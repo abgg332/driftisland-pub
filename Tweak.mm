@@ -251,11 +251,13 @@ static void updateSingleVideo(UIWindow *win) {
         [bestRoot insertSubview:ov atIndex:0]; // 垫到底层: 文字/图标都在视频之上
         bestRoot.clipsToBounds = YES;
         if (!ov.currentPath.length) [ov loadVideo:materialPath()]; // 搬迁不重载视频, 避免闪黑
+        // 仅挂载时设初始尺寸; 动画中的尺寸/圆角逐帧贴合完全交给 displayLink
+        ov.frame = bestRoot.bounds;
+        ov.layer.cornerRadius = bestRoot.layer.cornerRadius;
         DLog(@"挂载视频层 container=%@ frame=%@ 素材=%@", NSStringFromClass(bestRoot.class), NSStringFromCGRect(bestRoot.bounds), materialPath() ?: @"(无)");
     }
-    // 尺寸策略: 无条件立即对齐; 动画期间的逐帧贴合由 DIVideoView 内部 displayLink 负责
-    ov.frame = bestRoot.bounds;
-    ov.layer.cornerRadius = bestRoot.layer.cornerRadius;
+    // 关键: 此处不再设 frame —— 轮询若在岛动画进行中把视频直接跳到最终尺寸,
+    // 会与 displayLink 的逐帧贴合打架, 产生一帧"视频瞬间缩小露黑" = 收缩闪烁
     if (bestRoot.subviews.firstObject != ov) [bestRoot sendSubviewToBack:ov];
     NSString *mp = materialPath();
     if (mp && ![mp isEqualToString:ov.currentPath]) [ov loadVideo:mp]; // 切换素材立即生效
