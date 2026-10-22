@@ -117,16 +117,18 @@ static void updateSingleVideo(UIWindow *win); // 前置声明
 }
 
 // 每帧: 同步可见性 + frame/圆角对齐宿主实时呈现值(动画插值)
-// 可见性每帧判定, 岛哪一帧消失视频就哪一帧消失, 消除轮询延迟导致的闪现/残留
+// 不可见时自暂停 displayLink —— 无岛活动时渲染循环与视频彻底停止, 不耗电; 由 updateSingleVideo 唤醒
 - (void)syncFrameToHost {
     UIView *host = self.superview;
-    if (!host) return;
-    BOOL visible = enabled && !host.isHidden && host.alpha > 0.05
-                   && host.window != nil && host.bounds.size.width > 2
+    if (!host) { _syncLink.paused = YES; return; }
+    BOOL visible = enabled && !host.isHidden && host.window != nil
+                   && host.bounds.size.width > 2
                    && self.currentPath.length > 0;
+    // 不检查 alpha: 视频是子视图, 随宿主一起淡入淡出, 若按 alpha 自行隐藏会在岛渐隐中途先消失 → 闪一下
     if (!visible) {
         if (!self.hidden) self.hidden = YES;
         if (self.player.timeControlStatus == AVPlayerTimeControlStatusPlaying) [self.player pause];
+        _syncLink.paused = YES; // 彻底停止逐帧循环
         return;
     }
     if (self.hidden) self.hidden = NO;
@@ -153,36 +155,11 @@ static void updateSingleVideo(UIWindow *win); // 前置声明
     // 跟随宿主的圆角
     UIView *host = (UIView *)self.superview;
     self.layer.cornerRadius = host ? host.layer.cornerRadius : 0;
-    [self applyState];
+    self.player.muted = YES; // 永远静音
+    if (enabled) [self.player play];
 }
 
-- (void)applyState {
-    self.hidden = !enabled;
-    self.player.muted = YES; // 不需要声音
-    if (enabled) [self.player play]; else [self.player pause];
-}
-
-// 岛可见 → 播放; 岛收回/隐藏 → 暂停并隐藏; 总开关关 → 全部隐藏(含音乐岛)
-- (void)syncVisibility {
-    UIView *host = self.superview;
-    BOOL visible = enabled && host && !host.isHidden && host.alpha > 0.05
-                   && host.window != nil && host.bounds.size.width > 2 && materialPath() != nil;
-    if (!enabled) {
-        // 总开关关闭: 所有宿主(含音乐岛)的视频都隐藏并暂停
-        self.hidden = YES;
-        if (self.player.timeControlStatus != AVPlayerTimeControlStatusPaused) [self.player pause];
-        return;
-    }
-    if (visible) {
-        self.hidden = NO;
-        if (self.player.timeControlStatus != AVPlayerTimeControlStatusPlaying) [self.player play];
-        // 视频垫到最底层, 不遮挡文字
-        [host sendSubviewToBack:self];
-    } else {
-        self.hidden = YES;
-        if (self.player.timeControlStatus != AVPlayerTimeControlStatusPaused) [self.player pause];
-    }
-}
+@end
 
 // 音频会话: Ambient 混音模式, 永不抢占/打断音乐等其它音频; 被打断后自动恢复
 + (void)setupAudioSession {
@@ -250,19 +227,18 @@ static void updateSingleVideo(UIWindow *win) {
         if (ov && !ov.hidden) { ov.hidden = YES; if (ov.player.timeControlStatus != AVPlayerTimeControlStatusPaused) [ov.player pause]; }
         return;
     }
-    UIView *bestRoot = nil; CGFloat bestA = 0;
-    NSMutableArray<UIView *> *roots = [NSMutableArray array];
+    UIView *capRoot = nil, *bestRoot = nil; CGFloat bestA = 0;
     for (UIView *h in hostTable) {
-        if (h.window != win || h.isHidden || h.alpha < 0.05) continue;
+        if (h.window != win || h.isHidden) continue; // 不看 alpha: 岛淡入淡出期间仍要贴合
         if (h.bounds.size.width < 2 || h.bounds.size.height < 2) continue;
         UIView *root = islandRoot(h);
-        if (!root || root == ov.superview) { if (root) { [roots addObject:root]; continue; } }
+        if (!root) continue;
+        // 锁定官方岛胶囊本体: 展开/收缩始终是同一视图, 视频永不搬迁 → 根除闪烁
+        if ([NSStringFromClass(root.class) isEqualToString:@"SBSystemApertureContainerView"]) { capRoot = root; break; }
         CGFloat a = root.bounds.size.width * root.bounds.size.height;
         if (a > bestA) { bestA = a; bestRoot = root; }
-        [roots addObject:root];
     }
-    // 防抖: 当前容器仍在候选集中就不搬迁, 避免候选抖动导致视频来回搬而闪烁
-    if (ov && ov.superview && [roots containsObject:ov.superview]) bestRoot = ov.superview;
+    if (capRoot) bestRoot = capRoot;
     if (!bestRoot) {
         if (ov && !ov.hidden) { ov.hidden = YES; if (ov.player.timeControlStatus != AVPlayerTimeControlStatusPaused) [ov.player pause]; }
         return;
@@ -271,6 +247,7 @@ static void updateSingleVideo(UIWindow *win) {
         ov = [[DIVideoView alloc] initWithFrame:bestRoot.bounds];
         objc_setAssociatedObject(win, &kWinVideoKey, ov, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
     }
+    ov.syncLink.paused = NO; // 有岛活动: 唤醒逐帧循环
     if (ov.superview != bestRoot) {
         [ov removeFromSuperview];
         [bestRoot insertSubview:ov atIndex:0]; // 垫到底层: 文字/图标都在视频之上
@@ -284,7 +261,6 @@ static void updateSingleVideo(UIWindow *win) {
     if (bestRoot.subviews.firstObject != ov) [bestRoot sendSubviewToBack:ov];
     NSString *mp = materialPath();
     if (mp && ![mp isEqualToString:ov.currentPath]) [ov loadVideo:mp]; // 切换素材立即生效
-    [ov syncVisibility];
 }
 
 static void updateHost(UIView *host) {
