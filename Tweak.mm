@@ -159,8 +159,6 @@ static void updateSingleVideo(UIWindow *win); // 前置声明
     if (enabled) [self.player play];
 }
 
-@end
-
 // 音频会话: Ambient 混音模式, 永不抢占/打断音乐等其它音频; 被打断后自动恢复
 + (void)setupAudioSession {
     static dispatch_once_t once;
