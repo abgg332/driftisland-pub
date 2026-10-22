@@ -116,10 +116,21 @@ static void updateSingleVideo(UIWindow *win); // 前置声明
     return self;
 }
 
-// 每帧把视频 frame/圆角 对齐到宿主的实时呈现值(动画插值), 保证任意时刻都精确铺满
+// 每帧: 同步可见性 + frame/圆角对齐宿主实时呈现值(动画插值)
+// 可见性每帧判定, 岛哪一帧消失视频就哪一帧消失, 消除轮询延迟导致的闪现/残留
 - (void)syncFrameToHost {
     UIView *host = self.superview;
-    if (!host || self.hidden || self.superview.window == nil) return;
+    if (!host) return;
+    BOOL visible = enabled && !host.isHidden && host.alpha > 0.05
+                   && host.window != nil && host.bounds.size.width > 2
+                   && self.currentPath.length > 0;
+    if (!visible) {
+        if (!self.hidden) self.hidden = YES;
+        if (self.player.timeControlStatus == AVPlayerTimeControlStatusPlaying) [self.player pause];
+        return;
+    }
+    if (self.hidden) self.hidden = NO;
+    if (self.player.timeControlStatus != AVPlayerTimeControlStatusPlaying) [self.player play];
     CALayer *pl = host.layer.presentationLayer;
     CGRect b = pl ? pl.bounds : host.bounds;
     if (!CGRectEqualToRect(self.frame, b)) self.frame = b;
@@ -240,13 +251,18 @@ static void updateSingleVideo(UIWindow *win) {
         return;
     }
     UIView *bestRoot = nil; CGFloat bestA = 0;
+    NSMutableArray<UIView *> *roots = [NSMutableArray array];
     for (UIView *h in hostTable) {
         if (h.window != win || h.isHidden || h.alpha < 0.05) continue;
         if (h.bounds.size.width < 2 || h.bounds.size.height < 2) continue;
         UIView *root = islandRoot(h);
+        if (!root || root == ov.superview) { if (root) { [roots addObject:root]; continue; } }
         CGFloat a = root.bounds.size.width * root.bounds.size.height;
         if (a > bestA) { bestA = a; bestRoot = root; }
+        [roots addObject:root];
     }
+    // 防抖: 当前容器仍在候选集中就不搬迁, 避免候选抖动导致视频来回搬而闪烁
+    if (ov && ov.superview && [roots containsObject:ov.superview]) bestRoot = ov.superview;
     if (!bestRoot) {
         if (ov && !ov.hidden) { ov.hidden = YES; if (ov.player.timeControlStatus != AVPlayerTimeControlStatusPaused) [ov.player pause]; }
         return;
@@ -259,7 +275,7 @@ static void updateSingleVideo(UIWindow *win) {
         [ov removeFromSuperview];
         [bestRoot insertSubview:ov atIndex:0]; // 垫到底层: 文字/图标都在视频之上
         bestRoot.clipsToBounds = YES;
-        [ov loadVideo:materialPath()];
+        if (!ov.currentPath.length) [ov loadVideo:materialPath()]; // 搬迁不重载视频, 避免闪黑
         DLog(@"挂载视频层 container=%@ frame=%@ 素材=%@", NSStringFromClass(bestRoot.class), NSStringFromCGRect(bestRoot.bounds), materialPath() ?: @"(无)");
     }
     // 尺寸策略: 无条件立即对齐; 动画期间的逐帧贴合由 DIVideoView 内部 displayLink 负责
