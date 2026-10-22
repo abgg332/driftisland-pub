@@ -1,0 +1,10 @@
+CFBundleDevelopmentRegion = English;
+CFBundleExecutable = "${EXECUTABLE_NAME}";
+CFBundleIdentifier = "com.abgg332.driftislandprefs";
+CFBundleInfoDictionaryVersion = "6.0";
+CFBundleName = "DriftIslandPrefs";
+CFBundlePackageType = BNDL;
+CFBundleShortVersionString = "1.15.0";
+CFBundleSignature = "????";
+CFBundleVersion = "1.15.0";
+NSPrincipalClass = "";
