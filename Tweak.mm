@@ -247,6 +247,14 @@ static void attach(UIView *host) {
 
 // 每窗口双层视频: 小岛层 + 展开层, 各自加载各自素材持续循环;
 // 形态切换只是两层 hidden 互换 → 零重载零黑屏; 不可见层暂停(省电)
+/* nil 安全的层数组: @[] 字面量含 nil 会抛异常(安全模式根因) */
+static NSArray *diLayers(DIVideoView *a, DIVideoView *b) {
+    NSMutableArray *arr = [NSMutableArray array];
+    if (a) [arr addObject:a];
+    if (b) [arr addObject:b];
+    return arr;
+}
+
 static void wakeLayer(DIVideoView *v, UIView *bestRoot) {
     if (!v) return;
     BOOL wasPaused = v.syncLink.paused;
@@ -265,7 +273,7 @@ static void updateSingleVideo(UIWindow *win) {
     DIVideoView *smallV = objc_getAssociatedObject(win, &kWinVideoSmall);
     DIVideoView *expandV = objc_getAssociatedObject(win, &kWinVideoExpand);
     if (!enabled) {
-        for (DIVideoView *v in @[smallV, expandV]) {
+        for (DIVideoView *v in diLayers(smallV, expandV)) {
             if (v && !v.hidden) { v.hidden = YES; if (v.player.timeControlStatus != AVPlayerTimeControlStatusPaused) [v.player pause]; }
         }
         return;
@@ -283,7 +291,7 @@ static void updateSingleVideo(UIWindow *win) {
     }
     if (capRoot) bestRoot = capRoot;
     if (!bestRoot) {
-        for (DIVideoView *v in @[smallV, expandV]) {
+        for (DIVideoView *v in diLayers(smallV, expandV)) {
             if (v && !v.hidden) { v.hidden = YES; if (v.player.timeControlStatus != AVPlayerTimeControlStatusPaused) [v.player pause]; }
         }
         return;
@@ -298,7 +306,7 @@ static void updateSingleVideo(UIWindow *win) {
         expandV.expandedLayer = YES;
         objc_setAssociatedObject(win, &kWinVideoExpand, expandV, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
     }
-    for (DIVideoView *v in @[smallV, expandV]) {
+    for (DIVideoView *v in diLayers(smallV, expandV)) {
         if (v.superview != bestRoot) {
             [v removeFromSuperview];
             [bestRoot insertSubview:v atIndex:0]; // 垫到底层: 文字/图标都在视频之上
