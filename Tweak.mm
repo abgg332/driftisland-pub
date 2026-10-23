@@ -506,12 +506,15 @@ static void dumpViews(UIView *v, int depth) {
     for (UIView *s in v.subviews) dumpViews(s, depth + 1);
 }
 
+static void mruRecur(UIView *v) {
+    mruUpdate(v);
+    for (UIView *s in v.subviews) mruRecur(s);
+}
 static void mruTick(void) {
     refreshPrefs();
     for (UIScene *s in UIApplication.sharedApplication.connectedScenes)
         if ([s isKindOfClass:[UIWindowScene class]])
-            for (UIWindow *w in ((UIWindowScene *)s).windows)
-                for (UIView *v in w.subviews) { mruUpdate(v); for (UIView *ss in v.subviews) mruUpdate(ss); }
+            for (UIWindow *w in ((UIWindowScene *)s).windows) mruRecur(w);
 }
 
 static void mruInit(void) {
