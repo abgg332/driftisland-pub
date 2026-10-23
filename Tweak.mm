@@ -127,18 +127,19 @@ static void refreshPrefs(void) {
 @property (nonatomic, copy) NSString *currentPath;
 @property (nonatomic, strong) CADisplayLink *syncLink;
 @property (nonatomic, assign) BOOL expandedLayer; // YES=展开层(播展开素材), NO=小岛层
-@property (nonatomic, assign) BOOL spectrumLayer; // YES=频谱素材层(盖在展开岛右上角, 系统频谱已在 MediaRemoteUI 进程隐藏)
+@property (nonatomic, assign) BOOL spectrumLayer; // YES=频谱素材层(盖在展开岛右上角)
+@property (nonatomic, assign) BOOL airLayer;      // YES=投送隐藏层(播放展开素材局部, 视觉上抹掉跨进程投送图标)
 @end
 
-static char kWinVideoSmall, kWinVideoExpand, kWinVideoSpec; // 每窗口视频层(小岛/展开/频谱)
+static char kWinVideoSmall, kWinVideoExpand, kWinVideoSpec, kWinVideoAir; // 每窗口视频层(小岛/展开/频谱/投送)
 static BOOL gIsMRU = NO; // 是否运行在 MediaRemoteUI(灵动岛播放器渲染进程)
 
 // 区域标定(相对展开岛比例, 用户截图圈定); 素材层外扩2pt保证完全盖住
 static CGRect diSpecRegion(CGFloat w, CGFloat h) { return CGRectInset(CGRectMake(w * 0.815, h * 0.125, w * 0.18, h * 0.25), -2, -2); }
+static CGRect diAirRegion(CGFloat w, CGFloat h)  { return CGRectInset(CGRectMake(w * 0.835, h * 0.715, w * 0.16, h * 0.25), -2, -2); }
 // enabled 等偏好缓存已在 materialPathFor 上方声明
 static NSHashTable *hostTable; // 弱引用宿主集合
 static void updateSingleVideo(UIWindow *win); // 前置声明
-static void diHideAccessories(UIView *v, BOOL expand); // 前置声明
 
 @implementation DIVideoView {
     NSInteger _missCount; // 连续不可见帧计数, 攒够才暂停 displayLink(防瞬时抖动误停)
@@ -170,6 +171,7 @@ static void diHideAccessories(UIView *v, BOOL expand); // 前置声明
     UIView *host = self.superview;
     if (!host || host.window == nil) { _syncLink.paused = YES; return; }
     if (self.spectrumLayer) { [self syncSpectrum]; return; }
+    if (self.airLayer) { [self syncAir]; return; }
     CALayer *pl = host.layer.presentationLayer;
     // 帧贴合: 对齐宿主实时呈现值(动画插值), 外扩2pt覆盖取整边缘缝隙
     CGRect b = pl ? pl.bounds : host.bounds;
@@ -232,6 +234,45 @@ static void diHideAccessories(UIView *v, BOOL expand); // 前置声明
     if (self.player.timeControlStatus == AVPlayerTimeControlStatusPlaying) [self.player pause];
 }
 
+
+// 投送隐藏层: 投送图标是跨进程渲染(第三方美化插件也是加载UI进去替换的), 本进程无法直接隐藏
+// 播放展开素材+layer.mask 只露出投送区域对应的素材局部 → 图标被素材画面完全抹掉(视觉=隐藏)
+// 开关关/收缩岛时撤掉, 图标恢复显示
+- (void)syncAir {
+    UIView *host = self.superview;
+    BOOL expand = host && host.window && host.bounds.size.height > 100;
+    if (!expand || !enabled || !hideAirPlay) {
+        if (!self.hidden) self.hidden = YES;
+        if (self.player.timeControlStatus == AVPlayerTimeControlStatusPlaying) [self.player pause];
+        if (++_missCount > 20) _syncLink.paused = YES;
+        return;
+    }
+    _missCount = 0;
+    CALayer *pl = host.layer.presentationLayer;
+    CGSize bs = pl ? pl.bounds.size : host.bounds.size;
+    CGRect f = diAirRegion(bs.width, bs.height);
+    if (!CGRectEqualToRect(self.frame, f)) self.frame = f;
+    // mask: 露出"素材整图中投送区域对应的那一块", 与底层视频画面无缝衔接
+    CGSize full = host.bounds.size;
+    CGRect r = diAirRegion(full.width, full.height);
+    CALayer *mask = self.layer.mask;
+    if (!mask) {
+        mask = [CALayer layer];
+        mask.backgroundColor = [UIColor blackColor].CGColor;
+        self.layer.mask = mask;
+    }
+    CGRect mf = CGRectMake(-r.origin.x, -r.origin.y, full.width, full.height);
+    if (!CGRectEqualToRect(mask.frame, mf)) mask.frame = mf;
+    NSString *want = materialPathFor(YES); // 与展开层同一素材, 画面连续
+    if (want) {
+        if (self.hidden) self.hidden = NO;
+        if (self.player.timeControlStatus != AVPlayerTimeControlStatusPlaying) [self.player play];
+        if (![want isEqualToString:self.currentPath]) [self loadVideo:want];
+        return;
+    }
+    if (!self.hidden) self.hidden = YES;
+    if (self.player.timeControlStatus == AVPlayerTimeControlStatusPlaying) [self.player pause];
+}
 
 - (void)loadVideo:(NSString *)path {
     self.currentPath = path;
@@ -417,13 +458,6 @@ static void updateSingleVideo(UIWindow *win) {
         wakeLayer(v, bestRoot);
         if (bestRoot.subviews.firstObject != v) [bestRoot sendSubviewToBack:v];
     }
-    // 投送图标若由岛附件(portal)承载: 展开态全部隐藏, 0.5s tick 重申防系统重置, 关开关恢复
-    static BOOL lastHide;
-    if (hideAirPlay != lastHide || hideAirPlay) {
-        lastHide = hideAirPlay;
-        BOOL expand2 = bestRoot.bounds.size.height > 100;
-        for (UIView *s in bestRoot.subviews) diHideAccessories(s, expand2);
-    }
     // 展开态: dump 跨进程 CALayer 层树(频谱动画在这里渲染), 2s 后再抓一次布局稳定版; 30s 窗口后重新计数
     static int dumpCount; static CFAbsoluteTime dumpStart;
     CFAbsoluteTime nowT = CFAbsoluteTimeGetCurrent();
@@ -455,6 +489,23 @@ static void updateSingleVideo(UIWindow *win) {
     } else if (specV && !specV.hidden) {
         specV.hidden = YES;
     }
+    // 投送隐藏层: 开关打开时挂载(渲染进程无法隐藏跨进程图标, 用素材局部画面抹掉)
+    DIVideoView *airV = objc_getAssociatedObject(win, &kWinVideoAir);
+    if (hideAirPlay) {
+        if (!airV) {
+            airV = [[DIVideoView alloc] initWithFrame:CGRectZero];
+            airV.airLayer = YES;
+            objc_setAssociatedObject(win, &kWinVideoAir, airV, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        }
+        if (airV.superview != bestRoot) {
+            [airV removeFromSuperview];
+            [bestRoot addSubview:airV];
+            airV.hidden = YES;
+        }
+        wakeLayer(airV, airV.superview);
+    } else if (airV && !airV.hidden) {
+        airV.hidden = YES;
+    }
 }
 
 static void updateHost(UIView *host) {
@@ -469,11 +520,6 @@ static void updateHost(UIView *host) {
     }
 }
 
-static void diHideAccessories(UIView *v, BOOL expand) {
-    if ([NSStringFromClass(v.class) containsString:@"ProvidedViewContainer"] && v.isHidden != !expand)
-        v.hidden = !expand; // 展开+开关开=隐藏; 其他情况恢复
-    for (UIView *s in v.subviews) diHideAccessories(s, expand);
-}
 
 #pragma mark - layoutSubviews hook（沿用已验证的防重复安装模式）
 
