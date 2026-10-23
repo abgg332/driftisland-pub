@@ -9,36 +9,6 @@ static NSString *const kNotifyStr = @"com.abgg332.driftisland.reload";
 static NSString *const kMaterialDir = @"/var/mobile/灵动岛";
 static NSString *const kFrameDir = @"/var/mobile/灵动岛/帧率素材";
 
-/* 序列帧数量(递归 png/jpg, 与 tweak 同规则): 用于"素材名"行显示与空态提示 */
-static NSInteger frameCount(void) {
-    NSInteger n = 0;
-    NSMutableArray *stack = [NSMutableArray arrayWithObject:kFrameDir];
-    NSFileManager *fm = [NSFileManager defaultManager];
-    while (stack.count) {
-        NSString *dir = stack.firstObject; [stack removeObjectAtIndex:0];
-        for (NSString *f in [fm contentsOfDirectoryAtPath:dir error:NULL]) {
-            NSString *p = [dir stringByAppendingPathComponent:f];
-            BOOL isDir = NO;
-            if ([fm fileExistsAtPath:p isDirectory:&isDir] && isDir) { [stack addObject:p]; continue; }
-            NSString *ext = f.pathExtension.lowercaseString;
-            if ([ext isEqualToString:@"png"] || [ext isEqualToString:@"jpg"] || [ext isEqualToString:@"jpeg"]) n++;
-        }
-    }
-    return n;
-}
-
-static NSArray<NSString *> *videoFiles(void) {
-    NSArray *files = [[NSFileManager defaultManager] contentsOfDirectoryAtPath:kMaterialDir error:NULL] ?: @[];
-    NSMutableArray *out = [NSMutableArray array];
-    for (NSString *f in files) {
-        NSString *ext = f.pathExtension.lowercaseString;
-        if ([ext isEqualToString:@"mp4"] || [ext isEqualToString:@"mov"] || [ext isEqualToString:@"m4v"])
-            [out addObject:f];
-    }
-    [out sortUsingSelector:@selector(localizedCompare:)];
-    return out;
-}
-
 /* matMode: 0=小岛素材 1=展开素材 */
 static NSInteger indexForKey(NSString *key) {    CFPreferencesAppSynchronize((__bridge CFStringRef)kDomain);
     id v = CFBridgingRelease(CFPreferencesCopyAppValue((__bridge CFStringRef)key, (__bridge CFStringRef)kDomain));
