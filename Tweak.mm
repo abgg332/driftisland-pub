@@ -57,6 +57,11 @@ static NSInteger pInt(NSString *key, NSInteger def) {
     id v = CFBridgingRelease(CFPreferencesCopyAppValue((__bridge CFStringRef)key, (__bridge CFStringRef)kDomain));
     return v ? [v integerValue] : def;
 }
+static NSString *pString(NSString *key) {
+    CFPreferencesAppSynchronize((__bridge CFStringRef)kDomain);
+    id v = CFBridgingRelease(CFPreferencesCopyAppValue((__bridge CFStringRef)key, (__bridge CFStringRef)kDomain));
+    return [v isKindOfClass:NSString.class] ? v : nil;
+}
 
 #pragma mark - 素材扫描
 
@@ -85,15 +90,37 @@ static NSInteger smallIdx, expandIdx;
 /* 频谱帧率动画参数 */
 static double animFPS = 50, animRotateSpeed = 5, animScale = 1, animOffsetX, animOffsetY;
 static BOOL animRotate, animRotateReverse;
+static NSString *animFolder; // 选中的素材文件夹名(帧率素材目录下的子文件夹)
 
-// 序列帧列表缓存(2秒TTL): 递归收集 帧率素材 目录下 png/jpg, 按文件名数字排序(replay2 < replay10)
+// 帧图缓存: 序列帧可能几百张, NSCache 自动回收
+static UIImage *frameImage(NSString *path) {
+    static NSCache *cache;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{ cache = [NSCache new]; cache.countLimit = 900; });
+    UIImage *img = [cache objectForKey:path];
+    if (!img) { img = [UIImage imageWithContentsOfFile:path]; if (img) [cache setObject:img forKey:path]; }
+    return img;
+}
+
+// 帧图缓存: 序列帧可能几百张, NSCache 自动回收
+// 序列帧列表(2秒TTL): 目录优先级 = 选中的素材文件夹 → 帧率素材根目录(递归兜底)
 static NSArray<NSString *> *framePaths(void) {
     static NSArray *c; static CFAbsoluteTime t;
     CFAbsoluteTime now = CFAbsoluteTimeGetCurrent();
     if (c && now - t < 2.0) return c;
     NSFileManager *fm = NSFileManager.defaultManager;
     NSMutableArray<NSString *> *out = [NSMutableArray array];
-    NSMutableArray<NSString *> *stack = [NSMutableArray arrayWithObject:kFrameDir];
+    NSString *base = animFolder.length ? [kFrameDir stringByAppendingPathComponent:animFolder] : kFrameDir;
+    if (!animFolder.length) {
+        // 未选择文件夹: 根目录下若有直属 png 则只取直属, 否则递归全部子文件夹(兼容直接解压一层)
+        BOOL hasDirect = NO;
+        for (NSString *n in [fm contentsOfDirectoryAtPath:kFrameDir error:NULL]) {
+            NSString *ext = n.pathExtension.lowercaseString;
+            if ([ext isEqualToString:@"png"] || [ext isEqualToString:@"jpg"] || [ext isEqualToString:@"jpeg"]) { hasDirect = YES; break; }
+        }
+        if (hasDirect) base = kFrameDir; // 递归扫描同样能拿到直属, 统一走递归
+    }
+    NSMutableArray<NSString *> *stack = [NSMutableArray arrayWithObject:base];
     while (stack.count) {
         NSString *dir = stack.firstObject; [stack removeObjectAtIndex:0];
         for (NSString *n in [fm contentsOfDirectoryAtPath:dir error:NULL]) {
@@ -110,16 +137,6 @@ static NSArray<NSString *> *framePaths(void) {
     }];
     c = out; t = now;
     return out;
-}
-
-// 帧图片缓存: 序列帧可能几百张, NSCache 自动回收
-static UIImage *frameImage(NSString *path) {
-    static NSCache *cache;
-    static dispatch_once_t once;
-    dispatch_once(&once, ^{ cache = [NSCache new]; cache.countLimit = 900; });
-    UIImage *img = [cache objectForKey:path];
-    if (!img) { img = [UIImage imageWithContentsOfFile:path]; if (img) [cache setObject:img forKey:path]; }
-    return img;
 }
 
 // 素材列表缓存(2秒TTL): displayLink 每帧调用, 不能每次扫描目录
@@ -154,6 +171,7 @@ static void refreshPrefs(void) {
     animScale = pDouble(@"animScale", 1);
     animOffsetX = pDouble(@"animOffsetX", 0);
     animOffsetY = pDouble(@"animOffsetY", 0);
+    animFolder = pString(@"animFolder");
     if (animFPS < 1) animFPS = 1; if (animFPS > 60) animFPS = 60;
     if (animScale < 0.1) animScale = 0.1;
     // 兼容旧版单素材键 videoIndex: 未分别设置过时沿用旧值

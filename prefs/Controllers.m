@@ -64,6 +64,7 @@ static void postReload(void) {
 @interface DIMaterialsSmall : DIMaterialsController @end
 @interface DIMaterialsExpand : DIMaterialsController @end
 @interface DIAnimSettings : PSListController @end
+@interface DIFrameFolders : PSListController @end
 
 @interface DIPrefsController : PSListController {
     NSInteger _smallRow; /* 小岛素材选择 行号 */
@@ -102,10 +103,12 @@ static void postReload(void) {
     return videoFiles()[idx];
 }
 
-/* 频谱行右侧: 帧素材数量 */
+/* 频谱行右侧: 当前素材文件夹名 */
 - (NSString *)frameStatusName {
-    NSInteger n = frameCount();
-    return n > 0 ? [NSString stringWithFormat:@"%ld 帧", (long)n] : @"无帧素材";
+    CFPreferencesAppSynchronize((__bridge CFStringRef)kDomain);
+    id v = CFBridgingRelease(CFPreferencesCopyAppValue(CFSTR("animFolder"), (__bridge CFStringRef)kDomain));
+    if ([v isKindOfClass:NSString.class] && [(NSString *)v length]) return v;
+    return @"默认(全部帧)";
 }
 
 - (id)readSmallVideoName:(PSSpecifier *)spec { return [self nameForMode:0]; }
@@ -163,11 +166,11 @@ static void postReload(void) {
         [specs addObject:[self switchSpec:@"展开显示素材" key:@"expandOn" def:@YES]];
         [specs addObject:expandMat];
 
-        /* 频谱: 开关 + 帧率动画设置行(开关打开才显示); 关闭=系统频谱, 打开=隐藏频谱+播放序列帧动画 */
-        [specs addObject:[self groupSpec:@"频谱" footer:@"关闭时显示系统频谱，打开时隐藏频谱并播放帧率素材。"]];
+        /* 频谱: 开关 + 素材选择行(开关打开才显示); 关闭=系统频谱, 打开=隐藏频谱+播放序列帧动画 */
+        [specs addObject:[self groupSpec:@"频谱" footer:@"关闭时显示系统频谱，打开时用所选素材替换频谱。"]];
         [specs addObject:[self switchSpec:@"频谱开关" key:@"spectrumOn" def:@NO]];
         if ([[self readPreferenceValue:[self switchSpec:@"spectrumOn" key:@"spectrumOn" def:@NO]] boolValue]) {
-            PSSpecifier *animSet = [PSSpecifier preferenceSpecifierNamed:@"帧率动画设置" target:self
+            PSSpecifier *animSet = [PSSpecifier preferenceSpecifierNamed:@"素材选择" target:self
                 set:NULL get:@selector(readSpectrumName:)
                 detail:[DIAnimSettings class] cell:PSLinkCell edit:nil];
             [animSet setProperty:[self frameStatusName] forKey:@"value"];
@@ -256,7 +259,7 @@ static void postReload(void) {
 - (NSInteger)matMode { return 1; }
 @end
 
-#pragma mark - 频谱帧率动画设置页
+#pragma mark - 频谱帧率动画设置页(与素材图对照: 灵动岛动画/动画设置/位置缩放设置/素材设置)
 
 @implementation DIAnimSettings
 
@@ -277,6 +280,19 @@ static void postReload(void) {
         (__bridge CFStringRef)kNotifyStr, NULL, NULL, YES);
 }
 
+- (double)numForKey:(NSString *)key def:(double)def {
+    CFPreferencesAppSynchronize((__bridge CFStringRef)kDomain);
+    id v = CFBridgingRelease(CFPreferencesCopyAppValue((__bridge CFStringRef)key, (__bridge CFStringRef)kDomain));
+    return v ? [v doubleValue] : def;
+}
+
+- (NSString *)folderName {
+    CFPreferencesAppSynchronize((__bridge CFStringRef)kDomain);
+    id v = CFBridgingRelease(CFPreferencesCopyAppValue(CFSTR("animFolder"), (__bridge CFStringRef)kDomain));
+    if ([v isKindOfClass:NSString.class] && [(NSString *)v length]) return v;
+    return @"默认(全部帧)";
+}
+
 - (PSSpecifier *)switchSpec:(NSString *)name key:(NSString *)key def:(id)def {
     PSSpecifier *s = [PSSpecifier preferenceSpecifierNamed:name target:self
         set:@selector(setPreferenceValue:specifier:) get:@selector(readPreferenceValue:)
@@ -287,8 +303,11 @@ static void postReload(void) {
     return s;
 }
 
+/* 滑杆行: 标题右侧带当前数值(重新进页刷新) */
 - (PSSpecifier *)sliderSpec:(NSString *)name key:(NSString *)key def:(double)def min:(double)mn max:(double)mx {
-    PSSpecifier *s = [PSSpecifier preferenceSpecifierNamed:name target:self
+    double cur = [self numForKey:key def:def];
+    NSString *title = [NSString stringWithFormat:@"%@   %.2f", name, cur];
+    PSSpecifier *s = [PSSpecifier preferenceSpecifierNamed:title target:self
         set:@selector(setPreferenceValue:specifier:) get:@selector(readPreferenceValue:)
         detail:nil cell:PSSliderCell edit:nil];
     [s setProperty:key forKey:@"key"];
@@ -310,30 +329,101 @@ static void postReload(void) {
     if (!_specifiers) {
         NSMutableArray *specs = [NSMutableArray array];
         [specs addObject:[self groupSpec:@"灵动岛动画" footer:nil]];
-        [specs addObject:[self switchSpec:@"启用动画" key:@"spectrumOn" def:@NO]]; // 与主页频谱开关联动, 便于在子页直接启停
-        [specs addObject:[self groupSpec:@"动画设置" footer:@"动画帧率 = 每秒播放的序列帧张数。"]];
-        [specs addObject:[self sliderSpec:@"动画帧率" key:@"animFPS" def:50 min:1 max:60]];
+        [specs addObject:[self switchSpec:@"启用动画" key:@"spectrumOn" def:@NO]];
 
-        [specs addObject:[self groupSpec:nil footer:@"素材旋转: 序列帧整体绕中心持续旋转; 反转=逆时针; 旋转速度=度/秒。"]];
+        [specs addObject:[self groupSpec:@"动画设置" footer:@"动画帧率 = 每秒播放的序列帧张数; 旋转速度 = 每秒旋转的度数。"]];
+        [specs addObject:[self sliderSpec:@"动画帧率" key:@"animFPS" def:50 min:1 max:60]];
         [specs addObject:[self switchSpec:@"启用素材旋转" key:@"animRotate" def:@NO]];
         [specs addObject:[self switchSpec:@"素材旋转反转" key:@"animRotateReverse" def:@NO]];
         [specs addObject:[self sliderSpec:@"旋转速度" key:@"animRotateSpeed" def:5 min:1 max:30]];
 
-        [specs addObject:[self groupSpec:@"位置缩放设置" footer:@"缩放倍数相对频谱区域; XY偏移单位为点, 可把素材挪到想要的位置。"]];
+        [specs addObject:[self groupSpec:@"位置缩放设置" footer:@"缩放倍数相对频谱区域大小; X/Y偏移单位为点, 可把素材挪到想要的位置。"]];
         [specs addObject:[self sliderSpec:@"缩放倍数" key:@"animScale" def:1 min:0.2 max:3]];
         [specs addObject:[self sliderSpec:@"X偏移" key:@"animOffsetX" def:0 min:-150 max:150]];
         [specs addObject:[self sliderSpec:@"Y偏移" key:@"animOffsetY" def:0 min:-150 max:150]];
 
-        [specs addObject:[self groupSpec:@"素材设置" footer:nil]];
-        NSInteger n = frameCount();
+        [specs addObject:[self groupSpec:@"素材设置" footer:@"素材目录: /var/mobile/灵动岛/帧率素材 (每个子文件夹=一套素材, png/jpg 序列帧按文件名数字顺序播放)。"]];
         PSSpecifier *mat = [PSSpecifier preferenceSpecifierNamed:@"素材名" target:self
-            set:NULL get:NULL detail:nil cell:PSStaticTextCell edit:nil];
-        [mat setProperty:(n > 0 ? [NSString stringWithFormat:@"%ld 帧", (long)n] : @"无帧素材") forKey:@"value"];
+            set:NULL get:@selector(readFolderName)
+            detail:[DIFrameFolders class] cell:PSLinkCell edit:nil];
+        [mat setProperty:[self folderName] forKey:@"value"];
         [specs addObject:mat];
 
         _specifiers = specs;
     }
     return _specifiers;
+}
+
+- (void)reloadSpecifiers {
+    _specifiers = nil;
+    [super reloadSpecifiers];
+}
+
+@end
+
+#pragma mark - 素材文件夹选择(帧率素材目录下的全部子文件夹)
+
+@implementation DIFrameFolders
+
+- (void)saveFolder:(NSString *)name {
+    CFPreferencesSetAppValue(CFSTR("animFolder"), (__bridge CFPropertyListRef)name, (__bridge CFStringRef)kDomain);
+    CFPreferencesAppSynchronize((__bridge CFStringRef)kDomain);
+    CFNotificationCenterPostNotification(CFNotificationCenterGetDarwinNotifyCenter(),
+        (__bridge CFStringRef)kNotifyStr, NULL, NULL, YES);
+}
+
+- (NSArray<NSString *> *)folders {
+    NSFileManager *fm = [NSFileManager defaultManager];
+    NSMutableArray *out = [NSMutableArray array];
+    BOOL hasDirectFrame = NO;
+    for (NSString *n in [fm contentsOfDirectoryAtPath:kFrameDir error:NULL]) {
+        NSString *p = [kFrameDir stringByAppendingPathComponent:n];
+        BOOL isDir = NO;
+        if (![fm fileExistsAtPath:p isDirectory:&isDir]) continue;
+        if (isDir) [out addObject:n];
+        else {
+            NSString *ext = n.pathExtension.lowercaseString;
+            if ([ext isEqualToString:@"png"] || [ext isEqualToString:@"jpg"] || [ext isEqualToString:@"jpeg"]) hasDirectFrame = YES;
+        }
+    }
+    [out sortUsingSelector:@selector(localizedCompare:)];
+    if (hasDirectFrame || out.count == 0) [out insertObject:@"默认(全部帧)" atIndex:0];
+    return out;
+}
+
+- (NSArray *)specifiers {
+    if (!_specifiers) {
+        NSMutableArray *specs = [NSMutableArray array];
+        PSSpecifier *g = [PSSpecifier preferenceSpecifierNamed:@"选择素材" target:nil
+            set:NULL get:NULL detail:nil cell:PSGroupCell edit:nil];
+        [g setProperty:@"点击选择帧率素材文件夹。素材目录: /var/mobile/灵动岛/帧率素材" forKey:@"footerText"];
+        [specs addObject:g];
+        NSString *cur = nil;
+        CFPreferencesAppSynchronize((__bridge CFStringRef)kDomain);
+        id v = CFBridgingRelease(CFPreferencesCopyAppValue(CFSTR("animFolder"), (__bridge CFStringRef)kDomain));
+        if ([v isKindOfClass:NSString.class]) cur = v;
+        for (NSString *f in [self folders]) {
+            BOOL isCur = cur ? [f isEqualToString:cur] : [f isEqualToString:@"默认(全部帧)"];
+            NSString *label = isCur ? [NSString stringWithFormat:@"✓ %@", f] : f;
+            PSSpecifier *s = [PSSpecifier preferenceSpecifierNamed:label target:self
+                set:NULL get:NULL detail:nil cell:PSButtonCell edit:nil];
+            [s setButtonAction:@selector(pick:)];
+            [s setProperty:f forKey:@"folder"];
+            [specs addObject:s];
+        }
+        _specifiers = specs;
+    }
+    return _specifiers;
+}
+
+- (void)pick:(PSSpecifier *)spec {
+    NSString *f = [spec propertyForKey:@"folder"];
+    [self saveFolder:[f isEqualToString:@"默认(全部帧)"] ? nil : f];
+    NSArray *vcs = self.navigationController.viewControllers;
+    UIViewController *parent = (vcs.count >= 2) ? vcs[vcs.count - 2] : nil;
+    [self.navigationController popViewControllerAnimated:YES];
+    if ([parent respondsToSelector:@selector(reloadSpecifiers)])
+        [(id)parent performSelector:@selector(reloadSpecifiers)];
 }
 
 - (void)reloadSpecifiers {
