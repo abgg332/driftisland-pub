@@ -282,7 +282,7 @@ static void postReload(void) {
     scroll.backgroundColor = UIColor.systemGroupedBackgroundColor;
     scroll.alwaysBounceVertical = YES;
     scroll.keyboardDismissMode = UIScrollViewKeyboardDismissModeOnDrag;
-    self.view = scroll;
+    self.view = (UITableView *)scroll; /* 绕过 PSListController 的表格类型声明, 我们自绘 */
     self.navigationItem.title = @"动画设置";
 
     UIStackView *stack = [[UIStackView alloc] init];
@@ -341,7 +341,7 @@ static void postReload(void) {
     v.axis = UILayoutConstraintAxisVertical;
     v.spacing = 14;
     v.layoutMargins = UIEdgeInsetsMake(14, 16, 14, 16);
-    v.isLayoutMarginsRelativeArrangement = YES;
+    v.layoutMarginsRelativeArrangement = YES;
     for (UIView *r in rows) [v addArrangedSubview:r];
     UIView *card = [[UIView alloc] init];
     card.backgroundColor = UIColor.secondarySystemGroupedBackgroundColor;
