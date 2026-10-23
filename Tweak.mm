@@ -347,16 +347,20 @@ static UIView *findSpectrum(UIView *root) {
 }
 
 // dump 确认: 附件是 _SAUIProvidedViewContainerView(跨进程 PortalView 父容器), 无类名特征
-// 只能按位置分: 右侧(x>父宽一半)=频谱, 左侧(26x22)=投送
-static UIView *findAccessory(UIView *root, BOOL rightSide) {
+// 用户确认: 展开岛右上角=频谱, 右下角=投送 → 按右侧附件的上下位置区分
+// mode: 0=右上(频谱) 1=右下(投送)
+static UIView *findAccessory(UIView *root, int mode) {
     CGFloat half = root.bounds.size.width * 0.5;
+    CGFloat hh = root.bounds.size.height * 0.5;
     UIView *found = nil;
     for (UIView *s in root.subviews) {
         if ([NSStringFromClass(s.class) containsString:@"ProvidedViewContainer"] && s.bounds.size.width > 1) {
             CGRect r = [root convertRect:s.frame fromView:s.superview];
-            if ((r.origin.x > half) == rightSide) { found = s; break; }
+            BOOL right = r.origin.x > half;
+            BOOL lower = CGRectGetMidY(r) >= hh;
+            if (right && ((mode == 1) == lower)) { found = s; break; }
         }
-        UIView *r2 = findAccessory(s, rightSide);
+        UIView *r2 = findAccessory(s, mode);
         if (r2) { found = r2; break; }
     }
     return found;
@@ -444,10 +448,29 @@ static void updateSingleVideo(UIWindow *win) {
         wakeLayer(v, bestRoot);
         if (bestRoot.subviews.firstObject != v) [bestRoot sendSubviewToBack:v];
     }
+    // 展开态: 对整颗岛胶囊 dump(0/1.5/4s 三次), 捕捉右下角投送附件出现时机; 15s 窗口后重新计数
+    static int dumpCount; static CFAbsoluteTime dumpStart;
+    CFAbsoluteTime nowT = CFAbsoluteTimeGetCurrent();
+    if (dumpStart == 0 || nowT - dumpStart > 15) { dumpCount = 0; dumpStart = nowT; }
+    if (dumpCount < 3 && bestRoot.bounds.size.height > 60) {
+        dumpCount++;
+        DLog(@"===== 岛胶囊视图树 dump #%d =====", dumpCount);
+        dumpTree(bestRoot, 0);
+        if (dumpCount < 3) {
+            __weak UIView *wr = bestRoot;
+            int n = dumpCount;
+            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(n == 1 ? 1.5 : 4.0) * NSEC_PER_SEC), dispatch_get_main_queue(), ^{
+                if (wr && wr.bounds.size.height > 60) {
+                    DLog(@"===== 岛胶囊视图树 dump #%d (延迟) =====", n + 1);
+                    dumpTree(wr, 0);
+                }
+            });
+        }
+    }
     // 频谱素材层: 盖在系统频谱上
     DIVideoView *specV = objc_getAssociatedObject(win, &kWinVideoSpec);
     if (spectrumOn) {
-        UIView *sp = findSpectrum(bestRoot) ?: findAccessory(bestRoot, YES); // 右侧附件=频谱(右上角)
+        UIView *sp = findSpectrum(bestRoot) ?: findAccessory(bestRoot, 0); // 右上附件=频谱
         logOnce(@"频谱", sp);
         if (sp) {
             if (!specV) {
@@ -472,26 +495,11 @@ static void updateHost(UIView *host) {
     attach(host);
     if (NSThread.isMainThread && host.window) {
         updateSingleVideo(host.window); // 每次布局跟随岛尺寸
-        static int dumpCount;
-        if (dumpCount < 2 && host.bounds.size.height > 60) {
-            dumpCount++;
-            DLog(@"===== 展开岛视图树 dump #%d =====", dumpCount);
-            dumpTree(host, 0);
-            if (dumpCount == 1) {
-                __weak UIView *wh = host;
-                dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)1.5 * NSEC_PER_SEC), dispatch_get_main_queue(), ^{
-                    if (wh && wh.bounds.size.height > 60) {
-                        DLog(@"===== 展开岛视图树 dump #2 (布局稳定后) =====");
-                        dumpTree(wh, 0);
-                    }
-                });
-            }
-        }
-        // 投送按钮: 隐藏/显示 AirPlay 图标 + 左侧附件(右下角投送, dump 中 26x22), 每次布局重申防系统重置
+        // 投送按钮: 隐藏/显示 AirPlay 图标 + 右下角附件, 每次布局重申防系统重置
         UIView *ap = findAirPlay(host);
         logOnce(@"投送", ap);
         if (ap && ap.hidden != hideAirPlay) ap.hidden = hideAirPlay;
-        UIView *acc = findAccessory(host, NO);
+        UIView *acc = findAccessory(host, 1);
         logOnce(@"投送附件", acc);
         if (acc && acc.hidden != hideAirPlay) acc.hidden = hideAirPlay;
     }
