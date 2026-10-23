@@ -138,6 +138,7 @@ static CGRect diSpecRegion(CGFloat w, CGFloat h) { return CGRectInset(CGRectMake
 // enabled 等偏好缓存已在 materialPathFor 上方声明
 static NSHashTable *hostTable; // 弱引用宿主集合
 static void updateSingleVideo(UIWindow *win); // 前置声明
+static void diHideAccessories(UIView *v, BOOL expand); // 前置声明
 
 @implementation DIVideoView {
     NSInteger _missCount; // 连续不可见帧计数, 攒够才暂停 displayLink(防瞬时抖动误停)
