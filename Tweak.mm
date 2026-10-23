@@ -488,7 +488,8 @@ static void layoutHook(UIView *self, SEL selector) {
 // portal 挂在纯 CALayer 上(不一定有对应 UIView), 所以必须在 CALayer 层树里递归找;
 // portal 隐藏后跨进程内容失去显示入口, 这是真正的隐藏, 与视频/取图无关。
 // acc=从岛胶囊层算起的累计偏移; 命中条件: CAPortalLayer + 尺寸18~28pt + 位于岛右侧偏下区域
-static void airPortalSweep(CALayer *l, CGPoint acc, CGSize root, BOOL hide, NSMutableSet *hitSet) {
+// 压制强度: portal 本层 hidden+opacity=0, 父层/祖父层一并 hidden(系统会重建重置, 三层同压防复活)
+static void airPortalSweep(CALayer *l, CALayer *p1, CALayer *p2, CGPoint acc, CGSize root, BOOL hide, NSMutableSet *hitSet) {
     if (!l) return;
     CGPoint here = CGPointMake(acc.x + l.frame.origin.x, acc.y + l.frame.origin.y);
     if ([NSStringFromClass(l.class) isEqualToString:@"CAPortalLayer"]) {
@@ -496,15 +497,20 @@ static void airPortalSweep(CALayer *l, CGPoint acc, CGSize root, BOOL hide, NSMu
         BOOL inAirZone = (acc.x > root.width * 0.7) && (acc.y > root.height * 0.3) &&
                          (acc.y < root.height * 0.9) && w > 16 && w < 30 && h > 16 && h < 30;
         if (inAirZone) {
-            if (l.isHidden != hide) l.hidden = hide;
             NSString *key = [NSString stringWithFormat:@"portal-%.0f-%.0f", acc.x, acc.y];
-            if (hide && ![hitSet containsObject:key]) {
+            BOOL wasVisible = !l.isHidden && l.opacity > 0.01;
+            l.hidden = hide;
+            l.opacity = hide ? 0 : 1;
+            if (p1) p1.hidden = hide;
+            if (p2) p2.hidden = hide;
+            if (hide && (wasVisible || ![hitSet containsObject:key])) {
                 [hitSet addObject:key];
-                DLog(@"投送 portal 层隐藏: %@ acc=%@ size=%@ → hidden", NSStringFromClass(l.class), NSStringFromCGPoint(acc), NSStringFromCGSize(l.frame.size));
+                DLog(@"投送 portal 三层压制: portal可见=%d acc=%@ → portal+父+祖 hidden/opacity0", wasVisible, NSStringFromCGPoint(acc));
             }
+            return; // 已到目标, 不再下钻(portal 下无子层)
         }
     }
-    for (CALayer *s in l.sublayers) airPortalSweep(s, here, root, hide, hitSet);
+    for (CALayer *s in l.sublayers) airPortalSweep(s, l, p1, here, root, hide, hitSet);
 }
 
 // 投送 portal 扫描入口: 展开态(hideAirPlay=隐藏 portal, 关=恢复显示), 由 0.5s tick 持续维持
@@ -514,7 +520,7 @@ static void airPortalUpdate(UIView *bestRoot, BOOL hide) {
     static dispatch_once_t once;
     dispatch_once(&once, ^{ hitSet = [NSMutableSet set]; });
     if (!hide) [hitSet removeAllObjects];
-    airPortalSweep(bestRoot.layer, CGPointZero, bestRoot.bounds.size, hide, hitSet);
+    airPortalSweep(bestRoot.layer, NULL, NULL, CGPointZero, bestRoot.bounds.size, hide, hitSet);
 }
 
 #pragma mark - MediaRemoteUI 进程(灵动岛播放器真实渲染进程, iOS16/17 远程场景)
