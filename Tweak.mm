@@ -346,24 +346,31 @@ static UIView *findSpectrum(UIView *root) {
     return findSubviewTokens(root, @[@"Spectrum", @"Waveform", @"Visualiz", @"AudioBars"]);
 }
 
-// dump 确认: 附件是 _SAUIProvidedViewContainerView(跨进程 PortalView 父容器), 无类名特征
-// 用户确认: 展开岛右上角=频谱, 右下角=投送 → 按右侧附件的上下位置区分
-// mode: 0=右上(频谱) 1=右下(投送)
-static UIView *findAccessory(UIView *root, int mode) {
+// 用户确认: 展开岛右下角投送=跨进程附件(右侧 22x22), 右上频谱在跨进程 CA 层里(UIView 树中没有)
+// mode: 0=右侧可见附件(投送) —— 仅展开态使用, 避免误伤小岛
+static UIView *findAccessory(UIView *root) {
     CGFloat half = root.bounds.size.width * 0.5;
-    CGFloat hh = root.bounds.size.height * 0.5;
     UIView *found = nil;
     for (UIView *s in root.subviews) {
         if ([NSStringFromClass(s.class) containsString:@"ProvidedViewContainer"] && s.bounds.size.width > 1) {
             CGRect r = [root convertRect:s.frame fromView:s.superview];
-            BOOL right = r.origin.x > half;
-            BOOL lower = CGRectGetMidY(r) >= hh;
-            if (right && ((mode == 1) == lower)) { found = s; break; }
+            if (r.origin.x > half) { found = s; break; }
         }
-        UIView *r2 = findAccessory(s, mode);
+        UIView *r2 = findAccessory(s);
         if (r2) { found = r2; break; }
     }
     return found;
+}
+
+// CALayer 层树 dump: 频谱动画渲染在跨进程 scene 的 CA 层里, UIView dump 看不到
+static void dumpLayers(CALayer *l, int depth) {
+    if (!l || depth > 14) return;
+    NSMutableString *ind = [NSMutableString string];
+    for (int i = 0; i < depth; i++) [ind appendString:@"  "];
+    NSString *cn = NSStringFromClass(l.class);
+    NSString *nm = l.name ?: @"";
+    DLog(@"%@%@ %@%@", ind, cn, NSStringFromCGRect(l.frame), nm.length ? [@" name=" stringByAppendingString:nm] : @"");
+    for (CALayer *s in l.sublayers) dumpLayers(s, depth + 1);
 }
 
 // 展开岛视图树 dump: 记录全部类名+frame; 附件容器额外读 identifier(区分频谱/投送)
@@ -448,29 +455,24 @@ static void updateSingleVideo(UIWindow *win) {
         wakeLayer(v, bestRoot);
         if (bestRoot.subviews.firstObject != v) [bestRoot sendSubviewToBack:v];
     }
-    // 展开态: 对整颗岛胶囊 dump(0/1.5/4s 三次), 捕捉右下角投送附件出现时机; 15s 窗口后重新计数
+    // 展开态: dump 跨进程 CALayer 层树(频谱动画在这里渲染), 2s 后再抓一次布局稳定版; 30s 窗口后重新计数
     static int dumpCount; static CFAbsoluteTime dumpStart;
     CFAbsoluteTime nowT = CFAbsoluteTimeGetCurrent();
-    if (dumpStart == 0 || nowT - dumpStart > 15) { dumpCount = 0; dumpStart = nowT; }
-    if (dumpCount < 3 && bestRoot.bounds.size.height > 60) {
+    if (dumpStart == 0 || nowT - dumpStart > 30) { dumpCount = 0; dumpStart = nowT; }
+    if (dumpCount < 1 && bestRoot.bounds.size.height > 60) {
         dumpCount++;
-        DLog(@"===== 岛胶囊视图树 dump #%d =====", dumpCount);
-        dumpTree(bestRoot, 0);
-        if (dumpCount < 3) {
-            __weak UIView *wr = bestRoot;
-            int n = dumpCount;
-            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(n == 1 ? 1.5 : 4.0) * NSEC_PER_SEC), dispatch_get_main_queue(), ^{
-                if (wr && wr.bounds.size.height > 60) {
-                    DLog(@"===== 岛胶囊视图树 dump #%d (延迟) =====", n + 1);
-                    dumpTree(wr, 0);
-                }
-            });
-        }
+        __weak UIView *wr = bestRoot;
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)2.0 * NSEC_PER_SEC), dispatch_get_main_queue(), ^{
+            if (wr && wr.bounds.size.height > 60) {
+                DLog(@"===== 岛胶囊 CALayer 层树 dump (展开稳定后) =====");
+                dumpLayers(wr.layer, 0);
+            }
+        });
     }
     // 频谱素材层: 盖在系统频谱上
     DIVideoView *specV = objc_getAssociatedObject(win, &kWinVideoSpec);
     if (spectrumOn) {
-        UIView *sp = findSpectrum(bestRoot) ?: findAccessory(bestRoot, 0); // 右上附件=频谱
+        UIView *sp = findSpectrum(bestRoot); // 频谱在跨进程 CA 层里, 类名探测命中则覆盖; 层树 dump 后再精确定位
         logOnce(@"频谱", sp);
         if (sp) {
             if (!specV) {
@@ -495,11 +497,12 @@ static void updateHost(UIView *host) {
     attach(host);
     if (NSThread.isMainThread && host.window) {
         updateSingleVideo(host.window); // 每次布局跟随岛尺寸
-        // 投送按钮: 隐藏/显示 AirPlay 图标 + 右下角附件, 每次布局重申防系统重置
+        // 投送按钮: 仅展开态隐藏右侧附件(跨进程投送图标)+AirPlay 类名探测, 每次布局重申防系统重置
         UIView *ap = findAirPlay(host);
         logOnce(@"投送", ap);
-        if (ap && ap.hidden != hideAirPlay) ap.hidden = hideAirPlay;
-        UIView *acc = findAccessory(host, 1);
+        BOOL expand = host.bounds.size.height > 60;
+        if (ap && expand && ap.hidden != hideAirPlay) ap.hidden = hideAirPlay;
+        UIView *acc = expand ? findAccessory(host) : nil;
         logOnce(@"投送附件", acc);
         if (acc && acc.hidden != hideAirPlay) acc.hidden = hideAirPlay;
     }
