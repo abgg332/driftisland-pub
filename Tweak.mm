@@ -127,15 +127,14 @@ static void refreshPrefs(void) {
 @property (nonatomic, copy) NSString *currentPath;
 @property (nonatomic, strong) CADisplayLink *syncLink;
 @property (nonatomic, assign) BOOL expandedLayer; // YES=展开层(播展开素材), NO=小岛层
-@property (nonatomic, assign) BOOL spectrumLayer; // YES=频谱素材层(盖住右上角系统频谱)
-@property (nonatomic, assign) BOOL airLayer;      // YES=投送遮挡层(播放展开素材局部, 视觉上隐藏投送图标)
+@property (nonatomic, assign) BOOL spectrumLayer; // YES=频谱素材层(盖在展开岛右上角, 系统频谱已在 MediaRemoteUI 进程隐藏)
 @end
 
-static char kWinVideoSmall, kWinVideoExpand, kWinVideoSpec, kWinVideoAir; // 每窗口视频层(小岛/展开/频谱/投送遮挡)
+static char kWinVideoSmall, kWinVideoExpand, kWinVideoSpec; // 每窗口视频层(小岛/展开/频谱)
+static BOOL gIsMRU = NO; // 是否运行在 MediaRemoteUI(灵动岛播放器渲染进程)
 
 // 区域标定(相对展开岛比例, 用户截图圈定); 素材层外扩2pt保证完全盖住
 static CGRect diSpecRegion(CGFloat w, CGFloat h) { return CGRectInset(CGRectMake(w * 0.815, h * 0.125, w * 0.18, h * 0.25), -2, -2); }
-static CGRect diAirRegion(CGFloat w, CGFloat h)  { return CGRectInset(CGRectMake(w * 0.835, h * 0.715, w * 0.16, h * 0.25), -2, -2); }
 // enabled 等偏好缓存已在 materialPathFor 上方声明
 static NSHashTable *hostTable; // 弱引用宿主集合
 static void updateSingleVideo(UIWindow *win); // 前置声明
@@ -170,7 +169,6 @@ static void updateSingleVideo(UIWindow *win); // 前置声明
     UIView *host = self.superview;
     if (!host || host.window == nil) { _syncLink.paused = YES; return; }
     if (self.spectrumLayer) { [self syncSpectrum]; return; }
-    if (self.airLayer) { [self syncAir]; return; }
     CALayer *pl = host.layer.presentationLayer;
     // 帧贴合: 对齐宿主实时呈现值(动画插值), 外扩2pt覆盖取整边缘缝隙
     CGRect b = pl ? pl.bounds : host.bounds;
@@ -233,43 +231,6 @@ static void updateSingleVideo(UIWindow *win); // 前置声明
     if (self.player.timeControlStatus == AVPlayerTimeControlStatusPlaying) [self.player pause];
 }
 
-// 投送遮挡层: 跨进程图标无法隐藏 → 播放展开素材并用 layer.mask 只露出投送区域对应的素材局部
-// 视觉上=投送图标消失、视频背景无缝延续; 关闭开关/收缩岛时隐藏
-- (void)syncAir {
-    UIView *host = self.superview;
-    BOOL expand = host && host.window && host.bounds.size.height > 100;
-    if (!expand || !enabled || !hideAirPlay) {
-        if (!self.hidden) self.hidden = YES;
-        if (self.player.timeControlStatus == AVPlayerTimeControlStatusPlaying) [self.player pause];
-        if (++_missCount > 20) _syncLink.paused = YES;
-        return;
-    }
-    _missCount = 0;
-    CALayer *pl = host.layer.presentationLayer;
-    CGSize bs = pl ? pl.bounds.size : host.bounds.size;
-    CGRect f = diAirRegion(bs.width, bs.height);
-    if (!CGRectEqualToRect(self.frame, f)) self.frame = f;
-    // mask: 露出本窗口内对应"素材整图中的这一块" → 遮挡层显示素材的该局部, 与底层视频视觉连续
-    CGSize full = host.bounds.size;
-    CGRect r = diAirRegion(full.width, full.height);
-    CALayer *mask = self.layer.mask;
-    if (!mask) {
-        mask = [CALayer layer];
-        mask.backgroundColor = [UIColor blackColor].CGColor;
-        self.layer.mask = mask;
-    }
-    CGRect mf = CGRectMake(-r.origin.x, -r.origin.y, full.width, full.height);
-    if (!CGRectEqualToRect(mask.frame, mf)) mask.frame = mf;
-    NSString *want = materialPathFor(YES); // 播展开素材, 与底层展开视频同一画面
-    if (want) {
-        if (self.hidden) self.hidden = NO;
-        if (self.player.timeControlStatus != AVPlayerTimeControlStatusPlaying) [self.player play];
-        if (![want isEqualToString:self.currentPath]) [self loadVideo:want];
-        return;
-    }
-    if (!self.hidden) self.hidden = YES;
-    if (self.player.timeControlStatus == AVPlayerTimeControlStatusPlaying) [self.player pause];
-}
 
 - (void)loadVideo:(NSString *)path {
     self.currentPath = path;
@@ -486,23 +447,6 @@ static void updateSingleVideo(UIWindow *win) {
     } else if (specV && !specV.hidden) {
         specV.hidden = YES;
     }
-    // 投送遮挡层: 播展开素材局部盖住右下角投送图标(跨进程无法直接隐藏)
-    DIVideoView *airV = objc_getAssociatedObject(win, &kWinVideoAir);
-    if (hideAirPlay) {
-        if (!airV) {
-            airV = [[DIVideoView alloc] initWithFrame:CGRectZero];
-            airV.airLayer = YES;
-            objc_setAssociatedObject(win, &kWinVideoAir, airV, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-        }
-        if (airV.superview != bestRoot) {
-            [airV removeFromSuperview];
-            [bestRoot addSubview:airV]; // 最顶层: 盖住跨进程投送图标
-            airV.hidden = YES;
-        }
-        wakeLayer(airV, airV.superview);
-    } else if (airV && !airV.hidden) {
-        airV.hidden = YES;
-    }
 }
 
 static void updateHost(UIView *host) {
@@ -510,7 +454,7 @@ static void updateHost(UIView *host) {
     attach(host);
     if (NSThread.isMainThread && host.window) {
         updateSingleVideo(host.window); // 每次布局跟随岛尺寸
-        // 投送: 跨进程图标无法直接隐藏, 由遮挡层(kWinVideoAir)负责; 类名探测保留兜底
+        // 投送/频谱真隐藏: 在 MediaRemoteUI 渲染进程中 hook(见 init 的 mruInit); 此处仅保留类名探测兜底
         UIView *ap = findAirPlay(host);
         logOnce(@"投送", ap);
         if (ap && ap.hidden != hideAirPlay) ap.hidden = hideAirPlay;
@@ -522,6 +466,8 @@ static void updateHost(UIView *host) {
 struct DIHook { Class cls; IMP original; };
 static std::vector<DIHook> hooks;
 
+static void mruUpdate(UIView *v); // 前置声明
+
 static void layoutHook(UIView *self, SEL selector) {
     Class concrete = object_getClass(self);
     for (Class c = concrete; c; c = class_getSuperclass(c)) {
@@ -530,7 +476,89 @@ static void layoutHook(UIView *self, SEL selector) {
             if (h.cls == c) { ((void(*)(id,SEL))h.original)(self, selector); found = YES; break; }
         if (found) break;
     }
-    if (NSThread.isMainThread) updateHost(self);
+    if (NSThread.isMainThread) { if (gIsMRU) mruUpdate(self); else updateHost(self); }
+}
+
+#pragma mark - MediaRemoteUI 进程(灵动岛播放器真实渲染进程, iOS16/17 远程场景)
+
+// 布局后按类名特征隐藏: 频谱动态(spectrumOn=隐藏)/投送图标(hideAirPlay=隐藏)
+static void mruUpdate(UIView *v) {
+    NSString *cn = NSStringFromClass(v.class);
+    BOOL isSpec = [cn containsString:@"Spectrum"] || [cn containsString:@"Waveform"] ||
+                  [cn containsString:@"Visualiz"] || [cn containsString:@"AudioBars"];
+    BOOL isAir  = [cn containsString:@"RoutePicker"] || [cn containsString:@"AirPlay"] || [cn containsString:@"AirDrop"];
+    if (isSpec) {
+        logOnce(@"MRU频谱", v);
+        if (v.isHidden != spectrumOn) v.hidden = spectrumOn; // 打开频谱素材=隐藏系统频谱动态
+    }
+    if (isAir) {
+        logOnce(@"MRU投送", v);
+        if (v.isHidden != hideAirPlay) v.hidden = hideAirPlay; // 打开投送开关=隐藏图标
+    }
+}
+
+// MediaRemoteUI 视图树 dump(一次): 找频谱/投送真实类名与层级
+static void dumpViews(UIView *v, int depth) {
+    if (!v || depth > 16) return;
+    NSMutableString *ind = [NSMutableString string];
+    for (int i = 0; i < depth; i++) [ind appendString:@"  "];
+    DLog(@"%@%@ %@", ind, NSStringFromClass(v.class), NSStringFromCGRect(v.frame));
+    for (UIView *s in v.subviews) dumpViews(s, depth + 1);
+}
+
+static void mruTick(void) {
+    refreshPrefs();
+    for (UIScene *s in UIApplication.sharedApplication.connectedScenes)
+        if ([s isKindOfClass:[UIWindowScene class]])
+            for (UIWindow *w in ((UIWindowScene *)s).windows)
+                for (UIView *v in w.subviews) { mruUpdate(v); for (UIView *ss in v.subviews) mruUpdate(ss); }
+}
+
+static void mruInit(void) {
+    gIsMRU = YES;
+    logHandle = os_log_create("com.abgg332.driftisland", "runtime");
+    DLog(@"===== 漂流岛 tweak 加载 (MediaRemoteUI) =====");
+    // 枚举类安装 layoutSubviews hook: 频谱/投送特征类
+    unsigned int n = 0;
+    Class *classes = objc_copyClassList(&n);
+    if (classes) {
+        for (unsigned int i = 0; i < n; i++) {
+            NSString *cn = NSStringFromClass(classes[i]);
+            BOOL hit = [cn containsString:@"Spectrum"] || [cn containsString:@"Waveform"] ||
+                       [cn containsString:@"Visualiz"] || [cn containsString:@"AudioBars"] ||
+                       [cn containsString:@"RoutePicker"] || [cn containsString:@"AirPlay"];
+            if (!hit) continue;
+            Class c = classes[i];
+            if (![c isSubclassOfClass:UIView.class]) continue;
+            Method m = class_getInstanceMethod(c, @selector(layoutSubviews));
+            if (!m) continue;
+            IMP orig = method_setImplementation(m, (IMP)layoutHook);
+            bool dup = false;
+            for (const DIHook &h : hooks) if (h.cls == c) { dup = true; break; }
+            if (!dup) hooks.push_back({c, orig});
+            DLog(@"MRU hook 安装: %@", cn);
+        }
+        free(classes);
+    }
+    dispatch_async(dispatch_get_main_queue(), ^{
+        refreshPrefs();
+        static dispatch_source_t timer;
+        timer = dispatch_source_create(DISPATCH_SOURCE_TYPE_TIMER, 0, 0, dispatch_get_main_queue());
+        dispatch_source_set_timer(timer, DISPATCH_TIME_NOW, 0.5 * NSEC_PER_SEC, 0.1 * NSEC_PER_SEC);
+        dispatch_source_set_event_handler(timer, ^{ mruTick(); });
+        dispatch_resume(timer);
+        static dispatch_once_t once;
+        dispatch_once(&once, ^{
+            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)3 * NSEC_PER_SEC), dispatch_get_main_queue(), ^{
+                for (UIScene *s in UIApplication.sharedApplication.connectedScenes)
+                    if ([s isKindOfClass:[UIWindowScene class]])
+                        for (UIWindow *w in ((UIWindowScene *)s).windows) {
+                            DLog(@"===== MediaRemoteUI 窗口视图树 dump (%@) =====", NSStringFromClass(w.class));
+                            dumpViews(w, 0);
+                        }
+            });
+        });
+    });
 }
 
 static BOOL install(NSString *name) {
@@ -582,7 +610,9 @@ static void prefsChanged(CFNotificationCenterRef, void *, CFStringRef, const voi
 
 __attribute__((constructor)) static void init(void) {
     @autoreleasepool {
-        if (![NSBundle.mainBundle.bundleIdentifier isEqual:@"com.apple.springboard"]) return;
+        NSString *bid = NSBundle.mainBundle.bundleIdentifier;
+        if ([bid isEqual:@"com.apple.MediaRemoteUI"]) { mruInit(); return; }
+        if (![bid isEqual:@"com.apple.springboard"]) return;
         logHandle = os_log_create("com.abgg332.driftisland", "runtime");
         DLog(@"===== 漂流岛 tweak 加载 (SpringBoard) =====");
         dispatch_async(dispatch_get_main_queue(), ^{
