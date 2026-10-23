@@ -194,15 +194,15 @@ static void postReload(void) {
         [specs addObject:[self groupSpec:@"帧率" footer:@"打开时用帧率素材替换频谱。大小每+1放大0.1倍; 左右/上下为单位点数。"]];
         [specs addObject:[self switchSpec:@"帧率开关" key:@"spectrumOn" def:@NO]];
         if ([[self readPreferenceValue:[self switchSpec:@"spectrumOn" key:@"spectrumOn" def:@NO]] boolValue]) {
-            PSSpecifier *animSet = [PSSpecifier preferenceSpecifierNamed:@"素材名" target:self
-                set:NULL get:@selector(readSpectrumName:)
-                detail:[DIFrameFolders class] cell:PSLinkCell edit:nil];
-            [animSet setProperty:[self frameStatusName] forKey:@"value"];
-            [specs addObject:animSet];
             [specs addObject:[self numSlider:@"帧率速度" key:@"animFPS" def:50 mn:10 mx:200]];
             [specs addObject:[self numSlider:@"素材大小" key:@"animScaleAdj" def:0 mn:-20 mx:20]];
             [specs addObject:[self numSlider:@"左右偏移" key:@"animOffsetX3" def:0 mn:-50 mx:50]];
             [specs addObject:[self numSlider:@"上下偏移" key:@"animOffsetY3" def:0 mn:-50 mx:50]];
+            PSSpecifier *animSet = [PSSpecifier preferenceSpecifierNamed:@"素材名称" target:self
+                set:NULL get:@selector(readSpectrumName:)
+                detail:[DIFrameFolders class] cell:PSLinkCell edit:nil];
+            [animSet setProperty:[self frameStatusName] forKey:@"value"];
+            [specs addObject:animSet];
         }
         _smallRow = _expandRow = -1;
         NSInteger n = 0;
@@ -240,36 +240,51 @@ static void postReload(void) {
             @selector(tableView:willDisplayCell:forRowAtIndexPath:), tableView, cell, indexPath);
     /* 注意: PSGroupCell 是 section header 不占行, indexPath.row 是组内行号:
        section1(小岛): row0=开关 row1=素材; section2(展开): row1=素材; section3(频谱): row1=素材 */
-    /* 帧率参数滑杆行(section3 row2~5): 左侧"文字 数字", 滑杆移到右半边(PSSliderCell 不渲染标题) */
-    if (indexPath.section == 3 && indexPath.row >= 2 && indexPath.row <= 5) {
+    /* 帧率参数滑杆行(section3 row1~4): 左侧"文字 数字", 滑杆装入右半边容器(缩短横杠); 拖动实时更新数字 */
+    if (indexPath.section == 3 && indexPath.row >= 1 && indexPath.row <= 4) {
         NSArray *labels = @[@"帧率速度", @"素材大小", @"左右偏移", @"上下偏移"];
         NSArray *keys   = @[@"animFPS", @"animScaleAdj", @"animOffsetX3", @"animOffsetY3"];
         NSArray *defs   = @[@50, @0, @0, @0];
-        NSInteger i = indexPath.row - 2;
+        NSArray *mins   = @[@10, @-20, @-50, @-50];
+        NSArray *maxs   = @[@200, @20, @50, @50];
+        NSInteger i = indexPath.row - 1;
         int v = [self numValue:keys[i] def:[defs[i] intValue]];
-        NSArray *range = @{ @"animFPS": @[@(10), @(200)],
-                                 @"animScaleAdj": @[@(-20), @(20)],
-                                 @"animOffsetX3": @[@(-50), @(50)],
-                                 @"animOffsetY3": @[@(-50), @(50)] }[keys[i]];
-        if (v < [range[0] intValue]) v = [range[0] intValue];
-        if (v > [range[1] intValue]) v = [range[1] intValue];
+        if (v < [mins[i] intValue]) v = [mins[i] intValue];
+        if (v > [maxs[i] intValue]) v = [maxs[i] intValue];
         cell.textLabel.text = [NSString stringWithFormat:@"%@  %d", labels[i], v];
         cell.textLabel.font = [UIFont systemFontOfSize:15 weight:UIFontWeightSemibold];
-        UIView *root = cell.contentView.subviews.count ? cell.contentView : cell;
+
         UISlider *slider = nil;
+        UIView *root = cell.contentView.subviews.count ? cell.contentView : cell;
         for (UIView *sv in root.subviews) if ([sv isKindOfClass:UISlider.class]) { slider = (UISlider *)sv; break; }
         if (!slider) for (UIView *sv in cell.subviews) if ([sv isKindOfClass:UISlider.class]) { slider = (UISlider *)sv; break; }
         CGFloat cw = cell.contentView.bounds.size.width, ch = cell.contentView.bounds.size.height;
         if (slider && cw > 10) {
-            slider.frame = CGRectMake(cw * 0.42, (ch - 31) / 2, cw * 0.53, 31);
-            slider.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleRightMargin;
+            UIView *wrap = (UIView *)objc_getAssociatedObject(cell, "diWrap");
+            if (!wrap) {
+                wrap = [[UIView alloc] initWithFrame:CGRectMake(cw * 0.44, (ch - 31) / 2, cw * 0.52, 31)];
+                wrap.tag = 0xD1;
+                wrap.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleLeftMargin;
+                [slider removeFromSuperview];
+                slider.frame = wrap.bounds;
+                slider.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
+                [wrap addSubview:slider];
+                [cell.contentView addSubview:wrap];
+                objc_setAssociatedObject(cell, "diWrap", wrap, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+            }
+            /* 拖动实时同步数字(防重复挂接) */
+            if (!objc_getAssociatedObject(slider, "liveHook")) {
+                objc_setAssociatedObject(slider, "liveHook", @YES, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+                objc_setAssociatedObject(slider, "liveLabel", labels[i], OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+                [slider addTarget:self action:@selector(sliderLive:) forControlEvents:UIControlEventValueChanged];
+            }
         }
     }
 
     NSString *name = nil;
     if (indexPath.section == 1 && indexPath.row == 1) name = [self nameForMode:0];
     if (indexPath.section == 2 && indexPath.row == 1) name = [self nameForMode:1];
-    if (indexPath.section == 3 && indexPath.row == 1) name = [self frameStatusName];
+    if (indexPath.section == 3 && indexPath.row == 5) name = [self frameStatusName];
     if (name) {
         if ([cell respondsToSelector:@selector(setValue:)])
             ((void (*)(id, SEL, id))objc_msgSend)(cell, @selector(setValue:), name);
@@ -278,6 +293,19 @@ static void postReload(void) {
             if (vl) { vl.text = name; vl.textColor = [UIColor secondaryLabelColor]; }
         }
         if (cell.detailTextLabel) cell.detailTextLabel.text = name;
+    }
+}
+
+/* 滑杆拖动: 实时刷新本行"文字 数字" */
+- (void)sliderLive:(UISlider *)slider {
+    NSString *label = objc_getAssociatedObject(slider, "liveLabel");
+    UIView *cell = slider.superview.superview; // wrap → contentView → cell
+    for (UIView *v = cell; v; v = v.superview) {
+        if ([v isKindOfClass:UITableViewCell.class]) {
+            UILabel *tl = ((UITableViewCell *)v).textLabel;
+            if (tl) tl.text = [NSString stringWithFormat:@"%@  %d", label, (int)round(slider.value)];
+            break;
+        }
     }
 }
 
