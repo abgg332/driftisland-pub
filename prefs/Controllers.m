@@ -45,6 +45,7 @@ static void postReload(void) {
 
 @interface DIMaterialsSmall : DIMaterialsController @end
 @interface DIMaterialsExpand : DIMaterialsController @end
+@interface DIMaterialsSpectrum : DIMaterialsController @end
 
 @interface DIPrefsController : PSListController {
     NSInteger _smallRow; /* 小岛素材选择 行号 */
@@ -72,13 +73,15 @@ static void postReload(void) {
 
 /* 素材选择行右侧显示的当前素材名 */
 - (NSString *)nameForMode:(NSInteger)mode {
-    NSInteger idx = indexForKey(mode == 0 ? @"smallIndex" : @"expandIndex");
+    NSString *key = (mode == 0) ? @"smallIndex" : (mode == 1) ? @"expandIndex" : @"spectrumIndex";
+    NSInteger idx = indexForKey(key);
     if (idx < 0) return @"无素材";
     return videoFiles()[idx];
 }
 
 - (id)readSmallVideoName:(PSSpecifier *)spec { return [self nameForMode:0]; }
 - (id)readExpandVideoName:(PSSpecifier *)spec { return [self nameForMode:1]; }
+- (id)readSpectrumName:(PSSpecifier *)spec { return [self nameForMode:2]; }
 
 - (PSSpecifier *)switchSpec:(NSString *)name key:(NSString *)key def:(id)def {
     PSSpecifier *s = [PSSpecifier preferenceSpecifierNamed:name target:self
@@ -110,6 +113,8 @@ static void postReload(void) {
         NSMutableArray *specs = [NSMutableArray array];
         [specs addObject:[self groupSpec:@"漂流岛 · 灵动岛视频背景" footer:nil]];
         [specs addObject:[self switchSpec:@"总开关" key:@"enabled" def:@NO]];
+        /* 投送按钮: 隐藏/显示音乐岛右下角的投送(AirPlay)图标 */
+        [specs addObject:[self switchSpec:@"投送按钮" key:@"hideAirPlay" def:@NO]];
 
         /* 小岛素材: 开关 + 素材选择行(同组相邻) */
         [specs addObject:[self groupSpec:@"小岛素材" footer:nil]];
@@ -128,6 +133,15 @@ static void postReload(void) {
         [expandMat setProperty:[self nameForMode:1] forKey:@"value"];
         [specs addObject:[self switchSpec:@"展开显示素材" key:@"expandOn" def:@YES]];
         [specs addObject:expandMat];
+
+        /* 频谱: 开关 + 素材选择行(同组相邻); 关闭=系统频谱, 打开=用素材替换频谱 */
+        [specs addObject:[self groupSpec:@"频谱" footer:@"关闭时显示系统频谱，打开时用所选素材替换频谱。"]];
+        PSSpecifier *spectrumMat = [PSSpecifier preferenceSpecifierNamed:@"素材选择" target:self
+            set:NULL get:@selector(readSpectrumName:)
+            detail:[DIMaterialsSpectrum class] cell:PSLinkCell edit:nil];
+        [spectrumMat setProperty:[self nameForMode:2] forKey:@"value"];
+        [specs addObject:[self switchSpec:@"频谱开关" key:@"spectrumOn" def:@NO]];
+        [specs addObject:spectrumMat];
         _smallRow = _expandRow = -1;
         NSInteger n = 0;
         for (PSSpecifier *s in specs) {
@@ -162,10 +176,11 @@ static void postReload(void) {
             (struct objc_super *)&(struct objc_super){ .receiver = self, .super_class = class_getSuperclass(object_getClass(self)) },
             @selector(tableView:willDisplayCell:forRowAtIndexPath:), tableView, cell, indexPath);
     /* 注意: PSGroupCell 是 section header 不占行, indexPath.row 是组内行号:
-       section1(小岛素材组): row0=开关 row1=素材选择; section2(展开素材组): row0=开关 row1=素材选择 */
+       section1(小岛): row0=开关 row1=素材; section2(展开): row1=素材; section3(频谱): row1=素材 */
     NSString *name = nil;
     if (indexPath.section == 1 && indexPath.row == 1) name = [self nameForMode:0];
     if (indexPath.section == 2 && indexPath.row == 1) name = [self nameForMode:1];
+    if (indexPath.section == 3 && indexPath.row == 1) name = [self nameForMode:2];
     if (name) {
         if ([cell respondsToSelector:@selector(setValue:)])
             ((void (*)(id, SEL, id))objc_msgSend)(cell, @selector(setValue:), name);
@@ -207,7 +222,7 @@ static void postReload(void) {
     if (!_specifiers) {
         NSMutableArray *specs = [NSMutableArray array];
         NSInteger cnt = (NSInteger)videoFiles().count;
-        NSString *title = (self.matMode == 0) ? @"选择小岛素材" : @"选择展开素材";
+        NSString *title = (self.matMode == 0) ? @"选择小岛素材" : (self.matMode == 1) ? @"选择展开素材" : @"选择频谱素材";
         if (cnt == 0) {
             [specs addObject:[self groupSpec:@"素材目录为空" footer:@"请把视频 (mp4/mov/m4v) 放进 /var/mobile/灵动岛，然后重新进入本页。"]];
         } else {
@@ -237,7 +252,7 @@ static void postReload(void) {
 
 - (void)selectVideo:(PSSpecifier *)spec {
     NSInteger idx = [[spec propertyForKey:@"idx"] integerValue];
-    NSString *key = (self.matMode == 0) ? @"smallIndex" : @"expandIndex";
+    NSString *key = (self.matMode == 0) ? @"smallIndex" : (self.matMode == 1) ? @"expandIndex" : @"spectrumIndex";
     CFPreferencesSetAppValue((__bridge CFStringRef)key, (__bridge CFPropertyListRef)@(idx), (__bridge CFStringRef)kDomain);
     CFPreferencesAppSynchronize((__bridge CFStringRef)kDomain);
     postReload();

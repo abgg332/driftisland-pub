@@ -72,14 +72,32 @@ static NSArray<NSString *> *materialList(void) {
 }
 
 /* 偏好缓存: 供 displayLink 每帧读取(不直接读 CFPreferences), 由 refreshPrefs 定期刷新 */
-static BOOL enabled, smallOn = YES, expandOn = YES;
-static NSInteger smallIdx, expandIdx;
+static BOOL enabled, smallOn = YES, expandOn = YES, hideAirPlay, spectrumOn;
+static NSInteger smallIdx, expandIdx, spectrumIdx;
+
+// 素材列表缓存(2秒TTL): displayLink 每帧调用, 不能每次扫描目录
+static NSArray<NSString *> *cachedMaterials(void) {
+    static NSArray *l; static CFAbsoluteTime t;
+    CFAbsoluteTime now = CFAbsoluteTimeGetCurrent();
+    if (!l || now - t > 2.0) { l = materialList(); t = now; }
+    return l;
+}
 
 static NSString *materialPathFor(BOOL expanded) {
-    NSArray<NSString *> *list = materialList();
+    NSArray<NSString *> *list = cachedMaterials();
     if (!list.count) return nil;
     NSInteger idx = expanded ? expandIdx : smallIdx;
     if (expanded ? !expandOn : !smallOn) return nil; // 对应形态的开关关闭 → 不显示视频
+    if (idx < 0) idx = 0;
+    if (idx >= (NSInteger)list.count) idx = list.count - 1;
+    return [kMaterialDir stringByAppendingPathComponent:list[idx]];
+}
+
+static NSString *spectrumPath(void) {
+    if (!spectrumOn) return nil;
+    NSArray<NSString *> *list = cachedMaterials();
+    if (!list.count) return nil;
+    NSInteger idx = spectrumIdx;
     if (idx < 0) idx = 0;
     if (idx >= (NSInteger)list.count) idx = list.count - 1;
     return [kMaterialDir stringByAppendingPathComponent:list[idx]];
@@ -90,6 +108,9 @@ static void refreshPrefs(void) {
     logEnabled = pBool(@"logging", NO);
     smallOn = pBool(@"smallOn", YES);
     expandOn = pBool(@"expandOn", YES);
+    hideAirPlay = pBool(@"hideAirPlay", NO);
+    spectrumOn = pBool(@"spectrumOn", NO);
+    spectrumIdx = pInt(@"spectrumIndex", 0);
     // 兼容旧版单素材键 videoIndex: 未分别设置过时沿用旧值
     NSInteger none = -1000;
     NSInteger si = pInt(@"smallIndex", none), ei = pInt(@"expandIndex", none);
@@ -106,9 +127,11 @@ static void refreshPrefs(void) {
 @property (nonatomic, copy) NSString *currentPath;
 @property (nonatomic, strong) CADisplayLink *syncLink;
 @property (nonatomic, assign) BOOL expandedLayer; // YES=展开层(播展开素材), NO=小岛层
+@property (nonatomic, assign) BOOL spectrumLayer; // YES=频谱层(对齐 anchorView 位置)
+@property (nonatomic, weak) UIView *anchorView;   // 频谱层的锚点: 系统频谱视图
 @end
 
-static char kWinVideoSmall, kWinVideoExpand; // 每窗口双视频层(小岛/展开)
+static char kWinVideoSmall, kWinVideoExpand, kWinVideoSpec; // 每窗口视频层(小岛/展开/频谱)
 // enabled 等偏好缓存已在 materialPathFor 上方声明
 static NSHashTable *hostTable; // 弱引用宿主集合
 static void updateSingleVideo(UIWindow *win); // 前置声明
@@ -142,6 +165,7 @@ static void updateSingleVideo(UIWindow *win); // 前置声明
 - (void)syncFrameToHost {
     UIView *host = self.superview;
     if (!host || host.window == nil) { _syncLink.paused = YES; return; }
+    if (self.spectrumLayer) { [self syncSpectrum]; return; }
     CALayer *pl = host.layer.presentationLayer;
     // 帧贴合: 对齐宿主实时呈现值(动画插值), 外扩2pt覆盖取整边缘缝隙
     CGRect b = pl ? pl.bounds : host.bounds;
@@ -175,6 +199,37 @@ static void updateSingleVideo(UIWindow *win); // 前置声明
 
 - (void)dealloc {
     [_syncLink invalidate];
+}
+
+// 频谱层: 对齐系统频谱视图位置, 盖住它; 开关关/无锚点时恢复系统频谱并隐藏视频
+- (void)syncSpectrum {
+    UIView *a = self.anchorView;
+    if (!a || !a.window || !self.superview) {
+        if (!self.hidden) self.hidden = YES;
+        if (self.player.timeControlStatus == AVPlayerTimeControlStatusPlaying) [self.player pause];
+        if (++_missCount > 20) _syncLink.paused = YES;
+        return;
+    }
+    _missCount = 0;
+    CALayer *pl = a.layer.presentationLayer;
+    CGRect f = pl ? pl.frame : a.frame;
+    self.frame = CGRectInset(f, -1, -1); // 居中外扩1pt盖住边缘
+    self.layer.cornerRadius = pl ? pl.cornerRadius : a.layer.cornerRadius;
+    BOOL show = enabled && spectrumOn && !a.isHidden;
+    if (show) {
+        a.hidden = YES; // 打开频谱素材: 隐藏系统频谱
+        NSString *want = spectrumPath();
+        if (want) {
+            if (self.hidden) self.hidden = NO;
+            if (self.player.timeControlStatus != AVPlayerTimeControlStatusPlaying) [self.player play];
+            if (![want isEqualToString:self.currentPath]) [self loadVideo:want];
+            return;
+        }
+    } else {
+        a.hidden = NO; // 关闭开关: 恢复系统频谱
+    }
+    if (!self.hidden) self.hidden = YES;
+    if (self.player.timeControlStatus == AVPlayerTimeControlStatusPlaying) [self.player pause];
 }
 
 - (void)loadVideo:(NSString *)path {
@@ -273,6 +328,27 @@ static void wakeLayer(DIVideoView *v, UIView *bestRoot) {
     }
 }
 
+// 递归找类名含 token 的子视图(投送按钮/频谱图标)
+static UIView *findSubview(UIView *root, NSString *token) {
+    if (!root) return nil;
+    for (UIView *s in root.subviews) {
+        if ([NSStringFromClass(s.class) containsString:token]) return s;
+        UIView *r = findSubview(s, token);
+        if (r) return r;
+    }
+    return nil;
+}
+
+// 类名探测日志只记一次, 防刷屏
+static void logOnce(NSString *tag, UIView *v) {
+    if (!v) return;
+    static NSMutableSet *seen;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{ seen = [NSMutableSet set]; });
+    NSString *k = [tag stringByAppendingString:NSStringFromClass(v.class)];
+    if (![seen containsObject:k]) { [seen addObject:k]; DLog(@"探测%@: %@", tag, NSStringFromClass(v.class)); }
+}
+
 static void updateSingleVideo(UIWindow *win) {
     if (!win) return;
     DIVideoView *smallV = objc_getAssociatedObject(win, &kWinVideoSmall);
@@ -325,12 +401,39 @@ static void updateSingleVideo(UIWindow *win) {
         wakeLayer(v, bestRoot);
         if (bestRoot.subviews.firstObject != v) [bestRoot sendSubviewToBack:v];
     }
+    // 频谱素材层: 盖在系统频谱上
+    DIVideoView *specV = objc_getAssociatedObject(win, &kWinVideoSpec);
+    if (spectrumOn) {
+        UIView *sp = findSubview(bestRoot, @"Spectrum");
+        logOnce(@"频谱", sp);
+        if (sp) {
+            if (!specV) {
+                specV = [[DIVideoView alloc] initWithFrame:sp.frame];
+                specV.spectrumLayer = YES;
+                objc_setAssociatedObject(win, &kWinVideoSpec, specV, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+            }
+            specV.anchorView = sp;
+            if (specV.superview != sp.superview) {
+                [specV removeFromSuperview];
+                if (sp.superview) [sp.superview insertSubview:specV aboveSubview:sp];
+            }
+            wakeLayer(specV, specV.superview);
+        }
+    } else if (specV && !specV.hidden) {
+        specV.hidden = YES; // 开关关闭: syncSpectrum 也会恢复系统频谱
+    }
 }
 
 static void updateHost(UIView *host) {
     if (!host || !viewHasToken(host, @"SAUIElementView")) return;
     attach(host);
-    if (NSThread.isMainThread && host.window) updateSingleVideo(host.window); // 每次布局跟随岛尺寸
+    if (NSThread.isMainThread && host.window) {
+        updateSingleVideo(host.window); // 每次布局跟随岛尺寸
+        // 投送按钮: 隐藏/显示 AirPlay 图标(每次布局重申, 防系统重置)
+        UIView *ap = findSubview(host, @"AirPlay");
+        logOnce(@"投送", ap);
+        if (ap && ap.hidden != hideAirPlay) ap.hidden = hideAirPlay;
+    }
 }
 
 #pragma mark - layoutSubviews hook（沿用已验证的防重复安装模式）
