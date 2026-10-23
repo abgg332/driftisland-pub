@@ -201,32 +201,27 @@ static void updateSingleVideo(UIWindow *win); // 前置声明
     [_syncLink invalidate];
 }
 
-// 频谱层: 对齐系统频谱视图位置, 盖住它; 开关关/无锚点时恢复系统频谱并隐藏视频
+// 频谱层: 系统频谱渲染在跨进程 CA 层(无法 hook), 按截图标定的比例区域直接盖住
+// 展开岛右上角: x=0.82W y=0.13H w=0.17W h=0.24H(用户圈定); 收缩岛或开关关时隐藏
 - (void)syncSpectrum {
-    UIView *a = self.anchorView;
-    if (!a || !a.window || !self.superview) {
+    UIView *host = self.superview;
+    BOOL expand = host && host.window && host.bounds.size.height > 100;
+    if (!expand) {
         if (!self.hidden) self.hidden = YES;
         if (self.player.timeControlStatus == AVPlayerTimeControlStatusPlaying) [self.player pause];
         if (++_missCount > 20) _syncLink.paused = YES;
         return;
     }
     _missCount = 0;
-    CALayer *pl = a.layer.presentationLayer;
-    CGRect f = pl ? pl.frame : a.frame;
-    self.frame = CGRectInset(f, -1, -1); // 居中外扩1pt盖住边缘
-    self.layer.cornerRadius = pl ? pl.cornerRadius : a.layer.cornerRadius;
-    BOOL show = enabled && spectrumOn && !a.isHidden;
-    if (show) {
-        a.hidden = YES; // 打开频谱素材: 隐藏系统频谱
-        NSString *want = spectrumPath();
-        if (want) {
-            if (self.hidden) self.hidden = NO;
-            if (self.player.timeControlStatus != AVPlayerTimeControlStatusPlaying) [self.player play];
-            if (![want isEqualToString:self.currentPath]) [self loadVideo:want];
-            return;
-        }
-    } else {
-        a.hidden = NO; // 关闭开关: 恢复系统频谱
+    CGFloat w = host.bounds.size.width, h = host.bounds.size.height;
+    self.frame = CGRectMake(w * 0.82, h * 0.13, w * 0.17, h * 0.24);
+    self.layer.cornerRadius = h * 0.03;
+    NSString *want = (enabled && spectrumOn) ? spectrumPath() : nil;
+    if (want) {
+        if (self.hidden) self.hidden = NO;
+        if (self.player.timeControlStatus != AVPlayerTimeControlStatusPlaying) [self.player play];
+        if (![want isEqualToString:self.currentPath]) [self loadVideo:want];
+        return;
     }
     if (!self.hidden) self.hidden = YES;
     if (self.player.timeControlStatus == AVPlayerTimeControlStatusPlaying) [self.player pause];
@@ -342,7 +337,6 @@ static UIView *findSubviewTokens(UIView *root, NSArray<NSString *> *tokens) {
 static UIView *findAirPlay(UIView *root) {
     return findSubviewTokens(root, @[@"AirPlay", @"RoutePicker", @"AirDropUp", @"AirTraffic"]);
 }
-static UIView *findSpectrum(UIView *root) {
     return findSubviewTokens(root, @[@"Spectrum", @"Waveform", @"Visualiz", @"AudioBars"]);
 }
 
@@ -449,26 +443,22 @@ static void updateSingleVideo(UIWindow *win) {
             }
         });
     }
-    // 频谱素材层: 盖在系统频谱上
+    // 频谱素材层: 固定比例区域盖在展开岛右上角(跨进程频谱上方), 加在最顶层
     DIVideoView *specV = objc_getAssociatedObject(win, &kWinVideoSpec);
     if (spectrumOn) {
-        UIView *sp = findSpectrum(bestRoot); // 频谱在跨进程 CA 层里, 类名探测命中则覆盖; 层树 dump 后再精确定位
-        logOnce(@"频谱", sp);
-        if (sp) {
-            if (!specV) {
-                specV = [[DIVideoView alloc] initWithFrame:sp.frame];
-                specV.spectrumLayer = YES;
-                objc_setAssociatedObject(win, &kWinVideoSpec, specV, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-            }
-            specV.anchorView = sp;
-            if (specV.superview != sp.superview) {
-                [specV removeFromSuperview];
-                if (sp.superview) [sp.superview insertSubview:specV aboveSubview:sp];
-            }
-            wakeLayer(specV, specV.superview);
+        if (!specV) {
+            specV = [[DIVideoView alloc] initWithFrame:CGRectZero];
+            specV.spectrumLayer = YES;
+            objc_setAssociatedObject(win, &kWinVideoSpec, specV, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
         }
+        if (specV.superview != bestRoot) {
+            [specV removeFromSuperview];
+            [bestRoot addSubview:specV]; // 加在最顶层: 盖住跨进程频谱
+            specV.hidden = YES;
+        }
+        wakeLayer(specV, specV.superview);
     } else if (specV && !specV.hidden) {
-        specV.hidden = YES; // 开关关闭: syncSpectrum 也会恢复系统频谱
+        specV.hidden = YES;
     }
 }
 
