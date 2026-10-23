@@ -71,13 +71,30 @@ static NSArray<NSString *> *materialList(void) {
     return out;
 }
 
-static NSString *materialPath(void) {
+static NSString *materialPathFor(BOOL expanded) {
     NSArray<NSString *> *list = materialList();
     if (!list.count) return nil;
-    NSInteger idx = pInt(@"videoIndex", 0);
+    NSInteger idx = expanded ? expandIdx : smallIdx;
+    if (expanded ? !expandOn : !smallOn) return nil; // 对应形态的开关关闭 → 不显示视频
     if (idx < 0) idx = 0;
     if (idx >= (NSInteger)list.count) idx = list.count - 1;
     return [kMaterialDir stringByAppendingPathComponent:list[idx]];
+}
+
+/* 偏好缓存: 供 displayLink 每帧读取(不直接读 CFPreferences), 由 refreshPrefs 定期刷新 */
+static BOOL enabled, smallOn = YES, expandOn = YES;
+static NSInteger smallIdx, expandIdx;
+static void refreshPrefs(void) {
+    enabled = pBool(@"enabled", NO);
+    logEnabled = pBool(@"logging", NO);
+    smallOn = pBool(@"smallOn", YES);
+    expandOn = pBool(@"expandOn", YES);
+    // 兼容旧版单素材键 videoIndex: 未分别设置过时沿用旧值
+    NSInteger none = -1000;
+    NSInteger si = pInt(@"smallIndex", none), ei = pInt(@"expandIndex", none);
+    NSInteger legacy = pInt(@"videoIndex", 0);
+    smallIdx = (si == none) ? legacy : si;
+    expandIdx = (ei == none) ? legacy : ei;
 }
 
 #pragma mark - 视频覆盖视图
@@ -87,10 +104,11 @@ static NSString *materialPath(void) {
 @property (nonatomic, strong) AVPlayerLooper *looper;
 @property (nonatomic, copy) NSString *currentPath;
 @property (nonatomic, strong) CADisplayLink *syncLink;
+@private NSInteger _missCount;
 @end
 
 static char kWinVideoKey; // 每窗口唯一视频层
-static BOOL enabled;
+// enabled 等偏好缓存已在 materialPathFor 上方声明
 static NSHashTable *hostTable; // 弱引用宿主集合
 static void updateSingleVideo(UIWindow *win); // 前置声明
 
@@ -116,25 +134,32 @@ static void updateSingleVideo(UIWindow *win); // 前置声明
     return self;
 }
 
-// 每帧: 同步可见性 + frame/圆角对齐宿主实时呈现值(动画插值)
-// 不可见时自暂停 displayLink —— 无岛活动时渲染循环与视频彻底停止, 不耗电; 由 updateSingleVideo 唤醒
+// 每帧: 同步可见性 + frame/圆角对齐宿主实时呈现值(动画插值) + 按岛形态(小岛/展开)换素材
+// 不可见时仍需连续 20 帧才暂停 displayLink —— 瞬时抖动立即暂停会让视频 frame 停在旧值,
+// 等 0.5s 轮询唤醒前岛已经变小 → 右侧露黑边(快速切换闪烁的根因)
 - (void)syncFrameToHost {
     UIView *host = self.superview;
     if (!host) { _syncLink.paused = YES; return; }
+    // 用呈现层高度判定形态: 动画结束后才越过阈值, 避免收缩中途误换素材
+    CALayer *pl = host.layer.presentationLayer;
+    CGFloat ph = pl ? pl.bounds.size.height : host.bounds.size.height;
+    BOOL expanded = ph > 60; // 小岛高约36, 展开高 51~223
+    NSString *want = materialPathFor(expanded);
+    // 不检查 alpha: 视频是子视图, 随宿主一起淡入淡出
     BOOL visible = enabled && !host.isHidden && host.window != nil
-                   && host.bounds.size.width > 2
-                   && self.currentPath.length > 0;
-    // 不检查 alpha: 视频是子视图, 随宿主一起淡入淡出, 若按 alpha 自行隐藏会在岛渐隐中途先消失 → 闪一下
+                   && host.bounds.size.width > 2 && want != nil;
     if (!visible) {
         if (!self.hidden) self.hidden = YES;
         if (self.player.timeControlStatus == AVPlayerTimeControlStatusPlaying) [self.player pause];
-        _syncLink.paused = YES; // 彻底停止逐帧循环
+        if (++_missCount > 20) _syncLink.paused = YES; // 连续1/3秒不可见才彻底停循环(省电)
         return;
     }
+    _missCount = 0;
     if (self.hidden) self.hidden = NO;
     if (self.player.timeControlStatus != AVPlayerTimeControlStatusPlaying) [self.player play];
-    CALayer *pl = host.layer.presentationLayer;
+    if (want && ![want isEqualToString:self.currentPath]) [self loadVideo:want]; // 小岛/展开素材分开
     CGRect b = pl ? pl.bounds : host.bounds;
+    b = CGRectInset(b, -2, -2); // 外扩2pt覆盖取整/浮点边缘缝隙(岛 clipsToBounds 会裁掉超出部分)
     if (!CGRectEqualToRect(self.frame, b)) self.frame = b;
     CGFloat cr = pl ? pl.cornerRadius : host.layer.cornerRadius;
     if (self.layer.cornerRadius != cr) self.layer.cornerRadius = cr;
@@ -250,17 +275,15 @@ static void updateSingleVideo(UIWindow *win) {
         [ov removeFromSuperview];
         [bestRoot insertSubview:ov atIndex:0]; // 垫到底层: 文字/图标都在视频之上
         bestRoot.clipsToBounds = YES;
-        if (!ov.currentPath.length) [ov loadVideo:materialPath()]; // 搬迁不重载视频, 避免闪黑
+        if (!ov.currentPath.length) [ov loadVideo:materialPathFor(bestRoot.bounds.size.height > 60)];
         // 仅挂载时设初始尺寸; 动画中的尺寸/圆角逐帧贴合完全交给 displayLink
         ov.frame = bestRoot.bounds;
         ov.layer.cornerRadius = bestRoot.layer.cornerRadius;
-        DLog(@"挂载视频层 container=%@ frame=%@ 素材=%@", NSStringFromClass(bestRoot.class), NSStringFromCGRect(bestRoot.bounds), materialPath() ?: @"(无)");
+        DLog(@"挂载视频层 container=%@ frame=%@ 素材=%@", NSStringFromClass(bestRoot.class), NSStringFromCGRect(bestRoot.bounds), materialPathFor(bestRoot.bounds.size.height > 60) ?: @"(无)");
     }
     // 关键: 此处不再设 frame —— 轮询若在岛动画进行中把视频直接跳到最终尺寸,
     // 会与 displayLink 的逐帧贴合打架, 产生一帧"视频瞬间缩小露黑" = 收缩闪烁
     if (bestRoot.subviews.firstObject != ov) [bestRoot sendSubviewToBack:ov];
-    NSString *mp = materialPath();
-    if (mp && ![mp isEqualToString:ov.currentPath]) [ov loadVideo:mp]; // 切换素材立即生效
 }
 
 static void updateHost(UIView *host) {
@@ -314,16 +337,16 @@ static void installKnownHosts(void) {
 
 static BOOL lastLoggedEnabled = -1;
 static void refreshAll(void) {
-    enabled = pBool(@"enabled", NO);
-    logEnabled = pBool(@"logging", NO);
+    refreshPrefs();
     if (enabled != lastLoggedEnabled) { DLog(@"总开关状态: %@, 声音=永远关闭", enabled ? @"开" : @"关"); lastLoggedEnabled = enabled; }
     for (UIScene *s in UIApplication.sharedApplication.connectedScenes)
         if ([s isKindOfClass:[UIWindowScene class]])
             dispatch_async(dispatch_get_main_queue(), ^{ updateSingleVideo(((UIWindowScene *)s).windows.firstObject); });
 }
 
-// 0.5 秒轮询: 岛展开才播放, 收回即暂停; 素材路径变化立即重载(单视频层统一管理)
+// 0.5 秒轮询: 刷新偏好缓存 + 维持视频层; displayLink 负责逐帧贴合
 static void visibilityTick(void) {
+    refreshPrefs();
     for (UIScene *s in UIApplication.sharedApplication.connectedScenes)
         if ([s isKindOfClass:[UIWindowScene class]]) updateSingleVideo(((UIWindowScene *)s).windows.firstObject);
 }

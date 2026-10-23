@@ -20,10 +20,14 @@ static NSArray<NSString *> *videoFiles(void) {
     return out;
 }
 
-static NSInteger currentVideoIndex(void) {
+/* matMode: 0=小岛素材 1=展开素材 */
+static NSInteger indexForKey(NSString *key) {
     CFPreferencesAppSynchronize((__bridge CFStringRef)kDomain);
-    id v = CFBridgingRelease(CFPreferencesCopyAppValue(CFSTR("videoIndex"), (__bridge CFStringRef)kDomain));
-    NSInteger idx = v ? [v integerValue] : 0;
+    id v = CFBridgingRelease(CFPreferencesCopyAppValue((__bridge CFStringRef)key, (__bridge CFStringRef)kDomain));
+    if (v) return [v integerValue];
+    if (![key isEqualToString:@"videoIndex"]) { /* 兼容旧版单素材键 */ }
+    id legacy = CFBridgingRelease(CFPreferencesCopyAppValue(CFSTR("videoIndex"), (__bridge CFStringRef)kDomain));
+    NSInteger idx = legacy ? [legacy integerValue] : 0;
     NSInteger cnt = (NSInteger)videoFiles().count;
     if (cnt == 0) return -1;
     if (idx < 0 || idx >= cnt) return 0;
@@ -36,10 +40,15 @@ static void postReload(void) {
 }
 
 @interface DIMaterialsController : PSListController
+- (NSInteger)matMode; /* 0=小岛 1=展开 */
 @end
 
+@interface DIMaterialsSmall : DIMaterialsController @end
+@interface DIMaterialsExpand : DIMaterialsController @end
+
 @interface DIPrefsController : PSListController {
-    NSInteger _matRow; /* 素材选择 行号 */
+    NSInteger _smallRow; /* 小岛素材选择 行号 */
+    NSInteger _expandRow; /* 展开素材选择 行号 */
 }
 @end
 
@@ -62,11 +71,14 @@ static void postReload(void) {
 }
 
 /* 素材选择行右侧显示的当前素材名 */
-- (id)readCurrentVideoName:(PSSpecifier *)spec {
-    NSInteger idx = currentVideoIndex();
+- (NSString *)nameForMode:(NSInteger)mode {
+    NSInteger idx = indexForKey(mode == 0 ? @"smallIndex" : @"expandIndex");
     if (idx < 0) return @"无素材";
     return videoFiles()[idx];
 }
+
+- (id)readSmallVideoName:(PSSpecifier *)spec { return [self nameForMode:0]; }
+- (id)readExpandVideoName:(PSSpecifier *)spec { return [self nameForMode:1]; }
 
 - (PSSpecifier *)switchSpec:(NSString *)name key:(NSString *)key def:(id)def {
     PSSpecifier *s = [PSSpecifier preferenceSpecifierNamed:name target:self
@@ -92,24 +104,40 @@ static void postReload(void) {
     return s;
 }
 
+/* 素材选择行: 左标题、右当前素材名(箭头位置), 点击进入二级页面 */
+- (PSSpecifier *)matSpec:(NSString *)name getter:(SEL)get detail:(Class)detailCls {
+    PSSpecifier *s = [PSSpecifier preferenceSpecifierNamed:name target:self
+        set:NULL get:get detail:detailCls cell:PSLinkCell edit:nil];
+    [s setProperty:((id (*)(id, SEL))objc_msgSend)(self, get) forKey:@"value"];
+    return s;
+}
+
 - (NSArray *)specifiers {
     if (!_specifiers) {
         NSMutableArray *specs = [NSMutableArray array];
         [specs addObject:[self groupSpec:@"漂流岛 · 灵动岛视频背景" footer:nil]];
         [specs addObject:[self switchSpec:@"总开关" key:@"enabled" def:@NO]];
 
-        /* 素材选择：左标题、右当前素材名（箭头位置），点击进入二级页面 */
-        _matRow = -1;
-        NSInteger nonGroupBefore = 0;
-        PSSpecifier *mat = [PSSpecifier preferenceSpecifierNamed:@"素材选择" target:self
-            set:NULL get:@selector(readCurrentVideoName:)
-            detail:[DIMaterialsController class] cell:PSLinkCell edit:nil];
-        [mat setProperty:[self readCurrentVideoName:nil] forKey:@"value"];
-        [specs addObject:mat];
+        /* 小岛素材: 开关 + 素材选择行 */
+        [specs addObject:[self groupSpec:@"小岛素材" footer:nil]];
+        [specs addObject:[self switchSpec:@"小岛显示素材" key:@"smallOn" def:@YES]];
+        PSSpecifier *smallMat = [self matSpec:@"素材选择" get:@selector(readSmallVideoName:) detail:[DIMaterialsSmall class]];
+
+        /* 展开素材: 开关 + 素材选择行 */
+        [specs addObject:[self groupSpec:@"展开素材" footer:nil]];
+        [specs addObject:[self switchSpec:@"展开显示素材" key:@"expandOn" def:@YES]];
+        PSSpecifier *expandMat = [self matSpec:@"素材选择" get:@selector(readExpandVideoName:) detail:[DIMaterialsExpand class]];
+
+        [specs addObject:smallMat];
+        [specs addObject:expandMat];
+        _smallRow = _expandRow = -1;
+        NSInteger n = 0;
         for (PSSpecifier *s in specs) {
-            if (s.cellType != PSGroupCell && s != mat) nonGroupBefore++;
+            if (s.cellType == PSGroupCell) continue;
+            if (s == smallMat) _smallRow = n;
+            if (s == expandMat) _expandRow = n;
+            n++;
         }
-        _matRow = nonGroupBefore;
 
         [specs addObject:[self groupSpec:@"工具" footer:@"素材目录: /var/mobile/灵动岛"]];
         [specs addObject:[self buttonSpec:@"跳转素材目录" action:@selector(openMaterialDir)]];
@@ -135,8 +163,10 @@ static void postReload(void) {
         ((void (*)(struct objc_super *, SEL, UITableView *, UITableViewCell *, NSIndexPath *))objc_msgSendSuper)(
             (struct objc_super *)&(struct objc_super){ .receiver = self, .super_class = class_getSuperclass(object_getClass(self)) },
             @selector(tableView:willDisplayCell:forRowAtIndexPath:), tableView, cell, indexPath);
-    if (indexPath.row == _matRow) {
-        NSString *name = [self readCurrentVideoName:nil];
+    NSString *name = nil;
+    if (indexPath.row == _smallRow) name = [self nameForMode:0];
+    if (indexPath.row == _expandRow) name = [self nameForMode:1];
+    if (name) {
         if ([cell respondsToSelector:@selector(setValue:)])
             ((void (*)(id, SEL, id))objc_msgSend)(cell, @selector(setValue:), name);
         if ([cell respondsToSelector:@selector(valueLabel)]) {
@@ -160,16 +190,29 @@ static void postReload(void) {
 @end
 
 @implementation DIMaterialsController
+- (NSInteger)matMode { return 0; }
+@end
+
+@implementation DIMaterialsSmall
+- (NSInteger)matMode { return 0; }
+@end
+
+@implementation DIMaterialsExpand
+- (NSInteger)matMode { return 1; }
+@end
+
+@implementation DIMaterialsController (Internal)
 
 - (NSArray *)specifiers {
     if (!_specifiers) {
         NSMutableArray *specs = [NSMutableArray array];
         NSInteger cnt = (NSInteger)videoFiles().count;
+        NSString *title = (self.matMode == 0) ? @"选择小岛素材" : @"选择展开素材";
         if (cnt == 0) {
             [specs addObject:[self groupSpec:@"素材目录为空" footer:@"请把视频 (mp4/mov/m4v) 放进 /var/mobile/灵动岛，然后重新进入本页。"]];
         } else {
-            [specs addObject:[self groupSpec:@"选择素材" footer:@"文件夹里有几个视频就显示几个（原文件名），点击哪个生效哪个。"]];
-            NSInteger cur = currentVideoIndex();
+            [specs addObject:[self groupSpec:title footer:@"文件夹里有几个视频就显示几个（原文件名），点击哪个生效哪个。"]];
+            NSInteger cur = indexForKey(self.matMode == 0 ? @"smallIndex" : @"expandIndex");
             for (NSInteger i = 0; i < cnt; i++) {
                 NSString *name = videoFiles()[i];
                 NSString *label = (i == cur) ? [NSString stringWithFormat:@"✓ %@", name] : name;
@@ -194,7 +237,8 @@ static void postReload(void) {
 
 - (void)selectVideo:(PSSpecifier *)spec {
     NSInteger idx = [[spec propertyForKey:@"idx"] integerValue];
-    CFPreferencesSetAppValue(CFSTR("videoIndex"), (__bridge CFPropertyListRef)@(idx), (__bridge CFStringRef)kDomain);
+    NSString *key = (self.matMode == 0) ? @"smallIndex" : @"expandIndex";
+    CFPreferencesSetAppValue((__bridge CFStringRef)key, (__bridge CFPropertyListRef)@(idx), (__bridge CFStringRef)kDomain);
     CFPreferencesAppSynchronize((__bridge CFStringRef)kDomain);
     postReload();
     NSArray *vcs = self.navigationController.viewControllers;
