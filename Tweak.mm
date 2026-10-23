@@ -416,6 +416,13 @@ static void updateSingleVideo(UIWindow *win) {
         wakeLayer(v, bestRoot);
         if (bestRoot.subviews.firstObject != v) [bestRoot sendSubviewToBack:v];
     }
+    // 投送图标若由岛附件(portal)承载: 展开态全部隐藏, 0.5s tick 重申防系统重置, 关开关恢复
+    static BOOL lastHide;
+    if (hideAirPlay != lastHide || hideAirPlay) {
+        lastHide = hideAirPlay;
+        BOOL expand2 = bestRoot.bounds.size.height > 100;
+        for (UIView *s in bestRoot.subviews) diHideAccessories(s, expand2);
+    }
     // 展开态: dump 跨进程 CALayer 层树(频谱动画在这里渲染), 2s 后再抓一次布局稳定版; 30s 窗口后重新计数
     static int dumpCount; static CFAbsoluteTime dumpStart;
     CFAbsoluteTime nowT = CFAbsoluteTimeGetCurrent();
@@ -454,11 +461,17 @@ static void updateHost(UIView *host) {
     attach(host);
     if (NSThread.isMainThread && host.window) {
         updateSingleVideo(host.window); // 每次布局跟随岛尺寸
-        // 投送/频谱真隐藏: 在 MediaRemoteUI 渲染进程中 hook(见 init 的 mruInit); 此处仅保留类名探测兜底
+        // 投送/频谱真隐藏: 在 MediaRemoteUI 渲染进程中 hook(见 init 的 mruInit); 类名探测兜底
         UIView *ap = findAirPlay(host);
         logOnce(@"投送", ap);
         if (ap && ap.hidden != hideAirPlay) ap.hidden = hideAirPlay;
     }
+}
+
+static void diHideAccessories(UIView *v, BOOL expand) {
+    if ([NSStringFromClass(v.class) containsString:@"ProvidedViewContainer"] && v.isHidden != !expand)
+        v.hidden = !expand; // 展开+开关开=隐藏; 其他情况恢复
+    for (UIView *s in v.subviews) diHideAccessories(s, expand);
 }
 
 #pragma mark - layoutSubviews hook（沿用已验证的防重复安装模式）
@@ -613,8 +626,11 @@ static void prefsChanged(CFNotificationCenterRef, void *, CFStringRef, const voi
 
 __attribute__((constructor)) static void init(void) {
     @autoreleasepool {
-        NSString *bid = NSBundle.mainBundle.bundleIdentifier;
-        if ([bid isEqual:@"com.apple.MediaRemoteUI"]) { mruInit(); return; }
+        NSString *bid = NSBundle.mainBundle.bundleIdentifier.lowercaseString;
+        NSString *pname = NSProcessInfo.processInfo.processName.lowercaseString;
+        BOOL isMRU = [bid containsString:@"mediaremote"] || [bid containsString:@"avconducted"] ||
+                     [pname containsString:@"mediaremote"] || [pname containsString:@"avconducted"];
+        if (isMRU && ![bid isEqual:@"com.apple.springboard"]) { mruInit(); return; }
         if (![bid isEqual:@"com.apple.springboard"]) return;
         logHandle = os_log_create("com.abgg332.driftisland", "runtime");
         DLog(@"===== 漂流岛 tweak 加载 (SpringBoard) =====");
