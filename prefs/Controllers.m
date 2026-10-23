@@ -9,8 +9,21 @@ static NSString *const kNotifyStr = @"com.abgg332.driftisland.reload";
 static NSString *const kMaterialDir = @"/var/mobile/灵动岛";
 static NSString *const kFrameDir = @"/var/mobile/灵动岛/帧率素材";
 
+static NSArray<NSString *> *videoFiles(void) {
+    NSArray *files = [[NSFileManager defaultManager] contentsOfDirectoryAtPath:kMaterialDir error:NULL] ?: @[];
+    NSMutableArray *out = [NSMutableArray array];
+    for (NSString *f in files) {
+        NSString *ext = f.pathExtension.lowercaseString;
+        if ([ext isEqualToString:@"mp4"] || [ext isEqualToString:@"mov"] || [ext isEqualToString:@"m4v"])
+            [out addObject:f];
+    }
+    [out sortUsingSelector:@selector(localizedCompare:)];
+    return out;
+}
+
 /* matMode: 0=小岛素材 1=展开素材 */
-static NSInteger indexForKey(NSString *key) {    CFPreferencesAppSynchronize((__bridge CFStringRef)kDomain);
+static NSInteger indexForKey(NSString *key) {
+    CFPreferencesAppSynchronize((__bridge CFStringRef)kDomain);
     id v = CFBridgingRelease(CFPreferencesCopyAppValue((__bridge CFStringRef)key, (__bridge CFStringRef)kDomain));
     if (v) return [v integerValue];
     if (![key isEqualToString:@"videoIndex"]) { /* 兼容旧版单素材键 */ }
