@@ -328,15 +328,31 @@ static void wakeLayer(DIVideoView *v, UIView *bestRoot) {
     }
 }
 
-// 递归找类名含 token 的子视图(投送按钮/频谱图标)
-static UIView *findSubview(UIView *root, NSString *token) {
+// 递归找类名含任一 token 的子视图(投送按钮/频谱图标, 多特征词兼容不同系统版本命名)
+static UIView *findSubviewTokens(UIView *root, NSArray<NSString *> *tokens) {
     if (!root) return nil;
     for (UIView *s in root.subviews) {
-        if ([NSStringFromClass(s.class) containsString:token]) return s;
-        UIView *r = findSubview(s, token);
+        NSString *cn = NSStringFromClass(s.class);
+        for (NSString *t in tokens) if ([cn containsString:t]) return s;
+        UIView *r = findSubviewTokens(s, tokens);
         if (r) return r;
     }
     return nil;
+}
+static UIView *findAirPlay(UIView *root) {
+    return findSubviewTokens(root, @[@"AirPlay", @"RoutePicker", @"AirDropUp", @"AirTraffic"]);
+}
+static UIView *findSpectrum(UIView *root) {
+    return findSubviewTokens(root, @[@"Spectrum", @"Waveform", @"Visualiz", @"AudioBars"]);
+}
+
+// 展开岛视图树 dump(一次): 记录全部类名+frame, 用于精确定位投送/频谱等系统视图
+static void dumpTree(UIView *v, int depth) {
+    if (!v || depth > 14) return;
+    NSMutableString *ind = [NSMutableString string];
+    for (int i = 0; i < depth; i++) [ind appendString:@"  "];
+    DLog(@"%@%@ %@", ind, NSStringFromClass(v.class), NSStringFromCGRect(v.frame));
+    for (UIView *s in v.subviews) dumpTree(s, depth + 1);
 }
 
 // 类名探测日志只记一次, 防刷屏
@@ -404,7 +420,7 @@ static void updateSingleVideo(UIWindow *win) {
     // 频谱素材层: 盖在系统频谱上
     DIVideoView *specV = objc_getAssociatedObject(win, &kWinVideoSpec);
     if (spectrumOn) {
-        UIView *sp = findSubview(bestRoot, @"Spectrum");
+        UIView *sp = findSpectrum(bestRoot);
         logOnce(@"频谱", sp);
         if (sp) {
             if (!specV) {
@@ -429,8 +445,14 @@ static void updateHost(UIView *host) {
     attach(host);
     if (NSThread.isMainThread && host.window) {
         updateSingleVideo(host.window); // 每次布局跟随岛尺寸
+        static BOOL dumpedOnce;
+        if (!dumpedOnce && host.bounds.size.height > 60) {
+            dumpedOnce = YES;
+            DLog(@"===== 展开岛视图树 dump =====");
+            dumpTree(host, 0);
+        }
         // 投送按钮: 隐藏/显示 AirPlay 图标(每次布局重申, 防系统重置)
-        UIView *ap = findSubview(host, @"AirPlay");
+        UIView *ap = findAirPlay(host);
         logOnce(@"投送", ap);
         if (ap && ap.hidden != hideAirPlay) ap.hidden = hideAirPlay;
     }
