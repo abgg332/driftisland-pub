@@ -242,13 +242,13 @@ static void postReload(void) {
 - (NSInteger)matMode { return 1; }
 @end
 
-#pragma mark - 频谱帧率动画设置页(手写UI: 文字左+滑杆中+数值右, 与素材图逐行一致)
+#pragma mark - 频谱帧率动画设置页(UITableView自绘cell: 文字左+滑杆中+数值右, 与素材图逐行一致)
 
 @implementation DIAnimSettings {
     NSMutableDictionary<NSString *, UILabel *> *_labels;
 }
 
-- (NSArray *)specifiers { return @[]; } /* 自绘UI, 不用 Preferences 表格 */
+- (NSArray *)specifiers { return @[]; } /* 全部自绘, 不用 specifier 表格 */
 
 - (double)numForKey:(NSString *)key def:(double)def {
     CFPreferencesAppSynchronize((__bridge CFStringRef)kDomain);
@@ -270,194 +270,154 @@ static void postReload(void) {
 }
 
 - (void)saveBool:(BOOL)v forKey:(NSString *)key {
-    CFPreferencesSetAppValue((__bridge CFStringRef)key, (__bridge CFPropertyListRef)@(v), (__bridge CFStringRef)kDomain);
+    CFPreferencesSetAppValue((__bridge CFStringRef)key, (__bridge CFPropertyListRef)@(v), (__bridge CFPropertyListRef)kDomain);
     CFPreferencesAppSynchronize((__bridge CFStringRef)kDomain);
     CFNotificationCenterPostNotification(CFNotificationCenterGetDarwinNotifyCenter(),
         (__bridge CFStringRef)kNotifyStr, NULL, NULL, YES);
 }
 
-- (void)loadView {
-    _labels = [NSMutableDictionary dictionary];
-    UIScrollView *scroll = [[UIScrollView alloc] initWithFrame:CGRectZero];
-    scroll.backgroundColor = UIColor.systemGroupedBackgroundColor;
-    scroll.alwaysBounceVertical = YES;
-    scroll.keyboardDismissMode = UIScrollViewKeyboardDismissModeOnDrag;
-    self.view = (UITableView *)scroll; /* 绕过 PSListController 的表格类型声明, 我们自绘 */
-    self.navigationItem.title = @"动画设置";
-
-    UIStackView *stack = [[UIStackView alloc] init];
-    stack.axis = UILayoutConstraintAxisVertical;
-    stack.spacing = 10;
-    stack.translatesAutoresizingMaskIntoConstraints = NO;
-    [scroll addSubview:stack];
-
-    UIView *content = stack;
-    [NSLayoutConstraint activateConstraints:@[
-        [content.leadingAnchor constraintEqualToAnchor:scroll.contentLayoutGuide.leadingAnchor constant:16],
-        [content.trailingAnchor constraintEqualToAnchor:scroll.contentLayoutGuide.trailingAnchor constant:-16],
-        [content.topAnchor constraintEqualToAnchor:scroll.contentLayoutGuide.topAnchor constant:12],
-        [content.bottomAnchor constraintEqualToAnchor:scroll.contentLayoutGuide.bottomAnchor constant:-24],
-        [content.widthAnchor constraintEqualToAnchor:scroll.frameLayoutGuide.widthAnchor constant:-32],
-    ]];
-
-    /* —— 与素材图逐行一致 —— */
-    [stack addArrangedSubview:[self headerLabel:@"灵动岛动画"]];
-    [stack addArrangedSubview:[self cardWithRows:@[
-        [self switchRow:@"启用动画" key:@"spectrumOn" def:NO],
-    ]]];
-
-    [stack addArrangedSubview:[self headerLabel:@"动画设置"]];
-    [stack addArrangedSubview:[self cardWithRows:@[
-        [self sliderRow:@"动画帧率" key:@"animFPS" def:50 min:1 max:60],
-        [self switchRow:@"启用素材旋转" key:@"animRotate" def:NO],
-        [self switchRow:@"素材旋转反转" key:@"animRotateReverse" def:NO],
-        [self sliderRow:@"旋转速度" key:@"animRotateSpeed" def:5 min:1 max:30],
-    ]]];
-
-    [stack addArrangedSubview:[self headerLabel:@"位置缩放设置"]];
-    [stack addArrangedSubview:[self cardWithRows:@[
-        [self sliderRow:@"缩放倍数" key:@"animScale" def:1 min:0.2 max:3],
-        [self sliderRow:@"X偏移" key:@"animOffsetX" def:0 min:-150 max:150],
-        [self sliderRow:@"Y偏移" key:@"animOffsetY" def:0 min:-150 max:150],
-    ]]];
-
-    [stack addArrangedSubview:[self headerLabel:@"素材设置"]];
-    [stack addArrangedSubview:[self cardWithRows:@[
-        [self folderRow],
-    ]]];
+- (void)viewDidLoad {
+    [super viewDidLoad];
+    self.title = @"动画设置";
+    self.tableView.backgroundColor = UIColor.systemGroupedBackgroundColor;
+    [self.tableView reloadData];
 }
 
-- (UILabel *)headerLabel:(NSString *)text {
-    UILabel *l = [UILabel new];
-    l.text = text;
-    l.font = [UIFont systemFontOfSize:13 weight:UIFontWeightSemibold];
-    l.textColor = UIColor.secondaryLabelColor;
-    return l;
+/* 布局: section0=灵动岛动画(1行) section1=动画设置(4行) section2=位置缩放(3行) section3=素材设置(1行) */
+- (NSInteger)numberOfSectionsInTableView:(UITableView *)tv { return 4; }
+
+- (NSInteger)tableView:(UITableView *)tv numberOfRowsInSection:(NSInteger)section {
+    if (section == 0) return 1;
+    if (section == 1) return 4;
+    if (section == 2) return 3;
+    return 1;
 }
 
-/* 白色圆角卡片包住若干行 */
-- (UIView *)cardWithRows:(NSArray *)rows {
-    UIStackView *v = [[UIStackView alloc] init];
-    v.axis = UILayoutConstraintAxisVertical;
-    v.spacing = 14;
-    v.layoutMargins = UIEdgeInsetsMake(14, 16, 14, 16);
-    v.layoutMarginsRelativeArrangement = YES;
-    for (UIView *r in rows) [v addArrangedSubview:r];
-    UIView *card = [[UIView alloc] init];
-    card.backgroundColor = UIColor.secondarySystemGroupedBackgroundColor;
-    card.layer.cornerRadius = 12;
-    [card addSubview:v];
-    v.translatesAutoresizingMaskIntoConstraints = NO;
-    [NSLayoutConstraint activateConstraints:@[
-        [v.topAnchor constraintEqualToAnchor:card.topAnchor],
-        [v.bottomAnchor constraintEqualToAnchor:card.bottomAnchor],
-        [v.leadingAnchor constraintEqualToAnchor:card.leadingAnchor],
-        [v.trailingAnchor constraintEqualToAnchor:card.trailingAnchor],
-    ]];
-    return card;
+- (NSString *)tableView:(UITableView *)tv titleForHeaderInSection:(NSInteger)section {
+    if (section == 0) return @"灵动岛动画";
+    if (section == 1) return @"动画设置";
+    if (section == 2) return @"位置缩放设置";
+    return @"素材设置";
 }
 
-/* 行: 文字(左) + 滑杆(中) + 数值(右, 实时刷新) */
-- (UIView *)sliderRow:(NSString *)title key:(NSString *)key def:(double)def min:(double)mn max:(double)mx {
+- (void)tableView:(UITableView *)tv willDisplayHeaderView:(UIView *)v forSection:(NSInteger)s {
+    if ([v isKindOfClass:UITableViewHeaderFooterView.class]) {
+        UITableViewHeaderFooterView *h = (UITableViewHeaderFooterView *)v;
+        h.textLabel.textColor = UIColor.secondaryLabelColor;
+        h.textLabel.font = [UIFont systemFontOfSize:13 weight:UIFontWeightSemibold];
+    }
+}
+
+- (NSString *)tableView:(UITableView *)tv titleForFooterInSection:(NSInteger)section {
+    if (section == 1) return @"动画帧率 = 每秒播放的序列帧张数; 旋转速度 = 每秒旋转的度数。";
+    if (section == 2) return @"缩放倍数相对频谱区域大小; X/Y偏移单位为点。";
+    if (section == 3) return @"素材目录: /var/mobile/灵动岛/帧率素材 (每个子文件夹=一套素材, png/jpg 按文件名数字顺序播放)。";
+    return nil;
+}
+
+- (CGFloat)tableView:(UITableView *)tv heightForRowAtIndexPath:(NSIndexPath *)ip { return 52; }
+
+- (UITableViewCell *)tableView:(UITableView *)tv cellForRowAtIndexPath:(NSIndexPath *)ip {
+    NSString *cellId = [NSString stringWithFormat:@"c-%ld-%ld", (long)ip.section, (long)ip.row];
+    UITableViewCell *cell = [tv dequeueReusableCellWithIdentifier:cellId];
+    if (!cell) cell = [[UITableViewCell alloc] initWithStyle:UITableViewCellStyleDefault reuseIdentifier:cellId];
+    cell.textLabel.text = nil;
+    cell.selectionStyle = UITableViewCellSelectionStyleNone;
+    cell.accessoryView = nil;
+    cell.accessoryType = UITableViewCellAccessoryNone;
+    if (ip.section == 0 && ip.row == 0) [self decorateSwitch:cell title:@"启用动画" key:@"spectrumOn" def:NO];
+    else if (ip.section == 1 && (ip.row == 1 || ip.row == 2)) [self decorateSwitch:cell title:(ip.row == 1 ? @"启用素材旋转" : @"素材旋转反转") key:(ip.row == 1 ? @"animRotate" : @"animRotateReverse") def:NO];
+    else if (ip.section == 3 && ip.row == 0) {
+        if (![cell.reuseIdentifier isEqualToString:cellId]) cell = [[UITableViewCell alloc] initWithStyle:UITableViewCellStyleValue1 reuseIdentifier:cellId];
+        [self decorateFolder:cell];
+    }
+    else {
+        /* 滑杆行 */
+        NSString *key, *title; double def = 0, mn = 0, mx = 1;
+        if (ip.section == 1 && ip.row == 0) { key = @"animFPS"; title = @"动画帧率"; def = 50; mn = 1; mx = 60; }
+        else if (ip.section == 1 && ip.row == 3) { key = @"animRotateSpeed"; title = @"旋转速度"; def = 5; mn = 1; mx = 30; }
+        else if (ip.section == 2 && ip.row == 0) { key = @"animScale"; title = @"缩放倍数"; def = 1; mn = 0.2; mx = 3; }
+        else if (ip.section == 2 && ip.row == 1) { key = @"animOffsetX"; title = @"X偏移"; def = 0; mn = -150; mx = 150; }
+        else { key = @"animOffsetY"; title = @"Y偏移"; def = 0; mn = -150; mx = 150; }
+        [self decorateSlider:cell title:title key:key def:def min:mn max:mx];
+    }
+    return cell;
+}
+
+- (void)decorateSwitch:(UITableViewCell *)cell title:(NSString *)title key:(NSString *)key def:(BOOL)def {
+    cell.textLabel.text = title;
+    cell.textLabel.font = [UIFont systemFontOfSize:16 weight:UIFontWeightSemibold];
+    UISwitch *sw = [UISwitch new];
+    sw.on = [self boolForKey:key def:def];
+    [sw addTarget:self action:@selector(switchChanged:) forControlEvents:UIControlEventValueChanged];
+    objc_setAssociatedObject(sw, "key", key, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    cell.accessoryView = sw;
+}
+
+- (void)switchChanged:(UISwitch *)sw {
+    [self saveBool:sw.on forKey:objc_getAssociatedObject(sw, "key")];
+}
+
+- (void)decorateSlider:(UITableViewCell *)cell title:(NSString *)title key:(NSString *)key def:(double)def min:(double)mn max:(double)mx {
     UILabel *name = [UILabel new];
     name.text = title;
     name.font = [UIFont systemFontOfSize:16 weight:UIFontWeightSemibold];
     [name setContentCompressionResistancePriority:UILayoutPriorityRequired forAxis:UILayoutConstraintAxisHorizontal];
+    name.translatesAutoresizingMaskIntoConstraints = NO;
 
     UISlider *slider = [UISlider new];
-    slider.minimumValue = mn;
-    slider.maximumValue = mx;
+    slider.minimumValue = mn; slider.maximumValue = mx;
     slider.value = [self numForKey:key def:def];
+    slider.translatesAutoresizingMaskIntoConstraints = NO;
+    objc_setAssociatedObject(slider, "key", key, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    [slider addTarget:self action:@selector(sliderChanged:) forControlEvents:UIControlEventValueChanged];
 
     UILabel *val = [UILabel new];
     val.text = [NSString stringWithFormat:@"%.2f", slider.value];
     val.font = [UIFont monospacedDigitSystemFontOfSize:16 weight:UIFontWeightRegular];
     val.textAlignment = NSTextAlignmentRight;
     [val setContentCompressionResistancePriority:UILayoutPriorityRequired forAxis:UILayoutConstraintAxisHorizontal];
+    val.translatesAutoresizingMaskIntoConstraints = NO;
     _labels[key] = val;
 
-    [slider addTarget:self action:@selector(sliderChanged:) forControlEvents:UIControlEventValueChanged];
-    objc_setAssociatedObject(slider, "key", key, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-
-    UIStackView *row = [[UIStackView alloc] initWithArrangedSubviews:@[name, slider, val]];
-    row.axis = UILayoutConstraintAxisHorizontal;
-    row.spacing = 10;
-    row.alignment = UIStackViewAlignmentCenter;
-    [slider.widthAnchor constraintGreaterThanOrEqualToConstant:110].active = YES;
-    return row;
+    for (UIView *sub in cell.contentView.subviews) [sub removeFromSuperview];
+    [cell.contentView addSubview:name];
+    [cell.contentView addSubview:slider];
+    [cell.contentView addSubview:val];
+    [NSLayoutConstraint activateConstraints:@[
+        [name.leadingAnchor constraintEqualToAnchor:cell.contentView.leadingAnchor constant:16],
+        [name.centerYAnchor constraintEqualToAnchor:cell.contentView.centerYAnchor],
+        [name.trailingAnchor constraintLessThanOrEqualToAnchor:slider.leadingAnchor constant:-8],
+        [slider.centerYAnchor constraintEqualToAnchor:cell.contentView.centerYAnchor],
+        [slider.leadingAnchor constraintGreaterThanOrEqualToAnchor:name.trailingAnchor constant:8],
+        [val.leadingAnchor constraintEqualToAnchor:slider.trailingAnchor constant:8],
+        [val.trailingAnchor constraintEqualToAnchor:cell.contentView.trailingAnchor constant:-16],
+        [val.centerYAnchor constraintEqualToAnchor:cell.contentView.centerYAnchor],
+        [val.widthAnchor constraintGreaterThanOrEqualToConstant:58],
+    ]];
 }
 
 - (void)sliderChanged:(UISlider *)slider {
     NSString *key = objc_getAssociatedObject(slider, "key");
     [self saveNum:slider.value forKey:key];
-    UILabel *val = _labels[key];
-    val.text = [NSString stringWithFormat:@"%.2f", slider.value];
+    _labels[key].text = [NSString stringWithFormat:@"%.2f", slider.value];
 }
 
-/* 行: 文字(左) + 开关(右) */
-- (UIView *)switchRow:(NSString *)title key:(NSString *)key def:(BOOL)def {
-    UILabel *name = [UILabel new];
-    name.text = title;
-    name.font = [UIFont systemFontOfSize:16 weight:UIFontWeightSemibold];
-
-    UISwitch *sw = [UISwitch new];
-    sw.on = [self boolForKey:key def:def];
-    [sw addTarget:self action:@selector(switchChanged:) forControlEvents:UIControlEventValueChanged];
-    objc_setAssociatedObject(sw, "key", key, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-
-    UIStackView *row = [[UIStackView alloc] initWithArrangedSubviews:@[name, [[UIView alloc] init], sw]];
-    row.axis = UILayoutConstraintAxisHorizontal;
-    row.spacing = 10;
-    return row;
-}
-
-- (void)switchChanged:(UISwitch *)sw {
-    NSString *key = objc_getAssociatedObject(sw, "key");
-    [self saveBool:sw.on forKey:key];
-}
-
-/* 行: 素材名(左) + 当前文件夹(右) + 箭头, 点击进入文件夹选择 */
-- (UIView *)folderRow {
-    UILabel *name = [UILabel new];
-    name.text = @"素材名";
-    name.font = [UIFont systemFontOfSize:16 weight:UIFontWeightSemibold];
-
+- (void)decorateFolder:(UITableViewCell *)cell {
+    cell.textLabel.text = @"素材名";
+    cell.textLabel.font = [UIFont systemFontOfSize:16 weight:UIFontWeightSemibold];
     CFPreferencesAppSynchronize((__bridge CFStringRef)kDomain);
     id v = CFBridgingRelease(CFPreferencesCopyAppValue(CFSTR("animFolder"), (__bridge CFStringRef)kDomain));
-    NSString *cur = ([v isKindOfClass:NSString.class] && [(NSString *)v length]) ? v : @"默认(第一个文件夹)";
-    UILabel *val = [UILabel new];
-    val.text = cur;
-    val.font = [UIFont systemFontOfSize:16];
-    val.textColor = UIColor.secondaryLabelColor;
-
-    UILabel *chevron = [UILabel new];
-    chevron.text = @"›";
-    chevron.font = [UIFont systemFontOfSize:20];
-    chevron.textColor = UIColor.tertiaryLabelColor;
-
-    UIButton *btn = [UIButton buttonWithType:UIButtonTypeSystem];
-    btn.backgroundColor = [UIColor clearColor];
-    [btn addTarget:self action:@selector(pushFolders) forControlEvents:UIControlEventTouchUpInside];
-
-    UIStackView *row = [[UIStackView alloc] initWithArrangedSubviews:@[name, [[UIView alloc] init], val, chevron]];
-    row.axis = UILayoutConstraintAxisHorizontal;
-    row.spacing = 8;
-    row.alignment = UIStackViewAlignmentCenter;
-
-    // 全行可点: 透明按钮盖在整行上
-    btn.translatesAutoresizingMaskIntoConstraints = NO;
-    [row addSubview:btn];
-    [NSLayoutConstraint activateConstraints:@[
-        [btn.topAnchor constraintEqualToAnchor:row.topAnchor],
-        [btn.bottomAnchor constraintEqualToAnchor:row.bottomAnchor],
-        [btn.leadingAnchor constraintEqualToAnchor:row.leadingAnchor],
-        [btn.trailingAnchor constraintEqualToAnchor:row.trailingAnchor],
-    ]];
-    return row;
+    cell.detailTextLabel.text = ([v isKindOfClass:NSString.class] && [(NSString *)v length]) ? v : @"默认(第一个文件夹)";
+    cell.detailTextLabel.textColor = UIColor.secondaryLabelColor;
+    cell.accessoryType = UITableViewCellAccessoryDisclosureIndicator;
+    cell.selectionStyle = UITableViewCellSelectionStyleDefault;
 }
 
-- (void)pushFolders {
-    [self.navigationController pushViewController:[[DIFrameFolders alloc] init] animated:YES];
+- (void)tableView:(UITableView *)tv didSelectRowAtIndexPath:(NSIndexPath *)ip {
+    [tv deselectRowAtIndexPath:ip animated:YES];
+    if (ip.section == 3 && ip.row == 0)
+        [self.navigationController pushViewController:[[DIFrameFolders alloc] init] animated:YES];
 }
 
 @end

@@ -380,6 +380,10 @@ static void updateSingleVideo(UIWindow *win); // 前置声明
     if (img && _iv.image != img) _iv.image = img;
     static BOOL loggedFirst;
     if (!loggedFirst) { loggedFirst = YES; DLog(@"帧率动画首帧显示: 共 %lu 帧 (目录 %@)", (unsigned long)frames.count, animFolder ?: @"默认第一个文件夹"); }
+    // 每600帧(约12s@50fps)输出一次状态: 排查"渲染了但看不见"
+    static NSInteger diagCount;
+    if (++diagCount % 600 == 1)
+        DLog(@"帧率动画状态: idx=%ld hidden=%d frame=%@ 父视图=%@ 透明度=%.1f", (long)_idx, self.isHidden, NSStringFromCGRect(self.frame), NSStringFromClass(self.superview.class), self.layer.opacity);
     // 旋转(度/秒=旋转速度) + 缩放 + 偏移: 每帧刷新, 偏好即时生效
     if (animRotate) _angle += (animRotateReverse ? -1 : 1) * animRotateSpeed * dt;
     _iv.transform = CGAffineTransformRotate(CGAffineTransformMakeScale(animScale, animScale), _angle * M_PI / 180.0);
