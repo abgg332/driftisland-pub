@@ -111,23 +111,22 @@ static void postReload(void) {
         [specs addObject:[self groupSpec:@"漂流岛 · 灵动岛视频背景" footer:nil]];
         [specs addObject:[self switchSpec:@"总开关" key:@"enabled" def:@NO]];
 
-        /* 小岛素材: 开关 + 素材选择行 */
+        /* 小岛素材: 开关 + 素材选择行(同组相邻) */
         [specs addObject:[self groupSpec:@"小岛素材" footer:nil]];
-        [specs addObject:[self switchSpec:@"小岛显示素材" key:@"smallOn" def:@YES]];
         PSSpecifier *smallMat = [PSSpecifier preferenceSpecifierNamed:@"素材选择" target:self
             set:NULL get:@selector(readSmallVideoName:)
             detail:[DIMaterialsSmall class] cell:PSLinkCell edit:nil];
         [smallMat setProperty:[self nameForMode:0] forKey:@"value"];
+        [specs addObject:[self switchSpec:@"小岛显示素材" key:@"smallOn" def:@YES]];
+        [specs addObject:smallMat];
 
-        /* 展开素材: 开关 + 素材选择行 */
+        /* 展开素材: 开关 + 素材选择行(同组相邻) */
         [specs addObject:[self groupSpec:@"展开素材" footer:nil]];
-        [specs addObject:[self switchSpec:@"展开显示素材" key:@"expandOn" def:@YES]];
         PSSpecifier *expandMat = [PSSpecifier preferenceSpecifierNamed:@"素材选择" target:self
             set:NULL get:@selector(readExpandVideoName:)
             detail:[DIMaterialsExpand class] cell:PSLinkCell edit:nil];
         [expandMat setProperty:[self nameForMode:1] forKey:@"value"];
-
-        [specs addObject:smallMat];
+        [specs addObject:[self switchSpec:@"展开显示素材" key:@"expandOn" def:@YES]];
         [specs addObject:expandMat];
         _smallRow = _expandRow = -1;
         NSInteger n = 0;
