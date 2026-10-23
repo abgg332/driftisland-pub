@@ -373,26 +373,6 @@ static void dumpLayers(CALayer *l, int depth) {
     for (CALayer *s in l.sublayers) dumpLayers(s, depth + 1);
 }
 
-// 展开岛视图树 dump: 记录全部类名+frame; 附件容器额外读 identifier(区分频谱/投送)
-static void dumpTree(UIView *v, int depth) {
-    if (!v || depth > 16) return;
-    NSMutableString *ind = [NSMutableString string];
-    for (int i = 0; i < depth; i++) [ind appendString:@"  "];
-    NSString *cn = NSStringFromClass(v.class);
-    NSString *extra = @"";
-    if ([cn containsString:@"Accessory"] || [cn containsString:@"ProvidedView"] || [cn containsString:@"SceneElement"]) {
-        for (NSString *kp in @[@"identifier", @"elementIdentifier", @"sceneIdentifier", @"accessoryIdentifier", @"element"]) {
-            id val = nil;
-            @try { val = [v valueForKey:kp]; } @catch (id e) { val = nil; }
-            if (val && ![val isKindOfClass:[UIView class]]) {
-                extra = [extra stringByAppendingFormat:@" %@=%@", kp, val];
-            }
-        }
-    }
-    DLog(@"%@%@ %@%@", ind, cn, NSStringFromCGRect(v.frame), extra);
-    for (UIView *s in v.subviews) dumpTree(s, depth + 1);
-}
-
 // 类名探测日志只记一次, 防刷屏
 static void logOnce(NSString *tag, UIView *v) {
     if (!v) return;
