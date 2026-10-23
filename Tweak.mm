@@ -133,7 +133,6 @@ static void refreshPrefs(void) {
 static char kWinVideoSmall, kWinVideoExpand, kWinVideoSpec; // 每窗口视频层(小岛/展开/频谱)
 static BOOL gIsMRU = NO; // 是否运行在 MediaRemoteUI(灵动岛播放器渲染进程)
 
-static void diHideAccessories(UIView *v, BOOL hide); // 前置声明
 static void airPortalUpdate(UIView *bestRoot, BOOL hide); // 前置声明(投送 portal 根本隐藏)
 static void installImageNamedHook(void); // 前置声明(投送图标取图 hook, 定义在文件尾部)
 // 区域标定(相对展开岛比例, 用户截图圈定); 素材层外扩2pt保证完全盖住
@@ -482,13 +481,6 @@ static void layoutHook(UIView *self, SEL selector) {
         if (found) break;
     }
     if (NSThread.isMainThread) { if (gIsMRU) mruUpdate(self); else updateHost(self); }
-}
-
-static void diHideAccessories(UIView *v, BOOL hide) {
-    if ([NSStringFromClass(v.class) containsString:@"ProvidedViewContainer"]) {
-        if (v.isHidden != !hide) v.hidden = !hide; // 开关开=隐藏; 关=恢复
-    }
-    for (UIView *s in v.subviews) diHideAccessories(s, hide);
 }
 
 // ===== 投送图标根本隐藏: 直接在 SpringBoard 层树里 hidden 掉它的 CAPortalLayer =====
