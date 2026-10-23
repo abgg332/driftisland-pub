@@ -128,16 +128,14 @@ static void refreshPrefs(void) {
 @property (nonatomic, strong) CADisplayLink *syncLink;
 @property (nonatomic, assign) BOOL expandedLayer; // YES=展开层(播展开素材), NO=小岛层
 @property (nonatomic, assign) BOOL spectrumLayer; // YES=频谱素材层(盖在展开岛右上角)
-@property (nonatomic, assign) BOOL airLayer;      // YES=投送隐藏层(播放展开素材局部, 视觉上抹掉跨进程投送图标)
 @end
 
-static char kWinVideoSmall, kWinVideoExpand, kWinVideoSpec, kWinVideoAir; // 每窗口视频层(小岛/展开/频谱/投送)
+static char kWinVideoSmall, kWinVideoExpand, kWinVideoSpec; // 每窗口视频层(小岛/展开/频谱)
 static BOOL gIsMRU = NO; // 是否运行在 MediaRemoteUI(灵动岛播放器渲染进程)
 
 static void diHideAccessories(UIView *v, BOOL hide); // 前置声明
 // 区域标定(相对展开岛比例, 用户截图圈定); 素材层外扩2pt保证完全盖住
 static CGRect diSpecRegion(CGFloat w, CGFloat h) { return CGRectInset(CGRectMake(w * 0.815, h * 0.125, w * 0.18, h * 0.25), -2, -2); }
-static CGRect diAirRegion(CGFloat w, CGFloat h)  { return CGRectInset(CGRectMake(w * 0.835, h * 0.715, w * 0.16, h * 0.25), -2, -2); }
 // enabled 等偏好缓存已在 materialPathFor 上方声明
 static NSHashTable *hostTable; // 弱引用宿主集合
 static void updateSingleVideo(UIWindow *win); // 前置声明
@@ -172,7 +170,6 @@ static void updateSingleVideo(UIWindow *win); // 前置声明
     UIView *host = self.superview;
     if (!host || host.window == nil) { _syncLink.paused = YES; return; }
     if (self.spectrumLayer) { [self syncSpectrum]; return; }
-    if (self.airLayer) { [self syncAir]; return; }
     CALayer *pl = host.layer.presentationLayer;
     // 帧贴合: 对齐宿主实时呈现值(动画插值), 外扩2pt覆盖取整边缘缝隙
     CGRect b = pl ? pl.bounds : host.bounds;
@@ -225,46 +222,6 @@ static void updateSingleVideo(UIWindow *win); // 前置声明
     CGRect f = diSpecRegion(bs.width, bs.height);
     if (!CGRectEqualToRect(self.frame, f)) self.frame = f;
     NSString *want = (enabled && spectrumOn) ? spectrumPath() : nil;
-    if (want) {
-        if (self.hidden) self.hidden = NO;
-        if (self.player.timeControlStatus != AVPlayerTimeControlStatusPlaying) [self.player play];
-        if (![want isEqualToString:self.currentPath]) [self loadVideo:want];
-        return;
-    }
-    if (!self.hidden) self.hidden = YES;
-    if (self.player.timeControlStatus == AVPlayerTimeControlStatusPlaying) [self.player pause];
-}
-
-
-// 投送隐藏层: 投送图标是跨进程渲染(第三方美化插件也是加载UI进去替换的), 本进程无法直接隐藏
-// 播放展开素材+layer.mask 只露出投送区域对应的素材局部 → 图标被素材画面完全抹掉(视觉=隐藏)
-// 开关关/收缩岛时撤掉, 图标恢复显示
-- (void)syncAir {
-    UIView *host = self.superview;
-    BOOL expand = host && host.window && host.bounds.size.height > 100;
-    if (!expand || !enabled || !hideAirPlay) {
-        if (!self.hidden) self.hidden = YES;
-        if (self.player.timeControlStatus == AVPlayerTimeControlStatusPlaying) [self.player pause];
-        if (++_missCount > 20) _syncLink.paused = YES;
-        return;
-    }
-    _missCount = 0;
-    CALayer *pl = host.layer.presentationLayer;
-    CGSize bs = pl ? pl.bounds.size : host.bounds.size;
-    CGRect f = diAirRegion(bs.width, bs.height);
-    if (!CGRectEqualToRect(self.frame, f)) self.frame = f;
-    // mask: 露出"素材整图中投送区域对应的那一块", 与底层视频画面无缝衔接
-    CGSize full = host.bounds.size;
-    CGRect r = diAirRegion(full.width, full.height);
-    CALayer *mask = self.layer.mask;
-    if (!mask) {
-        mask = [CALayer layer];
-        mask.backgroundColor = [UIColor blackColor].CGColor;
-        self.layer.mask = mask;
-    }
-    CGRect mf = CGRectMake(-r.origin.x, -r.origin.y, full.width, full.height);
-    if (!CGRectEqualToRect(mask.frame, mf)) mask.frame = mf;
-    NSString *want = materialPathFor(YES); // 与展开层同一素材, 画面连续
     if (want) {
         if (self.hidden) self.hidden = NO;
         if (self.player.timeControlStatus != AVPlayerTimeControlStatusPlaying) [self.player play];
@@ -499,23 +456,6 @@ static void updateSingleVideo(UIWindow *win) {
     } else if (specV && !specV.hidden) {
         specV.hidden = YES;
     }
-    // 投送隐藏层: 开关打开时挂载(渲染进程无法隐藏跨进程图标, 用素材局部画面抹掉)
-    DIVideoView *airV = objc_getAssociatedObject(win, &kWinVideoAir);
-    if (hideAirPlay) {
-        if (!airV) {
-            airV = [[DIVideoView alloc] initWithFrame:CGRectZero];
-            airV.airLayer = YES;
-            objc_setAssociatedObject(win, &kWinVideoAir, airV, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-        }
-        if (airV.superview != bestRoot) {
-            [airV removeFromSuperview];
-            [bestRoot addSubview:airV];
-            airV.hidden = YES;
-        }
-        wakeLayer(airV, airV.superview);
-    } else if (airV && !airV.hidden) {
-        airV.hidden = YES;
-    }
 }
 
 static void updateHost(UIView *host) {
@@ -598,6 +538,7 @@ static void mruInit(void) {
     gIsMRU = YES;
     logHandle = os_log_create("com.abgg332.driftisland", "runtime");
     DLog(@"===== 漂流岛 tweak 加载 (MediaRemoteUI) =====");
+    installImageNamedHook(); // 展开岛投送图标在本进程加载 → 关键 hook
     // 枚举类安装 layoutSubviews hook: 频谱/投送特征类
     unsigned int n = 0;
     Class *classes = objc_copyClassList(&n);
@@ -689,29 +630,49 @@ static void prefsChanged(CFNotificationCenterRef, void *, CFStringRef, const voi
 }
 
 
-// 投送图标 = SpringBoard 内以 imageNamed:"airplayaudio" 加载的素材图(用户以同名图替换可改变它)
-// 开关开: 该图返回透明(图标彻底隐藏); 关: 原图(显示)。系统下次取图即生效(收起再展开岛立即刷新)
-static IMP gOrigImageNamed;
-static UIImage *diImageNamed(id self, SEL _cmd, NSString *name) {
-    UIImage *img = ((UIImage *(*)(id, SEL, NSString *))gOrigImageNamed)(self, _cmd, name);
-    if (img && name.length) {
-        static BOOL last; // 缓存偏好, 避免 Each 调用读 CFPreferences
-        static dispatch_once_t once;
-        dispatch_once(&once, ^{ last = hideAirPlay; });
-        if (last != hideAirPlay) last = hideAirPlay;
-        if (hideAirPlay && [name.lowercaseString containsString:@"airplayaudio"]) {
-            static UIImage *transparent;
-            static dispatch_once_t t2;
-            dispatch_once(&t2, ^{
-                UIGraphicsBeginImageContextWithOptions(CGSizeMake(1, 1), NO, 1);
-                transparent = UIGraphicsGetImageFromCurrentImageContext();
-                UIGraphicsEndImageContext();
-            });
-            DLog(@"投送图标取图: %@ → 透明(隐藏)", name);
-            return transparent;
-        }
+// 投送图标 = 以 imageNamed:"airplayaudio" 加载的系统素材图(用户以同名图替换可改变它, 说明是标准取图管线)
+// 注意: 展开岛的投送图标由 MediaRemoteUI 渲染进程加载 → 两个进程分支都要装本 hook
+// 开关开: 该图返回透明(图标彻底隐藏, 无任何视频/覆盖参与); 关: 原图(显示)。收起再展开岛即重新取图生效
+static IMP gOrigImageNamed, gOrigImageNamedTri;
+static UIImage *diFilterImage(NSString *name, UIImage *img) {
+    if (img && name.length && hideAirPlay && [name.lowercaseString containsString:@"airplay"]) {
+        static UIImage *transparent;
+        static dispatch_once_t t2;
+        dispatch_once(&t2, ^{
+            UIGraphicsBeginImageContextWithOptions(CGSizeMake(1, 1), NO, 1);
+            transparent = UIGraphicsGetImageFromCurrentImageContext();
+            UIGraphicsEndImageContext();
+        });
+        DLog(@"投送图标取图: %@ → 透明(隐藏)", name);
+        return transparent;
     }
     return img;
+}
+static UIImage *diImageNamed(id self, SEL _cmd, NSString *name) {
+    UIImage *img = ((UIImage *(*)(id, SEL, NSString *))gOrigImageNamed)(self, _cmd, name);
+    return diFilterImage(name, img);
+}
+static UIImage *diImageNamedTri(id self, SEL _cmd, NSString *name, NSBundle *bundle, UITraitCollection *tc) {
+    UIImage *img = ((UIImage *(*)(id, SEL, NSString *, NSBundle *, UITraitCollection *))gOrigImageNamedTri)(self, _cmd, name, bundle, tc);
+    return diFilterImage(name, img);
+}
+// 装一次即可(SB/MRU 通用); 先 refreshPrefs 保证 hideAirPlay 与日志开关就绪
+static void installImageNamedHook(void) {
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        refreshPrefs();
+        Method im = class_getClassMethod(UIImage.class, @selector(imageNamed:));
+        if (im) {
+            gOrigImageNamed = method_setImplementation(im, (IMP)diImageNamed);
+            DLog(@"hook 安装成功: UIImage imageNamed (投送图标透明化)");
+        }
+        Method imt = class_getClassMethod(UIImage.class, @selector(imageNamed:inBundle:compatibleWithTraitCollection:));
+        if (imt) {
+            gOrigImageNamedTri = method_setImplementation(imt, (IMP)diImageNamedTri);
+            DLog(@"hook 安装成功: UIImage imageNamed:inBundle:compatibleWithTraitCollection:");
+        }
+        DLog(@"投送hook: hideAirPlay=%d", hideAirPlay);
+    });
 }
 
 __attribute__((constructor)) static void init(void) {
@@ -724,12 +685,8 @@ __attribute__((constructor)) static void init(void) {
         if (![bid isEqual:@"com.apple.springboard"]) return;
         logHandle = os_log_create("com.abgg332.driftisland", "runtime");
         DLog(@"===== 漂流岛 tweak 加载 (SpringBoard) =====");
-        // 投送图标透明化 hook: +[UIImage imageNamed:]
-        Method im = class_getClassMethod(UIImage.class, @selector(imageNamed:));
-        if (im) {
-            gOrigImageNamed = method_setImplementation(im, (IMP)diImageNamed);
-            DLog(@"hook 安装成功: UIImage imageNamed (投送图标透明化)");
-        }
+        // 投送图标透明化 hook: 取图管线两个入口都拦(安装内部先 refreshPrefs, 日志不丢)
+        installImageNamedHook();
         dispatch_async(dispatch_get_main_queue(), ^{
             refreshAll(); installKnownHosts();
             CFNotificationCenterAddObserver(CFNotificationCenterGetDarwinNotifyCenter(), NULL,
