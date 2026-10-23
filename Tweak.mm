@@ -565,7 +565,7 @@ static void mruTick(void) {
 static void mruInit(void) {
     gIsMRU = YES;
     logHandle = os_log_create("com.abgg332.driftisland", "runtime");
-    DLog(@"===== 漂流岛 tweak 加载 (MediaRemoteUI 分支) bid=%@ proc=%@ =====", bid, NSProcessInfo.processInfo.processName);
+    DLog(@"===== 漂流岛 tweak 加载 (MediaRemoteUI 分支) bid=%@ proc=%@ =====", NSBundle.mainBundle.bundleIdentifier, NSProcessInfo.processInfo.processName);
     installImageNamedHook(); // 展开岛投送图标在本进程加载 → 关键 hook
     // 枚举类安装 layoutSubviews hook: 频谱/投送特征类
     unsigned int n = 0;
