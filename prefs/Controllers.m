@@ -161,9 +161,11 @@ static void postReload(void) {
         ((void (*)(struct objc_super *, SEL, UITableView *, UITableViewCell *, NSIndexPath *))objc_msgSendSuper)(
             (struct objc_super *)&(struct objc_super){ .receiver = self, .super_class = class_getSuperclass(object_getClass(self)) },
             @selector(tableView:willDisplayCell:forRowAtIndexPath:), tableView, cell, indexPath);
+    /* 注意: PSGroupCell 是 section header 不占行, indexPath.row 是组内行号:
+       section1(小岛素材组): row0=开关 row1=素材选择; section2(展开素材组): row0=开关 row1=素材选择 */
     NSString *name = nil;
-    if (indexPath.row == _smallRow) name = [self nameForMode:0];
-    if (indexPath.row == _expandRow) name = [self nameForMode:1];
+    if (indexPath.section == 1 && indexPath.row == 1) name = [self nameForMode:0];
+    if (indexPath.section == 2 && indexPath.row == 1) name = [self nameForMode:1];
     if (name) {
         if ([cell respondsToSelector:@selector(setValue:)])
             ((void (*)(id, SEL, id))objc_msgSend)(cell, @selector(setValue:), name);

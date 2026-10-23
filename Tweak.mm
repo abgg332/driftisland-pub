@@ -137,35 +137,40 @@ static void updateSingleVideo(UIWindow *win); // 前置声明
     return self;
 }
 
-// 每帧: 同步可见性 + frame/圆角对齐宿主实时呈现值(动画插值)
-// 双层架构: 本层只负责自己的形态; 非本形态时隐藏暂停(省电), 切换形态零重载零黑屏
+// 每帧: 帧贴合始终进行(即使本层非当前形态, 切换瞬间 frame 已就位), 显示/播放只属于本形态层
+// 无岛活动时两层连续 20 帧不可见才暂停循环(省电); 岛可见期间循环保持活跃
 - (void)syncFrameToHost {
     UIView *host = self.superview;
-    if (!host) { _syncLink.paused = YES; return; }
-    // 用呈现层高度判定形态: 动画结束后才越过阈值, 避免收缩中途误换层
+    if (!host || host.window == nil) { _syncLink.paused = YES; return; }
     CALayer *pl = host.layer.presentationLayer;
+    // 帧贴合: 对齐宿主实时呈现值(动画插值), 外扩2pt覆盖取整边缘缝隙
+    CGRect b = pl ? pl.bounds : host.bounds;
+    b = CGRectInset(b, -2, -2);
+    if (!CGRectEqualToRect(self.frame, b)) self.frame = b;
+    CGFloat cr = pl ? pl.cornerRadius : host.layer.cornerRadius;
+    if (self.layer.cornerRadius != cr) self.layer.cornerRadius = cr;
+    BOOL hostVisible = enabled && !host.isHidden && host.bounds.size.width > 2;
+    if (!hostVisible) {
+        if (!self.hidden) self.hidden = YES;
+        if (self.player.timeControlStatus == AVPlayerTimeControlStatusPlaying) [self.player pause];
+        if (++_missCount > 20) _syncLink.paused = YES; // 岛彻底消失后才停循环
+        return;
+    }
+    _missCount = 0;
+    // 形态判定用呈现层高度: 动画收尾才越过阈值
     CGFloat ph = pl ? pl.bounds.size.height : host.bounds.size.height;
     BOOL expanded = ph > 60; // 小岛高约36, 展开高 51~223
     BOOL mine = (expanded == self.expandedLayer);
     NSString *want = mine ? materialPathFor(expanded) : nil;
-    // 不检查 alpha: 视频是子视图, 随宿主一起淡入淡出
-    BOOL visible = enabled && mine && !host.isHidden && host.window != nil
-                   && host.bounds.size.width > 2 && want != nil;
-    if (!visible) {
+    if (mine && want) {
+        if (self.hidden) self.hidden = NO;
+        if (self.player.timeControlStatus != AVPlayerTimeControlStatusPlaying) [self.player play];
+        if (![want isEqualToString:self.currentPath]) [self loadVideo:want];
+    } else {
+        // 非本形态层: 隐藏+暂停, 但 frame 已在上面持续贴合 → 切换瞬间无缝显示
         if (!self.hidden) self.hidden = YES;
         if (self.player.timeControlStatus == AVPlayerTimeControlStatusPlaying) [self.player pause];
-        if (++_missCount > 20) _syncLink.paused = YES; // 连续1/3秒不用才彻底停循环(省电)
-        return;
     }
-    _missCount = 0;
-    if (self.hidden) self.hidden = NO;
-    if (self.player.timeControlStatus != AVPlayerTimeControlStatusPlaying) [self.player play];
-    if (want && ![want isEqualToString:self.currentPath]) [self loadVideo:want];
-    CGRect b = pl ? pl.bounds : host.bounds;
-    b = CGRectInset(b, -2, -2); // 外扩2pt覆盖取整/浮点边缘缝隙(岛 clipsToBounds 会裁掉超出部分)
-    if (!CGRectEqualToRect(self.frame, b)) self.frame = b;
-    CGFloat cr = pl ? pl.cornerRadius : host.layer.cornerRadius;
-    if (self.layer.cornerRadius != cr) self.layer.cornerRadius = cr;
 }
 
 - (void)dealloc {
@@ -313,7 +318,8 @@ static void updateSingleVideo(UIWindow *win) {
             bestRoot.clipsToBounds = YES;
             v.frame = bestRoot.bounds; // 仅挂载时设初始尺寸; 动画中交给 displayLink
             v.layer.cornerRadius = bestRoot.layer.cornerRadius;
-            DLog(@"挂载视频层(%@) container=%@ frame=%@", v.expandedLayer ? @"展开" : @"小岛", NSStringFromClass(bestRoot.class), NSStringFromCGRect(bestRoot.bounds));
+            [v loadVideo:materialPathFor(v.expandedLayer)]; // 挂载即加载各自素材, 首次展开零等待
+            DLog(@"挂载视频层(%@) container=%@ frame=%@ 素材=%@", v.expandedLayer ? @"展开" : @"小岛", NSStringFromClass(bestRoot.class), NSStringFromCGRect(bestRoot.bounds), materialPathFor(v.expandedLayer) ?: @"(无)");
         }
         // 关键: 动画进行中不设 frame(打架会闪黑); 仅在暂停唤醒瞬间手动对齐一次
         wakeLayer(v, bestRoot);
