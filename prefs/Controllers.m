@@ -50,7 +50,6 @@ static void postReload(void) {
     NSInteger _smallRow; /* 小岛素材选择 行号 */
     NSInteger _expandRow; /* 展开素材选择 行号 */
 }
-- (PSSpecifier *)matSpec:(NSString *)name getter:(SEL)get detail:(Class)detailCls;
 @end
 
 @implementation DIPrefsController
@@ -106,13 +105,6 @@ static void postReload(void) {
 }
 
 /* 素材选择行: 左标题、右当前素材名(箭头位置), 点击进入二级页面 */
-- (PSSpecifier *)matSpec:(NSString *)name getter:(SEL)get detail:(Class)detailCls {
-    PSSpecifier *s = [PSSpecifier preferenceSpecifierNamed:name target:self
-        set:NULL get:get detail:detailCls cell:PSLinkCell edit:nil];
-    [s setProperty:((id (*)(id, SEL))objc_msgSend)(self, get) forKey:@"value"];
-    return s;
-}
-
 - (NSArray *)specifiers {
     if (!_specifiers) {
         NSMutableArray *specs = [NSMutableArray array];
@@ -122,12 +114,18 @@ static void postReload(void) {
         /* 小岛素材: 开关 + 素材选择行 */
         [specs addObject:[self groupSpec:@"小岛素材" footer:nil]];
         [specs addObject:[self switchSpec:@"小岛显示素材" key:@"smallOn" def:@YES]];
-        PSSpecifier *smallMat = [self matSpec:@"素材选择" get:@selector(readSmallVideoName:) detail:[DIMaterialsSmall class]];
+        PSSpecifier *smallMat = [PSSpecifier preferenceSpecifierNamed:@"素材选择" target:self
+            set:NULL get:@selector(readSmallVideoName:)
+            detail:[DIMaterialsSmall class] cell:PSLinkCell edit:nil];
+        [smallMat setProperty:[self nameForMode:0] forKey:@"value"];
 
         /* 展开素材: 开关 + 素材选择行 */
         [specs addObject:[self groupSpec:@"展开素材" footer:nil]];
         [specs addObject:[self switchSpec:@"展开显示素材" key:@"expandOn" def:@YES]];
-        PSSpecifier *expandMat = [self matSpec:@"素材选择" get:@selector(readExpandVideoName:) detail:[DIMaterialsExpand class]];
+        PSSpecifier *expandMat = [PSSpecifier preferenceSpecifierNamed:@"素材选择" target:self
+            set:NULL get:@selector(readExpandVideoName:)
+            detail:[DIMaterialsExpand class] cell:PSLinkCell edit:nil];
+        [expandMat setProperty:[self nameForMode:1] forKey:@"value"];
 
         [specs addObject:smallMat];
         [specs addObject:expandMat];
