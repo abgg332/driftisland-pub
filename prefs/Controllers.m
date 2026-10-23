@@ -50,6 +50,7 @@ static void postReload(void) {
     NSInteger _smallRow; /* 小岛素材选择 行号 */
     NSInteger _expandRow; /* 展开素材选择 行号 */
 }
+- (PSSpecifier *)matSpec:(NSString *)name getter:(SEL)get detail:(Class)detailCls;
 @end
 
 @implementation DIPrefsController
