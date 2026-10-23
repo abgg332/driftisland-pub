@@ -25,8 +25,9 @@ static void DLog(NSString *fmt, ...) {
     static dispatch_once_t once;
     dispatch_once(&once, ^{
         NSFileManager *fm = [NSFileManager defaultManager];
-        [fm createDirectoryAtPath:kMaterialDir withIntermediateDirectories:YES attributes:NULL error:NULL];
+        [fm createDirectoryAtPath:kMaterialDir withIntermediateDirectories:YES attributes:@{NSFilePosixPermissions: @0777} error:NULL];
         path = [kMaterialDir stringByAppendingPathComponent:@"driftisland.log"];
+        [fm setAttributes:@{NSFilePosixPermissions: @0666} ofItemAtPath:path error:NULL]; // 跨进程守护进程也能写
     });
     if (!path) return;
     if (!logEnabled) return; // 日志开关关闭时不生成
@@ -564,7 +565,7 @@ static void mruTick(void) {
 static void mruInit(void) {
     gIsMRU = YES;
     logHandle = os_log_create("com.abgg332.driftisland", "runtime");
-    DLog(@"===== 漂流岛 tweak 加载 (MediaRemoteUI) =====");
+    DLog(@"===== 漂流岛 tweak 加载 (MediaRemoteUI 分支) bid=%@ proc=%@ =====", bid, NSProcessInfo.processInfo.processName);
     installImageNamedHook(); // 展开岛投送图标在本进程加载 → 关键 hook
     // 枚举类安装 layoutSubviews hook: 频谱/投送特征类
     unsigned int n = 0;
@@ -704,6 +705,7 @@ static void installImageNamedHook(void) {
 
 __attribute__((constructor)) static void init(void) {
     @autoreleasepool {
+        refreshPrefs(); // 先取偏好: 日志开关就绪, 各分支启动日志不再被吞(此前 MRU 注入可能一直没发声)
         NSString *bid = NSBundle.mainBundle.bundleIdentifier.lowercaseString;
         NSString *pname = NSProcessInfo.processInfo.processName.lowercaseString;
         BOOL isMRU = [bid containsString:@"mediaremote"] || [bid containsString:@"avconducted"] ||
