@@ -249,11 +249,14 @@ static void postReload(void) {
 }
 
 - (NSArray *)specifiers {
-    /* 自绘数据源(table delegate 全部由本类实现), 但 PSListController 内部要求至少一条 specifier(空数组会越界崩溃) */
+    /* 自绘数据源(table delegate 全部由本类实现)。
+       关键: Preferences 的表头机制按 section 下标取 _specifiers, 数量必须与 section 数一致, 否则越界闪退 */
     if (!_specifiers) {
-        PSSpecifier *g = [PSSpecifier preferenceSpecifierNamed:@"动画设置" target:nil
-            set:NULL get:NULL detail:nil cell:PSGroupCell edit:nil];
-        _specifiers = [NSMutableArray arrayWithObject:g];
+        NSMutableArray *g = [NSMutableArray array];
+        for (NSString *name in @[@"灵动岛动画", @"动画设置", @"位置缩放设置", @"素材设置"])
+            [g addObject:[PSSpecifier preferenceSpecifierNamed:name target:nil
+                set:NULL get:NULL detail:nil cell:PSGroupCell edit:nil]];
+        _specifiers = g;
     }
     return _specifiers;
 }

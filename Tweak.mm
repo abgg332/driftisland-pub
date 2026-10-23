@@ -569,6 +569,7 @@ static void updateSingleVideo(UIWindow *win) {
         [bestRoot addSubview:animV]; // 最顶层: 盖住跨进程频谱
         animV.hidden = YES;
     }
+    [bestRoot bringSubviewToFront:animV]; // 系统布局会把岛内容分支提到最前, 每轮重申动画层在最顶
     animV.link.paused = NO; // 岛活动期间保持动画循环, 内部按开关自隐藏
 }
 
