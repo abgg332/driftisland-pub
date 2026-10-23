@@ -335,6 +335,7 @@ static void updateSingleVideo(UIWindow *win); // 前置声明
 @property (nonatomic, assign) double angle;      // 当前旋转角
 @property (nonatomic, assign) CFTimeInterval lastTS;
 @property (nonatomic, assign) NSInteger idx;     // 当前帧号
+@property (nonatomic, assign) double advAcc;     // 帧推进累加器
 @property (nonatomic, assign) NSInteger miss;
 @end
 
@@ -379,8 +380,8 @@ static void updateSingleVideo(UIWindow *win); // 前置声明
     double dt = now - _lastTS;
     _lastTS = now;
     if (dt > 0.5) dt = 0.5; // 切后台回来防跳帧
-    double adv = dt * animFPS;
-    if (adv >= 1 && adv < frames.count * 2.0 + 10) _idx = (NSInteger)(_idx + adv) % (NSInteger)frames.count;
+    _advAcc += dt * animFPS; // 累加器: 低帧率也能逐帧推进(旧版 adv>=1 门槛导致帧率<60 冻结)
+    while (_advAcc >= 1.0) { _advAcc -= 1.0; _idx = (_idx + 1) % (NSInteger)frames.count; }
     UIImage *img = frameImage(frames[_idx]);
     if (img && _iv.image != img) _iv.image = img;
     static BOOL loggedFirst;

@@ -251,25 +251,43 @@ static void postReload(void) {
     if (!key) return nil;
     CFPreferencesAppSynchronize((__bridge CFStringRef)kDomain);
     id v = CFBridgingRelease(CFPreferencesCopyAppValue((__bridge CFStringRef)key, (__bridge CFStringRef)kDomain));
-    return v ?: [spec propertyForKey:@"default"];
+    id val = v ?: [spec propertyForKey:@"default"];
+    /* 编辑行期望 NSString, 数值键转字符串, 否则点确定可能闪退 */
+    if ([spec propertyForKey:@"asEdit"] && ![val isKindOfClass:NSString.class])
+        val = [NSString stringWithFormat:@"%g", [val doubleValue]];
+    return val;
 }
 
 - (void)setPreferenceValue:(id)value specifier:(PSSpecifier *)spec {
     NSString *key = [spec propertyForKey:@"key"];
     if (!key.length) return;
-    /* 数值行手输后 clamp 到滑杆范围 */
-    NSDictionary *range = [spec propertyForKey:@"range"];
-    if (range) {
+    /* 数值键: 统一转 double 并 clamp 到范围后存 NSNumber */
+    if ([spec propertyForKey:@"range"]) {
+        NSDictionary *range = [spec propertyForKey:@"range"];
+        if ([range isKindOfClass:NSArray.class]) range = [range firstObject];
         double v = [value doubleValue];
         double mn = [range[@"min"] doubleValue], mx = [range[@"max"] doubleValue];
-        if (v < mn) value = @(mn);
-        else if (v > mx) value = @(mx);
-        else value = @(v);
+        if (v < mn) v = mn; if (v > mx) v = mx;
+        value = @(v);
     }
     CFPreferencesSetAppValue((__bridge CFStringRef)key, (__bridge CFPropertyListRef)value, (__bridge CFStringRef)kDomain);
     CFPreferencesAppSynchronize((__bridge CFStringRef)kDomain);
     CFNotificationCenterPostNotification(CFNotificationCenterGetDarwinNotifyCenter(),
         (__bridge CFStringRef)kNotifyStr, NULL, NULL, YES);
+    /* 数值键改动后延迟刷新, 让滑杆行与数值行互相同步 */
+    if ([spec propertyForKey:@"range"]) [self scheduleSync];
+}
+
+- (void)scheduleSync {
+    static NSTimer *t = nil;
+    [t invalidate];
+    t = [NSTimer scheduledTimerWithTimeInterval:0.6 target:self selector:@selector(doSync)
+        userInfo:nil repeats:NO];
+    [[NSRunLoop mainRunLoop] addTimer:t forMode:NSRunLoopCommonModes];
+}
+
+- (void)doSync {
+    [self reloadSpecifiers];
 }
 
 - (PSSpecifier *)groupSpec:(NSString *)header footer:(NSString *)footer {
@@ -299,6 +317,7 @@ static void postReload(void) {
     [s setProperty:@(def) forKey:@"default"];
     [s setProperty:@(mn) forKey:@"min"];
     [s setProperty:@(mx) forKey:@"max"];
+    [s setProperty:@{ @"min": @(mn), @"max": @(mx) } forKey:@"range"];
     return s;
 }
 
@@ -309,7 +328,8 @@ static void postReload(void) {
         detail:nil cell:PSEditTextCell edit:nil];
     [s setProperty:key forKey:@"key"];
     [s setProperty:kDomain forKey:@"defaults"];
-    [s setProperty:@[ @{ @"min": @(mn), @"max": @(mx) } ] forKey:@"range"];
+    [s setProperty:@{ @"min": @(mn), @"max": @(mx) } forKey:@"range"];
+    [s setProperty:@YES forKey:@"asEdit"];
     return s;
 }
 
@@ -321,20 +341,20 @@ static void postReload(void) {
         [g addObject:[self switchSpec:@"启用动画" key:@"spectrumOn" def:@NO]];
         /* 1 动画设置 */
         [g addObject:[self groupSpec:@"动画设置" footer:@"帧率/速度拖动滑杆设置, 或点击下方数值行手动输入精确值。"]];
-        [g addObject:[self sliderSpec:@"动画帧率" key:@"animFPS" def:50 min:1 max:60]];
-        [g addObject:[self editSpec:@"帧率数值" key:@"animFPS" mn:1 max:60]];
+        [g addObject:[self sliderSpec:@"动画帧率" key:@"animFPS" def:50 min:10 max:60]];
+        [g addObject:[self editSpec:@"帧率数值" key:@"animFPS" mn:10 max:60]];
         [g addObject:[self switchSpec:@"启用素材旋转" key:@"animRotate" def:@NO]];
         [g addObject:[self switchSpec:@"素材旋转反转" key:@"animRotateReverse" def:@NO]];
         [g addObject:[self sliderSpec:@"旋转速度" key:@"animRotateSpeed" def:5 min:1 max:30]];
         [g addObject:[self editSpec:@"速度数值" key:@"animRotateSpeed" mn:1 max:30]];
         /* 2 位置缩放设置 */
-        [g addObject:[self groupSpec:@"位置缩放设置" footer:@"大小为缩放倍数; 左右/上下为偏移点数(正右正下), 可把素材精确移到音谱位置。"]];
-        [g addObject:[self sliderSpec:@"素材大小" key:@"animScale" def:1 min:0.2 max:3]];
-        [g addObject:[self editSpec:@"大小数值" key:@"animScale" mn:0.2 max:3]];
-        [g addObject:[self sliderSpec:@"左右偏移" key:@"animOffsetX" def:0 min:-150 max:150]];
-        [g addObject:[self editSpec:@"左右数值" key:@"animOffsetX" mn:-150 max:150]];
-        [g addObject:[self sliderSpec:@"上下偏移" key:@"animOffsetY" def:0 min:-150 max:150]];
-        [g addObject:[self editSpec:@"上下数值" key:@"animOffsetY" mn:-150 max:150]];
+        [g addObject:[self groupSpec:@"位置缩放设置" footer:@"大小为缩放倍数; 左右/上下为偏移点数(正右正下)。"]];
+        [g addObject:[self sliderSpec:@"素材大小" key:@"animScale" def:3 min:1 max:5]];
+        [g addObject:[self editSpec:@"大小数值" key:@"animScale" mn:1 max:5]];
+        [g addObject:[self sliderSpec:@"左右偏移" key:@"animOffsetX" def:150 min:0 max:300]];
+        [g addObject:[self editSpec:@"左右数值" key:@"animOffsetX" mn:0 max:300]];
+        [g addObject:[self sliderSpec:@"上下偏移" key:@"animOffsetY" def:0 min:-100 max:100]];
+        [g addObject:[self editSpec:@"上下数值" key:@"animOffsetY" mn:-100 max:100]];
         /* 3 素材设置 */
         [g addObject:[self groupSpec:@"素材设置" footer:@"素材目录: /var/mobile/灵动岛/帧率素材 (每个子文件夹=一套素材, png/jpg 按文件名数字顺序播放)。"]];
         PSSpecifier *folder = [PSSpecifier preferenceSpecifierNamed:@"素材名" target:self
