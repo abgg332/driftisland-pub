@@ -536,6 +536,7 @@ struct DIHook { Class cls; IMP original; };
 static std::vector<DIHook> hooks;
 
 static void mruUpdate(UIView *v); // 前置声明
+static void diHideAccessories(UIView *v, BOOL hide); // 前置声明
 
 static void layoutHook(UIView *self, SEL selector) {
     Class concrete = object_getClass(self);
