@@ -240,6 +240,32 @@ static void postReload(void) {
             @selector(tableView:willDisplayCell:forRowAtIndexPath:), tableView, cell, indexPath);
     /* 注意: PSGroupCell 是 section header 不占行, indexPath.row 是组内行号:
        section1(小岛): row0=开关 row1=素材; section2(展开): row1=素材; section3(频谱): row1=素材 */
+    /* 帧率参数滑杆行(section3 row2~5): 左侧"文字 数字", 滑杆移到右半边(PSSliderCell 不渲染标题) */
+    if (indexPath.section == 3 && indexPath.row >= 2 && indexPath.row <= 5) {
+        NSArray *labels = @[@"帧率速度", @"素材大小", @"左右偏移", @"上下偏移"];
+        NSArray *keys   = @[@"animFPS", @"animScaleAdj", @"animOffsetX3", @"animOffsetY3"];
+        NSArray *defs   = @[@50, @0, @0, @0];
+        NSInteger i = indexPath.row - 2;
+        int v = [self numValue:keys[i] def:[defs[i] intValue]];
+        NSDictionary *range = @{ @"animFPS": @[@(10), @(200)],
+                                 @"animScaleAdj": @[@(-20), @(20)],
+                                 @"animOffsetX3": @[@(-50), @(50)],
+                                 @"animOffsetY3": @[@(-50), @(50)] }[keys[i]];
+        if (v < [range[0] intValue]) v = [range[0] intValue];
+        if (v > [range[1] intValue]) v = [range[1] intValue];
+        cell.textLabel.text = [NSString stringWithFormat:@"%@  %d", labels[i], v];
+        cell.textLabel.font = [UIFont systemFontOfSize:15 weight:UIFontWeightSemibold];
+        UIView *root = cell.contentView.subviews.count ? cell.contentView : cell;
+        UISlider *slider = nil;
+        for (UIView *sv in root.subviews) if ([sv isKindOfClass:UISlider.class]) { slider = (UISlider *)sv; break; }
+        if (!slider) for (UIView *sv in cell.subviews) if ([sv isKindOfClass:UISlider.class]) { slider = (UISlider *)sv; break; }
+        CGFloat cw = cell.contentView.bounds.size.width, ch = cell.contentView.bounds.size.height;
+        if (slider && cw > 10) {
+            slider.frame = CGRectMake(cw * 0.42, (ch - 31) / 2, cw * 0.53, 31);
+            slider.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleRightMargin;
+        }
+    }
+
     NSString *name = nil;
     if (indexPath.section == 1 && indexPath.row == 1) name = [self nameForMode:0];
     if (indexPath.section == 2 && indexPath.row == 1) name = [self nameForMode:1];

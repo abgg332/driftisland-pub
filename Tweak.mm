@@ -373,9 +373,8 @@ static void updateSingleVideo(UIWindow *win); // 前置声明
     CGSize bs = pl ? pl.bounds.size : host.bounds.size;
     CGRect f = diSpecRegion(bs.width, bs.height);
     if (!CGRectEqualToRect(self.frame, f)) self.frame = f;
-    // 关键: 内部图片视图必须跟随外层尺寸(曾因初始化 CGRectZero 后未更新, 一直 0x0 不可见)
-    CGRect ivf = self.bounds;
-    if (!CGRectEqualToRect(_iv.frame, ivf)) _iv.frame = ivf;
+    // 内部图片视图: 只在 bounds 变化时对齐(transform 缩放会改变 frame, 不能用 frame 比较/赋值, 否则每轮抵消缩放)
+    if (!CGSizeEqualToSize(_iv.bounds.size, self.bounds.size)) _iv.frame = self.bounds;
     if (self.hidden) self.hidden = NO;
     // 帧推进: 按动画帧率
     CFTimeInterval now = self.link.timestamp;
@@ -393,8 +392,8 @@ static void updateSingleVideo(UIWindow *win); // 前置声明
     static NSInteger diagCount;
     if (++diagCount % 600 == 1)
         DLog(@"帧率动画状态: idx=%ld hidden=%d frame=%@ 父视图=%@ 透明度=%.1f", (long)_idx, self.isHidden, NSStringFromCGRect(self.frame), NSStringFromClass(self.superview.class), self.layer.opacity);
-    // 缩放 + 偏移: 每帧刷新, 偏好即时生效
-    _iv.transform = CGAffineTransformMakeScale(animScale, animScale);
+    // 缩放(改bounds, 图片随边界拉伸) + 偏移: 每帧刷新, 偏好即时生效
+    _iv.bounds = CGRectMake(0, 0, self.bounds.size.width * animScale, self.bounds.size.height * animScale);
     _iv.center = CGPointMake(self.bounds.size.width / 2 + animOffsetX, self.bounds.size.height / 2 + animOffsetY);
 }
 
