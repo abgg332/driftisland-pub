@@ -264,7 +264,7 @@ static void postReload(void) {
     /* 数值键: 统一转 double 并 clamp 到范围后存 NSNumber */
     if ([spec propertyForKey:@"range"]) {
         NSDictionary *range = [spec propertyForKey:@"range"];
-        if ([range isKindOfClass:NSArray.class]) range = [range firstObject];
+        if ([range isKindOfClass:NSArray.class]) range = range.count ? range[0] : @{};
         double v = [value doubleValue];
         double mn = [range[@"min"] doubleValue], mx = [range[@"max"] doubleValue];
         if (v < mn) v = mn; if (v > mx) v = mx;
