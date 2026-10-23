@@ -458,6 +458,15 @@ static void updateSingleVideo(UIWindow *win) {
         wakeLayer(v, bestRoot);
         if (bestRoot.subviews.firstObject != v) [bestRoot sendSubviewToBack:v];
     }
+    // 投送图标由 SpringBoard 岛附件(portal)承载: 开关开+展开态彻底隐藏, 0.5s tick 重申, 关开关恢复
+    {
+        static BOOL lastHide;
+        BOOL hide = hideAirPlay && bestRoot.bounds.size.height > 100;
+        if (hideAirPlay != lastHide || hide) {
+            lastHide = hideAirPlay;
+            for (UIView *s in bestRoot.subviews) diHideAccessories(s, hide);
+        }
+    }
     // 展开态: dump 跨进程 CALayer 层树(频谱动画在这里渲染), 2s 后再抓一次布局稳定版; 30s 窗口后重新计数
     static int dumpCount; static CFAbsoluteTime dumpStart;
     CFAbsoluteTime nowT = CFAbsoluteTimeGetCurrent();
@@ -537,6 +546,13 @@ static void layoutHook(UIView *self, SEL selector) {
         if (found) break;
     }
     if (NSThread.isMainThread) { if (gIsMRU) mruUpdate(self); else updateHost(self); }
+}
+
+static void diHideAccessories(UIView *v, BOOL hide) {
+    if ([NSStringFromClass(v.class) containsString:@"ProvidedViewContainer"]) {
+        if (v.isHidden != !hide) v.hidden = !hide; // 开关开=隐藏; 关=恢复
+    }
+    for (UIView *s in v.subviews) diHideAccessories(s, hide);
 }
 
 #pragma mark - MediaRemoteUI 进程(灵动岛播放器真实渲染进程, iOS16/17 远程场景)
