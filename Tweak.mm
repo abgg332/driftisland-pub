@@ -134,6 +134,7 @@ static void refreshPrefs(void) {
 static char kWinVideoSmall, kWinVideoExpand, kWinVideoSpec, kWinVideoAir; // 每窗口视频层(小岛/展开/频谱/投送)
 static BOOL gIsMRU = NO; // 是否运行在 MediaRemoteUI(灵动岛播放器渲染进程)
 
+static void diHideAccessories(UIView *v, BOOL hide); // 前置声明
 // 区域标定(相对展开岛比例, 用户截图圈定); 素材层外扩2pt保证完全盖住
 static CGRect diSpecRegion(CGFloat w, CGFloat h) { return CGRectInset(CGRectMake(w * 0.815, h * 0.125, w * 0.18, h * 0.25), -2, -2); }
 static CGRect diAirRegion(CGFloat w, CGFloat h)  { return CGRectInset(CGRectMake(w * 0.835, h * 0.715, w * 0.16, h * 0.25), -2, -2); }
@@ -536,7 +537,6 @@ struct DIHook { Class cls; IMP original; };
 static std::vector<DIHook> hooks;
 
 static void mruUpdate(UIView *v); // 前置声明
-static void diHideAccessories(UIView *v, BOOL hide); // 前置声明
 
 static void layoutHook(UIView *self, SEL selector) {
     Class concrete = object_getClass(self);
