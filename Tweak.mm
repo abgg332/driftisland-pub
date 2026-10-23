@@ -346,6 +346,22 @@ static UIView *findSpectrum(UIView *root) {
     return findSubviewTokens(root, @[@"Spectrum", @"Waveform", @"Visualiz", @"AudioBars"]);
 }
 
+// dump 确认: 附件是 _SAUIProvidedViewContainerView(跨进程 PortalView 父容器), 无类名特征
+// 只能按位置分: 右侧(x>父宽一半)=频谱, 左侧(26x22)=投送
+static UIView *findAccessory(UIView *root, BOOL rightSide) {
+    CGFloat half = root.bounds.size.width * 0.5;
+    UIView *found = nil;
+    for (UIView *s in root.subviews) {
+        if ([NSStringFromClass(s.class) containsString:@"ProvidedViewContainer"] && s.bounds.size.width > 1) {
+            CGRect r = [root convertRect:s.frame fromView:s.superview];
+            if ((r.origin.x > half) == rightSide) { found = s; break; }
+        }
+        UIView *r2 = findAccessory(s, rightSide);
+        if (r2) { found = r2; break; }
+    }
+    return found;
+}
+
 // 展开岛视图树 dump: 记录全部类名+frame; 附件容器额外读 identifier(区分频谱/投送)
 static void dumpTree(UIView *v, int depth) {
     if (!v || depth > 16) return;
@@ -431,7 +447,7 @@ static void updateSingleVideo(UIWindow *win) {
     // 频谱素材层: 盖在系统频谱上
     DIVideoView *specV = objc_getAssociatedObject(win, &kWinVideoSpec);
     if (spectrumOn) {
-        UIView *sp = findSpectrum(bestRoot);
+        UIView *sp = findSpectrum(bestRoot) ?: findAccessory(bestRoot, YES); // 右侧附件=频谱(右上角)
         logOnce(@"频谱", sp);
         if (sp) {
             if (!specV) {
@@ -471,10 +487,13 @@ static void updateHost(UIView *host) {
                 });
             }
         }
-        // 投送按钮: 隐藏/显示 AirPlay 图标(每次布局重申, 防系统重置)
+        // 投送按钮: 隐藏/显示 AirPlay 图标 + 左侧附件(右下角投送, dump 中 26x22), 每次布局重申防系统重置
         UIView *ap = findAirPlay(host);
         logOnce(@"投送", ap);
         if (ap && ap.hidden != hideAirPlay) ap.hidden = hideAirPlay;
+        UIView *acc = findAccessory(host, NO);
+        logOnce(@"投送附件", acc);
+        if (acc && acc.hidden != hideAirPlay) acc.hidden = hideAirPlay;
     }
 }
 
