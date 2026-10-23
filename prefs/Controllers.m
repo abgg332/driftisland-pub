@@ -293,7 +293,7 @@ static void postReload(void) {
 - (PSSpecifier *)sliderSpec:(NSString *)name key:(NSString *)key def:(double)def min:(double)mn max:(double)mx {
     PSSpecifier *s = [PSSpecifier preferenceSpecifierNamed:name target:self
         set:@selector(setPreferenceValue:specifier:) get:@selector(readPreferenceValue:)
-        detail:nil cell:PSSliderSpecifier edit:nil];
+        detail:nil cell:PSSliderCell edit:nil];
     [s setProperty:key forKey:@"key"];
     [s setProperty:kDomain forKey:@"defaults"];
     [s setProperty:@(def) forKey:@"default"];
@@ -306,7 +306,7 @@ static void postReload(void) {
 - (PSSpecifier *)editSpec:(NSString *)name key:(NSString *)key mn:(double)mn max:(double)mx {
     PSSpecifier *s = [PSSpecifier preferenceSpecifierNamed:name target:self
         set:@selector(setPreferenceValue:specifier:) get:@selector(readPreferenceValue:)
-        detail:nil cell:PSEditTextSpecifier edit:nil];
+        detail:nil cell:PSEditTextCell edit:nil];
     [s setProperty:key forKey:@"key"];
     [s setProperty:kDomain forKey:@"defaults"];
     [s setProperty:@[ @{ @"min": @(mn), @"max": @(mx) } ] forKey:@"range"];
