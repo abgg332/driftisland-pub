@@ -11,6 +11,7 @@
 static NSString *const kDomain = @"com.abgg332.driftisland";
 static NSString *const kNotifyStr = @"com.abgg332.driftisland.reload";
 static NSString *const kMaterialDir = @"/var/mobile/灵动岛";
+static NSString *const kFrameDir = @"/var/mobile/灵动岛/帧率素材"; // 频谱序列帧目录(png/jpg, 按文件名数字排序)
 
 static BOOL logEnabled; // 日志开关
 static os_log_t logHandle;
@@ -72,9 +73,54 @@ static NSArray<NSString *> *materialList(void) {
     return out;
 }
 
+static double pDouble(NSString *key, double def) {
+    CFPreferencesAppSynchronize((__bridge CFStringRef)kDomain);
+    id v = CFBridgingRelease(CFPreferencesCopyAppValue((__bridge CFStringRef)key, (__bridge CFStringRef)kDomain));
+    return v ? [v doubleValue] : def;
+}
+
 /* 偏好缓存: 供 displayLink 每帧读取(不直接读 CFPreferences), 由 refreshPrefs 定期刷新 */
 static BOOL enabled, smallOn = YES, expandOn = YES, hideAirPlay, spectrumOn;
-static NSInteger smallIdx, expandIdx, spectrumIdx;
+static NSInteger smallIdx, expandIdx;
+/* 频谱帧率动画参数 */
+static double animFPS = 50, animRotateSpeed = 5, animScale = 1, animOffsetX, animOffsetY;
+static BOOL animRotate, animRotateReverse;
+
+// 序列帧列表缓存(2秒TTL): 递归收集 帧率素材 目录下 png/jpg, 按文件名数字排序(replay2 < replay10)
+static NSArray<NSString *> *framePaths(void) {
+    static NSArray *c; static CFAbsoluteTime t;
+    CFAbsoluteTime now = CFAbsoluteTimeGetCurrent();
+    if (c && now - t < 2.0) return c;
+    NSFileManager *fm = NSFileManager.defaultManager;
+    NSMutableArray<NSString *> *out = [NSMutableArray array];
+    NSMutableArray<NSString *> *stack = [NSMutableArray arrayWithObject:kFrameDir];
+    while (stack.count) {
+        NSString *dir = stack.firstObject; [stack removeObjectAtIndex:0];
+        for (NSString *n in [fm contentsOfDirectoryAtPath:dir error:NULL]) {
+            NSString *p = [dir stringByAppendingPathComponent:n];
+            BOOL isDir = NO;
+            if ([fm fileExistsAtPath:p isDirectory:&isDir] && isDir) { [stack addObject:p]; continue; }
+            NSString *ext = n.pathExtension.lowercaseString;
+            if ([ext isEqualToString:@"png"] || [ext isEqualToString:@"jpg"] || [ext isEqualToString:@"jpeg"])
+                [out addObject:p];
+        }
+    }
+    [out sortUsingComparator:^NSComparisonResult(NSString *a, NSString *b) {
+        return [a.lastPathComponent compare:b.lastPathComponent options:NSNumericSearch];
+    }];
+    c = out; t = now;
+    return out;
+}
+
+// 帧图片缓存: 序列帧可能几百张, NSCache 自动回收
+static UIImage *frameImage(NSString *path) {
+    static NSCache *cache;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{ cache = [NSCache new]; cache.countLimit = 900; });
+    UIImage *img = [cache objectForKey:path];
+    if (!img) { img = [UIImage imageWithContentsOfFile:path]; if (img) [cache setObject:img forKey:path]; }
+    return img;
+}
 
 // 素材列表缓存(2秒TTL): displayLink 每帧调用, 不能每次扫描目录
 static NSArray<NSString *> *cachedMaterials(void) {
@@ -94,16 +140,6 @@ static NSString *materialPathFor(BOOL expanded) {
     return [kMaterialDir stringByAppendingPathComponent:list[idx]];
 }
 
-static NSString *spectrumPath(void) {
-    if (!spectrumOn) return nil;
-    NSArray<NSString *> *list = cachedMaterials();
-    if (!list.count) return nil;
-    NSInteger idx = spectrumIdx;
-    if (idx < 0) idx = 0;
-    if (idx >= (NSInteger)list.count) idx = list.count - 1;
-    return [kMaterialDir stringByAppendingPathComponent:list[idx]];
-}
-
 static void refreshPrefs(void) {
     enabled = pBool(@"enabled", NO);
     logEnabled = pBool(@"logging", NO);
@@ -111,7 +147,15 @@ static void refreshPrefs(void) {
     expandOn = pBool(@"expandOn", YES);
     hideAirPlay = pBool(@"hideAirPlay", NO);
     spectrumOn = pBool(@"spectrumOn", NO);
-    spectrumIdx = pInt(@"spectrumIndex", 0);
+    animFPS = pDouble(@"animFPS", 50);
+    animRotate = pBool(@"animRotate", NO);
+    animRotateReverse = pBool(@"animRotateReverse", NO);
+    animRotateSpeed = pDouble(@"animRotateSpeed", 5);
+    animScale = pDouble(@"animScale", 1);
+    animOffsetX = pDouble(@"animOffsetX", 0);
+    animOffsetY = pDouble(@"animOffsetY", 0);
+    if (animFPS < 1) animFPS = 1; if (animFPS > 60) animFPS = 60;
+    if (animScale < 0.1) animScale = 0.1;
     // 兼容旧版单素材键 videoIndex: 未分别设置过时沿用旧值
     NSInteger none = -1000;
     NSInteger si = pInt(@"smallIndex", none), ei = pInt(@"expandIndex", none);
@@ -128,7 +172,6 @@ static void refreshPrefs(void) {
 @property (nonatomic, copy) NSString *currentPath;
 @property (nonatomic, strong) CADisplayLink *syncLink;
 @property (nonatomic, assign) BOOL expandedLayer; // YES=展开层(播展开素材), NO=小岛层
-@property (nonatomic, assign) BOOL spectrumLayer; // YES=频谱素材层(盖在展开岛右上角)
 @end
 
 static char kWinVideoSmall, kWinVideoExpand, kWinVideoSpec; // 每窗口视频层(小岛/展开/频谱)
@@ -171,9 +214,8 @@ static void updateSingleVideo(UIWindow *win); // 前置声明
 - (void)syncFrameToHost {
     UIView *host = self.superview;
     if (!host || host.window == nil) { _syncLink.paused = YES; return; }
-    if (self.spectrumLayer) { [self syncSpectrum]; return; }
-    CALayer *pl = host.layer.presentationLayer;
-    // 帧贴合: 对齐宿主实时呈现值(动画插值), 外扩2pt覆盖取整边缘缝隙
+    if (self.expandedLayer == NO) { /* 小岛/展开层通用走主同步 */ }
+    CALayer *pl = host.layer.presentationLayer;    // 帧贴合: 对齐宿主实时呈现值(动画插值), 外扩2pt覆盖取整边缘缝隙
     CGRect b = pl ? pl.bounds : host.bounds;
     b = CGRectInset(b, -2, -2);
     if (!CGRectEqualToRect(self.frame, b)) self.frame = b;
@@ -207,32 +249,8 @@ static void updateSingleVideo(UIWindow *win); // 前置声明
     [_syncLink invalidate];
 }
 
-// 频谱层: 系统频谱渲染在跨进程 CA 层(无法 hook), 按截图标定的比例区域直接盖住(=视觉替换)
-// 区域用呈现层 bounds 实时计算(点击/布局变化/动画中都不跑位); 收缩岛或开关关时隐藏
-- (void)syncSpectrum {
-    UIView *host = self.superview;
-    BOOL expand = host && host.window && host.bounds.size.height > 100;
-    if (!expand) {
-        if (!self.hidden) self.hidden = YES;
-        if (self.player.timeControlStatus == AVPlayerTimeControlStatusPlaying) [self.player pause];
-        if (++_missCount > 20) _syncLink.paused = YES;
-        return;
-    }
-    _missCount = 0;
-    CALayer *pl = host.layer.presentationLayer;
-    CGSize bs = pl ? pl.bounds.size : host.bounds.size;
-    CGRect f = diSpecRegion(bs.width, bs.height);
-    if (!CGRectEqualToRect(self.frame, f)) self.frame = f;
-    NSString *want = (enabled && spectrumOn) ? spectrumPath() : nil;
-    if (want) {
-        if (self.hidden) self.hidden = NO;
-        if (self.player.timeControlStatus != AVPlayerTimeControlStatusPlaying) [self.player play];
-        if (![want isEqualToString:self.currentPath]) [self loadVideo:want];
-        return;
-    }
-    if (!self.hidden) self.hidden = YES;
-    if (self.player.timeControlStatus == AVPlayerTimeControlStatusPlaying) [self.player pause];
-}
+// 频谱动画视图: 序列帧播放(替代视频), 支持帧率/旋转/反转/旋转速度/缩放/XY偏移, 全部由偏好实时驱动
+// 区域沿用频谱标定(展开岛右上角), 用呈现层 bounds 实时计算不跑位; 开关关=隐藏(露出系统频谱)
 
 - (void)loadVideo:(NSString *)path {
     self.currentPath = path;
@@ -273,6 +291,68 @@ static void updateSingleVideo(UIWindow *win); // 前置声明
     });
 }
 
+@end
+
+#pragma mark - 频谱帧率动画视图(序列帧)
+
+@interface DIAnimView : UIView
+@property (nonatomic, strong) UIImageView *iv;
+@property (nonatomic, strong) CADisplayLink *link;
+@property (nonatomic, assign) double angle;      // 当前旋转角
+@property (nonatomic, assign) CFTimeInterval lastTS;
+@property (nonatomic, assign) NSInteger idx;     // 当前帧号
+@property (nonatomic, assign) NSInteger miss;
+@end
+
+@implementation DIAnimView
+- (instancetype)initWithFrame:(CGRect)frame {
+    if ((self = [super initWithFrame:frame])) {
+        self.userInteractionEnabled = NO;
+        self.backgroundColor = [UIColor clearColor];
+        self.clipsToBounds = NO; // 旋转/缩放后允许超出频谱区域
+        _iv = [[UIImageView alloc] initWithFrame:self.bounds];
+        _iv.contentMode = UIViewContentModeScaleAspectFit;
+        [self addSubview:_iv];
+        _link = [CADisplayLink displayLinkWithTarget:self selector:@selector(step)];
+        [_link addToRunLoop:NSRunLoop.mainRunLoop forMode:NSRunLoopCommonModes];
+    }
+    return self;
+}
+
+- (void)step {
+    UIView *host = self.superview;
+    if (!host || host.window == nil) { self.hidden = YES; if (++_miss > 30) _link.paused = YES; return; }
+    BOOL expand = host.bounds.size.height > 100;
+    NSArray<NSString *> *frames = framePaths();
+    if (!expand || !enabled || !spectrumOn || !frames.count) {
+        // 关闭/收缩: 隐藏本层 → 露出系统频谱; 完全不显示时暂停循环省电
+        if (!self.hidden) self.hidden = YES;
+        if (++_miss > 30) _link.paused = YES;
+        return;
+    }
+    _miss = 0;
+    CALayer *pl = host.layer.presentationLayer;
+    CGSize bs = pl ? pl.bounds.size : host.bounds.size;
+    CGRect f = diSpecRegion(bs.width, bs.height);
+    if (!CGRectEqualToRect(self.frame, f)) self.frame = f;
+    if (self.hidden) self.hidden = NO;
+    // 帧推进: 按动画帧率
+    CFTimeInterval now = self.link.timestamp;
+    if (!_lastTS) _lastTS = now;
+    double dt = now - _lastTS;
+    _lastTS = now;
+    if (dt > 0.5) dt = 0.5; // 切后台回来防跳帧
+    double adv = dt * animFPS;
+    if (adv >= 1 && adv < frames.count * 2.0 + 10) _idx = (NSInteger)(_idx + adv) % (NSInteger)frames.count;
+    UIImage *img = frameImage(frames[_idx]);
+    if (img && _iv.image != img) _iv.image = img;
+    // 旋转(度/秒=旋转速度) + 缩放 + 偏移: 每帧刷新, 偏好即时生效
+    if (animRotate) _angle += (animRotateReverse ? -1 : 1) * animRotateSpeed * dt;
+    _iv.transform = CGAffineTransformRotate(CGAffineTransformMakeScale(animScale, animScale), _angle * M_PI / 180.0);
+    _iv.center = CGPointMake(self.bounds.size.width / 2 + animOffsetX, self.bounds.size.height / 2 + animOffsetY);
+}
+
+- (void)dealloc { [_link invalidate]; }
 @end
 
 #pragma mark - 宿主挂载
@@ -434,23 +514,21 @@ static void updateSingleVideo(UIWindow *win) {
             }
         });
     }
-    // 频谱素材层: 固定比例区域盖在展开岛右上角(跨进程频谱上方), 加在最顶层
-    DIVideoView *specV = objc_getAssociatedObject(win, &kWinVideoSpec);
-    if (spectrumOn) {
-        if (!specV) {
-            specV = [[DIVideoView alloc] initWithFrame:CGRectZero];
-            specV.spectrumLayer = YES;
-            objc_setAssociatedObject(win, &kWinVideoSpec, specV, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-        }
-        if (specV.superview != bestRoot) {
-            [specV removeFromSuperview];
-            [bestRoot addSubview:specV]; // 加在最顶层: 盖住跨进程频谱
-            specV.hidden = YES;
-        }
-        wakeLayer(specV, specV.superview);
-    } else if (specV && !specV.hidden) {
-        specV.hidden = YES;
+    // 频谱帧率动画层: 序列帧播放, 盖在展开岛右上角(跨进程频谱上方), 加在最顶层
+    // 开关关/无帧素材: 隐藏本层 → 露出系统频谱(关闭=显示原生频谱)
+    DIAnimView *animV = objc_getAssociatedObject(win, &kWinVideoSpec);
+    if (!animV) {
+        animV = [[DIAnimView alloc] initWithFrame:CGRectZero];
+        objc_setAssociatedObject(win, &kWinVideoSpec, animV, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        static BOOL logged;
+        if (!logged) { logged = YES; DLog(@"帧率动画层创建, 帧素材=%lu 张 (目录 %@)", (unsigned long)framePaths().count, kFrameDir); }
     }
+    if (animV.superview != bestRoot) {
+        [animV removeFromSuperview];
+        [bestRoot addSubview:animV]; // 最顶层: 盖住跨进程频谱
+        animV.hidden = YES;
+    }
+    animV.link.paused = NO; // 岛活动期间保持动画循环, 内部按开关自隐藏
 }
 
 static void updateHost(UIView *host) {
