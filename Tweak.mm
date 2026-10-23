@@ -688,6 +688,32 @@ static void prefsChanged(CFNotificationCenterRef, void *, CFStringRef, const voi
     dispatch_async(dispatch_get_main_queue(), ^{ refreshAll(); installKnownHosts(); });
 }
 
+
+// 投送图标 = SpringBoard 内以 imageNamed:"airplayaudio" 加载的素材图(用户以同名图替换可改变它)
+// 开关开: 该图返回透明(图标彻底隐藏); 关: 原图(显示)。系统下次取图即生效(收起再展开岛立即刷新)
+static IMP gOrigImageNamed;
+static UIImage *diImageNamed(id self, SEL _cmd, NSString *name) {
+    UIImage *img = ((UIImage *(*)(id, SEL, NSString *))gOrigImageNamed)(self, _cmd, name);
+    if (img && name.length) {
+        static BOOL last; // 缓存偏好, 避免 Each 调用读 CFPreferences
+        static dispatch_once_t once;
+        dispatch_once(&once, ^{ last = hideAirPlay; });
+        if (last != hideAirPlay) last = hideAirPlay;
+        if (hideAirPlay && [name.lowercaseString containsString:@"airplayaudio"]) {
+            static UIImage *transparent;
+            static dispatch_once_t t2;
+            dispatch_once(&t2, ^{
+                UIGraphicsBeginImageContextWithOptions(CGSizeMake(1, 1), NO, 1);
+                transparent = UIGraphicsGetImageFromCurrentImageContext();
+                UIGraphicsEndImageContext();
+            });
+            DLog(@"投送图标取图: %@ → 透明(隐藏)", name);
+            return transparent;
+        }
+    }
+    return img;
+}
+
 __attribute__((constructor)) static void init(void) {
     @autoreleasepool {
         NSString *bid = NSBundle.mainBundle.bundleIdentifier.lowercaseString;
@@ -698,6 +724,12 @@ __attribute__((constructor)) static void init(void) {
         if (![bid isEqual:@"com.apple.springboard"]) return;
         logHandle = os_log_create("com.abgg332.driftisland", "runtime");
         DLog(@"===== 漂流岛 tweak 加载 (SpringBoard) =====");
+        // 投送图标透明化 hook: +[UIImage imageNamed:]
+        Method im = class_getClassMethod(UIImage.class, @selector(imageNamed:));
+        if (im) {
+            gOrigImageNamed = method_setImplementation(im, (IMP)diImageNamed);
+            DLog(@"hook 安装成功: UIImage imageNamed (投送图标透明化)");
+        }
         dispatch_async(dispatch_get_main_queue(), ^{
             refreshAll(); installKnownHosts();
             CFNotificationCenterAddObserver(CFNotificationCenterGetDarwinNotifyCenter(), NULL,
