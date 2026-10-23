@@ -180,9 +180,10 @@ static void refreshPrefs(void) {
     hideAirPlay = pBool(@"hideAirPlay", NO);
     spectrumOn = pBool(@"spectrumOn", NO);
     animFPS = pDouble(@"animFPS", 50);
-    double adj = pDouble(@"animScaleAdj", 0); // 大小调整量: 0=当前校准大小, 每+1放大0.1倍
+    double adj = pDouble(@"animScaleAdj", 0); // 大小调整量: 0=原始大小, 每+1放大0.1倍
     if (adj < -20) adj = -20; if (adj > 20) adj = 20;
-    animScale = 2.77709 + adj * 0.1;
+    animScale = 1 + adj * 0.1;
+    if (animScale < 0.1) animScale = 0.1;
     animOffsetX = pDouble(@"animOffsetX3", 0);
     animOffsetY = pDouble(@"animOffsetY3", 0);
     animFolder = pString(@"animFolder");
@@ -214,11 +215,8 @@ static void airPortalUpdate(UIView *bestRoot, BOOL hide); // 前置声明(投送
 static void installImageNamedHook(void); // 前置声明(投送图标取图 hook, 定义在文件尾部)
 // 区域标定(相对展开岛比例, 用户截图圈定); 素材层外扩2pt保证完全盖住
 static CGRect diSpecRegion(CGFloat w, CGFloat h) {
-    /* 已烘焙用户校准值: 原区域{0.41w,0.72h,0.18w,0.25h} + 缩放2.77709 + 偏移(134.83,-119.195) */
-    const double sc = 2.77709, ox = 134.83, oy = -119.195;
-    CGFloat cw = w * 0.18 * sc, ch = h * 0.25 * sc;
-    CGFloat cx = w * 0.5 + ox, cy = h * 0.845 + oy;
-    return CGRectMake(cx - cw / 2, cy - ch / 2, cw, ch);
+    /* 已烘焙校准位置: 原始区域{0.41w,0.72h,0.18w,0.25h} 平移(134.83,-119.195); 大小保持原始, 缩放基准=1 */
+    return CGRectMake(w * 0.41 + 134.83 - 2, h * 0.72 - 119.195 - 2, w * 0.18 + 4, h * 0.25 + 4);
 }
 // enabled 等偏好缓存已在 materialPathFor 上方声明
 static NSHashTable *hostTable; // 弱引用宿主集合

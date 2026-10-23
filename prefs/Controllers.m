@@ -46,7 +46,6 @@ static void postReload(void) {
 
 @interface DIMaterialsSmall : DIMaterialsController @end
 @interface DIMaterialsExpand : DIMaterialsController @end
-@interface DIAnimSettings : PSListController @end
 @interface DIFrameFolders : PSListController @end
 
 @interface DIPrefsController : PSListController {
@@ -68,13 +67,21 @@ static void postReload(void) {
 - (void)setPreferenceValue:(id)value specifier:(PSSpecifier *)spec {
     NSString *key = [spec propertyForKey:@"key"];
     if (!key.length) return;
+    NSDictionary *range = [spec propertyForKey:@"range"];
+    if (range) { // 数值键: 取整+clamp
+        double v = [value doubleValue];
+        double mn = [range[@"min"] doubleValue], mx = [range[@"max"] doubleValue];
+        if (v < mn) v = mn; if (v > mx) v = mx;
+        value = @(round(v));
+    }
     CFPreferencesSetAppValue((__bridge CFStringRef)key, (__bridge CFPropertyListRef)value, (__bridge CFStringRef)kDomain);
     CFPreferencesAppSynchronize((__bridge CFStringRef)kDomain);
     postReload();
-    /* 频谱开关切换: 立即增删下方"帧率动画设置"行 */
-    if ([key isEqualToString:@"spectrumOn"]) {
+    if ([key isEqualToString:@"spectrumOn"]) { // 开关切换: 立即增删下方参数行
         _specifiers = nil;
         [self reloadSpecifiers];
+    } else if (range) {
+        [self scheduleSync]; // 数值改动: 稍后刷新标题里的数字
     }
 }
 
@@ -115,6 +122,40 @@ static void postReload(void) {
     return s;
 }
 
+/* 数值行: 标题=文字+当前整数(如"帧率速度 60"), 滑杆改动后刷新标题; 保存取整并clamp */
+- (int)numValue:(NSString *)key def:(int)def {
+    CFPreferencesAppSynchronize((__bridge CFStringRef)kDomain);
+    id v = CFBridgingRelease(CFPreferencesCopyAppValue((__bridge CFStringRef)key, (__bridge CFStringRef)kDomain));
+    return v ? (int)round([v doubleValue]) : def;
+}
+
+- (PSSpecifier *)numSlider:(NSString *)label key:(NSString *)key def:(int)def mn:(int)mn mx:(int)mx {
+    int v = [self numValue:key def:def];
+    if (v < mn) v = mn; if (v > mx) v = mx;
+    PSSpecifier *s = [PSSpecifier preferenceSpecifierNamed:[NSString stringWithFormat:@"%@  %d", label, v]
+        target:self set:@selector(setPreferenceValue:specifier:) get:@selector(readPreferenceValue:)
+        detail:nil cell:PSSliderCell edit:nil];
+    [s setProperty:key forKey:@"key"];
+    [s setProperty:kDomain forKey:@"defaults"];
+    [s setProperty:@(def) forKey:@"default"];
+    [s setProperty:@(mn) forKey:@"min"];
+    [s setProperty:@(mx) forKey:@"max"];
+    [s setProperty:@{ @"min": @(mn), @"max": @(mx), @"label": label } forKey:@"range"];
+    return s;
+}
+
+- (void)scheduleSync {
+    static NSTimer *t = nil;
+    [t invalidate];
+    t = [NSTimer scheduledTimerWithTimeInterval:0.6 target:self selector:@selector(doSync)
+        userInfo:nil repeats:NO];
+    [[NSRunLoop mainRunLoop] addTimer:t forMode:NSRunLoopCommonModes];
+}
+
+- (void)doSync {
+    [self reloadSpecifiers]; // 重建后标题带上最新数值
+}
+
 - (PSSpecifier *)buttonSpec:(NSString *)name action:(SEL)sel {
     PSSpecifier *s = [PSSpecifier preferenceSpecifierNamed:name target:self
         set:NULL get:NULL detail:nil cell:PSButtonCell edit:nil];
@@ -149,15 +190,19 @@ static void postReload(void) {
         [specs addObject:[self switchSpec:@"展开显示素材" key:@"expandOn" def:@YES]];
         [specs addObject:expandMat];
 
-        /* 频谱: 开关 + 素材选择行(开关打开才显示); 关闭=系统频谱, 打开=隐藏频谱+播放序列帧动画 */
-        [specs addObject:[self groupSpec:@"频谱" footer:@"关闭时显示系统频谱，打开时用所选素材替换频谱。"]];
-        [specs addObject:[self switchSpec:@"频谱开关" key:@"spectrumOn" def:@NO]];
+        /* 帧率: 开关 + 素材名 + 参数行(开关打开才显示); 打开=隐藏频谱+播放序列帧动画 */
+        [specs addObject:[self groupSpec:@"帧率" footer:@"打开时用帧率素材替换频谱。大小每+1放大0.1倍; 左右/上下为单位点数。"]];
+        [specs addObject:[self switchSpec:@"帧率开关" key:@"spectrumOn" def:@NO]];
         if ([[self readPreferenceValue:[self switchSpec:@"spectrumOn" key:@"spectrumOn" def:@NO]] boolValue]) {
-            PSSpecifier *animSet = [PSSpecifier preferenceSpecifierNamed:@"素材选择" target:self
+            PSSpecifier *animSet = [PSSpecifier preferenceSpecifierNamed:@"素材名" target:self
                 set:NULL get:@selector(readSpectrumName:)
-                detail:[DIAnimSettings class] cell:PSLinkCell edit:nil];
+                detail:[DIFrameFolders class] cell:PSLinkCell edit:nil];
             [animSet setProperty:[self frameStatusName] forKey:@"value"];
             [specs addObject:animSet];
+            [specs addObject:[self numSlider:@"帧率速度" key:@"animFPS" def:50 mn:10 mx:200]];
+            [specs addObject:[self numSlider:@"素材大小" key:@"animScaleAdj" def:0 mn:-20 mx:20]];
+            [specs addObject:[self numSlider:@"左右偏移" key:@"animOffsetX3" def:0 mn:-50 mx:50]];
+            [specs addObject:[self numSlider:@"上下偏移" key:@"animOffsetY3" def:0 mn:-50 mx:50]];
         }
         _smallRow = _expandRow = -1;
         NSInteger n = 0;
@@ -241,130 +286,6 @@ static void postReload(void) {
 @implementation DIMaterialsExpand
 - (NSInteger)matMode { return 1; }
 @end
-
-#pragma mark - 频谱帧率动画设置页(纯标准specifier模式, v1.46验证不闪退; 滑杆+数值输入行)
-
-@implementation DIAnimSettings
-
-- (id)readPreferenceValue:(PSSpecifier *)spec {
-    NSString *key = [spec propertyForKey:@"key"];
-    if (!key) return nil;
-    CFPreferencesAppSynchronize((__bridge CFStringRef)kDomain);
-    id v = CFBridgingRelease(CFPreferencesCopyAppValue((__bridge CFStringRef)key, (__bridge CFStringRef)kDomain));
-    id val = v ?: [spec propertyForKey:@"default"];
-    /* 编辑行期望 NSString, 数值键转字符串, 否则点确定可能闪退 */
-    if ([spec propertyForKey:@"asEdit"] && ![val isKindOfClass:NSString.class])
-        val = [NSString stringWithFormat:@"%d", (int)round([val doubleValue])];
-    return val;
-}
-
-- (void)setPreferenceValue:(id)value specifier:(PSSpecifier *)spec {
-    NSString *key = [spec propertyForKey:@"key"];
-    if (!key.length) return;
-    /* 数值键: 统一转 double 并 clamp 到范围后存 NSNumber */
-    if ([spec propertyForKey:@"range"]) {
-        NSDictionary *range = [spec propertyForKey:@"range"];
-        if ([range isKindOfClass:NSArray.class]) { NSArray *arr = (NSArray *)range; range = arr.count ? arr[0] : @{}; }
-        double v = [value doubleValue];
-        double mn = [range[@"min"] doubleValue], mx = [range[@"max"] doubleValue];
-        if (v < mn) v = mn; if (v > mx) v = mx;
-        value = @(round(v)); // 取整
-    }
-    CFPreferencesSetAppValue((__bridge CFStringRef)key, (__bridge CFPropertyListRef)value, (__bridge CFStringRef)kDomain);
-    CFPreferencesAppSynchronize((__bridge CFStringRef)kDomain);
-    CFNotificationCenterPostNotification(CFNotificationCenterGetDarwinNotifyCenter(),
-        (__bridge CFStringRef)kNotifyStr, NULL, NULL, YES);
-    /* 数值键改动后延迟刷新, 让滑杆行与数值行互相同步 */
-    if ([spec propertyForKey:@"range"]) [self scheduleSync];
-}
-
-- (void)scheduleSync {
-    static NSTimer *t = nil;
-    [t invalidate];
-    t = [NSTimer scheduledTimerWithTimeInterval:0.6 target:self selector:@selector(doSync)
-        userInfo:nil repeats:NO];
-    [[NSRunLoop mainRunLoop] addTimer:t forMode:NSRunLoopCommonModes];
-}
-
-- (void)doSync {
-    [self reloadSpecifiers];
-}
-
-- (PSSpecifier *)groupSpec:(NSString *)header footer:(NSString *)footer {
-    PSSpecifier *s = [PSSpecifier preferenceSpecifierNamed:header target:nil
-        set:NULL get:NULL detail:nil cell:PSGroupCell edit:nil];
-    if (footer) [s setProperty:footer forKey:@"footerText"];
-    return s;
-}
-
-- (PSSpecifier *)switchSpec:(NSString *)name key:(NSString *)key def:(id)def {
-    PSSpecifier *s = [PSSpecifier preferenceSpecifierNamed:name target:self
-        set:@selector(setPreferenceValue:specifier:) get:@selector(readPreferenceValue:)
-        detail:nil cell:PSSwitchCell edit:nil];
-    [s setProperty:key forKey:@"key"];
-    [s setProperty:kDomain forKey:@"defaults"];
-    [s setProperty:def forKey:@"default"];
-    return s;
-}
-
-/* 滑杆行: 文字在横杠前(标题), 数值在拖动气泡里显示 */
-- (PSSpecifier *)sliderSpec:(NSString *)name key:(NSString *)key def:(double)def min:(double)mn max:(double)mx {
-    PSSpecifier *s = [PSSpecifier preferenceSpecifierNamed:name target:self
-        set:@selector(setPreferenceValue:specifier:) get:@selector(readPreferenceValue:)
-        detail:nil cell:PSSliderCell edit:nil];
-    [s setProperty:key forKey:@"key"];
-    [s setProperty:kDomain forKey:@"defaults"];
-    [s setProperty:@(def) forKey:@"default"];
-    [s setProperty:@(mn) forKey:@"min"];
-    [s setProperty:@(mx) forKey:@"max"];
-    [s setProperty:@{ @"min": @(mn), @"max": @(mx) } forKey:@"range"];
-    return s;
-}
-
-/* 数值行: 点击弹键盘手动输入精确值(与上一行滑杆共用key, 范围clamp) */
-- (PSSpecifier *)editSpec:(NSString *)name key:(NSString *)key mn:(double)mn max:(double)mx {
-    PSSpecifier *s = [PSSpecifier preferenceSpecifierNamed:name target:self
-        set:@selector(setPreferenceValue:specifier:) get:@selector(readPreferenceValue:)
-        detail:nil cell:PSEditTextCell edit:nil];
-    [s setProperty:key forKey:@"key"];
-    [s setProperty:kDomain forKey:@"defaults"];
-    [s setProperty:@{ @"min": @(mn), @"max": @(mx) } forKey:@"range"];
-    [s setProperty:@YES forKey:@"asEdit"];
-    return s;
-}
-
-- (NSArray *)specifiers {
-    if (!_specifiers) {
-        NSMutableArray *g = [NSMutableArray array];
-        /* 0 灵动岛动画 */
-        [g addObject:[self groupSpec:@"灵动岛动画" footer:@"打开后隐藏系统频谱并在岛内显示帧率素材动画。"]];
-        [g addObject:[self switchSpec:@"启用动画" key:@"spectrumOn" def:@NO]];
-        /* 1 动画设置 */
-        [g addObject:[self groupSpec:@"动画设置" footer:@"动画帧率 10~200, 默认 50。拖动滑杆或点击下方数值行手动输入精确值。"]];
-        [g addObject:[self sliderSpec:@"动画帧率" key:@"animFPS" def:50 min:10 max:200]];
-        [g addObject:[self editSpec:@"帧率数值" key:@"animFPS" mn:10 max:200]];
-        /* 2 位置缩放设置 */
-        [g addObject:[self groupSpec:@"位置缩放设置" footer:@"已按当前校准位置为基数。大小: 0=当前大小, 每+1放大0.1倍(-20~20); 左右/上下: 0=当前位置, 单位点数(-50~50)。"]];
-        [g addObject:[self sliderSpec:@"素材大小" key:@"animScaleAdj" def:0 min:-20 max:20]];
-        [g addObject:[self editSpec:@"大小数值" key:@"animScaleAdj" mn:-20 max:20]];
-        [g addObject:[self sliderSpec:@"左右偏移" key:@"animOffsetX3" def:0 min:-50 max:50]];
-        [g addObject:[self editSpec:@"左右数值" key:@"animOffsetX3" mn:-50 max:50]];
-        [g addObject:[self sliderSpec:@"上下偏移" key:@"animOffsetY3" def:0 min:-50 max:50]];
-        [g addObject:[self editSpec:@"上下数值" key:@"animOffsetY3" mn:-50 max:50]];
-        /* 3 素材设置 */
-        [g addObject:[self groupSpec:@"素材设置" footer:@"素材目录: /var/mobile/灵动岛/帧率素材 (每个子文件夹=一套素材, png/jpg 按文件名数字顺序播放)。"]];
-        PSSpecifier *folder = [PSSpecifier preferenceSpecifierNamed:@"素材名" target:self
-            set:NULL get:NULL detail:[DIFrameFolders class] cell:PSLinkCell edit:nil];
-        [g addObject:folder];
-        _specifiers = g;
-    }
-    return _specifiers;
-}
-
-@end
-
-
-#pragma mark - 素材文件夹选择(帧率素材目录下的全部子文件夹)
 
 @implementation DIFrameFolders
 
