@@ -253,7 +253,7 @@ static void postReload(void) {
     if (!_specifiers) {
         PSSpecifier *g = [PSSpecifier preferenceSpecifierNamed:@"动画设置" target:nil
             set:NULL get:NULL detail:nil cell:PSGroupCell edit:nil];
-        _specifiers = @[g];
+        _specifiers = [NSMutableArray arrayWithObject:g];
     }
     return _specifiers;
 }
