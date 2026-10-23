@@ -216,6 +216,10 @@ static void postReload(void) {
 - (NSInteger)matMode { return 1; }
 @end
 
+@implementation DIMaterialsSpectrum
+- (NSInteger)matMode { return 2; }
+@end
+
 @implementation DIMaterialsController (Internal)
 
 - (NSArray *)specifiers {
