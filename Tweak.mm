@@ -367,6 +367,9 @@ static void updateSingleVideo(UIWindow *win); // 前置声明
     CGSize bs = pl ? pl.bounds.size : host.bounds.size;
     CGRect f = diSpecRegion(bs.width, bs.height);
     if (!CGRectEqualToRect(self.frame, f)) self.frame = f;
+    // 关键: 内部图片视图必须跟随外层尺寸(曾因初始化 CGRectZero 后未更新, 一直 0x0 不可见)
+    CGRect ivf = self.bounds;
+    if (!CGRectEqualToRect(_iv.frame, ivf)) _iv.frame = ivf;
     if (self.hidden) self.hidden = NO;
     // 帧推进: 按动画帧率
     CFTimeInterval now = self.link.timestamp;

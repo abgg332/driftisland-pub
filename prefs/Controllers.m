@@ -248,7 +248,15 @@ static void postReload(void) {
     NSMutableDictionary<NSString *, UILabel *> *_labels;
 }
 
-- (NSArray *)specifiers { return @[]; } /* 全部自绘, 不用 specifier 表格 */
+- (NSArray *)specifiers {
+    /* 自绘数据源(table delegate 全部由本类实现), 但 PSListController 内部要求至少一条 specifier(空数组会越界崩溃) */
+    if (!_specifiers) {
+        PSSpecifier *g = [PSSpecifier preferenceSpecifierNamed:@"动画设置" target:nil
+            set:NULL get:NULL detail:nil cell:PSGroupCell edit:nil];
+        _specifiers = @[g];
+    }
+    return _specifiers;
+}
 
 - (double)numForKey:(NSString *)key def:(double)def {
     CFPreferencesAppSynchronize((__bridge CFStringRef)kDomain);
