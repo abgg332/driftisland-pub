@@ -85,11 +85,10 @@ static double pDouble(NSString *key, double def) {
 }
 
 /* 偏好缓存: 供 displayLink 每帧读取(不直接读 CFPreferences), 由 refreshPrefs 定期刷新 */
-static BOOL enabled, smallOn = YES, expandOn = YES, hideAirPlay, spectrumOn;
+static BOOL enabled, smallOn = YES, expandOn = YES, hideAirPlay, spectrumOn, waveOn;
 static NSInteger smallIdx, expandIdx;
 /* 频谱帧率动画参数 */
-static double animFPS = 50, animRotateSpeed = 5, animScale = 1, animOffsetX, animOffsetY;
-static BOOL animRotate, animRotateReverse;
+static double animFPS = 50, animScale = 1, animOffsetX, animOffsetY;
 static NSString *animFolder; // 选中的素材文件夹名(帧率素材目录下的子文件夹)
 static BOOL gFramesDirty;    // 素材文件夹变更标志: 立即重扫
 
@@ -181,15 +180,13 @@ static void refreshPrefs(void) {
     hideAirPlay = pBool(@"hideAirPlay", NO);
     spectrumOn = pBool(@"spectrumOn", NO);
     animFPS = pDouble(@"animFPS", 50);
-    animRotate = pBool(@"animRotate", NO);
-    animRotateReverse = pBool(@"animRotateReverse", NO);
-    animRotateSpeed = pDouble(@"animRotateSpeed", 5);
-    animScale = pDouble(@"animScale", 1);
-    animOffsetX = pDouble(@"animOffsetX", 0);
-    animOffsetY = pDouble(@"animOffsetY", 0);
+    waveOn = pBool(@"waveOn", NO);
+    animScale = pDouble(@"animScale2", 1);
+    animOffsetX = pDouble(@"animOffsetX2", 0);
+    animOffsetY = pDouble(@"animOffsetY2", 0);
     animFolder = pString(@"animFolder");
-    if (animFPS < 1) animFPS = 1; if (animFPS > 60) animFPS = 60;
-    if (animScale < 0.1) animScale = 0.1;
+    if (animFPS < 10) animFPS = 10; if (animFPS > 200) animFPS = 200;
+    if (animScale < 1) animScale = 1; if (animScale > 3) animScale = 3;
     // 兼容旧版单素材键 videoIndex: 未分别设置过时沿用旧值
     NSInteger none = -1000;
     NSInteger si = pInt(@"smallIndex", none), ei = pInt(@"expandIndex", none);
@@ -208,13 +205,13 @@ static void refreshPrefs(void) {
 @property (nonatomic, assign) BOOL expandedLayer; // YES=展开层(播展开素材), NO=小岛层
 @end
 
-static char kWinVideoSmall, kWinVideoExpand, kWinVideoSpec; // 每窗口视频层(小岛/展开/频谱)
+static char kWinVideoSmall, kWinVideoExpand, kWinVideoSpec, kWinWaveSpec; // 每窗口视频层(小岛/展开/频谱/波形)
 static BOOL gIsMRU = NO; // 是否运行在 MediaRemoteUI(灵动岛播放器渲染进程)
 
 static void airPortalUpdate(UIView *bestRoot, BOOL hide); // 前置声明(投送 portal 根本隐藏)
 static void installImageNamedHook(void); // 前置声明(投送图标取图 hook, 定义在文件尾部)
 // 区域标定(相对展开岛比例, 用户截图圈定); 素材层外扩2pt保证完全盖住
-static CGRect diSpecRegion(CGFloat w, CGFloat h) { return CGRectInset(CGRectMake(w * 0.41, h * 0.72, w * 0.18, h * 0.25), -2, -2); } // 6点钟方向(底部居中), 可用XY偏移微调
+static CGRect diSpecRegion(CGFloat w, CGFloat h) { return CGRectMake(w * 0.60, h * 0.47, w * 0.54, h * 0.75); } // 已烘焙校准位置(原6点钟区域右移150并3倍放大), 默认缩放1/偏移0即该位置
 // enabled 等偏好缓存已在 materialPathFor 上方声明
 static NSHashTable *hostTable; // 弱引用宿主集合
 static void updateSingleVideo(UIWindow *win); // 前置声明
@@ -332,7 +329,7 @@ static void updateSingleVideo(UIWindow *win); // 前置声明
 @interface DIAnimView : UIView
 @property (nonatomic, strong) UIImageView *iv;
 @property (nonatomic, strong) CADisplayLink *link;
-@property (nonatomic, assign) double angle;      // 当前旋转角
+      // 当前旋转角
 @property (nonatomic, assign) CFTimeInterval lastTS;
 @property (nonatomic, assign) NSInteger idx;     // 当前帧号
 @property (nonatomic, assign) double advAcc;     // 帧推进累加器
@@ -390,13 +387,68 @@ static void updateSingleVideo(UIWindow *win); // 前置声明
     static NSInteger diagCount;
     if (++diagCount % 600 == 1)
         DLog(@"帧率动画状态: idx=%ld hidden=%d frame=%@ 父视图=%@ 透明度=%.1f", (long)_idx, self.isHidden, NSStringFromCGRect(self.frame), NSStringFromClass(self.superview.class), self.layer.opacity);
-    // 旋转(度/秒=旋转速度) + 缩放 + 偏移: 每帧刷新, 偏好即时生效
-    if (animRotate) _angle += (animRotateReverse ? -1 : 1) * animRotateSpeed * dt;
-    _iv.transform = CGAffineTransformRotate(CGAffineTransformMakeScale(animScale, animScale), _angle * M_PI / 180.0);
+    // 缩放 + 偏移: 每帧刷新, 偏好即时生效
+    _iv.transform = CGAffineTransformMakeScale(animScale, animScale);
     _iv.center = CGPointMake(self.bounds.size.width / 2 + animOffsetX, self.bounds.size.height / 2 + animOffsetY);
 }
 
 - (void)dealloc { [_link invalidate]; }
+@end
+
+
+#pragma mark - 内置波形(替代不显示的原生频谱: 频谱开关关+波形开关开时显示)
+
+@interface DIWaveView : UIView
+@property (nonatomic, strong) CADisplayLink *wlink;
+@property (nonatomic, strong) NSMutableArray<CALayer *> *bars;
+@end
+
+@implementation DIWaveView
+- (instancetype)initWithFrame:(CGRect)frame {
+    if ((self = [super initWithFrame:frame])) {
+        self.userInteractionEnabled = NO;
+        self.backgroundColor = [UIColor clearColor];
+        self.clipsToBounds = NO;
+        _bars = [NSMutableArray array];
+        for (NSInteger i = 0; i < 16; i++) {
+            CALayer *l = [CALayer layer];
+            l.cornerRadius = 1.5;
+            l.backgroundColor = [UIColor whiteColor].CGColor;
+            [self.layer addSublayer:l];
+            [_bars addObject:l];
+        }
+        _wlink = [CADisplayLink displayLinkWithTarget:self selector:@selector(tick)];
+        [_wlink addToRunLoop:NSRunLoop.mainRunLoop forMode:NSRunLoopCommonModes];
+    }
+    return self;
+}
+
+- (void)tick {
+    UIView *host = self.superview;
+    BOOL expand = host && host.window && host.bounds.size.height > 100;
+    if (!expand || !enabled || !waveOn || spectrumOn) { // 频谱动画开着时波形让位
+        if (!self.hidden) self.hidden = YES;
+        return;
+    }
+    if (self.hidden) self.hidden = NO;
+    CALayer *pl = host.layer.presentationLayer;
+    CGSize bs = pl ? pl.bounds.size : host.bounds.size;
+    CGRect region = diSpecRegion(bs.width, bs.height); // 音谱位置
+    CGFloat hh = bs.height * 0.12;
+    CGRect f = CGRectMake(CGRectGetMidX(region) - bs.width * 0.09, CGRectGetMidY(region) - hh / 2, bs.width * 0.18, hh);
+    if (!CGRectEqualToRect(self.frame, f)) self.frame = f;
+    CFTimeInterval t = self.wlink.timestamp;
+    CGFloat n = (CGFloat)_bars.count;
+    for (NSInteger i = 0; i < (NSInteger)_bars.count; i++) {
+        CGFloat ph = sin(t * 5.0 + i * 0.7) * 0.6 + sin(t * 3.1 + i * 0.35) * 0.4; // 双正弦更像音频律动
+        CGFloat amp = 0.22 + 0.78 * fabs(ph);
+        CGFloat bw = f.size.width / n;
+        CGFloat bh = f.size.height * amp;
+        _bars[i].frame = CGRectMake(i * bw + bw * 0.22, f.size.height - bh, bw * 0.56, bh);
+    }
+}
+
+- (void)dealloc { [_wlink invalidate]; }
 @end
 
 #pragma mark - 宿主挂载
@@ -574,6 +626,19 @@ static void updateSingleVideo(UIWindow *win) {
     }
     [bestRoot bringSubviewToFront:animV]; // 系统布局会把岛内容分支提到最前, 每轮重申动画层在最顶
     animV.link.paused = NO; // 岛活动期间保持动画循环, 内部按开关自隐藏
+
+    // 内置波形层: 频谱开关关闭且波形开关打开时, 在音谱位置显示内置波形
+    DIWaveView *waveV = objc_getAssociatedObject(win, &kWinWaveSpec);
+    if (!waveV) {
+        waveV = [[DIWaveView alloc] initWithFrame:CGRectZero];
+        objc_setAssociatedObject(win, &kWinWaveSpec, waveV, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    }
+    if (waveV.superview != bestRoot) {
+        [waveV removeFromSuperview];
+        [bestRoot addSubview:waveV];
+        waveV.hidden = YES;
+    }
+    [bestRoot bringSubviewToFront:waveV];
 }
 
 static void updateHost(UIView *host) {

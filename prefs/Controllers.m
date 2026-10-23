@@ -150,8 +150,9 @@ static void postReload(void) {
         [specs addObject:expandMat];
 
         /* 频谱: 开关 + 素材选择行(开关打开才显示); 关闭=系统频谱, 打开=隐藏频谱+播放序列帧动画 */
-        [specs addObject:[self groupSpec:@"频谱" footer:@"关闭时显示系统频谱，打开时用所选素材替换频谱。"]];
+        [specs addObject:[self groupSpec:@"频谱" footer:@"频谱开关: 打开时用帧率素材替换频谱。内置波形: 频谱开关关闭时, 在音谱位置显示内置波形(原生频谱在视频背景下不显示)。"]];
         [specs addObject:[self switchSpec:@"频谱开关" key:@"spectrumOn" def:@NO]];
+        [specs addObject:[self switchSpec:@"内置波形" key:@"waveOn" def:@NO]];
         if ([[self readPreferenceValue:[self switchSpec:@"spectrumOn" key:@"spectrumOn" def:@NO]] boolValue]) {
             PSSpecifier *animSet = [PSSpecifier preferenceSpecifierNamed:@"素材选择" target:self
                 set:NULL get:@selector(readSpectrumName:)
@@ -340,21 +341,17 @@ static void postReload(void) {
         [g addObject:[self groupSpec:@"灵动岛动画" footer:@"打开后隐藏系统频谱并在岛内显示帧率素材动画。"]];
         [g addObject:[self switchSpec:@"启用动画" key:@"spectrumOn" def:@NO]];
         /* 1 动画设置 */
-        [g addObject:[self groupSpec:@"动画设置" footer:@"帧率/速度拖动滑杆设置, 或点击下方数值行手动输入精确值。"]];
-        [g addObject:[self sliderSpec:@"动画帧率" key:@"animFPS" def:50 min:10 max:60]];
-        [g addObject:[self editSpec:@"帧率数值" key:@"animFPS" mn:10 max:60]];
-        [g addObject:[self switchSpec:@"启用素材旋转" key:@"animRotate" def:@NO]];
-        [g addObject:[self switchSpec:@"素材旋转反转" key:@"animRotateReverse" def:@NO]];
-        [g addObject:[self sliderSpec:@"旋转速度" key:@"animRotateSpeed" def:5 min:1 max:30]];
-        [g addObject:[self editSpec:@"速度数值" key:@"animRotateSpeed" mn:1 max:30]];
+        [g addObject:[self groupSpec:@"动画设置" footer:@"动画帧率 10~200, 默认 50。拖动滑杆或点击下方数值行手动输入精确值。"]];
+        [g addObject:[self sliderSpec:@"动画帧率" key:@"animFPS" def:50 min:10 max:200]];
+        [g addObject:[self editSpec:@"帧率数值" key:@"animFPS" mn:10 max:200]];
         /* 2 位置缩放设置 */
-        [g addObject:[self groupSpec:@"位置缩放设置" footer:@"大小为缩放倍数; 左右/上下为偏移点数(正右正下)。"]];
-        [g addObject:[self sliderSpec:@"素材大小" key:@"animScale" def:3 min:1 max:5]];
-        [g addObject:[self editSpec:@"大小数值" key:@"animScale" mn:1 max:5]];
-        [g addObject:[self sliderSpec:@"左右偏移" key:@"animOffsetX" def:150 min:0 max:300]];
-        [g addObject:[self editSpec:@"左右数值" key:@"animOffsetX" mn:0 max:300]];
-        [g addObject:[self sliderSpec:@"上下偏移" key:@"animOffsetY" def:0 min:-100 max:100]];
-        [g addObject:[self editSpec:@"上下数值" key:@"animOffsetY" mn:-100 max:100]];
+        [g addObject:[self groupSpec:@"位置缩放设置" footer:@"默认位置即音谱处。素材大小 1~3 整数步进; 左右/上下偏移 -50~50 微调。"]];
+        [g addObject:[self sliderSpec:@"素材大小" key:@"animScale2" def:1 min:1 max:3]];
+        [g addObject:[self editSpec:@"大小数值" key:@"animScale2" mn:1 max:3]];
+        [g addObject:[self sliderSpec:@"左右偏移" key:@"animOffsetX2" def:0 min:-50 max:50]];
+        [g addObject:[self editSpec:@"左右数值" key:@"animOffsetX2" mn:-50 max:50]];
+        [g addObject:[self sliderSpec:@"上下偏移" key:@"animOffsetY2" def:0 min:-50 max:50]];
+        [g addObject:[self editSpec:@"上下数值" key:@"animOffsetY2" mn:-50 max:50]];
         /* 3 素材设置 */
         [g addObject:[self groupSpec:@"素材设置" footer:@"素材目录: /var/mobile/灵动岛/帧率素材 (每个子文件夹=一套素材, png/jpg 按文件名数字顺序播放)。"]];
         PSSpecifier *folder = [PSSpecifier preferenceSpecifierNamed:@"素材名" target:self
