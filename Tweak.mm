@@ -71,6 +71,10 @@ static NSArray<NSString *> *materialList(void) {
     return out;
 }
 
+/* 偏好缓存: 供 displayLink 每帧读取(不直接读 CFPreferences), 由 refreshPrefs 定期刷新 */
+static BOOL enabled, smallOn = YES, expandOn = YES;
+static NSInteger smallIdx, expandIdx;
+
 static NSString *materialPathFor(BOOL expanded) {
     NSArray<NSString *> *list = materialList();
     if (!list.count) return nil;
@@ -81,9 +85,6 @@ static NSString *materialPathFor(BOOL expanded) {
     return [kMaterialDir stringByAppendingPathComponent:list[idx]];
 }
 
-/* 偏好缓存: 供 displayLink 每帧读取(不直接读 CFPreferences), 由 refreshPrefs 定期刷新 */
-static BOOL enabled, smallOn = YES, expandOn = YES;
-static NSInteger smallIdx, expandIdx;
 static void refreshPrefs(void) {
     enabled = pBool(@"enabled", NO);
     logEnabled = pBool(@"logging", NO);
@@ -104,7 +105,6 @@ static void refreshPrefs(void) {
 @property (nonatomic, strong) AVPlayerLooper *looper;
 @property (nonatomic, copy) NSString *currentPath;
 @property (nonatomic, strong) CADisplayLink *syncLink;
-@private NSInteger _missCount;
 @end
 
 static char kWinVideoKey; // 每窗口唯一视频层
@@ -112,7 +112,9 @@ static char kWinVideoKey; // 每窗口唯一视频层
 static NSHashTable *hostTable; // 弱引用宿主集合
 static void updateSingleVideo(UIWindow *win); // 前置声明
 
-@implementation DIVideoView
+@implementation DIVideoView {
+    NSInteger _missCount; // 连续不可见帧计数, 攒够才暂停 displayLink(防瞬时抖动误停)
+}
 
 + (Class)layerClass { return AVPlayerLayer.class; }
 
