@@ -247,7 +247,7 @@ static void postReload(void) {
         NSArray *defs   = @[@50, @0, @0, @0];
         NSInteger i = indexPath.row - 2;
         int v = [self numValue:keys[i] def:[defs[i] intValue]];
-        NSDictionary *range = @{ @"animFPS": @[@(10), @(200)],
+        NSArray *range = @{ @"animFPS": @[@(10), @(200)],
                                  @"animScaleAdj": @[@(-20), @(20)],
                                  @"animOffsetX3": @[@(-50), @(50)],
                                  @"animOffsetY3": @[@(-50), @(50)] }[keys[i]];
