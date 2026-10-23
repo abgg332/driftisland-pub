@@ -242,26 +242,13 @@ static void postReload(void) {
 - (NSInteger)matMode { return 1; }
 @end
 
-#pragma mark - 频谱帧率动画设置页(与素材图对照: 灵动岛动画/动画设置/位置缩放设置/素材设置)
+#pragma mark - 频谱帧率动画设置页(手写UI: 文字左+滑杆中+数值右, 与素材图逐行一致)
 
-@implementation DIAnimSettings
-
-- (id)readPreferenceValue:(PSSpecifier *)spec {
-    NSString *key = [spec propertyForKey:@"key"];
-    if (!key) return nil;
-    CFPreferencesAppSynchronize((__bridge CFStringRef)kDomain);
-    id v = CFBridgingRelease(CFPreferencesCopyAppValue((__bridge CFStringRef)key, (__bridge CFStringRef)kDomain));
-    return v ?: [spec propertyForKey:@"default"];
+@implementation DIAnimSettings {
+    NSMutableDictionary<NSString *, UILabel *> *_labels;
 }
 
-- (void)setPreferenceValue:(id)value specifier:(PSSpecifier *)spec {
-    NSString *key = [spec propertyForKey:@"key"];
-    if (!key.length) return;
-    CFPreferencesSetAppValue((__bridge CFStringRef)key, (__bridge CFPropertyListRef)value, (__bridge CFStringRef)kDomain);
-    CFPreferencesAppSynchronize((__bridge CFStringRef)kDomain);
-    CFNotificationCenterPostNotification(CFNotificationCenterGetDarwinNotifyCenter(),
-        (__bridge CFStringRef)kNotifyStr, NULL, NULL, YES);
-}
+- (NSArray *)specifiers { return @[]; } /* 自绘UI, 不用 Preferences 表格 */
 
 - (double)numForKey:(NSString *)key def:(double)def {
     CFPreferencesAppSynchronize((__bridge CFStringRef)kDomain);
@@ -269,77 +256,208 @@ static void postReload(void) {
     return v ? [v doubleValue] : def;
 }
 
-- (NSString *)folderName {
+- (void)saveNum:(double)v forKey:(NSString *)key {
+    CFPreferencesSetAppValue((__bridge CFStringRef)key, (__bridge CFPropertyListRef)@(v), (__bridge CFStringRef)kDomain);
+    CFPreferencesAppSynchronize((__bridge CFStringRef)kDomain);
+    CFNotificationCenterPostNotification(CFNotificationCenterGetDarwinNotifyCenter(),
+        (__bridge CFStringRef)kNotifyStr, NULL, NULL, YES);
+}
+
+- (BOOL)boolForKey:(NSString *)key def:(BOOL)def {
+    CFPreferencesAppSynchronize((__bridge CFStringRef)kDomain);
+    id v = CFBridgingRelease(CFPreferencesCopyAppValue((__bridge CFStringRef)key, (__bridge CFStringRef)kDomain));
+    return v ? [v boolValue] : def;
+}
+
+- (void)saveBool:(BOOL)v forKey:(NSString *)key {
+    CFPreferencesSetAppValue((__bridge CFStringRef)key, (__bridge CFPropertyListRef)@(v), (__bridge CFStringRef)kDomain);
+    CFPreferencesAppSynchronize((__bridge CFStringRef)kDomain);
+    CFNotificationCenterPostNotification(CFNotificationCenterGetDarwinNotifyCenter(),
+        (__bridge CFStringRef)kNotifyStr, NULL, NULL, YES);
+}
+
+- (void)loadView {
+    _labels = [NSMutableDictionary dictionary];
+    UIScrollView *scroll = [[UIScrollView alloc] initWithFrame:CGRectZero];
+    scroll.backgroundColor = UIColor.systemGroupedBackgroundColor;
+    scroll.alwaysBounceVertical = YES;
+    scroll.keyboardDismissMode = UIScrollViewKeyboardDismissModeOnDrag;
+    self.view = scroll;
+    self.navigationItem.title = @"动画设置";
+
+    UIStackView *stack = [[UIStackView alloc] init];
+    stack.axis = UILayoutConstraintAxisVertical;
+    stack.spacing = 10;
+    stack.translatesAutoresizingMaskIntoConstraints = NO;
+    [scroll addSubview:stack];
+
+    UIView *content = stack;
+    [NSLayoutConstraint activateConstraints:@[
+        [content.leadingAnchor constraintEqualToAnchor:scroll.contentLayoutGuide.leadingAnchor constant:16],
+        [content.trailingAnchor constraintEqualToAnchor:scroll.contentLayoutGuide.trailingAnchor constant:-16],
+        [content.topAnchor constraintEqualToAnchor:scroll.contentLayoutGuide.topAnchor constant:12],
+        [content.bottomAnchor constraintEqualToAnchor:scroll.contentLayoutGuide.bottomAnchor constant:-24],
+        [content.widthAnchor constraintEqualToAnchor:scroll.frameLayoutGuide.widthAnchor constant:-32],
+    ]];
+
+    /* —— 与素材图逐行一致 —— */
+    [stack addArrangedSubview:[self headerLabel:@"灵动岛动画"]];
+    [stack addArrangedSubview:[self cardWithRows:@[
+        [self switchRow:@"启用动画" key:@"spectrumOn" def:NO],
+    ]]];
+
+    [stack addArrangedSubview:[self headerLabel:@"动画设置"]];
+    [stack addArrangedSubview:[self cardWithRows:@[
+        [self sliderRow:@"动画帧率" key:@"animFPS" def:50 min:1 max:60],
+        [self switchRow:@"启用素材旋转" key:@"animRotate" def:NO],
+        [self switchRow:@"素材旋转反转" key:@"animRotateReverse" def:NO],
+        [self sliderRow:@"旋转速度" key:@"animRotateSpeed" def:5 min:1 max:30],
+    ]]];
+
+    [stack addArrangedSubview:[self headerLabel:@"位置缩放设置"]];
+    [stack addArrangedSubview:[self cardWithRows:@[
+        [self sliderRow:@"缩放倍数" key:@"animScale" def:1 min:0.2 max:3],
+        [self sliderRow:@"X偏移" key:@"animOffsetX" def:0 min:-150 max:150],
+        [self sliderRow:@"Y偏移" key:@"animOffsetY" def:0 min:-150 max:150],
+    ]]];
+
+    [stack addArrangedSubview:[self headerLabel:@"素材设置"]];
+    [stack addArrangedSubview:[self cardWithRows:@[
+        [self folderRow],
+    ]]];
+}
+
+- (UILabel *)headerLabel:(NSString *)text {
+    UILabel *l = [UILabel new];
+    l.text = text;
+    l.font = [UIFont systemFontOfSize:13 weight:UIFontWeightSemibold];
+    l.textColor = UIColor.secondaryLabelColor;
+    return l;
+}
+
+/* 白色圆角卡片包住若干行 */
+- (UIView *)cardWithRows:(NSArray *)rows {
+    UIStackView *v = [[UIStackView alloc] init];
+    v.axis = UILayoutConstraintAxisVertical;
+    v.spacing = 14;
+    v.layoutMargins = UIEdgeInsetsMake(14, 16, 14, 16);
+    v.isLayoutMarginsRelativeArrangement = YES;
+    for (UIView *r in rows) [v addArrangedSubview:r];
+    UIView *card = [[UIView alloc] init];
+    card.backgroundColor = UIColor.secondarySystemGroupedBackgroundColor;
+    card.layer.cornerRadius = 12;
+    [card addSubview:v];
+    v.translatesAutoresizingMaskIntoConstraints = NO;
+    [NSLayoutConstraint activateConstraints:@[
+        [v.topAnchor constraintEqualToAnchor:card.topAnchor],
+        [v.bottomAnchor constraintEqualToAnchor:card.bottomAnchor],
+        [v.leadingAnchor constraintEqualToAnchor:card.leadingAnchor],
+        [v.trailingAnchor constraintEqualToAnchor:card.trailingAnchor],
+    ]];
+    return card;
+}
+
+/* 行: 文字(左) + 滑杆(中) + 数值(右, 实时刷新) */
+- (UIView *)sliderRow:(NSString *)title key:(NSString *)key def:(double)def min:(double)mn max:(double)mx {
+    UILabel *name = [UILabel new];
+    name.text = title;
+    name.font = [UIFont systemFontOfSize:16 weight:UIFontWeightSemibold];
+    [name setContentCompressionResistancePriority:UILayoutPriorityRequired forAxis:UILayoutConstraintAxisHorizontal];
+
+    UISlider *slider = [UISlider new];
+    slider.minimumValue = mn;
+    slider.maximumValue = mx;
+    slider.value = [self numForKey:key def:def];
+
+    UILabel *val = [UILabel new];
+    val.text = [NSString stringWithFormat:@"%.2f", slider.value];
+    val.font = [UIFont monospacedDigitSystemFontOfSize:16 weight:UIFontWeightRegular];
+    val.textAlignment = NSTextAlignmentRight;
+    [val setContentCompressionResistancePriority:UILayoutPriorityRequired forAxis:UILayoutConstraintAxisHorizontal];
+    _labels[key] = val;
+
+    [slider addTarget:self action:@selector(sliderChanged:) forControlEvents:UIControlEventValueChanged];
+    objc_setAssociatedObject(slider, "key", key, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+
+    UIStackView *row = [[UIStackView alloc] initWithArrangedSubviews:@[name, slider, val]];
+    row.axis = UILayoutConstraintAxisHorizontal;
+    row.spacing = 10;
+    row.alignment = UIStackViewAlignmentCenter;
+    [slider.widthAnchor constraintGreaterThanOrEqualToConstant:110].active = YES;
+    return row;
+}
+
+- (void)sliderChanged:(UISlider *)slider {
+    NSString *key = objc_getAssociatedObject(slider, "key");
+    [self saveNum:slider.value forKey:key];
+    UILabel *val = _labels[key];
+    val.text = [NSString stringWithFormat:@"%.2f", slider.value];
+}
+
+/* 行: 文字(左) + 开关(右) */
+- (UIView *)switchRow:(NSString *)title key:(NSString *)key def:(BOOL)def {
+    UILabel *name = [UILabel new];
+    name.text = title;
+    name.font = [UIFont systemFontOfSize:16 weight:UIFontWeightSemibold];
+
+    UISwitch *sw = [UISwitch new];
+    sw.on = [self boolForKey:key def:def];
+    [sw addTarget:self action:@selector(switchChanged:) forControlEvents:UIControlEventValueChanged];
+    objc_setAssociatedObject(sw, "key", key, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+
+    UIStackView *row = [[UIStackView alloc] initWithArrangedSubviews:@[name, [[UIView alloc] init], sw]];
+    row.axis = UILayoutConstraintAxisHorizontal;
+    row.spacing = 10;
+    return row;
+}
+
+- (void)switchChanged:(UISwitch *)sw {
+    NSString *key = objc_getAssociatedObject(sw, "key");
+    [self saveBool:sw.on forKey:key];
+}
+
+/* 行: 素材名(左) + 当前文件夹(右) + 箭头, 点击进入文件夹选择 */
+- (UIView *)folderRow {
+    UILabel *name = [UILabel new];
+    name.text = @"素材名";
+    name.font = [UIFont systemFontOfSize:16 weight:UIFontWeightSemibold];
+
     CFPreferencesAppSynchronize((__bridge CFStringRef)kDomain);
     id v = CFBridgingRelease(CFPreferencesCopyAppValue(CFSTR("animFolder"), (__bridge CFStringRef)kDomain));
-    if ([v isKindOfClass:NSString.class] && [(NSString *)v length]) return v;
-    return @"默认(全部帧)";
+    NSString *cur = ([v isKindOfClass:NSString.class] && [(NSString *)v length]) ? v : @"默认(第一个文件夹)";
+    UILabel *val = [UILabel new];
+    val.text = cur;
+    val.font = [UIFont systemFontOfSize:16];
+    val.textColor = UIColor.secondaryLabelColor;
+
+    UILabel *chevron = [UILabel new];
+    chevron.text = @"›";
+    chevron.font = [UIFont systemFontOfSize:20];
+    chevron.textColor = UIColor.tertiaryLabelColor;
+
+    UIButton *btn = [UIButton buttonWithType:UIButtonTypeSystem];
+    btn.backgroundColor = [UIColor clearColor];
+    [btn addTarget:self action:@selector(pushFolders) forControlEvents:UIControlEventTouchUpInside];
+
+    UIStackView *row = [[UIStackView alloc] initWithArrangedSubviews:@[name, [[UIView alloc] init], val, chevron]];
+    row.axis = UILayoutConstraintAxisHorizontal;
+    row.spacing = 8;
+    row.alignment = UIStackViewAlignmentCenter;
+
+    // 全行可点: 透明按钮盖在整行上
+    btn.translatesAutoresizingMaskIntoConstraints = NO;
+    [row addSubview:btn];
+    [NSLayoutConstraint activateConstraints:@[
+        [btn.topAnchor constraintEqualToAnchor:row.topAnchor],
+        [btn.bottomAnchor constraintEqualToAnchor:row.bottomAnchor],
+        [btn.leadingAnchor constraintEqualToAnchor:row.leadingAnchor],
+        [btn.trailingAnchor constraintEqualToAnchor:row.trailingAnchor],
+    ]];
+    return row;
 }
 
-- (PSSpecifier *)switchSpec:(NSString *)name key:(NSString *)key def:(id)def {
-    PSSpecifier *s = [PSSpecifier preferenceSpecifierNamed:name target:self
-        set:@selector(setPreferenceValue:specifier:) get:@selector(readPreferenceValue:)
-        detail:nil cell:PSSwitchCell edit:nil];
-    [s setProperty:key forKey:@"key"];
-    [s setProperty:kDomain forKey:@"defaults"];
-    [s setProperty:def forKey:@"default"];
-    return s;
-}
-
-/* 滑杆行: 标题右侧带当前数值(重新进页刷新) */
-- (PSSpecifier *)sliderSpec:(NSString *)name key:(NSString *)key def:(double)def min:(double)mn max:(double)mx {
-    double cur = [self numForKey:key def:def];
-    NSString *title = [NSString stringWithFormat:@"%@   %.2f", name, cur];
-    PSSpecifier *s = [PSSpecifier preferenceSpecifierNamed:title target:self
-        set:@selector(setPreferenceValue:specifier:) get:@selector(readPreferenceValue:)
-        detail:nil cell:PSSliderCell edit:nil];
-    [s setProperty:key forKey:@"key"];
-    [s setProperty:kDomain forKey:@"defaults"];
-    [s setProperty:@(def) forKey:@"default"];
-    [s setProperty:@(mn) forKey:@"min"];
-    [s setProperty:@(mx) forKey:@"max"];
-    return s;
-}
-
-- (PSSpecifier *)groupSpec:(NSString *)header footer:(NSString *)footer {
-    PSSpecifier *s = [PSSpecifier preferenceSpecifierNamed:header target:nil
-        set:NULL get:NULL detail:nil cell:PSGroupCell edit:nil];
-    if (footer) [s setProperty:footer forKey:@"footerText"];
-    return s;
-}
-
-- (NSArray *)specifiers {
-    if (!_specifiers) {
-        NSMutableArray *specs = [NSMutableArray array];
-        [specs addObject:[self groupSpec:@"灵动岛动画" footer:nil]];
-        [specs addObject:[self switchSpec:@"启用动画" key:@"spectrumOn" def:@NO]];
-
-        [specs addObject:[self groupSpec:@"动画设置" footer:@"动画帧率 = 每秒播放的序列帧张数; 旋转速度 = 每秒旋转的度数。"]];
-        [specs addObject:[self sliderSpec:@"动画帧率" key:@"animFPS" def:50 min:1 max:60]];
-        [specs addObject:[self switchSpec:@"启用素材旋转" key:@"animRotate" def:@NO]];
-        [specs addObject:[self switchSpec:@"素材旋转反转" key:@"animRotateReverse" def:@NO]];
-        [specs addObject:[self sliderSpec:@"旋转速度" key:@"animRotateSpeed" def:5 min:1 max:30]];
-
-        [specs addObject:[self groupSpec:@"位置缩放设置" footer:@"缩放倍数相对频谱区域大小; X/Y偏移单位为点, 可把素材挪到想要的位置。"]];
-        [specs addObject:[self sliderSpec:@"缩放倍数" key:@"animScale" def:1 min:0.2 max:3]];
-        [specs addObject:[self sliderSpec:@"X偏移" key:@"animOffsetX" def:0 min:-150 max:150]];
-        [specs addObject:[self sliderSpec:@"Y偏移" key:@"animOffsetY" def:0 min:-150 max:150]];
-
-        [specs addObject:[self groupSpec:@"素材设置" footer:@"素材目录: /var/mobile/灵动岛/帧率素材 (每个子文件夹=一套素材, png/jpg 序列帧按文件名数字顺序播放)。"]];
-        PSSpecifier *mat = [PSSpecifier preferenceSpecifierNamed:@"素材名" target:self
-            set:NULL get:@selector(readFolderName)
-            detail:[DIFrameFolders class] cell:PSLinkCell edit:nil];
-        [mat setProperty:[self folderName] forKey:@"value"];
-        [specs addObject:mat];
-
-        _specifiers = specs;
-    }
-    return _specifiers;
-}
-
-- (void)reloadSpecifiers {
-    _specifiers = nil;
-    [super reloadSpecifiers];
+- (void)pushFolders {
+    [self.navigationController pushViewController:[[DIFrameFolders alloc] init] animated:YES];
 }
 
 @end

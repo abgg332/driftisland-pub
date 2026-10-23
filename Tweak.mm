@@ -110,15 +110,29 @@ static NSArray<NSString *> *framePaths(void) {
     if (c && now - t < 2.0) return c;
     NSFileManager *fm = NSFileManager.defaultManager;
     NSMutableArray<NSString *> *out = [NSMutableArray array];
-    NSString *base = animFolder.length ? [kFrameDir stringByAppendingPathComponent:animFolder] : kFrameDir;
-    if (!animFolder.length) {
-        // 未选择文件夹: 根目录下若有直属 png 则只取直属, 否则递归全部子文件夹(兼容直接解压一层)
+    NSString *base = animFolder.length ? [kFrameDir stringByAppendingPathComponent:animFolder] : nil;
+    if (!base) {
+        // 未选择文件夹: 默认用第一个子文件夹(避免多套素材混播); 根目录有直属 png 才用根目录
+        NSFileManager *fm = NSFileManager.defaultManager;
+        NSMutableArray *dirs = [NSMutableArray array];
         BOOL hasDirect = NO;
         for (NSString *n in [fm contentsOfDirectoryAtPath:kFrameDir error:NULL]) {
-            NSString *ext = n.pathExtension.lowercaseString;
-            if ([ext isEqualToString:@"png"] || [ext isEqualToString:@"jpg"] || [ext isEqualToString:@"jpeg"]) { hasDirect = YES; break; }
+            NSString *p = [kFrameDir stringByAppendingPathComponent:n];
+            BOOL isDir = NO;
+            if (![fm fileExistsAtPath:p isDirectory:&isDir]) continue;
+            if (isDir) [dirs addObject:n];
+            else {
+                NSString *ext = n.pathExtension.lowercaseString;
+                if ([ext isEqualToString:@"png"] || [ext isEqualToString:@"jpg"] || [ext isEqualToString:@"jpeg"]) hasDirect = YES;
+            }
         }
-        if (hasDirect) base = kFrameDir; // 递归扫描同样能拿到直属, 统一走递归
+        if (hasDirect || !dirs.count) base = kFrameDir;
+        else {
+            [dirs sortUsingSelector:@selector(localizedCompare:)];
+            base = [kFrameDir stringByAppendingPathComponent:dirs.firstObject];
+            static NSString *lastAuto;
+            if (![lastAuto isEqualToString:dirs.firstObject]) { lastAuto = dirs.firstObject; DLog(@"未选素材文件夹, 默认使用: %@", dirs.firstObject); }
+        }
     }
     NSMutableArray<NSString *> *stack = [NSMutableArray arrayWithObject:base];
     while (stack.count) {
@@ -364,6 +378,8 @@ static void updateSingleVideo(UIWindow *win); // 前置声明
     if (adv >= 1 && adv < frames.count * 2.0 + 10) _idx = (NSInteger)(_idx + adv) % (NSInteger)frames.count;
     UIImage *img = frameImage(frames[_idx]);
     if (img && _iv.image != img) _iv.image = img;
+    static BOOL loggedFirst;
+    if (!loggedFirst) { loggedFirst = YES; DLog(@"帧率动画首帧显示: 共 %lu 帧 (目录 %@)", (unsigned long)frames.count, animFolder ?: @"默认第一个文件夹"); }
     // 旋转(度/秒=旋转速度) + 缩放 + 偏移: 每帧刷新, 偏好即时生效
     if (animRotate) _angle += (animRotateReverse ? -1 : 1) * animRotateSpeed * dt;
     _iv.transform = CGAffineTransformRotate(CGAffineTransformMakeScale(animScale, animScale), _angle * M_PI / 180.0);
