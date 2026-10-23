@@ -242,67 +242,22 @@ static void postReload(void) {
 - (NSInteger)matMode { return 1; }
 @end
 
-#pragma mark - 频谱帧率动画设置页(纯标准 specifier 页面, 与素材选择页同模式, 不闪退)
+#pragma mark - 频谱帧率动画设置页(自绘cell: 文字+滑杆+数字, 点数字弹框手输; 表头机制已用4组specifier对齐)
 
-@implementation DIAnimSettings
-
-- (id)readPreferenceValue:(PSSpecifier *)spec {
-    NSString *key = [spec propertyForKey:@"key"];
-    if (!key) return nil;
-    CFPreferencesAppSynchronize((__bridge CFStringRef)kDomain);
-    id v = CFBridgingRelease(CFPreferencesCopyAppValue((__bridge CFStringRef)key, (__bridge CFStringRef)kDomain));
-    return v ?: [spec propertyForKey:@"default"];
+@implementation DIAnimSettings {
+    NSMutableDictionary<NSString *, UILabel *> *_labels;
 }
 
-- (void)setPreferenceValue:(id)value specifier:(PSSpecifier *)spec {
-    NSString *key = [spec propertyForKey:@"key"];
-    if (!key.length) return;
-    CFPreferencesSetAppValue((__bridge CFStringRef)key, (__bridge CFPropertyListRef)value, (__bridge CFStringRef)kDomain);
-    CFPreferencesAppSynchronize((__bridge CFStringRef)kDomain);
-    CFNotificationCenterPostNotification(CFNotificationCenterGetDarwinNotifyCenter(),
-        (__bridge CFStringRef)kNotifyStr, NULL, NULL, YES);
-}
-
-- (PSSpecifier *)switchSpec:(NSString *)name key:(NSString *)key def:(id)def {
-    PSSpecifier *s = [PSSpecifier preferenceSpecifierNamed:name target:self
-        set:@selector(setPreferenceValue:specifier:) get:@selector(readPreferenceValue:)
-        detail:nil cell:PSSwitchCell edit:nil];
-    [s setProperty:key forKey:@"key"];
-    [s setProperty:kDomain forKey:@"defaults"];
-    [s setProperty:def forKey:@"default"];
-    return s;
-}
-
-- (PSSpecifier *)sliderSpec:(NSString *)name key:(NSString *)key def:(double)def min:(double)mn max:(double)mx {
-    PSSpecifier *s = [PSSpecifier preferenceSpecifierNamed:name target:self
-        set:@selector(setPreferenceValue:specifier:) get:@selector(readPreferenceValue:)
-        detail:nil cell:PSSliderCell edit:nil];
-    [s setProperty:key forKey:@"key"];
-    [s setProperty:kDomain forKey:@"defaults"];
-    [s setProperty:@(def) forKey:@"default"];
-    [s setProperty:@(mn) forKey:@"min"];
-    [s setProperty:@(mx) forKey:@"max"];
-    return s;
-}
-
-- (PSSpecifier *)groupSpec:(NSString *)header footer:(NSString *)footer {
-    PSSpecifier *s = [PSSpecifier preferenceSpecifierNamed:header target:nil
-        set:NULL get:NULL detail:nil cell:PSGroupCell edit:nil];
-    if (footer) [s setProperty:footer forKey:@"footerText"];
-    return s;
-}
-
-/* 手动输入行: 标题带当前数值, 点击弹出输入框精确设置 */
-- (PSSpecifier *)editSpec:(NSString *)name key:(NSString *)key def:(double)def min:(double)mn max:(double)mx {
-    double cur = [self numForKey:key def:def];
-    PSSpecifier *s = [PSSpecifier preferenceSpecifierNamed:[NSString stringWithFormat:@"数值输入 · %@ (%.2f)", name, cur] target:self
-        set:NULL get:NULL detail:nil cell:PSButtonCell edit:nil];
-    [s setButtonAction:@selector(editValue:)];
-    [s setProperty:key forKey:@"key"];
-    [s setProperty:@(def) forKey:@"default"];
-    [s setProperty:@(mn) forKey:@"min"];
-    [s setProperty:@(mx) forKey:@"max"];
-    return s;
+- (NSArray *)specifiers {
+    /* 数量必须与 numberOfSectionsInTableView 一致, 否则 Preferences 表头机制越界 */
+    if (!_specifiers) {
+        NSMutableArray *g = [NSMutableArray array];
+        for (NSString *name in @[@"灵动岛动画", @"动画设置", @"位置缩放设置", @"素材设置"])
+            [g addObject:[PSSpecifier preferenceSpecifierNamed:name target:nil
+                set:NULL get:NULL detail:nil cell:PSGroupCell edit:nil]];
+        _specifiers = g;
+    }
+    return _specifiers;
 }
 
 - (double)numForKey:(NSString *)key def:(double)def {
@@ -311,77 +266,198 @@ static void postReload(void) {
     return v ? [v doubleValue] : def;
 }
 
-- (void)editValue:(PSSpecifier *)spec {
-    NSString *key = [spec propertyForKey:@"key"];
-    double def = [[spec propertyForKey:@"default"] doubleValue];
-    double mn = [[spec propertyForKey:@"min"] doubleValue];
-    double mx = [[spec propertyForKey:@"max"] doubleValue];
-    double cur = [self numForKey:key def:def];
+- (void)saveNum:(double)v forKey:(NSString *)key {
+    CFPreferencesSetAppValue((__bridge CFStringRef)key, (__bridge CFPropertyListRef)@(v), (__bridge CFStringRef)kDomain);
+    CFPreferencesAppSynchronize((__bridge CFStringRef)kDomain);
+    CFNotificationCenterPostNotification(CFNotificationCenterGetDarwinNotifyCenter(),
+        (__bridge CFStringRef)kNotifyStr, NULL, NULL, YES);
+}
+
+- (BOOL)boolForKey:(NSString *)key def:(BOOL)def {
+    CFPreferencesAppSynchronize((__bridge CFStringRef)kDomain);
+    id v = CFBridgingRelease(CFPreferencesCopyAppValue((__bridge CFStringRef)key, (__bridge CFStringRef)kDomain));
+    return v ? [v boolValue] : def;
+}
+
+- (void)saveBool:(BOOL)v forKey:(NSString *)key {
+    CFPreferencesSetAppValue((__bridge CFStringRef)key, (__bridge CFPropertyListRef)@(v), (__bridge CFPropertyListRef)kDomain);
+    CFPreferencesAppSynchronize((__bridge CFStringRef)kDomain);
+    CFNotificationCenterPostNotification(CFNotificationCenterGetDarwinNotifyCenter(),
+        (__bridge CFStringRef)kNotifyStr, NULL, NULL, YES);
+}
+
+- (void)viewDidLoad {
+    [super viewDidLoad];
+    self.title = @"动画设置";
+    self.tableView.backgroundColor = UIColor.systemGroupedBackgroundColor;
+    [self.tableView reloadData];
+}
+
+- (NSInteger)numberOfSectionsInTableView:(UITableView *)tv { return 4; }
+
+- (NSInteger)tableView:(UITableView *)tv numberOfRowsInSection:(NSInteger)section {
+    if (section == 0) return 1;
+    if (section == 1) return 4;
+    if (section == 2) return 3;
+    return 1;
+}
+
+- (NSString *)tableView:(UITableView *)tv titleForHeaderInSection:(NSInteger)section {
+    if (section == 0) return @"灵动岛动画";
+    if (section == 1) return @"动画设置";
+    if (section == 2) return @"位置缩放设置";
+    return @"素材设置";
+}
+
+- (NSString *)tableView:(UITableView *)tv titleForFooterInSection:(NSInteger)section {
+    if (section == 1) return @"动画帧率=每秒播放帧数(1~60); 旋转速度=每秒旋转度数。点数字可直接输入精确值。";
+    if (section == 2) return @"素材大小=缩放倍数(0.2~3); 左右/上下=偏移点数(-150~150)。点数字可直接输入精确值。";
+    if (section == 3) return @"素材目录: /var/mobile/灵动岛/帧率素材 (每个子文件夹=一套素材, png/jpg 按文件名数字顺序播放)。";
+    return nil;
+}
+
+- (CGFloat)tableView:(UITableView *)tv heightForRowAtIndexPath:(NSIndexPath *)ip { return 50; }
+
+- (UITableViewCell *)tableView:(UITableView *)tv cellForRowAtIndexPath:(NSIndexPath *)ip {
+    NSString *cellId = [NSString stringWithFormat:@"c-%ld-%ld", (long)ip.section, (long)ip.row];
+    UITableViewCell *cell = [tv dequeueReusableCellWithIdentifier:cellId];
+    if (!cell) cell = [[UITableViewCell alloc] initWithStyle:UITableViewCellStyleDefault reuseIdentifier:cellId];
+    cell.textLabel.text = nil;
+    cell.selectionStyle = UITableViewCellSelectionStyleNone;
+    cell.accessoryView = nil;
+    cell.accessoryType = UITableViewCellAccessoryNone;
+    for (UIView *sub in cell.contentView.subviews) [sub removeFromSuperview];
+
+    /* 参数表: (标题, 键, 默认, 最小, 最大) */
+    if (ip.section == 0 && ip.row == 0)
+        [self decorateSwitch:cell title:@"启用动画" key:@"spectrumOn" def:NO];
+    else if (ip.section == 1 && ip.row == 1)
+        [self decorateSwitch:cell title:@"启用素材旋转" key:@"animRotate" def:NO];
+    else if (ip.section == 1 && ip.row == 2)
+        [self decorateSwitch:cell title:@"素材旋转反转" key:@"animRotateReverse" def:NO];
+    else if (ip.section == 3 && ip.row == 0)
+        [self decorateFolder:cell];
+    else {
+        NSString *key, *title; double def = 0, mn = 0, mx = 1;
+        if (ip.section == 1 && ip.row == 0)      { key = @"animFPS";         title = @"动画帧率"; def = 50; mn = 1;   mx = 60;  }
+        else if (ip.section == 1 && ip.row == 3) { key = @"animRotateSpeed"; title = @"旋转速度"; def = 5;  mn = 1;   mx = 30;  }
+        else if (ip.section == 2 && ip.row == 0) { key = @"animScale";       title = @"素材大小"; def = 1;  mn = 0.2; mx = 3;   }
+        else if (ip.section == 2 && ip.row == 1) { key = @"animOffsetX";     title = @"左右偏移"; def = 0;  mn = -150; mx = 150; }
+        else                                     { key = @"animOffsetY";     title = @"上下偏移"; def = 0;  mn = -150; mx = 150; }
+        [self decorateSlider:cell title:title key:key def:def min:mn max:mx];
+    }
+    return cell;
+}
+
+/* 行: 文字(左) + 滑杆(中) + 数字(右, 点击弹框手输) */
+- (void)decorateSlider:(UITableViewCell *)cell title:(NSString *)title key:(NSString *)key def:(double)def min:(double)mn max:(double)mx {
+    UILabel *name = [UILabel new];
+    name.text = title;
+    name.font = [UIFont systemFontOfSize:15 weight:UIFontWeightSemibold];
+    [name setContentCompressionResistancePriority:UILayoutPriorityRequired forAxis:UILayoutConstraintAxisHorizontal];
+    name.translatesAutoresizingMaskIntoConstraints = NO;
+
+    UISlider *slider = [UISlider new];
+    slider.minimumValue = mn; slider.maximumValue = mx;
+    slider.value = [self numForKey:key def:def];
+    slider.translatesAutoresizingMaskIntoConstraints = NO;
+    objc_setAssociatedObject(slider, "key", key, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    objc_setAssociatedObject(slider, "min", @(mn), OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    objc_setAssociatedObject(slider, "max", @(mx), OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    [slider addTarget:self action:@selector(sliderChanged:) forControlEvents:UIControlEventValueChanged];
+
+    UILabel *val = [UILabel new];
+    val.text = [NSString stringWithFormat:@"%.2f", slider.value];
+    val.font = [UIFont monospacedDigitSystemFontOfSize:15 weight:UIFontWeightMedium];
+    val.textAlignment = NSTextAlignmentRight;
+    val.textColor = [UIColor systemBlueColor]; // 提示可点击
+    val.userInteractionEnabled = YES;
+    [val setContentCompressionResistancePriority:UILayoutPriorityRequired forAxis:UILayoutConstraintAxisHorizontal];
+    val.translatesAutoresizingMaskIntoConstraints = NO;
+    _labels[key] = val;
+
+    objc_setAssociatedObject(val, "key", key, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    objc_setAssociatedObject(val, "min", @(mn), OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    objc_setAssociatedObject(val, "max", @(mx), OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    UITapGestureRecognizer *tap = [[UITapGestureRecognizer alloc] initWithTarget:self action:@selector(tapValue:)];
+    [val addGestureRecognizer:tap];
+
+    [cell.contentView addSubview:name];
+    [cell.contentView addSubview:slider];
+    [cell.contentView addSubview:val];
+    [NSLayoutConstraint activateConstraints:@[
+        [name.leadingAnchor constraintEqualToAnchor:cell.contentView.leadingAnchor constant:16],
+        [name.centerYAnchor constraintEqualToAnchor:cell.contentView.centerYAnchor],
+        [name.trailingAnchor constraintLessThanOrEqualToAnchor:slider.leadingAnchor constant:-6],
+        [slider.centerYAnchor constraintEqualToAnchor:cell.contentView.centerYAnchor],
+        [slider.leadingAnchor constraintGreaterThanOrEqualToAnchor:name.trailingAnchor constant:6],
+        [val.leadingAnchor constraintEqualToAnchor:slider.trailingAnchor constant:6],
+        [val.trailingAnchor constraintEqualToAnchor:cell.contentView.trailingAnchor constant:-16],
+        [val.centerYAnchor constraintEqualToAnchor:cell.contentView.centerYAnchor],
+        [val.widthAnchor constraintGreaterThanOrEqualToConstant:52],
+    ]];
+}
+
+- (void)sliderChanged:(UISlider *)slider {
+    NSString *key = objc_getAssociatedObject(slider, "key");
+    [self saveNum:slider.value forKey:key];
+    _labels[key].text = [NSString stringWithFormat:@"%.2f", slider.value];
+}
+
+/* 点击数字: 弹框手动输入精确值 */
+- (void)tapValue:(UITapGestureRecognizer *)tap {
+    UILabel *val = (UILabel *)tap.view;
+    NSString *key = objc_getAssociatedObject(val, "key");
+    double mn = [objc_getAssociatedObject(val, "min") doubleValue];
+    double mx = [objc_getAssociatedObject(val, "max") doubleValue];
     UIAlertController *alert = [UIAlertController alertControllerWithTitle:key
         message:[NSString stringWithFormat:@"范围 %.2f ~ %.2f", mn, mx]
         preferredStyle:UIAlertControllerStyleAlert];
     [alert addTextFieldWithConfigurationHandler:^(UITextField *tf) {
-        tf.text = [NSString stringWithFormat:@"%.2f", cur];
+        tf.text = val.text;
         tf.keyboardType = UIKeyboardTypeDecimalPad;
     }];
     [alert addAction:[UIAlertAction actionWithTitle:@"取消" style:UIAlertActionStyleCancel handler:nil]];
     [alert addAction:[UIAlertAction actionWithTitle:@"确定" style:UIAlertActionStyleDefault handler:^(UIAlertAction *a) {
         double v = [alert.textFields.firstObject.text doubleValue];
         if (v < mn) v = mn; if (v > mx) v = mx;
-        CFPreferencesSetAppValue((__bridge CFStringRef)key, (__bridge CFPropertyListRef)@(v), (__bridge CFStringRef)kDomain);
-        CFPreferencesAppSynchronize((__bridge CFStringRef)kDomain);
-        CFNotificationCenterPostNotification(CFNotificationCenterGetDarwinNotifyCenter(),
-            (__bridge CFStringRef)kNotifyStr, NULL, NULL, YES);
-        [self reloadSpecifiers];
+        [self saveNum:v forKey:key];
+        val.text = [NSString stringWithFormat:@"%.2f", v];
     }]];
     [self presentViewController:alert animated:YES completion:nil];
 }
 
-- (NSString *)curFolder {
+/* 行: 文字(左) + 开关(右) */
+- (void)decorateSwitch:(UITableViewCell *)cell title:(NSString *)title key:(NSString *)key def:(BOOL)def {
+    cell.textLabel.text = title;
+    cell.textLabel.font = [UIFont systemFontOfSize:15 weight:UIFontWeightSemibold];
+    UISwitch *sw = [UISwitch new];
+    sw.on = [self boolForKey:key def:def];
+    [sw addTarget:self action:@selector(switchChanged:) forControlEvents:UIControlEventValueChanged];
+    objc_setAssociatedObject(sw, "key", key, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    cell.accessoryView = sw;
+}
+
+- (void)switchChanged:(UISwitch *)sw {
+    [self saveBool:sw.on forKey:objc_getAssociatedObject(sw, "key")];
+}
+
+/* 行: 素材名(左) + 当前文件夹(右) + 箭头 */
+- (void)decorateFolder:(UITableViewCell *)cell {
+    cell.textLabel.text = @"素材名";
+    cell.textLabel.font = [UIFont systemFontOfSize:15 weight:UIFontWeightSemibold];
     CFPreferencesAppSynchronize((__bridge CFStringRef)kDomain);
     id v = CFBridgingRelease(CFPreferencesCopyAppValue(CFSTR("animFolder"), (__bridge CFStringRef)kDomain));
-    return ([v isKindOfClass:NSString.class] && [(NSString *)v length]) ? v : @"默认(第一个文件夹)";
+    cell.detailTextLabel.text = ([v isKindOfClass:NSString.class] && [(NSString *)v length]) ? v : @"默认(第一个文件夹)";
+    cell.detailTextLabel.textColor = UIColor.secondaryLabelColor;
+    cell.accessoryType = UITableViewCellAccessoryDisclosureIndicator;
+    cell.selectionStyle = UITableViewCellSelectionStyleDefault;
 }
 
-- (NSArray *)specifiers {
-    if (!_specifiers) {
-        NSMutableArray *specs = [NSMutableArray array];
-        [specs addObject:[self groupSpec:@"灵动岛动画" footer:nil]];
-        [specs addObject:[self switchSpec:@"启用动画" key:@"spectrumOn" def:@NO]];
-
-        [specs addObject:[self groupSpec:@"动画设置" footer:@"动画帧率 = 每秒播放的序列帧张数(1~60, 默认50); 旋转速度 = 每秒旋转度数(默认5)。"]];
-        [specs addObject:[self sliderSpec:@"动画帧率" key:@"animFPS" def:50 min:1 max:60]];
-        [specs addObject:[self editSpec:@"动画帧率" key:@"animFPS" def:50 min:1 max:60]];
-        [specs addObject:[self switchSpec:@"启用素材旋转" key:@"animRotate" def:@NO]];
-        [specs addObject:[self switchSpec:@"素材旋转反转" key:@"animRotateReverse" def:@NO]];
-        [specs addObject:[self sliderSpec:@"旋转速度" key:@"animRotateSpeed" def:5 min:1 max:30]];
-        [specs addObject:[self editSpec:@"旋转速度" key:@"animRotateSpeed" def:5 min:1 max:30]];
-
-        [specs addObject:[self groupSpec:@"位置缩放设置" footer:@"缩放倍数相对频谱区域(0.2~3, 默认1); X/Y偏移单位为点(-150~150)。"]];
-        [specs addObject:[self sliderSpec:@"缩放倍数" key:@"animScale" def:1 min:0.2 max:3]];
-        [specs addObject:[self editSpec:@"缩放倍数" key:@"animScale" def:1 min:0.2 max:3]];
-        [specs addObject:[self sliderSpec:@"X偏移" key:@"animOffsetX" def:0 min:-150 max:150]];
-        [specs addObject:[self editSpec:@"X偏移" key:@"animOffsetX" def:0 min:-150 max:150]];
-        [specs addObject:[self sliderSpec:@"Y偏移" key:@"animOffsetY" def:0 min:-150 max:150]];
-        [specs addObject:[self editSpec:@"Y偏移" key:@"animOffsetY" def:0 min:-150 max:150]];
-
-        [specs addObject:[self groupSpec:@"素材设置" footer:nil]];
-        PSSpecifier *mat = [PSSpecifier preferenceSpecifierNamed:@"素材名" target:self
-            set:NULL get:@selector(readFolderName)
-            detail:[DIFrameFolders class] cell:PSLinkCell edit:nil];
-        [mat setProperty:[self curFolder] forKey:@"value"];
-        [specs addObject:mat];
-
-        _specifiers = specs;
-    }
-    return _specifiers;
-}
-
-- (id)readFolderName:(PSSpecifier *)spec { return [self curFolder]; }
-
-- (void)reloadSpecifiers {
-    _specifiers = nil;
-    [super reloadSpecifiers];
+- (void)tableView:(UITableView *)tv didSelectRowAtIndexPath:(NSIndexPath *)ip {
+    [tv deselectRowAtIndexPath:ip animated:YES];
+    if (ip.section == 3 && ip.row == 0)
+        [self.navigationController pushViewController:[[DIFrameFolders alloc] init] animated:YES];
 }
 
 @end
