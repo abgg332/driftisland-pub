@@ -134,6 +134,7 @@ static char kWinVideoSmall, kWinVideoExpand, kWinVideoSpec; // 每窗口视频�
 static BOOL gIsMRU = NO; // 是否运行在 MediaRemoteUI(灵动岛播放器渲染进程)
 
 static void diHideAccessories(UIView *v, BOOL hide); // 前置声明
+static void installImageNamedHook(void); // 前置声明(投送图标取图 hook, 定义在文件尾部)
 // 区域标定(相对展开岛比例, 用户截图圈定); 素材层外扩2pt保证完全盖住
 static CGRect diSpecRegion(CGFloat w, CGFloat h) { return CGRectInset(CGRectMake(w * 0.815, h * 0.125, w * 0.18, h * 0.25), -2, -2); }
 // enabled 等偏好缓存已在 materialPathFor 上方声明
