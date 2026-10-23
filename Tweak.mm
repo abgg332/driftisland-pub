@@ -91,6 +91,7 @@ static NSInteger smallIdx, expandIdx;
 static double animFPS = 50, animRotateSpeed = 5, animScale = 1, animOffsetX, animOffsetY;
 static BOOL animRotate, animRotateReverse;
 static NSString *animFolder; // 选中的素材文件夹名(帧率素材目录下的子文件夹)
+static BOOL gFramesDirty;    // 素材文件夹变更标志: 立即重扫
 
 // 帧图缓存: 序列帧可能几百张, NSCache 自动回收
 static UIImage *frameImage(NSString *path) {
@@ -107,7 +108,8 @@ static UIImage *frameImage(NSString *path) {
 static NSArray<NSString *> *framePaths(void) {
     static NSArray *c; static CFAbsoluteTime t;
     CFAbsoluteTime now = CFAbsoluteTimeGetCurrent();
-    if (c && now - t < 2.0) return c;
+    if (gFramesDirty || (c && now - t > 2.0)) { gFramesDirty = NO; c = nil; }
+    if (c) return c;
     NSFileManager *fm = NSFileManager.defaultManager;
     NSMutableArray<NSString *> *out = [NSMutableArray array];
     NSString *base = animFolder.length ? [kFrameDir stringByAppendingPathComponent:animFolder] : nil;
@@ -212,7 +214,7 @@ static BOOL gIsMRU = NO; // 是否运行在 MediaRemoteUI(灵动岛播放器渲�
 static void airPortalUpdate(UIView *bestRoot, BOOL hide); // 前置声明(投送 portal 根本隐藏)
 static void installImageNamedHook(void); // 前置声明(投送图标取图 hook, 定义在文件尾部)
 // 区域标定(相对展开岛比例, 用户截图圈定); 素材层外扩2pt保证完全盖住
-static CGRect diSpecRegion(CGFloat w, CGFloat h) { return CGRectInset(CGRectMake(w * 0.815, h * 0.125, w * 0.18, h * 0.25), -2, -2); }
+static CGRect diSpecRegion(CGFloat w, CGFloat h) { return CGRectInset(CGRectMake(w * 0.41, h * 0.72, w * 0.18, h * 0.25), -2, -2); } // 6点钟方向(底部居中), 可用XY偏移微调
 // enabled 等偏好缓存已在 materialPathFor 上方声明
 static NSHashTable *hostTable; // 弱引用宿主集合
 static void updateSingleVideo(UIWindow *win); // 前置声明
@@ -774,6 +776,7 @@ static void visibilityTick(void) {
 }
 
 static void prefsChanged(CFNotificationCenterRef, void *, CFStringRef, const void *, CFDictionaryRef) {
+    gFramesDirty = YES; // 偏好变更(可能换了素材文件夹): 立即重扫
     dispatch_async(dispatch_get_main_queue(), ^{ refreshAll(); installKnownHosts(); });
 }
 

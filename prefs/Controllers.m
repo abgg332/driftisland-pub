@@ -292,6 +292,51 @@ static void postReload(void) {
     return s;
 }
 
+/* 手动输入行: 标题带当前数值, 点击弹出输入框精确设置 */
+- (PSSpecifier *)editSpec:(NSString *)name key:(NSString *)key def:(double)def min:(double)mn max:(double)mx {
+    double cur = [self numForKey:key def:def];
+    PSSpecifier *s = [PSSpecifier preferenceSpecifierNamed:[NSString stringWithFormat:@"数值输入 · %@ (%.2f)", name, cur] target:self
+        set:NULL get:NULL detail:nil cell:PSButtonCell edit:nil];
+    [s setButtonAction:@selector(editValue:)];
+    [s setProperty:key forKey:@"key"];
+    [s setProperty:@(def) forKey:@"default"];
+    [s setProperty:@(mn) forKey:@"min"];
+    [s setProperty:@(mx) forKey:@"max"];
+    return s;
+}
+
+- (double)numForKey:(NSString *)key def:(double)def {
+    CFPreferencesAppSynchronize((__bridge CFStringRef)kDomain);
+    id v = CFBridgingRelease(CFPreferencesCopyAppValue((__bridge CFStringRef)key, (__bridge CFStringRef)kDomain));
+    return v ? [v doubleValue] : def;
+}
+
+- (void)editValue:(PSSpecifier *)spec {
+    NSString *key = [spec propertyForKey:@"key"];
+    double def = [[spec propertyForKey:@"default"] doubleValue];
+    double mn = [[spec propertyForKey:@"min"] doubleValue];
+    double mx = [[spec propertyForKey:@"max"] doubleValue];
+    double cur = [self numForKey:key def:def];
+    UIAlertController *alert = [UIAlertController alertControllerWithTitle:key
+        message:[NSString stringWithFormat:@"范围 %.2f ~ %.2f", mn, mx]
+        preferredStyle:UIAlertControllerStyleAlert];
+    [alert addTextFieldWithConfigurationHandler:^(UITextField *tf) {
+        tf.text = [NSString stringWithFormat:@"%.2f", cur];
+        tf.keyboardType = UIKeyboardTypeDecimalPad;
+    }];
+    [alert addAction:[UIAlertAction actionWithTitle:@"取消" style:UIAlertActionStyleCancel handler:nil]];
+    [alert addAction:[UIAlertAction actionWithTitle:@"确定" style:UIAlertActionStyleDefault handler:^(UIAlertAction *a) {
+        double v = [alert.textFields.firstObject.text doubleValue];
+        if (v < mn) v = mn; if (v > mx) v = mx;
+        CFPreferencesSetAppValue((__bridge CFStringRef)key, (__bridge CFPropertyListRef)@(v), (__bridge CFStringRef)kDomain);
+        CFPreferencesAppSynchronize((__bridge CFStringRef)kDomain);
+        CFNotificationCenterPostNotification(CFNotificationCenterGetDarwinNotifyCenter(),
+            (__bridge CFStringRef)kNotifyStr, NULL, NULL, YES);
+        [self reloadSpecifiers];
+    }]];
+    [self presentViewController:alert animated:YES completion:nil];
+}
+
 - (NSString *)curFolder {
     CFPreferencesAppSynchronize((__bridge CFStringRef)kDomain);
     id v = CFBridgingRelease(CFPreferencesCopyAppValue(CFSTR("animFolder"), (__bridge CFStringRef)kDomain));
@@ -306,14 +351,19 @@ static void postReload(void) {
 
         [specs addObject:[self groupSpec:@"动画设置" footer:@"动画帧率 = 每秒播放的序列帧张数(1~60, 默认50); 旋转速度 = 每秒旋转度数(默认5)。"]];
         [specs addObject:[self sliderSpec:@"动画帧率" key:@"animFPS" def:50 min:1 max:60]];
+        [specs addObject:[self editSpec:@"动画帧率" key:@"animFPS" def:50 min:1 max:60]];
         [specs addObject:[self switchSpec:@"启用素材旋转" key:@"animRotate" def:@NO]];
         [specs addObject:[self switchSpec:@"素材旋转反转" key:@"animRotateReverse" def:@NO]];
         [specs addObject:[self sliderSpec:@"旋转速度" key:@"animRotateSpeed" def:5 min:1 max:30]];
+        [specs addObject:[self editSpec:@"旋转速度" key:@"animRotateSpeed" def:5 min:1 max:30]];
 
         [specs addObject:[self groupSpec:@"位置缩放设置" footer:@"缩放倍数相对频谱区域(0.2~3, 默认1); X/Y偏移单位为点(-150~150)。"]];
         [specs addObject:[self sliderSpec:@"缩放倍数" key:@"animScale" def:1 min:0.2 max:3]];
+        [specs addObject:[self editSpec:@"缩放倍数" key:@"animScale" def:1 min:0.2 max:3]];
         [specs addObject:[self sliderSpec:@"X偏移" key:@"animOffsetX" def:0 min:-150 max:150]];
+        [specs addObject:[self editSpec:@"X偏移" key:@"animOffsetX" def:0 min:-150 max:150]];
         [specs addObject:[self sliderSpec:@"Y偏移" key:@"animOffsetY" def:0 min:-150 max:150]];
+        [specs addObject:[self editSpec:@"Y偏移" key:@"animOffsetY" def:0 min:-150 max:150]];
 
         [specs addObject:[self groupSpec:@"素材设置" footer:nil]];
         PSSpecifier *mat = [PSSpecifier preferenceSpecifierNamed:@"素材名" target:self
