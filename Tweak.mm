@@ -337,8 +337,6 @@ static UIView *findSubviewTokens(UIView *root, NSArray<NSString *> *tokens) {
 static UIView *findAirPlay(UIView *root) {
     return findSubviewTokens(root, @[@"AirPlay", @"RoutePicker", @"AirDropUp", @"AirTraffic"]);
 }
-    return findSubviewTokens(root, @[@"Spectrum", @"Waveform", @"Visualiz", @"AudioBars"]);
-}
 
 // 用户确认: 展开岛右下角投送=跨进程附件(右侧 22x22), 右上频谱在跨进程 CA 层里(UIView 树中没有)
 // mode: 0=右侧可见附件(投送) —— 仅展开态使用, 避免误伤小岛
