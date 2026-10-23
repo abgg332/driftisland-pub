@@ -346,12 +346,23 @@ static UIView *findSpectrum(UIView *root) {
     return findSubviewTokens(root, @[@"Spectrum", @"Waveform", @"Visualiz", @"AudioBars"]);
 }
 
-// 展开岛视图树 dump(一次): 记录全部类名+frame, 用于精确定位投送/频谱等系统视图
+// 展开岛视图树 dump: 记录全部类名+frame; 附件容器额外读 identifier(区分频谱/投送)
 static void dumpTree(UIView *v, int depth) {
-    if (!v || depth > 14) return;
+    if (!v || depth > 16) return;
     NSMutableString *ind = [NSMutableString string];
     for (int i = 0; i < depth; i++) [ind appendString:@"  "];
-    DLog(@"%@%@ %@", ind, NSStringFromClass(v.class), NSStringFromCGRect(v.frame));
+    NSString *cn = NSStringFromClass(v.class);
+    NSString *extra = @"";
+    if ([cn containsString:@"Accessory"] || [cn containsString:@"ProvidedView"] || [cn containsString:@"SceneElement"]) {
+        for (NSString *kp in @[@"identifier", @"elementIdentifier", @"sceneIdentifier", @"accessoryIdentifier", @"element"]) {
+            id val = nil;
+            @try { val = [v valueForKey:kp]; } @catch (id e) { val = nil; }
+            if (val && ![val isKindOfClass:[UIView class]]) {
+                extra = [extra stringByAppendingFormat:@" %@=%@", kp, val];
+            }
+        }
+    }
+    DLog(@"%@%@ %@%@", ind, cn, NSStringFromCGRect(v.frame), extra);
     for (UIView *s in v.subviews) dumpTree(s, depth + 1);
 }
 
@@ -445,11 +456,20 @@ static void updateHost(UIView *host) {
     attach(host);
     if (NSThread.isMainThread && host.window) {
         updateSingleVideo(host.window); // 每次布局跟随岛尺寸
-        static BOOL dumpedOnce;
-        if (!dumpedOnce && host.bounds.size.height > 60) {
-            dumpedOnce = YES;
-            DLog(@"===== 展开岛视图树 dump =====");
+        static int dumpCount;
+        if (dumpCount < 2 && host.bounds.size.height > 60) {
+            dumpCount++;
+            DLog(@"===== 展开岛视图树 dump #%d =====", dumpCount);
             dumpTree(host, 0);
+            if (dumpCount == 1) {
+                __weak UIView *wh = host;
+                dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)1.5 * NSEC_PER_SEC), dispatch_get_main_queue(), ^{
+                    if (wh && wh.bounds.size.height > 60) {
+                        DLog(@"===== 展开岛视图树 dump #2 (布局稳定后) =====");
+                        dumpTree(wh, 0);
+                    }
+                });
+            }
         }
         // 投送按钮: 隐藏/显示 AirPlay 图标(每次布局重申, 防系统重置)
         UIView *ap = findAirPlay(host);
