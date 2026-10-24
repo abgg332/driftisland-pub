@@ -257,6 +257,7 @@ static CGRect diSpecRegion(CGFloat w, CGFloat h) {
 static NSHashTable *hostTable; // 弱引用宿主集合
 static void updateSingleVideo(UIWindow *win); // 前置声明
 
+static CALayer *diFindAudioLayer(UIView *host); // 前向声明: syncFrameToHost 的"无音乐隐藏"判据使用
 @implementation DIVideoView {
     NSInteger _missCount; // 连续不可见帧计数, 攒够才暂停 displayLink(防瞬时抖动误停)
     NSInteger _stallCount; // 播放器起不来计数: 攒够自动重载素材, 保证无限循环不被打断
