@@ -328,7 +328,10 @@ static void updateSingleVideo(UIWindow *win); // 前置声明
     UIView *host = (UIView *)self.superview;
     self.layer.cornerRadius = host ? host.layer.cornerRadius : 0;
     self.player.muted = YES; // 永远静音
-    if (enabled) [self.player play];
+    if (enabled) {
+        [self.player play];
+        dispatch_async(dispatch_get_main_queue(), ^{ [self.player play]; }); // 下一轮再补一次, 防切换素材后偶发暂停
+    }
 }
 
 @end
@@ -421,32 +424,31 @@ static CALayer *diFindAudioLayer(UIView *host) {
 @end
 
 
-/* 音频开关: 开→在音频门户层(CALayerHost)上用掩码挖洞, 只隐藏右上角波形区域, 按钮/专辑等不受影响; 关→移除掩码 */
-static char kDiMaskW; // 记录已应用掩码时的宽度, 避免每轮重建
+/* 音频开关: 开→在音频门户层(CALayerHost)上用掩码挖洞, 只隐藏右上角波形, 按钮/专辑/歌词不受影响; 关→移除掩码
+   注意: 只在展开稳定态应用(收缩态岛尺寸太小, 算出的洞坐标是乱值会遮到歌词); 洞用展开态实测固定坐标(波形 x≈353-381 y≈42-65) */
+static char kDiMaskOn;
 static void syncNativeSpectrum(UIView *bestRoot) {
     CALayer *audioL = diFindAudioLayer(bestRoot);
     if (!audioL) return;
     if (!spectrumOn || !enabled) {
-        if (audioL.mask) { audioL.mask = nil; objc_setAssociatedObject(audioL, &kDiMaskW, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC); DLog(@"音频开关关: 移除波形区域掩码"); }
+        if (audioL.mask) { audioL.mask = nil; objc_setAssociatedObject(audioL, &kDiMaskOn, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC); DLog(@"音频开关关: 移除波形掩码"); }
         return;
     }
-    CGSize ws = audioL.bounds.size;
-    if (audioL.mask && ![NSStringFromCGSize(ws) isEqualToString:NSStringFromCGSize((CGSize){[objc_getAssociatedObject(audioL, &kDiMaskW) doubleValue], 0})]) { /* 尺寸变了重建 */ }
-    else if (audioL.mask) return; // 已应用且尺寸未变
-    // 波形区域: 与帧率素材同一标定区域(岛呈现坐标), host 层原点与岛原点对齐, 直接用岛坐标
     CALayer *pl = bestRoot.layer.presentationLayer;
     CGSize bs = pl ? pl.bounds.size : bestRoot.bounds.size;
-    CGRect wf = diSpecRegion(bs.width, bs.height);
+    if (bs.width < 300 || bs.height < 100) return; // 收缩/过渡态: 不动掩码, 等展开稳定
+    if (audioL.mask && [objc_getAssociatedObject(audioL, &kDiMaskOn) isEqual:@YES]) return; // 已应用
+    CGRect hole = CGRectMake(bs.width - 69, 26, 54, 50); // 波形实际范围外扩少许(实测波形 x 353-381 y 42-65)
     CAShapeLayer *m = [CAShapeLayer new];
-    m.frame = CGRectMake(0, 0, ws.width, ws.height);
+    m.frame = CGRectMake(0, 0, audioL.bounds.size.width, audioL.bounds.size.height);
     UIBezierPath *p = [UIBezierPath bezierPathWithRect:m.frame];
-    UIBezierPath *hole = [UIBezierPath bezierPathWithRoundedRect:CGRectInset(wf, -4, -4) cornerRadius:14];
-    [p appendPath:hole];
-    m.fillRule = kCAFillRuleEvenOdd; // 全区域挖一个洞: 洞里露出的是岛自己的内容, 洞外保留音乐门户
+    UIBezierPath *h = [UIBezierPath bezierPathWithRoundedRect:hole cornerRadius:12];
+    [p appendPath:h];
+    m.fillRule = kCAFillRuleEvenOdd; // 洞里露出岛自己的内容, 洞外保留音乐门户
     m.path = p.CGPath;
     audioL.mask = m;
-    objc_setAssociatedObject(audioL, &kDiMaskW, @(ws.width), OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-    DLog(@"音频开关开: 已挖洞隐藏波形区域 %@ (门户 %@)", NSStringFromCGRect(wf), NSStringFromCGRect(audioL.frame));
+    objc_setAssociatedObject(audioL, &kDiMaskOn, @YES, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    DLog(@"音频开关开: 已挖洞隐藏波形 %@ (岛 %@)", NSStringFromCGRect(hole), NSStringFromCGSize(bs));
 }
 
 #pragma mark - 宿主挂载
