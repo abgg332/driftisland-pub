@@ -221,23 +221,7 @@ static void setupAudioSession(void) {
     });
 }
 
-/* 查询"正在播放音乐"(MediaRemote 动态加载): 只有音乐岛才有频谱, 帧率动画只在播音乐时显示 */
-static BOOL musicPlaying = NO;
-static BOOL mrQueryOK = NO; // 查询可用过才启用过滤, 避免符号缺失导致动画永不显示
-static void queryMusicPlaying(void) {
-    static void (*mrGet)(dispatch_queue_t, void (^)(BOOL)) = NULL;
-    static dispatch_queue_t q;
-    static dispatch_once_t once;
-    dispatch_once(&once, ^{
-        void *h = dlopen("/System/Library/PrivateFrameworks/MediaRemote.framework/MediaRemote", RTLD_LAZY);
-        if (h) mrGet = (void (*)(dispatch_queue_t, void (^)(BOOL)))dlsym(h, "MRMediaRemoteGetNowPlayingIsPlaying");
-        if (mrGet) q = dispatch_queue_create("di.mediaremote", DISPATCH_QUEUE_SERIAL);
-    });
-    if (!mrGet) return;
-    dispatch_async(q, ^{ mrGet(q, ^(BOOL playing) {
-        dispatch_async(dispatch_get_main_queue(), ^{ musicPlaying = playing; mrQueryOK = YES; });
-    }); });
-}
+/* 查询"正在播放音乐"改为直接探测岛内原生音频动态层(见 diFindAudioLayer): 层在=音乐岛 */
  // 每窗口视频层(小岛/展开/频谱)
 // 区域标定(相对展开岛比例, 用户截图圈定); 素材层外扩2pt保证完全盖住
 static CGRect diSpecRegion(CGFloat w, CGFloat h) {
@@ -346,6 +330,33 @@ static void updateSingleVideo(UIWindow *win); // 前置声明
 @property (nonatomic, assign) NSInteger miss;
 @end
 
+/* 判断层是否属于帧率动画视图自己(不能隐藏/误认自己的层) */
+static BOOL diInsideAnimView(CALayer *l) {
+    for (id d = l.delegate; d; ) {
+        if ([d isKindOfClass:[DIAnimView class]]) return YES;
+        if ([d isKindOfClass:[UIView class]]) d = ((UIView *)d).superview; else break;
+    }
+    return NO;
+}
+
+/* 定位原生音频动态层: 岛容器层的直接子层、非 AVPlayerLayer/自己的层、小块(宽40~160 高30~100)、
+   位于岛的右上半区(音乐岛右上角)。找到 = 当前是音乐岛展开; 找不到 = 非音乐岛, 帧率素材不显示 */
+static CALayer *diFindAudioLayer(UIView *host) {
+    if (!host) return nil;
+    CGFloat w = host.bounds.size.width, h = host.bounds.size.height;
+    if (w < 100 || h < 60) return nil;
+    for (CALayer *s in host.layer.sublayers) {
+        if ([s isKindOfClass:[AVPlayerLayer class]]) continue;
+        if (diInsideAnimView(s)) continue;
+        CGRect f = s.frame;
+        if (f.size.width < 40 || f.size.width > 160) continue;
+        if (f.size.height < 30 || f.size.height > 100) continue;
+        if (f.origin.x < w * 0.5 || f.origin.y > h * 0.6) continue; // 必须在右上半区
+        return s;
+    }
+    return nil;
+}
+
 @implementation DIAnimView
 - (instancetype)initWithFrame:(CGRect)frame {
     if ((self = [super initWithFrame:frame])) {
@@ -366,17 +377,17 @@ static void updateSingleVideo(UIWindow *win); // 前置声明
     if (!host || host.window == nil) { self.hidden = YES; if (++_miss > 30) _link.paused = YES; return; }
     BOOL expand = host.bounds.size.height > 100;
     NSArray<NSString *> *frames = framePaths();
-    BOOL musicVisible = musicPlaying || !mrQueryOK; // 只在音乐播放时显示
-    if (!expand || !enabled || !materialOn || !frames.count || !musicVisible) {
-        // 素材开关关/收缩: 隐藏本层; 原生频谱是否显示由帧率开关单独控制(updateSingleVideo)
+    CALayer *audioL = expand ? diFindAudioLayer(host) : nil; // 原生音频动态层: 在=音乐岛
+    if (!expand || !enabled || !materialOn || !frames.count || !audioL) {
+        // 帧率开关关/收缩/非音乐岛(无音频层): 隐藏本层; 音频层显示与否由音频开关单独控制
         if (!self.hidden) self.hidden = YES;
         if (++_miss > 30) _link.paused = YES;
         return;
     }
     _miss = 0;
-    CALayer *pl = host.layer.presentationLayer;
-    CGSize bs = pl ? pl.bounds.size : host.bounds.size;
-    CGRect f = diSpecRegion(bs.width, bs.height);
+    // 显示层级与音频层一致: 直接贴合音频层实时 frame(动画中用呈现层)
+    CALayer *apl = audioL.presentationLayer;
+    CGRect f = apl ? apl.frame : audioL.frame;
     if (!CGRectEqualToRect(self.frame, f)) self.frame = f;
     // 内部图片视图: 只在 bounds 变化时对齐(transform 缩放会改变 frame, 不能用 frame 比较/赋值, 否则每轮抵消缩放)
     if (!CGSizeEqualToSize(_iv.bounds.size, self.bounds.size)) _iv.frame = self.bounds;
@@ -406,44 +417,21 @@ static void updateSingleVideo(UIWindow *win); // 前置声明
 @end
 
 
-/* 判断层是否属于帧率动画视图自己(不能隐藏自己的层) */
-static BOOL diInsideAnimView(CALayer *l) {
-    for (id d = l.delegate; d; ) {
-        if ([d isKindOfClass:[DIAnimView class]]) return YES;
-        if ([d isKindOfClass:[UIView class]]) d = ((UIView *)d).superview; else break;
-    }
-    return NO;
-}
-
-/* 帧率开关 = 原生频谱开关: 开→隐藏岛内频谱区域的原生音频层; 关→恢复显示 */
+/* 音频开关 = 原生音频动态开关: 开→隐藏右上角音频层; 关→恢复显示 (用统一查找函数) */
 static void syncNativeSpectrum(UIView *bestRoot) {
     if (!hiddenNativeLayers) hiddenNativeLayers = [NSHashTable weakObjectsHashTable];
     if (!spectrumOn || !enabled) {
         for (CALayer *l in hiddenNativeLayers.allObjects) l.hidden = NO;
-        if (hiddenNativeLayers.count) DLog(@"帧率开关关: 恢复原生频谱层 %lu 个", (unsigned long)hiddenNativeLayers.count);
+        if (hiddenNativeLayers.count) DLog(@"音频开关关: 恢复原生子频谱层 %lu 个", (unsigned long)hiddenNativeLayers.count);
         [hiddenNativeLayers removeAllObjects];
         return;
     }
     if (!bestRoot) return;
-    CGRect specR = diSpecRegion(bestRoot.bounds.size.width, bestRoot.bounds.size.height);
-    NSMutableArray<CALayer *> *stack = [NSMutableArray arrayWithObject:bestRoot.layer];
-    while (stack.count) {
-        CALayer *l = stack.firstObject; [stack removeObjectAtIndex:0];
-        for (CALayer *s in l.sublayers) {
-            [stack addObject:s];
-            if (s.isHidden) continue;
-            if (diInsideAnimView(s)) continue; // 自己的层不动
-            CGRect f = s.frame;
-            CGFloat a = f.size.width * f.size.height;
-            if (a < 4) continue;
-            CGRect ix = CGRectIntersection(f, specR);
-            CGFloat ratio = ix.size.width * ix.size.height / a;
-            if (ratio > 0.5 && ![hiddenNativeLayers containsObject:s]) { // 主体落在频谱区域内 → 视为原生频谱
-                s.hidden = YES;
-                [hiddenNativeLayers addObject:s];
-                DLog(@"隐藏原生频谱层: %@ frame=%@ 重叠=%.2f", NSStringFromClass(s.class), NSStringFromCGRect(f), ratio);
-            }
-        }
+    CALayer *audioL = diFindAudioLayer(bestRoot); // 与帧率素材同一个定位函数, 层级一致
+    if (audioL && !audioL.isHidden && ![hiddenNativeLayers containsObject:audioL]) {
+        audioL.hidden = YES;
+        [hiddenNativeLayers addObject:audioL];
+        DLog(@"音频开关开: 隐藏原生音频层 %@ frame=%@", NSStringFromClass(audioL.class), NSStringFromCGRect(audioL.frame));
     }
 }
 
@@ -594,7 +582,7 @@ static void updateSingleVideo(UIWindow *win) {
         animV.hidden = YES;
     }
     [bestRoot bringSubviewToFront:animV]; // 系统布局会把岛内容分支提到最前, 每轮重申动画层在最顶
-    syncNativeSpectrum(bestRoot); // 帧率开关开→隐藏原生频谱层, 关→恢复
+    syncNativeSpectrum(bestRoot); // 音频开关开→隐藏原生音频层, 关→恢复
     animV.link.paused = NO; // 岛活动期间保持动画循环, 内部按开关自隐藏
 }
 
@@ -660,7 +648,6 @@ static void refreshAll(void) {
 // 0.5 秒轮询: 刷新偏好缓存 + 维持视频层; displayLink 负责逐帧贴合
 static void visibilityTick(void) {
     refreshPrefs();
-    queryMusicPlaying();
     for (UIScene *s in UIApplication.sharedApplication.connectedScenes)
         if ([s isKindOfClass:[UIWindowScene class]]) updateSingleVideo(((UIWindowScene *)s).windows.firstObject);
 }

@@ -77,7 +77,7 @@ static void postReload(void) {
     CFPreferencesSetAppValue((__bridge CFStringRef)key, (__bridge CFPropertyListRef)value, (__bridge CFStringRef)kDomain);
     CFPreferencesAppSynchronize((__bridge CFStringRef)kDomain);
     postReload();
-    if ([key isEqualToString:@"spectrumOn"]) { // 开关切换: 立即增删下方参数行
+    if ([key isEqualToString:@"spectrumOn"] || [key isEqualToString:@"materialOn"]) { // 开关切换: 立即增删下方参数行
         _specifiers = nil;
         [self reloadSpecifiers];
     } else if (range) {
@@ -187,11 +187,11 @@ static void postReload(void) {
         [specs addObject:[self switchSpec:@"展开显示素材" key:@"expandOn" def:@YES]];
         [specs addObject:expandMat];
 
-        /* 帧率: 帧率开关控制原生频谱隐藏/显示; 帧率素材开关控制序列帧素材显示(两个独立开关) */
-        [specs addObject:[self groupSpec:@"帧率" footer:@"帧率开关=开时隐藏原生频谱(注销后必生效); 帧率素材开关=控制帧率素材显示, 立即生效。大小每+1放大0.1倍; 左右/上下为单位点数。"]];
-        [specs addObject:[self switchSpec:@"帧率开关" key:@"spectrumOn" def:@NO]];
-        [specs addObject:[self switchSpec:@"帧率素材开关" key:@"materialOn" def:@YES]];
-        if ([[self readPreferenceValue:[self switchSpec:@"spectrumOn" key:@"spectrumOn" def:@NO]] boolValue]) {
+        /* 帧(音频)率组: 音频开关=右上角原生音频动态(关=显示 开=隐藏); 帧率开关=序列帧素材(立即生效) */
+        [specs addObject:[self groupSpec:@"帧率" footer:@"音频开关: 控制右上角原生音频动态, 关=显示 开=隐藏。帧率开关: 控制帧率素材显示, 立即生效。大小每+1放大0.1倍; 左右/上下为单位点数。"]];
+        [specs addObject:[self switchSpec:@"音频开关" key:@"spectrumOn" def:@NO]];
+        [specs addObject:[self switchSpec:@"帧率开关" key:@"materialOn" def:@YES]];
+        if ([[self readPreferenceValue:[self switchSpec:@"materialOn" key:@"materialOn" def:@YES]] boolValue]) {
             [specs addObject:[self numSlider:@"帧率速度" key:@"animFPS" def:50 mn:10 mx:200]];
             [specs addObject:[self numSlider:@"素材大小" key:@"animScaleAdj" def:0 mn:-20 mx:20]];
             [specs addObject:[self numSlider:@"左右偏移" key:@"animOffsetX3" def:0 mn:-50 mx:50]];
@@ -237,15 +237,16 @@ static void postReload(void) {
             (struct objc_super *)&(struct objc_super){ .receiver = self, .super_class = class_getSuperclass(object_getClass(self)) },
             @selector(tableView:willDisplayCell:forRowAtIndexPath:), tableView, cell, indexPath);
     /* 注意: PSGroupCell 是 section header 不占行, indexPath.row 是组内行号:
-       section1(小岛): row0=开关 row1=素材; section2(展开): row1=素材; section3(频谱): row1=素材 */
-    /* 帧率参数滑杆行(section3 row1~4): 文字(左) + 滑杆(中) + 数值(右), 自绘布局 */
-    if (indexPath.section == 3 && indexPath.row >= 1 && indexPath.row <= 4) {
+       section1(小岛): row0=开关 row1=素材; section2(展开): row1=素材;
+       section3(帧率): row0=音频开关 row1=帧率开关 row2~5=滑杆 row6=素材名称 */
+    /* 帧率参数滑杆行(section3 row2~5): 文字(左) + 滑杆(中) + 数值(右), 自绘布局 */
+    if (indexPath.section == 3 && indexPath.row >= 2 && indexPath.row <= 5) {
         NSArray *labels = @[@"帧率速度", @"素材大小", @"左右偏移", @"上下偏移"];
         NSArray *keys   = @[@"animFPS", @"animScaleAdj", @"animOffsetX3", @"animOffsetY3"];
         NSArray *defs   = @[@50, @0, @0, @0];
         NSArray *mins   = @[@10, @-20, @-50, @-50];
         NSArray *maxs   = @[@200, @20, @50, @50];
-        NSInteger i = indexPath.row - 1;
+        NSInteger i = indexPath.row - 2;
         int v = [self numValue:keys[i] def:[defs[i] intValue]];
         if (v < [mins[i] intValue]) v = [mins[i] intValue];
         if (v > [maxs[i] intValue]) v = [maxs[i] intValue];
@@ -297,7 +298,7 @@ static void postReload(void) {
     NSString *name = nil;
     if (indexPath.section == 1 && indexPath.row == 1) name = [self nameForMode:0];
     if (indexPath.section == 2 && indexPath.row == 1) name = [self nameForMode:1];
-    if (indexPath.section == 3 && indexPath.row == 5) name = [self frameStatusName];
+    if (indexPath.section == 3 && indexPath.row == 6) name = [self frameStatusName];
     if (name) {
         if ([cell respondsToSelector:@selector(setValue:)])
             ((void (*)(id, SEL, id))objc_msgSend)(cell, @selector(setValue:), name);
