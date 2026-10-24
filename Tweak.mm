@@ -441,6 +441,7 @@ static void syncNativeSpectrum(UIView *bestRoot); // 前向声明: step 每帧�
 /* 音频开关: 开→在音频门户层(CALayerHost)上用掩码挖洞, 只隐藏右上角波形, 按钮/专辑/歌词不受影响; 关→移除掩码
    注意: 只在展开稳定态应用(收缩态岛尺寸太小, 算出的洞坐标是乱值会遮到歌词); 洞用展开态实测固定坐标(波形 x≈353-381 y≈42-65) */
 static char kDiMaskOn;
+static char kDiMaskW; // 记录掩码应用时的岛宽: 重新展开宽度变化>1pt 时重算洞位置
 static void syncNativeSpectrum(UIView *bestRoot) {
     CALayer *audioL = diFindAudioLayer(bestRoot);
     if (!audioL) return;
@@ -459,7 +460,6 @@ static void syncNativeSpectrum(UIView *bestRoot) {
     CAShapeLayer *m = (CAShapeLayer *)audioL.mask;
     if (applied && m) {
         // 已应用: 岛宽变化超过1pt(重新展开/切换岛)才重算洞位置, 否则不动
-        static char kDiMaskW;
         NSNumber *lastW = objc_getAssociatedObject(audioL, &kDiMaskW);
         if (lastW && fabs([lastW doubleValue] - bs.width) < 1.0) return;
         objc_setAssociatedObject(audioL, &kDiMaskW, @(bs.width), OBJC_ASSOCIATION_RETAIN_NONATOMIC);
