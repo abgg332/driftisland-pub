@@ -169,9 +169,6 @@ static void postReload(void) {
         NSMutableArray *specs = [NSMutableArray array];
         [specs addObject:[self groupSpec:@"漂流岛 · 灵动岛视频背景" footer:nil]];
         [specs addObject:[self switchSpec:@"总开关" key:@"enabled" def:@NO]];
-        /* 投送按钮: 隐藏/显示音乐岛右下角的投送(AirPlay)图标 */
-        [specs addObject:[self switchSpec:@"投送按钮" key:@"hideAirPlay" def:@NO]];
-
         /* 小岛素材: 开关 + 素材选择行(同组相邻) */
         [specs addObject:[self groupSpec:@"小岛素材" footer:nil]];
         PSSpecifier *smallMat = [PSSpecifier preferenceSpecifierNamed:@"素材选择" target:self
@@ -253,7 +250,7 @@ static void postReload(void) {
         if (v > [maxs[i] intValue]) v = [maxs[i] intValue];
 
         cell.textLabel.text = labels[i];
-        cell.textLabel.font = [UIFont systemFontOfSize:17 weight:UIFontWeightSemibold];
+        cell.textLabel.font = [UIFont systemFontOfSize:17];
 
         /* 隐藏系统滑杆(它不渲染标题且铺满整行) */
         UIView *root = cell.contentView.subviews.count ? cell.contentView : cell;
@@ -269,7 +266,7 @@ static void postReload(void) {
             sl.minimumTrackTintColor = [UIColor systemBlueColor];
             [sl addTarget:self action:@selector(diSliderChanged:) forControlEvents:UIControlEventValueChanged];
             UILabel *vl = [UILabel new];
-            vl.font = [UIFont monospacedDigitSystemFontOfSize:17 weight:UIFontWeightSemibold];
+            vl.font = [UIFont monospacedDigitSystemFontOfSize:17];
             vl.textAlignment = NSTextAlignmentRight;
             vl.userInteractionEnabled = YES;
             vl.textColor = [UIColor systemBlueColor]; // 提示可点击输入

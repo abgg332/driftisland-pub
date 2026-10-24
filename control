@@ -1,7 +1,7 @@
 Package: com.abgg332.driftisland
 Name: 漂流岛 Drift Island
 Depends: mobilesubstrate, preferenceloader
-Version: 1.57.0
+Version: 1.58.0
 Architecture: iphoneos-arm64
 Description: 在灵动岛内加载视频背景。把视频放进 /var/mobile/灵动岛，设置中出现「漂流岛」入口（总开关/声音/素材选择）。
 Maintainer: abgg332
