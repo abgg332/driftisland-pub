@@ -3,6 +3,7 @@
 #import <Preferences/PSSpecifier.h>
 #import <CoreFoundation/CoreFoundation.h>
 #import <objc/message.h>
+#import <AVFoundation/AVFoundation.h>
 
 static NSString *const kDomain = @"com.abgg332.driftisland";
 static NSString *const kNotifyStr = @"com.abgg332.driftisland.reload";
@@ -458,28 +459,139 @@ static void postReload(void) {
 
 @end
 
+#pragma mark - 素材预览网格
+
+static NSCache *diThumbCache(void) {
+    static NSCache *c;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{ c = [NSCache new]; c.countLimit = 60; });
+    return c;
+}
+
+@interface DIPreviewCell : UICollectionViewCell
+@property (nonatomic, strong) UIImageView *iv;
+@property (nonatomic, strong) UILabel *lb;
+@end
+@implementation DIPreviewCell
+- (instancetype)initWithFrame:(CGRect)frame {
+    if ((self = [super initWithFrame:frame])) {
+        _iv = [[UIImageView alloc] initWithFrame:CGRectMake(0, 0, frame.size.width, frame.size.height - 20)];
+        _iv.contentMode = UIViewContentModeScaleAspectFill;
+        _iv.clipsToBounds = YES;
+        _iv.layer.cornerRadius = 12;
+        _iv.backgroundColor = [UIColor tertiarySystemFillColor];
+        _iv.translatesAutoresizingMaskIntoConstraints = NO;
+        _lb = [[UILabel alloc] initWithFrame:CGRectZero];
+        _lb.font = [UIFont systemFontOfSize:11];
+        _lb.textAlignment = NSTextAlignmentCenter;
+        _lb.textColor = [UIColor secondaryLabelColor];
+        _lb.translatesAutoresizingMaskIntoConstraints = NO;
+        [self.contentView addSubview:_iv];
+        [self.contentView addSubview:_lb];
+        [NSLayoutConstraint activateConstraints:@[
+            [_iv.topAnchor constraintEqualToAnchor:self.contentView.topAnchor],
+            [_iv.leadingAnchor constraintEqualToAnchor:self.contentView.leadingAnchor],
+            [_iv.trailingAnchor constraintEqualToAnchor:self.contentView.trailingAnchor],
+            [_iv.bottomAnchor constraintEqualToAnchor:self.contentView.bottomAnchor constant:-20],
+            [_lb.topAnchor constraintEqualToAnchor:_iv.bottomAnchor constant:2],
+            [_lb.leadingAnchor constraintEqualToAnchor:self.contentView.leadingAnchor],
+            [_lb.trailingAnchor constraintEqualToAnchor:self.contentView.trailingAnchor],
+        ]];
+    }
+    return self;
+}
+- (void)layoutSubviews {
+    [super layoutSubviews];
+    self.layer.cornerRadius = 0;
+    if (self.highlighted) self.contentView.alpha = 0.6; else self.contentView.alpha = 1;
+}
+@end
+
+@interface DIPreviewGrid : UICollectionViewController
+@property (nonatomic, assign) NSInteger matMode; /* 0=小岛 1=展开 */
+@end
+
+@implementation DIPreviewGrid
+- (instancetype)init {
+    UICollectionViewFlowLayout *fl = [UICollectionViewFlowLayout new];
+    CGFloat w = [UIScreen mainScreen].bounds.size.width - 32;
+    fl.itemSize = CGSizeMake((w - 12) / 3, (w - 12) / 3 * 0.72 + 22);
+    fl.minimumInteritemSpacing = 6;
+    fl.minimumLineSpacing = 14;
+    fl.sectionInset = UIEdgeInsetsMake(12, 16, 24, 16);
+    return [super initWithCollectionViewLayout:fl];
+}
+- (void)viewDidLoad {
+    [super viewDidLoad];
+    self.title = (self.matMode == 0) ? @"小岛素材" : @"展开素材";
+    self.collectionView.backgroundColor = [UIColor systemGroupedBackgroundColor];
+    [self.collectionView registerClass:[DIPreviewCell class] forCellWithReuseIdentifier:@"cell"];
+    self.navigationItem.rightBarButtonItem = [[UIBarButtonItem alloc] initWithTitle:@"关闭" style:UIBarButtonItemStylePlain target:self action:@selector(close)];
+}
+- (void)close { [self dismissViewControllerAnimated:YES completion:nil]; }
+- (NSInteger)currentIndex {
+    CFPreferencesAppSynchronize((__bridge CFStringRef)kDomain);
+    id v = CFBridgingRelease(CFPreferencesCopyAppValue((__bridge CFStringRef)(self.matMode == 0 ? @"smallIndex" : @"expandIndex"), (__bridge CFStringRef)kDomain));
+    return v ? [v integerValue] : 0;
+}
+- (NSInteger)collectionView:(UICollectionView *)cv numberOfItemsInSection:(NSInteger)section {
+    return (NSInteger)videoFiles().count;
+}
+- (UICollectionViewCell *)collectionView:(UICollectionView *)cv cellForItemAtIndexPath:(NSIndexPath *)ip {
+    DIPreviewCell *cell = [cv dequeueReusableCellWithReuseIdentifier:@"cell" forIndexPath:ip];
+    NSString *name = videoFiles()[ip.item];
+    cell.lb.text = name;
+    cell.lb.textColor = (ip.item == [self currentIndex]) ? [UIColor systemBlueColor] : [UIColor secondaryLabelColor];
+    cell.iv.layer.borderWidth = (ip.item == [self currentIndex]) ? 2 : 0;
+    cell.iv.layer.borderColor = [UIColor systemBlueColor].CGColor;
+    UIImage *thumb = [diThumbCache() objectForKey:name];
+    if (thumb) { cell.iv.image = thumb; }
+    else {
+        cell.iv.image = nil;
+        __weak DIPreviewCell *wc = cell;
+        __weak UICollectionView *wcv = cv;
+        dispatch_async(dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
+            AVURLAsset *asset = [AVURLAsset URLAssetWithURL:[NSURL fileURLWithPath:[kMaterialDir stringByAppendingPathComponent:name]] options:nil];
+            AVAssetImageGenerator *gen = [AVAssetImageGenerator assetImageGeneratorWithAsset:asset];
+            gen.appliesPreferredTrackTransform = YES;
+            gen.maximumSize = CGSizeMake(360, 360);
+            NSError *err = nil;
+            CGImageRef img = [gen copyCGImageAtTime:CMTimeMake(5, 10) actualTime:NULL error:&err];
+            if (img) {
+                UIImage *ui = [UIImage imageWithCGImage:img];
+                CGImageRelease(img);
+                [diThumbCache() setObject:ui forKey:name];
+                dispatch_async(dispatch_get_main_queue(), ^{
+                    if ([wc.lb.text isEqualToString:name]) wc.iv.image = ui;
+                    [wcv reloadItemsAtIndexPaths:@[ip]];
+                });
+            }
+        });
+    }
+    return cell;
+}
+- (void)collectionView:(UICollectionView *)cv didSelectItemAtIndexPath:(NSIndexPath *)ip {
+    NSString *key = (self.matMode == 0) ? @"smallIndex" : @"expandIndex";
+    CFPreferencesSetAppValue((__bridge CFStringRef)key, (__bridge CFPropertyListRef)@(ip.item), (__bridge CFStringRef)kDomain);
+    CFPreferencesAppSynchronize((__bridge CFStringRef)kDomain);
+    postReload();
+    [self close];
+}
+@end
+
 @implementation DIMaterialsController (Internal)
 
 - (NSArray *)specifiers {
     if (!_specifiers) {
         NSMutableArray *specs = [NSMutableArray array];
         NSInteger cnt = (NSInteger)videoFiles().count;
-        NSString *title = (self.matMode == 0) ? @"选择小岛素材" : (self.matMode == 1) ? @"选择展开素材" : @"选择频谱素材";
-        if (cnt == 0) {
-            [specs addObject:[self groupSpec:@"素材目录为空" footer:@"请把视频 (mp4/mov/m4v) 放进 /var/mobile/灵动岛，然后重新进入本页。"]];
-        } else {
-            [specs addObject:[self groupSpec:title footer:@"文件夹里有几个视频就显示几个（原文件名），点击哪个生效哪个。"]];
-            NSInteger cur = indexForKey(self.matMode == 0 ? @"smallIndex" : @"expandIndex");
-            for (NSInteger i = 0; i < cnt; i++) {
-                NSString *name = videoFiles()[i];
-                NSString *label = (i == cur) ? [NSString stringWithFormat:@"✓ %@", name] : name;
-                PSSpecifier *s = [PSSpecifier preferenceSpecifierNamed:label target:self
-                    set:NULL get:NULL detail:nil cell:PSButtonCell edit:nil];
-                [s setButtonAction:@selector(selectVideo:)];
-                [s setProperty:@(i) forKey:@"idx"];
-                [specs addObject:s];
-            }
-        }
+        NSString *title = (self.matMode == 0) ? @"小岛素材" : @"展开素材";
+        (void)cnt;
+        [specs addObject:[self groupSpec:title footer:@"点击下方打开预览网格，带视频封面缩略图，点哪个生效哪个。"]];
+        PSSpecifier *btn = [PSSpecifier preferenceSpecifierNamed:@"打开素材预览选择" target:self
+            set:NULL get:NULL detail:nil cell:PSButtonCell edit:nil];
+        [btn setButtonAction:@selector(openGrid:)];
+        [specs addObject:btn];
         _specifiers = specs;
     }
     return _specifiers;
@@ -492,17 +604,12 @@ static void postReload(void) {
     return s;
 }
 
-- (void)selectVideo:(PSSpecifier *)spec {
-    NSInteger idx = [[spec propertyForKey:@"idx"] integerValue];
-    NSString *key = (self.matMode == 0) ? @"smallIndex" : @"expandIndex";
-    CFPreferencesSetAppValue((__bridge CFStringRef)key, (__bridge CFPropertyListRef)@(idx), (__bridge CFStringRef)kDomain);
-    CFPreferencesAppSynchronize((__bridge CFStringRef)kDomain);
-    postReload();
-    NSArray *vcs = self.navigationController.viewControllers;
-    UIViewController *parent = (vcs.count >= 2) ? vcs[vcs.count - 2] : nil;
-    [self.navigationController popViewControllerAnimated:YES];
-    if ([parent respondsToSelector:@selector(reloadSpecifiers)])
-        [(id)parent performSelector:@selector(reloadSpecifiers)];
+- (void)openGrid:(PSSpecifier *)spec {
+    DIPreviewGrid *g = [[DIPreviewGrid alloc] init];
+    g.matMode = self.matMode;
+    UINavigationController *nav = [[UINavigationController alloc] initWithRootViewController:g];
+    nav.modalPresentationStyle = UIModalPresentationPageSheet;
+    [self presentViewController:nav animated:YES completion:nil];
 }
 
 - (void)reloadSpecifiers {

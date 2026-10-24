@@ -98,9 +98,9 @@ static BOOL gFramesDirty;    // 素材文件夹变更标志: 立即重扫
 static UIImage *frameImage(NSString *path) {
     static NSCache *cache;
     static dispatch_once_t once;
-    dispatch_once(&once, ^{ cache = [NSCache new]; cache.countLimit = 900; });
+    dispatch_once(&once, ^{ cache = [NSCache new]; cache.countLimit = 120; cache.totalCostLimit = 64 * 1024 * 1024; }); // 限内存: 最多120帧且总成本64MB
     UIImage *img = [cache objectForKey:path];
-    if (!img) { img = [UIImage imageWithContentsOfFile:path]; if (img) [cache setObject:img forKey:path]; }
+    if (!img) { img = [UIImage imageWithContentsOfFile:path]; if (img) [cache setObject:img forKey:path cost:(NSUInteger)(img.size.width * img.size.height * 4)]; }
     return img;
 }
 
@@ -694,6 +694,11 @@ static void visibilityTick(void) {
 static void applyLockState(BOOL locked) {
     if (locked == gLocked) return;
     gLocked = locked;
+    if (locked) {
+        [AVAudioSession.sharedInstance setActive:NO withOptions:AVAudioSessionSetActiveOptionNotifyOthersOnDeactivation error:NULL]; // 释放会话: iOS16 上放歌时不再抑制自动息屏
+    } else {
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)0.5 * NSEC_PER_SEC), dispatch_get_main_queue(), ^{ setupAudioSession(); }); // 解锁后重新应用类别
+    }
     DLog(@"锁屏状态: %@", locked ? @"已锁定 → 全部暂停" : @"已解锁 → 恢复");
     for (UIScene *s in UIApplication.sharedApplication.connectedScenes)
         if ([s isKindOfClass:[UIWindowScene class]])
