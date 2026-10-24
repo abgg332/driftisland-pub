@@ -240,7 +240,7 @@ static void postReload(void) {
             @selector(tableView:willDisplayCell:forRowAtIndexPath:), tableView, cell, indexPath);
     /* 注意: PSGroupCell 是 section header 不占行, indexPath.row 是组内行号:
        section1(小岛): row0=开关 row1=素材; section2(展开): row1=素材; section3(频谱): row1=素材 */
-    /* 帧率参数滑杆行(section3 row1~4): 左侧"文字 数字", 滑杆装入右半边容器(缩短横杠); 拖动实时更新数字 */
+    /* 帧率参数滑杆行(section3 row1~4): 文字(左) + 滑杆(中) + 数值(右), 自绘布局 */
     if (indexPath.section == 3 && indexPath.row >= 1 && indexPath.row <= 4) {
         NSArray *labels = @[@"帧率速度", @"素材大小", @"左右偏移", @"上下偏移"];
         NSArray *keys   = @[@"animFPS", @"animScaleAdj", @"animOffsetX3", @"animOffsetY3"];
@@ -251,34 +251,46 @@ static void postReload(void) {
         int v = [self numValue:keys[i] def:[defs[i] intValue]];
         if (v < [mins[i] intValue]) v = [mins[i] intValue];
         if (v > [maxs[i] intValue]) v = [maxs[i] intValue];
-        cell.textLabel.text = [NSString stringWithFormat:@"%@  %d", labels[i], v];
+
+        cell.textLabel.text = labels[i];
         cell.textLabel.font = [UIFont systemFontOfSize:15 weight:UIFontWeightSemibold];
 
-        UISlider *slider = nil;
+        /* 隐藏系统滑杆(它不渲染标题且铺满整行) */
         UIView *root = cell.contentView.subviews.count ? cell.contentView : cell;
-        for (UIView *sv in root.subviews) if ([sv isKindOfClass:UISlider.class]) { slider = (UISlider *)sv; break; }
-        if (!slider) for (UIView *sv in cell.subviews) if ([sv isKindOfClass:UISlider.class]) { slider = (UISlider *)sv; break; }
+        for (UIView *sv in root.subviews) if ([sv isKindOfClass:UISlider.class]) sv.hidden = YES;
+        for (UIView *sv in cell.subviews) if ([sv isKindOfClass:UISlider.class]) sv.hidden = YES;
+
         CGFloat cw = cell.contentView.bounds.size.width, ch = cell.contentView.bounds.size.height;
-        if (slider && cw > 10) {
-            UIView *wrap = (UIView *)objc_getAssociatedObject(cell, "diWrap");
-            if (!wrap) {
-                wrap = [[UIView alloc] initWithFrame:CGRectMake(cw * 0.44, (ch - 31) / 2, cw * 0.52, 31)];
-                wrap.tag = 0xD1;
-                wrap.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleLeftMargin;
-                [slider removeFromSuperview];
-                slider.frame = wrap.bounds;
-                slider.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
-                [wrap addSubview:slider];
-                [cell.contentView addSubview:wrap];
-                objc_setAssociatedObject(cell, "diWrap", wrap, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-            }
-            /* 拖动实时同步数字(防重复挂接) */
-            if (!objc_getAssociatedObject(slider, "liveHook")) {
-                objc_setAssociatedObject(slider, "liveHook", @YES, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-                objc_setAssociatedObject(slider, "liveLabel", labels[i], OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-                [slider addTarget:self action:@selector(sliderLive:) forControlEvents:UIControlEventValueChanged];
-            }
+        UIView *box = objc_getAssociatedObject(cell, "diBox");
+        if (!box) {
+            box = [[UIView alloc] initWithFrame:CGRectMake(0, 0, cw, ch)];
+            box.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
+            UISlider *sl = [UISlider new];
+            sl.minimumTrackTintColor = [UIColor systemBlueColor];
+            [sl addTarget:self action:@selector(diSliderChanged:) forControlEvents:UIControlEventValueChanged];
+            UILabel *vl = [UILabel new];
+            vl.font = [UIFont monospacedDigitSystemFontOfSize:16 weight:UIFontWeightSemibold];
+            vl.textAlignment = NSTextAlignmentRight;
+            [box addSubview:sl];
+            [box addSubview:vl];
+            [cell.contentView addSubview:box];
+            objc_setAssociatedObject(cell, "diBox", box, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+            objc_setAssociatedObject(box, "slider", sl, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+            objc_setAssociatedObject(box, "valLabel", vl, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
         }
+        objc_setAssociatedObject(box, "key", keys[i], OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        objc_setAssociatedObject(box, "label", labels[i], OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        objc_setAssociatedObject(box, "mn", mins[i], OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        objc_setAssociatedObject(box, "mx", maxs[i], OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        box.frame = CGRectMake(0, 0, cw, ch);
+        UISlider *sl = objc_getAssociatedObject(box, "slider");
+        UILabel *vl = objc_getAssociatedObject(box, "valLabel");
+        sl.frame = CGRectMake(cw * 0.30, (ch - 31) / 2, cw * 0.46, 31);
+        sl.minimumValue = [mins[i] intValue]; sl.maximumValue = [maxs[i] intValue];
+        if ((int)round(sl.value) != v) sl.value = v; // 不在拖动中才校准
+        vl.text = [NSString stringWithFormat:@"%d", v];
+        vl.frame = CGRectMake(cw * 0.78, (ch - 20) / 2, cw * 0.19, 20);
+        box.hidden = NO;
     }
 
     NSString *name = nil;
@@ -296,17 +308,22 @@ static void postReload(void) {
     }
 }
 
-/* 滑杆拖动: 实时刷新本行"文字 数字" */
-- (void)sliderLive:(UISlider *)slider {
-    NSString *label = objc_getAssociatedObject(slider, "liveLabel");
-    UIView *cell = slider.superview.superview; // wrap → contentView → cell
-    for (UIView *v = cell; v; v = v.superview) {
-        if ([v isKindOfClass:UITableViewCell.class]) {
-            UILabel *tl = ((UITableViewCell *)v).textLabel;
-            if (tl) tl.text = [NSString stringWithFormat:@"%@  %d", label, (int)round(slider.value)];
-            break;
-        }
-    }
+/* 自绘滑杆拖动: 实时保存(取整+clamp) + 实时刷新数值 */
+- (void)diSliderChanged:(UISlider *)sl {
+    UIView *box = sl.superview;
+    NSString *key = objc_getAssociatedObject(box, "key");
+    NSString *label = objc_getAssociatedObject(box, "label");
+    double v = round(sl.value);
+    double mn = [objc_getAssociatedObject(box, "mn") doubleValue];
+    double mx = [objc_getAssociatedObject(box, "mx") doubleValue];
+    if (v < mn) v = mn; if (v > mx) v = mx;
+    if (sl.value != v) sl.value = v;
+    CFPreferencesSetAppValue((__bridge CFStringRef)key, (__bridge CFPropertyListRef)@(v), (__bridge CFStringRef)kDomain);
+    CFPreferencesAppSynchronize((__bridge CFStringRef)kDomain);
+    postReload();
+    UILabel *vl = objc_getAssociatedObject(box, "valLabel");
+    vl.text = [NSString stringWithFormat:@"%d", (int)v];
+    /* 同步行标题? 标题只有文字, 数字在右侧已实时刷新 */
 }
 
 /* Filza 官方 URL 格式: filza://view/路径 或 filza://路径（见 tigisoftware 官方指南），中文路径严格百分号编码 */
