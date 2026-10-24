@@ -349,7 +349,7 @@ static CALayer *diFindAudioLayer(UIView *host); // 前向声明: syncFrameToHost
 
 - (void)dealloc {
     [_syncLink invalidate];
-    if (_endObs) { [NSNotificationCenter.defaultCenter removeObserver:_endObs]; }
+    [[NSNotificationCenter defaultCenter] removeObserver:self];
 }
 
 // 频谱动画视图: 序列帧播放(替代视频), 支持帧率/旋转/反转/旋转速度/缩放/XY偏移, 全部由偏好实时驱动
@@ -358,7 +358,7 @@ static CALayer *diFindAudioLayer(UIView *host); // 前向声明: syncFrameToHost
 - (void)loadVideo:(NSString *)path {
     self.currentPath = path;
     self.looper = nil;
-    if (_endObs) { [NSNotificationCenter.defaultCenter removeObserver:_endObs]; _endObs = nil; }
+    [[NSNotificationCenter defaultCenter] removeObserver:self name:@"AVPlayerItemDidPlayToEndTime" object:nil];
     [self.player replaceCurrentItemWithPlayerItem:nil];
     if (!path.length) { self.hidden = YES; DLog(@"素材为空: /var/mobile/灵动岛 下没有 mp4/mov/m4v"); return; }
     /* 音频冲突根治: 用 AVMutableComposition 只保留视频轨(剔除音轨)。
@@ -382,14 +382,9 @@ static CALayer *diFindAudioLayer(UIView *host); // 前向声明: syncFrameToHost
     DLog(@"加载视频: %@", path);
     if ([item.asset isKindOfClass:[AVMutableComposition class]]) {
         /* AVPlayerLooper 不支持 composition 素材: 播完一遍循环即断("过一会停止"根因)。
-           composition 素材改用结束通知手动循环 */
+           composition 素材改用结束通知手动循环(selector 观察者) */
         [self.player replaceCurrentItemWithPlayerItem:item];
-        __weak typeof(self) ws = self;
-        _endObs = [NSNotificationCenter.defaultCenter addObserverForName:AVPlayerItemDidPlayToEndTime object:item queue:nil usingBlock:^(NSNotification *n) {
-            __strong typeof(ws) s = ws; if (!s) return;
-            [s.player seekToTime:kCMTimeZero];
-            if (enabled && !gLocked) [s.player play];
-        }];
+        [[NSNotificationCenter defaultCenter] addObserver:self selector:@selector(diItemEnded:) name:@"AVPlayerItemDidPlayToEndTime" object:item];
         DLog(@"composition 素材: 手动循环模式");
     } else {
         self.looper = [AVPlayerLooper playerLooperWithPlayer:self.player templateItem:item];
@@ -405,6 +400,12 @@ static CALayer *diFindAudioLayer(UIView *host); // 前向声明: syncFrameToHost
         [self.player setRate:spd0];
         dispatch_async(dispatch_get_main_queue(), ^{ [self.player play]; }); // 下一轮再补一次, 防切换素材后偶发暂停
     }
+}
+
+- (void)diItemEnded:(NSNotification *)n { // composition 素材播完: 手动循环
+    if (n.object != (id)_player.currentItem) return;
+    [_player seekToTime:kCMTimeZero];
+    if (enabled && !gLocked) [_player play];
 }
 
 @end
