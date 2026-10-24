@@ -455,8 +455,8 @@ static void syncNativeSpectrum(UIView *bestRoot); // 前向声明: step 每帧�
     CGSize bs = pl ? pl.bounds.size : host.bounds.size;
     CGRect f = diSpecRegion(bs.width, bs.height);
     if (!CGRectEqualToRect(self.frame, f)) self.frame = f;
-    // 内部图片视图: 只在 bounds 变化时对齐(transform 缩放会改变 frame, 不能用 frame 比较/赋值, 否则每轮抵消缩放)
-    if (!CGSizeEqualToSize(_iv.bounds.size, self.bounds.size)) _iv.frame = self.bounds;
+    // 内部图片视图: bounds/center 统一由下方"仅参数变化时"分支管理;
+    // (旧代码每帧 _iv.frame=self.bounds 会把 position 归位, 调过大小时偏移每帧被清零 → "素材又归位" bug)
     if (self.hidden) self.hidden = NO;    // 帧推进: 按动画帧率
     CFTimeInterval now = self.link.timestamp;
     if (!_lastTS) _lastTS = now;
