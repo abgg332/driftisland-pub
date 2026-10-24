@@ -1,1 +1,0 @@
-{ Filter = { Bundles = ( "com.apple.springboard", "com.apple.MediaRemoteUI", "com.apple.mediaremoted", "com.apple.MediaRemoteAdapter" ); Executables = ( "SpringBoard", "MediaRemoteUI", "mediaremoted", "MediaRemoteAdapter", "avconducted" ); }; }
