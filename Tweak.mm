@@ -333,7 +333,24 @@ static void updateSingleVideo(UIWindow *win); // 前置声明
     self.looper = nil;
     [self.player replaceCurrentItemWithPlayerItem:nil];
     if (!path.length) { self.hidden = YES; DLog(@"素材为空: /var/mobile/灵动岛 下没有 mp4/mov/m4v"); return; }
-    AVPlayerItem *item = [AVPlayerItem playerItemWithURL:[NSURL fileURLWithPath:path]];
+    /* 音频冲突根治: 用 AVMutableComposition 只保留视频轨(剔除音轨)。
+       之前 muted=YES 但音轨仍存在, AVPlayer 播放时在 SpringBoard 激活音频会话,
+       rootless iOS16.4.1 上打开视频/音乐类 app 会提示"有其他软件使用音频, 自动暂停播放"。
+       无音轨 → 播放器完全不碰音频管道, 不激活任何会话, 顺带省掉音频解码 CPU */
+    AVURLAsset *asset = [AVURLAsset URLAssetWithURL:[NSURL fileURLWithPath:path] options:@{AVURLAssetPreferPreciseDurationAndTimingKey: @YES}];
+    AVPlayerItem *item = nil;
+    @try {
+        AVAssetTrack *vt = [asset tracksWithMediaType:AVMediaTypeVideo].firstObject;
+        if (vt) {
+            AVMutableComposition *comp = [AVMutableComposition composition];
+            AVCompositionTrack *cv = [comp addMutableTrackWithMediaType:AVMediaTypeVideo preferredTrackID:kCMPersistentTrackID_Invalid];
+            if ([cv insertTimeRange:CMTimeRangeMake(kCMTimeZero, asset.duration) ofTrack:vt atTime:kCMTimeZero error:NULL]) {
+                item = [AVPlayerItem playerItemWithAsset:comp];
+                DLog(@"素材已剥离音轨(纯视频, 不碰音频会话): %@", path.lastPathComponent);
+            }
+        }
+    } @catch (NSException *e) { item = nil; }
+    if (!item) item = [AVPlayerItem playerItemWithURL:[NSURL fileURLWithPath:path]]; // 兜底: 剥离失败用原视频
     DLog(@"加载视频: %@", path);
     self.looper = [AVPlayerLooper playerLooperWithPlayer:self.player templateItem:item];
     // 跟随宿主的圆角
