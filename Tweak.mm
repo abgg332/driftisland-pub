@@ -208,7 +208,26 @@ static void refreshPrefs(void) {
 @property (nonatomic, assign) BOOL expandedLayer; // YES=展开层(播展开素材), NO=小岛层
 @end
 
-static char kWinVideoSmall, kWinVideoExpand, kWinVideoSpec; // 每窗口视频层(小岛/展开/频谱)
+static char kWinVideoSmall, kWinVideoExpand, kWinVideoSpec;
+
+/* 查询"正在播放音乐"(MediaRemote 动态加载): 只有音乐岛才有频谱, 帧率动画只在播音乐时显示 */
+static BOOL musicPlaying = NO;
+static BOOL mrQueryOK = NO; // 查询可用过才启用过滤, 避免符号缺失导致动画永不显示
+static void queryMusicPlaying(void) {
+    static void (*mrGet)(dispatch_queue_t, void (^)(BOOL)) = NULL;
+    static dispatch_queue_t q;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        void *h = dlopen("/System/Library/PrivateFrameworks/MediaRemote.framework/MediaRemote", RTLD_LAZY);
+        if (h) mrGet = (void (*)(dispatch_queue_t, void (^)(BOOL)))dlsym(h, "MRMediaRemoteGetNowPlayingIsPlaying");
+        if (mrGet) q = dispatch_queue_create("di.mediaremote", DISPATCH_QUEUE_SERIAL);
+    });
+    if (!mrGet) return;
+    dispatch_async(q, ^{ mrGet(q, ^(BOOL playing) {
+        dispatch_async(dispatch_get_main_queue(), ^{ musicPlaying = playing; mrQueryOK = YES; });
+    }); });
+}
+ // 每窗口视频层(小岛/展开/频谱)
 // 区域标定(相对展开岛比例, 用户截图圈定); 素材层外扩2pt保证完全盖住
 static CGRect diSpecRegion(CGFloat w, CGFloat h) {
     /* 已烘焙校准位置: 原始区域{0.41w,0.72h,0.18w,0.25h} 平移(134.83,-119.195); 大小保持原始, 缩放基准=1 */
@@ -583,24 +602,6 @@ static void refreshAll(void) {
 }
 
 // 0.5 秒轮询: 刷新偏好缓存 + 维持视频层; displayLink 负责逐帧贴合
-/* 查询"正在播放音乐"(MediaRemote 动态加载): 只有音乐岛才有频谱, 帧率动画只在播音乐时显示 */
-static BOOL musicPlaying = NO;
-static BOOL mrQueryOK = NO; // 查询可用过才启用过滤, 避免符号缺失导致动画永不显示
-static void queryMusicPlaying(void) {
-    static void (*mrGet)(dispatch_queue_t, void (^)(BOOL)) = NULL;
-    static dispatch_queue_t q;
-    static dispatch_once_t once;
-    dispatch_once(&once, ^{
-        void *h = dlopen("/System/Library/PrivateFrameworks/MediaRemote.framework/MediaRemote", RTLD_LAZY);
-        if (h) mrGet = (void (*)(dispatch_queue_t, void (^)(BOOL)))dlsym(h, "MRMediaRemoteGetNowPlayingIsPlaying");
-        if (mrGet) q = dispatch_queue_create("di.mediaremote", DISPATCH_QUEUE_SERIAL);
-    });
-    if (!mrGet) return;
-    dispatch_async(q, ^{ mrGet(q, ^(BOOL playing) {
-        dispatch_async(dispatch_get_main_queue(), ^{ musicPlaying = playing; mrQueryOK = YES; });
-    }); });
-}
-
 static void visibilityTick(void) {
     refreshPrefs();
     queryMusicPlaying();
