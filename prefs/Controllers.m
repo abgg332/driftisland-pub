@@ -253,7 +253,7 @@ static void postReload(void) {
         if (v > [maxs[i] intValue]) v = [maxs[i] intValue];
 
         cell.textLabel.text = labels[i];
-        cell.textLabel.font = [UIFont systemFontOfSize:15 weight:UIFontWeightSemibold];
+        cell.textLabel.font = [UIFont systemFontOfSize:17 weight:UIFontWeightSemibold];
 
         /* 隐藏系统滑杆(它不渲染标题且铺满整行) */
         UIView *root = cell.contentView.subviews.count ? cell.contentView : cell;
@@ -269,8 +269,11 @@ static void postReload(void) {
             sl.minimumTrackTintColor = [UIColor systemBlueColor];
             [sl addTarget:self action:@selector(diSliderChanged:) forControlEvents:UIControlEventValueChanged];
             UILabel *vl = [UILabel new];
-            vl.font = [UIFont monospacedDigitSystemFontOfSize:16 weight:UIFontWeightSemibold];
+            vl.font = [UIFont monospacedDigitSystemFontOfSize:17 weight:UIFontWeightSemibold];
             vl.textAlignment = NSTextAlignmentRight;
+            vl.userInteractionEnabled = YES;
+            vl.textColor = [UIColor systemBlueColor]; // 提示可点击输入
+            [vl addGestureRecognizer:[[UITapGestureRecognizer alloc] initWithTarget:self action:@selector(diTapValue:)]];
             [box addSubview:sl];
             [box addSubview:vl];
             [cell.contentView addSubview:box];
@@ -289,7 +292,7 @@ static void postReload(void) {
         sl.minimumValue = [mins[i] intValue]; sl.maximumValue = [maxs[i] intValue];
         if ((int)round(sl.value) != v) sl.value = v; // 不在拖动中才校准
         vl.text = [NSString stringWithFormat:@"%d", v];
-        vl.frame = CGRectMake(cw * 0.78, (ch - 20) / 2, cw * 0.19, 20);
+        vl.frame = CGRectMake(cw * 0.77, (ch - 22) / 2, cw * 0.20, 22);
         box.hidden = NO;
     }
 
@@ -323,6 +326,35 @@ static void postReload(void) {
     UILabel *vl = objc_getAssociatedObject(box, "valLabel");
     vl.text = [NSString stringWithFormat:@"%d", (int)v];
     /* 同步行标题? 标题只有文字, 数字在右侧已实时刷新 */
+}
+
+/* 点击右侧数值: 弹框手动输入精确值(取整+clamp) */
+- (void)diTapValue:(UITapGestureRecognizer *)tap {
+    UIView *box = tap.view.superview;
+    NSString *key = objc_getAssociatedObject(box, "key");
+    NSString *label = objc_getAssociatedObject(box, "label");
+    double mn = [objc_getAssociatedObject(box, "mn") doubleValue];
+    double mx = [objc_getAssociatedObject(box, "mx") doubleValue];
+    UILabel *vl = objc_getAssociatedObject(box, "valLabel");
+    UIAlertController *alert = [UIAlertController alertControllerWithTitle:label
+        message:[NSString stringWithFormat:@"范围 %.0f ~ %.0f", mn, mx]
+        preferredStyle:UIAlertControllerStyleAlert];
+    [alert addTextFieldWithConfigurationHandler:^(UITextField *tf) {
+        tf.text = vl.text;
+        tf.keyboardType = UIKeyboardTypeNumberPad;
+    }];
+    [alert addAction:[UIAlertAction actionWithTitle:@"取消" style:UIAlertActionStyleCancel handler:nil]];
+    [alert addAction:[UIAlertAction actionWithTitle:@"确定" style:UIAlertActionStyleDefault handler:^(UIAlertAction *a) {
+        double v = round([alert.textFields.firstObject.text doubleValue]);
+        if (v < mn) v = mn; if (v > mx) v = mx;
+        CFPreferencesSetAppValue((__bridge CFStringRef)key, (__bridge CFPropertyListRef)@(v), (__bridge CFStringRef)kDomain);
+        CFPreferencesAppSynchronize((__bridge CFStringRef)kDomain);
+        postReload();
+        vl.text = [NSString stringWithFormat:@"%d", (int)v];
+        UISlider *sl = objc_getAssociatedObject(box, "slider");
+        if (sl && (int)round(sl.value) != (int)v) sl.value = v; // 滑杆同步
+    }]];
+    [self presentViewController:alert animated:YES completion:nil];
 }
 
 /* Filza 官方 URL 格式: filza://view/路径 或 filza://路径（见 tigisoftware 官方指南），中文路径严格百分号编码 */
