@@ -673,7 +673,7 @@ static NSCache *diThumbCache(void) {
     if ([cfg respondsToSelector:@selector(setFilter:)] && [f respondsToSelector:@selector(videosFilter)])
         [cfg performSelector:@selector(setFilter:) withObject:((id (*)(id, SEL))objc_msgSend)(f, @selector(videosFilter))]; // 只显示视频
     if ([cfg respondsToSelector:@selector(setSelectionLimit:)])
-        [cfg performSelector:@selector(setSelectionLimit:) withObject:@1];
+        [cfg performSelector:@selector(setSelectionLimit:) withObject:@0]; // 0=不限制, 多选多导
     id p = [[phpPicker alloc] initWithConfiguration:cfg];
     if ([p respondsToSelector:@selector(setDelegate:)]) [p performSelector:@selector(setDelegate:) withObject:self];
     [self presentViewController:p animated:YES completion:nil];
@@ -681,35 +681,48 @@ static NSCache *diThumbCache(void) {
 
 - (void)picker:(id)picker didFinishPicking:(NSArray *)results {
     [picker dismissViewControllerAnimated:YES completion:nil];
-    id r = results.firstObject;
-    if (!r) return;
-    id provider = [r valueForKey:@"itemProvider"];
-    NSString *sugg = [provider respondsToSelector:@selector(suggestedName)] ? [provider performSelector:@selector(suggestedName)] : nil;
-    [provider loadFileRepresentationForTypeIdentifier:@"public.movie" completionHandler:^(NSURL *url, NSError *err) {
-        if (!url) return;
-        NSFileManager *fm = [NSFileManager defaultManager];
-        [fm createDirectoryAtPath:kMaterialDir withIntermediateDirectories:YES attributes:nil error:nil];
-        NSString *ext = url.pathExtension.length ? url.pathExtension : @"mov";
-        NSString *base = @"相册导入";
-        if (sugg.length) {
-            base = sugg.pathExtension.length ? sugg.stringByDeletingPathExtension : sugg;
-            base = [base stringByReplacingOccurrencesOfString:@"/" withString:@"_"];
-        }
-        NSString *name = [NSString stringWithFormat:@"%@.%@", base, ext];
-        NSString *dst = [kMaterialDir stringByAppendingPathComponent:name];
-        NSInteger n = 1;
-        while ([fm fileExistsAtPath:dst]) { // 重名自动加序号
-            name = [NSString stringWithFormat:@"%@_%ld.%@", base, (long)n++, ext];
-            dst = [kMaterialDir stringByAppendingPathComponent:name];
-        }
-        NSError *cpErr = nil;
-        [fm copyItemAtURL:url toURL:[NSURL fileURLWithPath:dst] error:&cpErr];
-        dispatch_async(dispatch_get_main_queue(), ^{
-            NSString *msg = cpErr ? [NSString stringWithFormat:@"导入失败: %@", cpErr.localizedDescription] : [NSString stringWithFormat:@"已导入: %@", name];
-            UIAlertController *a = [UIAlertController alertControllerWithTitle:@"相册素材导入" message:msg preferredStyle:UIAlertControllerStyleAlert];
-            [a addAction:[UIAlertAction actionWithTitle:@"好" style:UIAlertActionStyleDefault handler:nil]];
-            [self presentViewController:a animated:YES completion:nil];
-        });
-    }];
+    if (!results.count) return;
+    NSFileManager *fm = [NSFileManager defaultManager];
+    [fm createDirectoryAtPath:kMaterialDir withIntermediateDirectories:YES attributes:nil error:nil];
+    __block NSInteger okCnt = 0, failCnt = 0;
+    __block NSString *firstNew = nil;
+    dispatch_group_t grp = dispatch_group_create();
+    for (id r in results) {
+        id provider = [r valueForKey:@"itemProvider"];
+        NSString *sugg = [provider respondsToSelector:@selector(suggestedName)] ? [provider performSelector:@selector(suggestedName)] : nil;
+        dispatch_group_enter(grp);
+        [provider loadFileRepresentationForTypeIdentifier:@"public.movie" completionHandler:^(NSURL *url, NSError *err) {
+            if (url) {
+                NSString *ext = url.pathExtension.length ? url.pathExtension : @"mov";
+                NSString *base = @"相册导入";
+                if (sugg.length) {
+                    base = sugg.pathExtension.length ? sugg.stringByDeletingPathExtension : sugg;
+                    base = [base stringByReplacingOccurrencesOfString:@"/" withString:@"_"];
+                }
+                NSString *name = [NSString stringWithFormat:@"%@.%@", base, ext];
+                NSString *dst = [kMaterialDir stringByAppendingPathComponent:name];
+                NSInteger n = 1;
+                while ([fm fileExistsAtPath:dst]) { // 重名自动加序号
+                    name = [NSString stringWithFormat:@"%@_%ld.%@", base, (long)n++, ext];
+                    dst = [kMaterialDir stringByAppendingPathComponent:name];
+                }
+                NSError *cpErr = nil;
+                if ([fm copyItemAtURL:url toURL:[NSURL fileURLWithPath:dst] error:&cpErr]) {
+                    okCnt++;
+                    if (!firstNew) firstNew = name;
+                } else failCnt++;
+            } else failCnt++;
+            dispatch_group_leave(grp);
+        }];
+    }
+    dispatch_group_notify(grp, dispatch_get_main_queue(), ^{
+        NSString *msg;
+        if (failCnt > 0) msg = [NSString stringWithFormat:@"成功 %ld 个, 失败 %ld 个", (long)okCnt, (long)failCnt];
+        else if (okCnt == 1) msg = [NSString stringWithFormat:@"已导入: %@", firstNew];
+        else msg = [NSString stringWithFormat:@"已导入 %ld 个素材", (long)okCnt];
+        UIAlertController *a = [UIAlertController alertControllerWithTitle:@"相册素材导入" message:msg preferredStyle:UIAlertControllerStyleAlert];
+        [a addAction:[UIAlertAction actionWithTitle:@"好" style:UIAlertActionStyleDefault handler:nil]];
+        [self presentViewController:a animated:YES completion:nil];
+    });
 }
 @end

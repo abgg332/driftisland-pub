@@ -294,6 +294,16 @@ static void updateSingleVideo(UIWindow *win); // 前置声明
     if (!CGRectEqualToRect(self.frame, b)) self.frame = b;
     CGFloat cr = pl ? pl.cornerRadius : host.layer.cornerRadius;
     if (self.layer.cornerRadius != cr) self.layer.cornerRadius = cr;
+    /* 视频也响应"素材大小/左右偏移/上下偏移"滑杆(默认 1/0/0 时恒等不作用); 帧率速度映射为播放速率 */
+    {
+        CGFloat sc = animScale, ox = animOffsetX, oy = animOffsetY;
+        CATransform3D t = CATransform3DIdentity;
+        if (sc != 1 || ox != 0 || oy != 0) {
+            t = CATransform3DMakeScale(sc, sc, 1);
+            t = CATransform3DTranslate(t, ox, oy, 0);
+        }
+        if (!CATransform3DEqualToTransform(self.layer.transform, t)) self.layer.transform = t;
+    }
     BOOL hostVisible = enabled && !gLocked && !host.isHidden && host.alpha > 0.05 && host.bounds.size.width > 2;
     if (!hostVisible) {
         if (!self.hidden) self.hidden = YES;
@@ -313,6 +323,8 @@ static void updateSingleVideo(UIWindow *win); // 前置声明
         if (self.hidden) self.hidden = NO;
         if (self.player.timeControlStatus != AVPlayerTimeControlStatusPlaying) {
             [self.player play];
+            float spd = (float)(animFPS / 50.0); if (spd < 0.1) spd = 0.1; if (spd > 4) spd = 4; // 帧率速度滑杆映射为视频播放速率(50=原速)
+            if (spd > 0 && fabsf(self.player.rate - spd) > 0.01f) [self.player setRate:spd];
             if (++_stallCount > 120) { _stallCount = 0; [self loadVideo:want]; DLog(@"播放器连续2秒起不来, 重载素材: %@", want); } // 看门狗: 约2秒仍不播则重载
         } else {
             _stallCount = 0;
@@ -364,6 +376,8 @@ static void updateSingleVideo(UIWindow *win); // 前置声明
     if ([self.player respondsToSelector:@selector(setPreventsDisplaySleepDuringVideoPlayback:)]) self.player.preventsDisplaySleepDuringVideoPlayback = NO; // 不阻止自动息屏
     if (enabled) {
         [self.player play];
+        float spd0 = (float)(animFPS / 50.0); if (spd0 < 0.1) spd0 = 0.1; if (spd0 > 4) spd0 = 4; // 帧率速度滑杆映射为视频播放速率(50=原速)
+        [self.player setRate:spd0];
         dispatch_async(dispatch_get_main_queue(), ^{ [self.player play]; }); // 下一轮再补一次, 防切换素材后偶发暂停
     }
 }
