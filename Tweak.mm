@@ -250,6 +250,7 @@ static void updateSingleVideo(UIWindow *win); // 前置声明
 
 @implementation DIVideoView {
     NSInteger _missCount; // 连续不可见帧计数, 攒够才暂停 displayLink(防瞬时抖动误停)
+    NSInteger _stallCount; // 播放器起不来计数: 攒够自动重载素材, 保证无限循环不被打断
 }
 
 + (Class)layerClass { return AVPlayerLayer.class; }
@@ -300,7 +301,12 @@ static void updateSingleVideo(UIWindow *win); // 前置声明
     NSString *want = mine ? materialPathFor(expanded) : nil;
     if (mine && want) {
         if (self.hidden) self.hidden = NO;
-        if (self.player.timeControlStatus != AVPlayerTimeControlStatusPlaying) [self.player play];
+        if (self.player.timeControlStatus != AVPlayerTimeControlStatusPlaying) {
+            [self.player play];
+            if (++_stallCount > 120) { _stallCount = 0; [self loadVideo:want]; DLog(@"播放器连续2秒起不来, 重载素材: %@", want); } // 看门狗: 约2秒仍不播则重载
+        } else {
+            _stallCount = 0;
+        }
         if (![want isEqualToString:self.currentPath]) [self loadVideo:want];
     } else {
         // 非本形态层: 隐藏+暂停, 但 frame 已在上面持续贴合 → 切换瞬间无缝显示
@@ -605,7 +611,15 @@ static void updateHost(UIView *host) {
     if (!host || !viewHasToken(host, @"SAUIElementView")) return;
     attach(host);
     if (NSThread.isMainThread && host.window) {
-        updateSingleVideo(host.window); // 每次布局跟随岛尺寸
+        /* 节流: 岛收/展动画期间 layoutSubviews 每帧触发, 全量扫描很重会卡顿;
+           每 0.25 秒最多一次(逐帧贴合由视频层自己的 displayLink 负责, 不受影响) */
+        static char kLastUpd;
+        CFAbsoluteTime now = CFAbsoluteTimeGetCurrent();
+        NSNumber *last = objc_getAssociatedObject(host.window, &kLastUpd);
+        if (!last || now - [last doubleValue] > 0.25) {
+            objc_setAssociatedObject(host.window, &kLastUpd, @(now), OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+            updateSingleVideo(host.window);
+        }
     }
 }
 
