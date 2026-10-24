@@ -211,6 +211,24 @@ static void refreshPrefs(void) {
 
 static char kWinVideoSmall, kWinVideoExpand, kWinVideoSpec;
 
+/* 查询"正在播放音乐"(MediaRemote 动态加载): 0.5秒轮询, 音乐停止时帧率素材即刻隐藏 */
+static BOOL musicPlaying = NO;
+static BOOL mrQueryOK = NO;
+static void queryMusicPlaying(void) {
+    static void (*mrGet)(dispatch_queue_t, void (^)(BOOL)) = NULL;
+    static dispatch_queue_t q;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        void *h = dlopen("/System/Library/PrivateFrameworks/MediaRemote.framework/MediaRemote", RTLD_LAZY);
+        if (h) mrGet = (void (*)(dispatch_queue_t, void (^)(BOOL)))dlsym(h, "MRMediaRemoteGetNowPlayingIsPlaying");
+        if (mrGet) q = dispatch_queue_create("di.mediaremote", DISPATCH_QUEUE_SERIAL);
+    });
+    if (!mrGet) return;
+    dispatch_async(q, ^{ mrGet(q, ^(BOOL playing) {
+        dispatch_async(dispatch_get_main_queue(), ^{ musicPlaying = playing; mrQueryOK = YES; });
+    }); });
+}
+
 /* 音频会话混音类别: 只设 Ambient(与其他音频混播, 视频不打断音乐), 不调 setActive(不抢占、不影响锁屏) */
 static void setupAudioSession(void) {
     static dispatch_once_t once;
@@ -228,7 +246,6 @@ static CGRect diSpecRegion(CGFloat w, CGFloat h) {
 }
 // enabled 等偏好缓存已在 materialPathFor 上方声明
 static NSHashTable *hostTable; // 弱引用宿主集合
-static NSHashTable *hiddenNativeLayers; // 被隐藏的原生频谱层(弱引用, 便于恢复)
 static void updateSingleVideo(UIWindow *win); // 前置声明
 
 @implementation DIVideoView {
@@ -364,7 +381,7 @@ static CALayer *diFindAudioLayer(UIView *host) {
     BOOL expand = host.bounds.size.height > 100;
     NSArray<NSString *> *frames = framePaths();
     CALayer *audioL = expand ? diFindAudioLayer(host) : nil; // 原生音频动态层: 在=音乐岛
-    if (!expand || !enabled || !materialOn || !frames.count || !audioL) {
+    if (!expand || !enabled || !materialOn || !frames.count || !audioL || (mrQueryOK && !musicPlaying)) {
         // 帧率开关关/收缩/非音乐岛(无音频层): 隐藏本层; 音频层显示与否由音频开关单独控制
         if (!self.hidden) self.hidden = YES;
         if (++_miss > 30) _link.paused = YES;
@@ -404,21 +421,32 @@ static CALayer *diFindAudioLayer(UIView *host) {
 @end
 
 
-/* 音频开关 = 原生音频动态开关: 开→隐藏音乐岛跨进程门户层(CALayerHost); 关→恢复显示 */
+/* 音频开关: 开→在音频门户层(CALayerHost)上用掩码挖洞, 只隐藏右上角波形区域, 按钮/专辑等不受影响; 关→移除掩码 */
+static char kDiMaskW; // 记录已应用掩码时的宽度, 避免每轮重建
 static void syncNativeSpectrum(UIView *bestRoot) {
-    if (!hiddenNativeLayers) hiddenNativeLayers = [NSHashTable weakObjectsHashTable];
-    if (!spectrumOn || !enabled || !bestRoot) {
-        for (CALayer *l in hiddenNativeLayers.allObjects) l.hidden = NO;
-        if (hiddenNativeLayers.count) DLog(@"音频开关关: 恢复原生子频谱层 %lu 个", (unsigned long)hiddenNativeLayers.count);
-        [hiddenNativeLayers removeAllObjects];
+    CALayer *audioL = diFindAudioLayer(bestRoot);
+    if (!audioL) return;
+    if (!spectrumOn || !enabled) {
+        if (audioL.mask) { audioL.mask = nil; objc_setAssociatedObject(audioL, &kDiMaskW, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC); DLog(@"音频开关关: 移除波形区域掩码"); }
         return;
     }
-    CALayer *audioL = diFindAudioLayer(bestRoot); // 与帧率素材同一个定位函数, 层级一致
-    if (audioL && !audioL.isHidden && ![hiddenNativeLayers containsObject:audioL]) {
-        audioL.hidden = YES;
-        [hiddenNativeLayers addObject:audioL];
-        DLog(@"音频开关开: 隐藏原生音频门户层 %@ frame=%@", NSStringFromClass(audioL.class), NSStringFromCGRect(audioL.frame));
-    }
+    CGSize ws = audioL.bounds.size;
+    if (audioL.mask && ![NSStringFromCGSize(ws) isEqualToString:NSStringFromCGSize((CGSize){[objc_getAssociatedObject(audioL, &kDiMaskW) doubleValue], 0})]) { /* 尺寸变了重建 */ }
+    else if (audioL.mask) return; // 已应用且尺寸未变
+    // 波形区域: 与帧率素材同一标定区域(岛呈现坐标), host 层原点与岛原点对齐, 直接用岛坐标
+    CALayer *pl = bestRoot.layer.presentationLayer;
+    CGSize bs = pl ? pl.bounds.size : bestRoot.bounds.size;
+    CGRect wf = diSpecRegion(bs.width, bs.height);
+    CAShapeLayer *m = [CAShapeLayer new];
+    m.frame = CGRectMake(0, 0, ws.width, ws.height);
+    UIBezierPath *p = [UIBezierPath bezierPathWithRect:m.frame];
+    UIBezierPath *hole = [UIBezierPath bezierPathWithRoundedRect:CGRectInset(wf, -4, -4) cornerRadius:14];
+    [p appendPath:hole];
+    m.fillRule = kCAFillRuleEvenOdd; // 全区域挖一个洞: 洞里露出的是岛自己的内容, 洞外保留音乐门户
+    m.path = p.CGPath;
+    audioL.mask = m;
+    objc_setAssociatedObject(audioL, &kDiMaskW, @(ws.width), OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    DLog(@"音频开关开: 已挖洞隐藏波形区域 %@ (门户 %@)", NSStringFromCGRect(wf), NSStringFromCGRect(audioL.frame));
 }
 
 #pragma mark - 宿主挂载
@@ -491,7 +519,6 @@ static void updateSingleVideo(UIWindow *win) {
     DIVideoView *smallV = objc_getAssociatedObject(win, &kWinVideoSmall);
     DIVideoView *expandV = objc_getAssociatedObject(win, &kWinVideoExpand);
     if (!enabled) {
-        syncNativeSpectrum(nil); // 总开关关: 恢复原生频谱
         for (DIVideoView *v in diLayers(smallV, expandV)) {
             if (v && !v.hidden) { v.hidden = YES; if (v.player.timeControlStatus != AVPlayerTimeControlStatusPaused) [v.player pause]; }
         }
@@ -634,6 +661,7 @@ static void refreshAll(void) {
 // 0.5 秒轮询: 刷新偏好缓存 + 维持视频层; displayLink 负责逐帧贴合
 static void visibilityTick(void) {
     refreshPrefs();
+    queryMusicPlaying();
     for (UIScene *s in UIApplication.sharedApplication.connectedScenes)
         if ([s isKindOfClass:[UIWindowScene class]]) updateSingleVideo(((UIWindowScene *)s).windows.firstObject);
 }
