@@ -333,7 +333,8 @@ static void updateSingleVideo(UIWindow *win); // 前置声明
     if (!host || host.window == nil) { self.hidden = YES; if (++_miss > 30) _link.paused = YES; return; }
     BOOL expand = host.bounds.size.height > 100;
     NSArray<NSString *> *frames = framePaths();
-    if (!expand || !enabled || !spectrumOn || !frames.count) {
+    BOOL musicVisible = musicPlaying || !mrQueryOK; // 替换音频频谱: 只在音乐播放时显示
+    if (!expand || !enabled || !spectrumOn || !frames.count || !musicVisible) {
         // 关闭/收缩: 隐藏本层 → 露出系统频谱; 完全不显示时暂停循环省电
         if (!self.hidden) self.hidden = YES;
         if (++_miss > 30) _link.paused = YES;
@@ -581,8 +582,27 @@ static void refreshAll(void) {
 }
 
 // 0.5 秒轮询: 刷新偏好缓存 + 维持视频层; displayLink 负责逐帧贴合
+/* 查询"正在播放音乐"(MediaRemote 动态加载): 只有音乐岛才有频谱, 帧率动画只在播音乐时显示 */
+static BOOL musicPlaying = NO;
+static BOOL mrQueryOK = NO; // 查询可用过才启用过滤, 避免符号缺失导致动画永不显示
+static void queryMusicPlaying(void) {
+    static void (*mrGet)(dispatch_queue_t, void (^)(BOOL)) = NULL;
+    static dispatch_queue_t q;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        void *h = dlopen("/System/Library/PrivateFrameworks/MediaRemote.framework/MediaRemote", RTLD_LAZY);
+        if (h) mrGet = (void (*)(dispatch_queue_t, void (^)(BOOL)))dlsym(h, "MRMediaRemoteGetNowPlayingIsPlaying");
+        if (mrGet) q = dispatch_queue_create("di.mediaremote", DISPATCH_QUEUE_SERIAL);
+    });
+    if (!mrGet) return;
+    dispatch_async(q, ^{ mrGet(q, ^(BOOL playing) {
+        dispatch_async(dispatch_get_main_queue(), ^{ musicPlaying = playing; mrQueryOK = YES; });
+    }); });
+}
+
 static void visibilityTick(void) {
     refreshPrefs();
+    queryMusicPlaying();
     for (UIScene *s in UIApplication.sharedApplication.connectedScenes)
         if ([s isKindOfClass:[UIWindowScene class]]) updateSingleVideo(((UIWindowScene *)s).windows.firstObject);
 }
