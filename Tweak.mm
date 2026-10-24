@@ -223,11 +223,6 @@ static void setupAudioSession(void) {
 
 /* 查询"正在播放音乐"改为直接探测岛内原生音频动态层(见 diFindAudioLayer): 层在=音乐岛 */
  // 每窗口视频层(小岛/展开/频谱)
-// 区域标定(相对展开岛比例, 用户截图圈定); 素材层外扩2pt保证完全盖住
-static CGRect diSpecRegion(CGFloat w, CGFloat h) {
-    /* 已烘焙校准位置: 原始区域{0.41w,0.72h,0.18w,0.25h} 平移(134.83,-119.195); 大小保持原始, 缩放基准=1 */
-    return CGRectMake(w * 0.41 + 134.83 - 2, h * 0.72 - 119.195 - 2, w * 0.18 + 4, h * 0.25 + 4);
-}
 // enabled 等偏好缓存已在 materialPathFor 上方声明
 static NSHashTable *hostTable; // 弱引用宿主集合
 static NSHashTable *hiddenNativeLayers; // 被隐藏的原生频谱层(弱引用, 便于恢复)
