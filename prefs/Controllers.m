@@ -56,11 +56,7 @@ static void postReload(void) {
 @end
 
 static BOOL diGridPicked = NO; // 网格选中标记: 主页据此刷新按钮标题
-
-@interface DIPreviewGrid : UICollectionViewController
-@property (nonatomic, assign) NSInteger matMode; /* 0=小岛 1=展开 */
-- (void)close;
-@end
+@class DIPreviewGrid;
 
 static void diPrefsReloadCB(CFNotificationCenterRef center, void *observer, CFStringRef name, const void *object, CFDictionaryRef userInfo) {
     if (!diGridPicked) return;
@@ -250,17 +246,6 @@ static void diPrefsReloadCB(CFNotificationCenterRef center, void *observer, CFSt
     _specifiers = nil;
     [super reloadSpecifiers];
 }
-
-/* 点击"素材选择"直接弹出平铺预览网格(不进二级页) */
-- (void)presentGridMode:(NSInteger)mode {
-    DIPreviewGrid *g = [[DIPreviewGrid alloc] init];
-    g.matMode = mode;
-    UINavigationController *nav = [[UINavigationController alloc] initWithRootViewController:g];
-    nav.modalPresentationStyle = UIModalPresentationPageSheet;
-    [self presentViewController:nav animated:YES completion:nil];
-}
-- (void)openSmallGrid:(PSSpecifier *)s { [self presentGridMode:0]; }
-- (void)openExpandGrid:(PSSpecifier *)s { [self presentGridMode:1]; }
 
 /* 强制在箭头位置显示当前素材名（valueLabel / detailTextLabel 双保险） */
 - (void)tableView:(UITableView *)tableView willDisplayCell:(UITableViewCell *)cell forRowAtIndexPath:(NSIndexPath *)indexPath {
@@ -657,4 +642,17 @@ static NSCache *diThumbCache(void) {
     [super reloadSpecifiers];
 }
 
+@end
+
+/* 点击"素材选择"直接弹出平铺预览网格(不进二级页) */
+@implementation DIPrefsController (Grid)
+- (void)presentGridMode:(NSInteger)mode {
+    DIPreviewGrid *g = [[DIPreviewGrid alloc] init];
+    g.matMode = mode;
+    UINavigationController *nav = [[UINavigationController alloc] initWithRootViewController:g];
+    nav.modalPresentationStyle = UIModalPresentationPageSheet;
+    [self presentViewController:nav animated:YES completion:nil];
+}
+- (void)openSmallGrid:(PSSpecifier *)s { [self presentGridMode:0]; }
+- (void)openExpandGrid:(PSSpecifier *)s { [self presentGridMode:1]; }
 @end
