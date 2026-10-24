@@ -4,6 +4,7 @@
 #import <AVFoundation/AVFoundation.h>
 #import <CoreMedia/CMTime.h>
 #import <objc/runtime.h>
+#import <dlfcn.h>
 #import <substrate.h>
 #import <os/log.h>
 #include <vector>
