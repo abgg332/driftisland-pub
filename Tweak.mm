@@ -229,26 +229,6 @@ static void queryMusicPlaying(void) {
     }); });
 }
 
-static char kWinVideoSmall, kWinVideoExpand, kWinVideoSpec;
-
-/* 查询"正在播放音乐"(MediaRemote 动态加载): 0.5秒轮询, 音乐停止时帧率素材即刻隐藏 */
-static BOOL musicPlaying = NO;
-static BOOL mrQueryOK = NO;
-static void queryMusicPlaying(void) {
-    static void (*mrGet)(dispatch_queue_t, void (^)(BOOL)) = NULL;
-    static dispatch_queue_t q;
-    static dispatch_once_t once;
-    dispatch_once(&once, ^{
-        void *h = dlopen("/System/Library/PrivateFrameworks/MediaRemote.framework/MediaRemote", RTLD_LAZY);
-        if (h) mrGet = (void (*)(dispatch_queue_t, void (^)(BOOL)))dlsym(h, "MRMediaRemoteGetNowPlayingIsPlaying");
-        if (mrGet) q = dispatch_queue_create("di.mediaremote", DISPATCH_QUEUE_SERIAL);
-    });
-    if (!mrGet) return;
-    dispatch_async(q, ^{ mrGet(q, ^(BOOL playing) {
-        dispatch_async(dispatch_get_main_queue(), ^{ musicPlaying = playing; mrQueryOK = YES; });
-    }); });
-}
-
  // 每窗口视频层(小岛/展开/频谱)
 // 频谱区域标定(相对展开岛比例, 用户截图校准, 已验证与原生音频位置吻合); 素材层外扩2pt
 static CGRect diSpecRegion(CGFloat w, CGFloat h) {
