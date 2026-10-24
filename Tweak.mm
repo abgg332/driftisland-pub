@@ -285,11 +285,11 @@ static void updateSingleVideo(UIWindow *win); // 前置声明
     if (!CGRectEqualToRect(self.frame, b)) self.frame = b;
     CGFloat cr = pl ? pl.cornerRadius : host.layer.cornerRadius;
     if (self.layer.cornerRadius != cr) self.layer.cornerRadius = cr;
-    BOOL hostVisible = enabled && !host.isHidden && host.bounds.size.width > 2;
+    BOOL hostVisible = enabled && !host.isHidden && host.alpha > 0.05 && host.bounds.size.width > 2;
     if (!hostVisible) {
         if (!self.hidden) self.hidden = YES;
         if (self.player.timeControlStatus == AVPlayerTimeControlStatusPlaying) [self.player pause];
-        if (++_missCount > 20) _syncLink.paused = YES; // 岛彻底消失后才停循环
+        if (++_missCount > 10) _syncLink.paused = YES; // 岛彻底消失后很快停循环
         return;
     }
     _missCount = 0;
@@ -380,14 +380,14 @@ static CALayer *diFindAudioLayer(UIView *host) {
 
 - (void)step {
     UIView *host = self.superview;
-    if (!host || host.window == nil) { self.hidden = YES; if (++_miss > 30) _link.paused = YES; return; }
+    if (!host || host.window == nil) { self.hidden = YES; if (++_miss > 15) _link.paused = YES; return; }
     BOOL expand = host.bounds.size.height > 100;
     NSArray<NSString *> *frames = framePaths();
     CALayer *audioL = expand ? diFindAudioLayer(host) : nil; // 原生音频动态层: 在=音乐岛
     if (!expand || !enabled || !materialOn || !frames.count || !audioL || (mrQueryOK && !musicPlaying)) {
         // 帧率开关关/收缩/非音乐岛(无音频层): 隐藏本层; 音频层显示与否由音频开关单独控制
         if (!self.hidden) self.hidden = YES;
-        if (++_miss > 30) _link.paused = YES;
+        if (++_miss > 15) _link.paused = YES;
         return;
     }
     _miss = 0;
@@ -657,7 +657,8 @@ static void refreshAll(void) {
     if (enabled != lastLoggedEnabled) { DLog(@"总开关状态: %@, 声音=永远关闭", enabled ? @"开" : @"关"); lastLoggedEnabled = enabled; }
     for (UIScene *s in UIApplication.sharedApplication.connectedScenes)
         if ([s isKindOfClass:[UIWindowScene class]])
-            dispatch_async(dispatch_get_main_queue(), ^{ updateSingleVideo(((UIWindowScene *)s).windows.firstObject); });
+            for (UIWindow *w in ((UIWindowScene *)s).windows)
+                dispatch_async(dispatch_get_main_queue(), ^{ updateSingleVideo(w); });
 }
 
 // 0.5 秒轮询: 刷新偏好缓存 + 维持视频层; displayLink 负责逐帧贴合
@@ -665,7 +666,8 @@ static void visibilityTick(void) {
     refreshPrefs();
     queryMusicPlaying();
     for (UIScene *s in UIApplication.sharedApplication.connectedScenes)
-        if ([s isKindOfClass:[UIWindowScene class]]) updateSingleVideo(((UIWindowScene *)s).windows.firstObject);
+        if ([s isKindOfClass:[UIWindowScene class]])
+            for (UIWindow *w in ((UIWindowScene *)s).windows) updateSingleVideo(w);
 }
 
 static void prefsChanged(CFNotificationCenterRef, void *, CFStringRef, const void *, CFDictionaryRef) {
