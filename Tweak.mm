@@ -426,17 +426,6 @@ static void wakeLayer(DIVideoView *v, UIView *bestRoot) {
     }
 }
 
-// 递归找类名含任一 token 的子视图(投送按钮/频谱图标, 多特征词兼容不同系统版本命名)
-static UIView *findSubviewTokens(UIView *root, NSArray<NSString *> *tokens) {
-    if (!root) return nil;
-    for (UIView *s in root.subviews) {
-        NSString *cn = NSStringFromClass(s.class);
-        for (NSString *t in tokens) if ([cn containsString:t]) return s;
-        UIView *r = findSubviewTokens(s, tokens);
-        if (r) return r;
-    }
-    return nil;
-}
 // CALayer 层树 dump: 频谱动画渲染在跨进程 scene 的 CA 层里, UIView dump 看不到
 static void dumpLayers(CALayer *l, int depth) {
     if (!l || depth > 14) return;
