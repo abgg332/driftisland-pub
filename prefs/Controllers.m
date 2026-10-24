@@ -266,7 +266,7 @@ static void postReload(void) {
             sl.minimumTrackTintColor = [UIColor systemBlueColor];
             [sl addTarget:self action:@selector(diSliderChanged:) forControlEvents:UIControlEventValueChanged];
             UILabel *vl = [UILabel new];
-            vl.font = [UIFont monospacedDigitSystemFontOfSize:17];
+            vl.font = [UIFont monospacedDigitSystemFontOfSize:17 weight:UIFontWeightRegular];
             vl.textAlignment = NSTextAlignmentRight;
             vl.userInteractionEnabled = YES;
             vl.textColor = [UIColor systemBlueColor]; // 提示可点击输入
