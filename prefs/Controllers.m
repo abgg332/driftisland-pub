@@ -670,7 +670,7 @@ static NSCache *diThumbCache(void) {
     id cfg = [[phpCfg alloc] init];
     Class f = NSClassFromString(@"PHPickerFilter");
     if ([cfg respondsToSelector:@selector(setFilter:)] && [f respondsToSelector:@selector(videosFilter)])
-        [cfg performSelector:@selector(setFilter:) withObject:[f videosFilter]]; // 只显示视频
+        [cfg performSelector:@selector(setFilter:) withObject:((id (*)(id, SEL))objc_msgSend)(f, @selector(videosFilter))]; // 只显示视频
     if ([cfg respondsToSelector:@selector(setSelectionLimit:)])
         [cfg performSelector:@selector(setSelectionLimit:) withObject:@1];
     id p = [[phpPicker alloc] initWithConfiguration:cfg];
