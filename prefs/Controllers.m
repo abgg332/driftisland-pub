@@ -312,7 +312,6 @@ static void postReload(void) {
 - (void)diSliderChanged:(UISlider *)sl {
     UIView *box = sl.superview;
     NSString *key = objc_getAssociatedObject(box, "key");
-    NSString *label = objc_getAssociatedObject(box, "label");
     double v = round(sl.value);
     double mn = [objc_getAssociatedObject(box, "mn") doubleValue];
     double mx = [objc_getAssociatedObject(box, "mx") doubleValue];
