@@ -86,7 +86,7 @@ static double pDouble(NSString *key, double def) {
 }
 
 /* 偏好缓存: 供 displayLink 每帧读取(不直接读 CFPreferences), 由 refreshPrefs 定期刷新 */
-static BOOL enabled, smallOn = YES, expandOn = YES, spectrumOn;
+static BOOL enabled, smallOn = YES, expandOn = YES, spectrumOn, materialOn = YES;
 static NSInteger smallIdx, expandIdx;
 /* 频谱帧率动画参数 */
 static double animFPS = 50, animScale = 1, animOffsetX, animOffsetY;
@@ -178,7 +178,8 @@ static void refreshPrefs(void) {
     logEnabled = pBool(@"logging", NO);
     smallOn = pBool(@"smallOn", YES);
     expandOn = pBool(@"expandOn", YES);
-    spectrumOn = pBool(@"spectrumOn", NO);
+    spectrumOn = pBool(@"spectrumOn", NO);   // 帧率开关: 只控制隐藏原生频谱
+    materialOn = pBool(@"materialOn", YES);  // 帧率素材开关: 只控制序列帧素材显示
     animFPS = pDouble(@"animFPS", 50);
     double adj = pDouble(@"animScaleAdj", 0); // 大小调整量: 0=原始大小, 每+1放大0.1倍
     if (adj < -20) adj = -20; if (adj > 20) adj = 20;
@@ -210,6 +211,16 @@ static void refreshPrefs(void) {
 
 static char kWinVideoSmall, kWinVideoExpand, kWinVideoSpec;
 
+/* 音频会话混音类别: 只设 Ambient(与其他音频混播, 视频不打断音乐), 不调 setActive(不抢占、不影响锁屏) */
+static void setupAudioSession(void) {
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        NSError *err = nil;
+        [AVAudioSession.sharedInstance setCategory:AVAudioSessionCategoryAmbient mode:AVAudioSessionModeDefault options:0 error:&err];
+        DLog(@"音频会话混音类别设置: %@", err ? err.localizedDescription : @"成功(Ambient, 不抢占音频)");
+    });
+}
+
 /* 查询"正在播放音乐"(MediaRemote 动态加载): 只有音乐岛才有频谱, 帧率动画只在播音乐时显示 */
 static BOOL musicPlaying = NO;
 static BOOL mrQueryOK = NO; // 查询可用过才启用过滤, 避免符号缺失导致动画永不显示
@@ -235,7 +246,49 @@ static CGRect diSpecRegion(CGFloat w, CGFloat h) {
 }
 // enabled 等偏好缓存已在 materialPathFor 上方声明
 static NSHashTable *hostTable; // 弱引用宿主集合
+static NSHashTable *hiddenNativeLayers; // 被隐藏的原生频谱层(弱引用, 便于恢复)
 static void updateSingleVideo(UIWindow *win); // 前置声明
+
+/* 判断层是否属于帧率动画视图自己(不能隐藏自己的层) */
+static BOOL diInsideAnimView(CALayer *l) {
+    for (id d = l.delegate; d; ) {
+        if ([d isKindOfClass:[DIAnimView class]]) return YES;
+        if ([d isKindOfClass:[UIView class]]) d = ((UIView *)d).superview; else break;
+    }
+    return NO;
+}
+
+/* 帧率开关 = 原生频谱开关: 开→隐藏岛内频谱区域的原生音频层; 关→恢复显示 */
+static void syncNativeSpectrum(UIView *bestRoot) {
+    if (!hiddenNativeLayers) hiddenNativeLayers = [NSHashTable weakObjectsHashTable];
+    if (!spectrumOn || !enabled) {
+        for (CALayer *l in hiddenNativeLayers.allObjects) l.hidden = NO;
+        if (hiddenNativeLayers.count) DLog(@"帧率开关关: 恢复原生频谱层 %lu 个", (unsigned long)hiddenNativeLayers.count);
+        [hiddenNativeLayers removeAllObjects];
+        return;
+    }
+    if (!bestRoot) return;
+    CGRect specR = diSpecRegion(bestRoot.bounds.size.width, bestRoot.bounds.size.height);
+    NSMutableArray<CALayer *> *stack = [NSMutableArray arrayWithObject:bestRoot.layer];
+    while (stack.count) {
+        CALayer *l = stack.firstObject; [stack removeObjectAtIndex:0];
+        for (CALayer *s in l.sublayers) {
+            [stack addObject:s];
+            if (s.isHidden) continue;
+            if (diInsideAnimView(s)) continue; // 自己的层不动
+            CGRect f = s.frame;
+            CGFloat a = f.size.width * f.size.height;
+            if (a < 4) continue;
+            CGRect ix = CGRectIntersection(f, specR);
+            CGFloat ratio = ix.size.width * ix.size.height / a;
+            if (ratio > 0.5 && ![hiddenNativeLayers containsObject:s]) { // 主体落在频谱区域内 → 视为原生频谱
+                s.hidden = YES;
+                [hiddenNativeLayers addObject:s];
+                DLog(@"隐藏原生频谱层: %@ frame=%@ 重叠=%.2f", NSStringFromClass(s.class), NSStringFromCGRect(f), ratio);
+            }
+        }
+    }
+}
 
 @implementation DIVideoView {
     NSInteger _missCount; // 连续不可见帧计数, 攒够才暂停 displayLink(防瞬时抖动误停)
@@ -245,6 +298,7 @@ static void updateSingleVideo(UIWindow *win); // 前置声明
 
 - (instancetype)initWithFrame:(CGRect)frame {
     if ((self = [super initWithFrame:frame])) {
+        setupAudioSession(); // 混音: 播放视频不打断音乐
         _player = [[AVQueuePlayer alloc] init];
         _player.actionAtItemEnd = AVPlayerActionAtItemEndNone;
         _player.muted = YES; // 永远静音
@@ -353,9 +407,9 @@ static void updateSingleVideo(UIWindow *win); // 前置声明
     if (!host || host.window == nil) { self.hidden = YES; if (++_miss > 30) _link.paused = YES; return; }
     BOOL expand = host.bounds.size.height > 100;
     NSArray<NSString *> *frames = framePaths();
-    BOOL musicVisible = musicPlaying || !mrQueryOK; // 替换音频频谱: 只在音乐播放时显示
-    if (!expand || !enabled || !spectrumOn || !frames.count || !musicVisible) {
-        // 关闭/收缩: 隐藏本层 → 露出系统频谱; 完全不显示时暂停循环省电
+    BOOL musicVisible = musicPlaying || !mrQueryOK; // 只在音乐播放时显示
+    if (!expand || !enabled || !materialOn || !frames.count || !musicVisible) {
+        // 素材开关关/收缩: 隐藏本层; 原生频谱是否显示由帧率开关单独控制(updateSingleVideo)
         if (!self.hidden) self.hidden = YES;
         if (++_miss > 30) _link.paused = YES;
         return;
@@ -463,6 +517,7 @@ static void updateSingleVideo(UIWindow *win) {
     DIVideoView *smallV = objc_getAssociatedObject(win, &kWinVideoSmall);
     DIVideoView *expandV = objc_getAssociatedObject(win, &kWinVideoExpand);
     if (!enabled) {
+        syncNativeSpectrum(nil); // 总开关关: 恢复原生频谱
         for (DIVideoView *v in diLayers(smallV, expandV)) {
             if (v && !v.hidden) { v.hidden = YES; if (v.player.timeControlStatus != AVPlayerTimeControlStatusPaused) [v.player pause]; }
         }
@@ -539,6 +594,7 @@ static void updateSingleVideo(UIWindow *win) {
         animV.hidden = YES;
     }
     [bestRoot bringSubviewToFront:animV]; // 系统布局会把岛内容分支提到最前, 每轮重申动画层在最顶
+    syncNativeSpectrum(bestRoot); // 帧率开关开→隐藏原生频谱层, 关→恢复
     animV.link.paused = NO; // 岛活动期间保持动画循环, 内部按开关自隐藏
 }
 

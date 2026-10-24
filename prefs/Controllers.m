@@ -187,9 +187,10 @@ static void postReload(void) {
         [specs addObject:[self switchSpec:@"展开显示素材" key:@"expandOn" def:@YES]];
         [specs addObject:expandMat];
 
-        /* 帧率: 开关 + 素材名 + 参数行(开关打开才显示); 打开=隐藏频谱+播放序列帧动画 */
-        [specs addObject:[self groupSpec:@"帧率" footer:@"打开时用帧率素材替换频谱。大小每+1放大0.1倍; 左右/上下为单位点数。"]];
+        /* 帧率: 帧率开关控制原生频谱隐藏/显示; 帧率素材开关控制序列帧素材显示(两个独立开关) */
+        [specs addObject:[self groupSpec:@"帧率" footer:@"帧率开关=开时隐藏原生频谱(注销后必生效); 帧率素材开关=控制帧率素材显示, 立即生效。大小每+1放大0.1倍; 左右/上下为单位点数。"]];
         [specs addObject:[self switchSpec:@"帧率开关" key:@"spectrumOn" def:@NO]];
+        [specs addObject:[self switchSpec:@"帧率素材开关" key:@"materialOn" def:@YES]];
         if ([[self readPreferenceValue:[self switchSpec:@"spectrumOn" key:@"spectrumOn" def:@NO]] boolValue]) {
             [specs addObject:[self numSlider:@"帧率速度" key:@"animFPS" def:50 mn:10 mx:200]];
             [specs addObject:[self numSlider:@"素材大小" key:@"animScaleAdj" def:0 mn:-20 mx:20]];
