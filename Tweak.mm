@@ -343,7 +343,7 @@ static void updateSingleVideo(UIWindow *win); // 前置声明
         AVAssetTrack *vt = [asset tracksWithMediaType:AVMediaTypeVideo].firstObject;
         if (vt) {
             AVMutableComposition *comp = [AVMutableComposition composition];
-            AVCompositionTrack *cv = [comp addMutableTrackWithMediaType:AVMediaTypeVideo preferredTrackID:kCMPersistentTrackID_Invalid];
+            AVMutableCompositionTrack *cv = (AVMutableCompositionTrack *)[comp addMutableTrackWithMediaType:AVMediaTypeVideo preferredTrackID:kCMPersistentTrackID_Invalid];
             if ([cv insertTimeRange:CMTimeRangeMake(kCMTimeZero, asset.duration) ofTrack:vt atTime:kCMTimeZero error:NULL]) {
                 item = [AVPlayerItem playerItemWithAsset:comp];
                 DLog(@"素材已剥离音轨(纯视频, 不碰音频会话): %@", path.lastPathComponent);
