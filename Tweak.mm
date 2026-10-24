@@ -249,47 +249,6 @@ static NSHashTable *hostTable; // 弱引用宿主集合
 static NSHashTable *hiddenNativeLayers; // 被隐藏的原生频谱层(弱引用, 便于恢复)
 static void updateSingleVideo(UIWindow *win); // 前置声明
 
-/* 判断层是否属于帧率动画视图自己(不能隐藏自己的层) */
-static BOOL diInsideAnimView(CALayer *l) {
-    for (id d = l.delegate; d; ) {
-        if ([d isKindOfClass:[DIAnimView class]]) return YES;
-        if ([d isKindOfClass:[UIView class]]) d = ((UIView *)d).superview; else break;
-    }
-    return NO;
-}
-
-/* 帧率开关 = 原生频谱开关: 开→隐藏岛内频谱区域的原生音频层; 关→恢复显示 */
-static void syncNativeSpectrum(UIView *bestRoot) {
-    if (!hiddenNativeLayers) hiddenNativeLayers = [NSHashTable weakObjectsHashTable];
-    if (!spectrumOn || !enabled) {
-        for (CALayer *l in hiddenNativeLayers.allObjects) l.hidden = NO;
-        if (hiddenNativeLayers.count) DLog(@"帧率开关关: 恢复原生频谱层 %lu 个", (unsigned long)hiddenNativeLayers.count);
-        [hiddenNativeLayers removeAllObjects];
-        return;
-    }
-    if (!bestRoot) return;
-    CGRect specR = diSpecRegion(bestRoot.bounds.size.width, bestRoot.bounds.size.height);
-    NSMutableArray<CALayer *> *stack = [NSMutableArray arrayWithObject:bestRoot.layer];
-    while (stack.count) {
-        CALayer *l = stack.firstObject; [stack removeObjectAtIndex:0];
-        for (CALayer *s in l.sublayers) {
-            [stack addObject:s];
-            if (s.isHidden) continue;
-            if (diInsideAnimView(s)) continue; // 自己的层不动
-            CGRect f = s.frame;
-            CGFloat a = f.size.width * f.size.height;
-            if (a < 4) continue;
-            CGRect ix = CGRectIntersection(f, specR);
-            CGFloat ratio = ix.size.width * ix.size.height / a;
-            if (ratio > 0.5 && ![hiddenNativeLayers containsObject:s]) { // 主体落在频谱区域内 → 视为原生频谱
-                s.hidden = YES;
-                [hiddenNativeLayers addObject:s];
-                DLog(@"隐藏原生频谱层: %@ frame=%@ 重叠=%.2f", NSStringFromClass(s.class), NSStringFromCGRect(f), ratio);
-            }
-        }
-    }
-}
-
 @implementation DIVideoView {
     NSInteger _missCount; // 连续不可见帧计数, 攒够才暂停 displayLink(防瞬时抖动误停)
 }
@@ -446,6 +405,47 @@ static void syncNativeSpectrum(UIView *bestRoot) {
 - (void)dealloc { [_link invalidate]; }
 @end
 
+
+/* 判断层是否属于帧率动画视图自己(不能隐藏自己的层) */
+static BOOL diInsideAnimView(CALayer *l) {
+    for (id d = l.delegate; d; ) {
+        if ([d isKindOfClass:[DIAnimView class]]) return YES;
+        if ([d isKindOfClass:[UIView class]]) d = ((UIView *)d).superview; else break;
+    }
+    return NO;
+}
+
+/* 帧率开关 = 原生频谱开关: 开→隐藏岛内频谱区域的原生音频层; 关→恢复显示 */
+static void syncNativeSpectrum(UIView *bestRoot) {
+    if (!hiddenNativeLayers) hiddenNativeLayers = [NSHashTable weakObjectsHashTable];
+    if (!spectrumOn || !enabled) {
+        for (CALayer *l in hiddenNativeLayers.allObjects) l.hidden = NO;
+        if (hiddenNativeLayers.count) DLog(@"帧率开关关: 恢复原生频谱层 %lu 个", (unsigned long)hiddenNativeLayers.count);
+        [hiddenNativeLayers removeAllObjects];
+        return;
+    }
+    if (!bestRoot) return;
+    CGRect specR = diSpecRegion(bestRoot.bounds.size.width, bestRoot.bounds.size.height);
+    NSMutableArray<CALayer *> *stack = [NSMutableArray arrayWithObject:bestRoot.layer];
+    while (stack.count) {
+        CALayer *l = stack.firstObject; [stack removeObjectAtIndex:0];
+        for (CALayer *s in l.sublayers) {
+            [stack addObject:s];
+            if (s.isHidden) continue;
+            if (diInsideAnimView(s)) continue; // 自己的层不动
+            CGRect f = s.frame;
+            CGFloat a = f.size.width * f.size.height;
+            if (a < 4) continue;
+            CGRect ix = CGRectIntersection(f, specR);
+            CGFloat ratio = ix.size.width * ix.size.height / a;
+            if (ratio > 0.5 && ![hiddenNativeLayers containsObject:s]) { // 主体落在频谱区域内 → 视为原生频谱
+                s.hidden = YES;
+                [hiddenNativeLayers addObject:s];
+                DLog(@"隐藏原生频谱层: %@ frame=%@ 重叠=%.2f", NSStringFromClass(s.class), NSStringFromCGRect(f), ratio);
+            }
+        }
+    }
+}
 
 #pragma mark - 宿主挂载
 
