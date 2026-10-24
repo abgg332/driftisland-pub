@@ -221,8 +221,11 @@ static void setupAudioSession(void) {
     });
 }
 
-/* 查询"正在播放音乐"改为直接探测岛内原生音频动态层(见 diFindAudioLayer): 层在=音乐岛 */
  // 每窗口视频层(小岛/展开/频谱)
+// 频谱区域标定(相对展开岛比例, 用户截图校准, 已验证与原生音频位置吻合); 素材层外扩2pt
+static CGRect diSpecRegion(CGFloat w, CGFloat h) {
+    return CGRectMake(w * 0.41 + 134.83 - 2, h * 0.72 - 119.195 - 2, w * 0.18 + 4, h * 0.25 + 4);
+}
 // enabled 等偏好缓存已在 materialPathFor 上方声明
 static NSHashTable *hostTable; // 弱引用宿主集合
 static NSHashTable *hiddenNativeLayers; // 被隐藏的原生频谱层(弱引用, 便于恢复)
@@ -325,29 +328,17 @@ static void updateSingleVideo(UIWindow *win); // 前置声明
 @property (nonatomic, assign) NSInteger miss;
 @end
 
-/* 判断层是否属于帧率动画视图自己(不能隐藏/误认自己的层) */
-static BOOL diInsideAnimView(CALayer *l) {
-    for (id d = l.delegate; d; ) {
-        if ([d isKindOfClass:[DIAnimView class]]) return YES;
-        if ([d isKindOfClass:[UIView class]]) d = ((UIView *)d).superview; else break;
-    }
-    return NO;
-}
-
-/* 定位原生音频动态层: 岛容器层的直接子层、非 AVPlayerLayer/自己的层、小块(宽40~160 高30~100)、
-   位于岛的右上半区(音乐岛右上角)。找到 = 当前是音乐岛展开; 找不到 = 非音乐岛, 帧率素材不显示 */
+/* 定位原生音频层: 音乐岛的跨进程内容通过 CALayerHost 渲染(高约488, 只在音乐岛出现, 其他岛没有)。
+   找到 = 当前是音乐岛展开(帧率素材允许显示 / 音频开关可隐藏它); 找不到 = 非音乐岛 */
 static CALayer *diFindAudioLayer(UIView *host) {
     if (!host) return nil;
-    CGFloat w = host.bounds.size.width, h = host.bounds.size.height;
-    if (w < 100 || h < 60) return nil;
-    for (CALayer *s in host.layer.sublayers) {
-        if ([s isKindOfClass:[AVPlayerLayer class]]) continue;
-        if (diInsideAnimView(s)) continue;
-        CGRect f = s.frame;
-        if (f.size.width < 40 || f.size.width > 160) continue;
-        if (f.size.height < 30 || f.size.height > 100) continue;
-        if (f.origin.x < w * 0.5 || f.origin.y > h * 0.6) continue; // 必须在右上半区
-        return s;
+    NSMutableArray<CALayer *> *stack = [NSMutableArray arrayWithObject:host.layer];
+    while (stack.count) {
+        CALayer *l = stack.firstObject; [stack removeObjectAtIndex:0];
+        for (CALayer *s in l.sublayers) {
+            [stack addObject:s];
+            if ([NSStringFromClass(s.class) containsString:@"CALayerHost"] && s.frame.size.height > 300) return s;
+        }
     }
     return nil;
 }
@@ -380,9 +371,10 @@ static CALayer *diFindAudioLayer(UIView *host) {
         return;
     }
     _miss = 0;
-    // 显示层级与音频层一致: 直接贴合音频层实时 frame(动画中用呈现层)
-    CALayer *apl = audioL.presentationLayer;
-    CGRect f = apl ? apl.frame : audioL.frame;
+    // 显示层级与音频层一致: 只有音乐岛(存在 CALayerHost)才显示; 位置用校准烘焙区域盖住原生音频
+    CALayer *pl = host.layer.presentationLayer;
+    CGSize bs = pl ? pl.bounds.size : host.bounds.size;
+    CGRect f = diSpecRegion(bs.width, bs.height);
     if (!CGRectEqualToRect(self.frame, f)) self.frame = f;
     // 内部图片视图: 只在 bounds 变化时对齐(transform 缩放会改变 frame, 不能用 frame 比较/赋值, 否则每轮抵消缩放)
     if (!CGSizeEqualToSize(_iv.bounds.size, self.bounds.size)) _iv.frame = self.bounds;
@@ -412,21 +404,20 @@ static CALayer *diFindAudioLayer(UIView *host) {
 @end
 
 
-/* 音频开关 = 原生音频动态开关: 开→隐藏右上角音频层; 关→恢复显示 (用统一查找函数) */
+/* 音频开关 = 原生音频动态开关: 开→隐藏音乐岛跨进程门户层(CALayerHost); 关→恢复显示 */
 static void syncNativeSpectrum(UIView *bestRoot) {
     if (!hiddenNativeLayers) hiddenNativeLayers = [NSHashTable weakObjectsHashTable];
-    if (!spectrumOn || !enabled) {
+    if (!spectrumOn || !enabled || !bestRoot) {
         for (CALayer *l in hiddenNativeLayers.allObjects) l.hidden = NO;
         if (hiddenNativeLayers.count) DLog(@"音频开关关: 恢复原生子频谱层 %lu 个", (unsigned long)hiddenNativeLayers.count);
         [hiddenNativeLayers removeAllObjects];
         return;
     }
-    if (!bestRoot) return;
     CALayer *audioL = diFindAudioLayer(bestRoot); // 与帧率素材同一个定位函数, 层级一致
     if (audioL && !audioL.isHidden && ![hiddenNativeLayers containsObject:audioL]) {
         audioL.hidden = YES;
         [hiddenNativeLayers addObject:audioL];
-        DLog(@"音频开关开: 隐藏原生音频层 %@ frame=%@", NSStringFromClass(audioL.class), NSStringFromCGRect(audioL.frame));
+        DLog(@"音频开关开: 隐藏原生音频门户层 %@ frame=%@", NSStringFromClass(audioL.class), NSStringFromCGRect(audioL.frame));
     }
 }
 
