@@ -403,11 +403,11 @@ static CALayer *diFindAudioLayer(UIView *host); // 前向声明: syncFrameToHost
     if (usedComp) {
         /* AVPlayerLooper 不支持 AVMutableComposition(播完一遍就停 → 卡住 → 看门狗重载 → 闪黑)。
            composition 素材改用"播完通知回开头续播"的无缝手动循环; 原生素材(剥离失败兜底)才用 looper */
-        __weak typeof(self) ws = self;
+        __unsafe_unretained typeof(self) ws = self;
         self.loopObs = [[NSNotificationCenter defaultCenter]
             addObserverForName:AVPlayerItemDidPlayToEndTimeNotification object:item queue:NSOperationQueue.mainQueue
             usingBlock:^(NSNotification *n) {
-                __strong typeof(ws) s = ws; if (!s || !s.player.currentItem) return;
+                __unsafe_unretained typeof(ws) s = ws; if (!s || !s.player.currentItem) return;
                 [s.player seekToTime:kCMTimeZero toleranceBefore:kCMTimeZero toleranceAfter:kCMTimeZero];
                 float spdL = (float)(animFPS / 50.0); if (spdL < 0.1) spdL = 0.1; if (spdL > 4) spdL = 4;
                 [s.player setRate:spdL]; // setRate 自带播放语义, 回开头无缝续播
