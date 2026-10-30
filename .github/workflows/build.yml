@@ -1,0 +1,69 @@
+name: Build DriftIsland
+
+on:
+  push:
+    branches: [main, master]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: macos-14
+    env:
+      VERSION: 1.35.0
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: brew install ldid dpkg
+
+      - name: Install Theos (standard)
+        run: |
+          git clone --recursive https://github.com/theos/theos.git ~/theos
+          echo "THEOS=$HOME/theos" >> "$GITHUB_ENV"
+
+      - name: Install iPhoneOS SDK
+        run: |
+          mkdir -p "$THEOS/sdks"
+          curl -L https://github.com/theos/sdks/releases/download/master-146e41f/iPhoneOS16.5.sdk.tar.xz | tar -xJ -C "$THEOS/sdks"
+
+      # 无根 rootless：arm64 + arm64e（多巴胺等无根越狱，装 /var/jb）
+      - name: Build rootless package
+        run: |
+          rm -rf .theos obj packages prefs/.theos helper/.theos
+          make package FINALPACKAGE=1 THEOS_PACKAGE_SCHEME=rootless ARCHS="arm64 arm64e"
+          mv packages/*.deb "packages/DriftIsland-${VERSION}-无根rootless-arm64-arm64e.deb"
+
+      - name: Upload rootless package
+        uses: actions/upload-artifact@v4
+        with:
+          name: driftisland-rootless
+          path: packages/*.deb
+          if-no-files-found: error
+          retention-days: 30
+
+      # 隐根 roothide：arm64e（RootHide Bootstrap，原生编译免转换）
+      - name: Reinstall Theos (roothide fork)
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          rm -rf ~/theos "$THEOS"
+          bash -c "$(curl -fsSL https://raw.githubusercontent.com/roothide/theos/master/bin/install-theos)"
+          echo "THEOS=$HOME/theos" >> "$GITHUB_ENV"
+
+      - name: Build roothide package
+        run: |
+          rm -rf .theos obj packages prefs/.theos helper/.theos
+          make package FINALPACKAGE=1 THEOS_PACKAGE_SCHEME=roothide ARCHS=arm64e
+          mv packages/*.deb "packages/DriftIsland-${VERSION}-RootHide原生-arm64e.deb"
+
+      - name: Upload roothide package
+        uses: actions/upload-artifact@v4
+        with:
+          name: driftisland-roothide
+          path: packages/*.deb
+          if-no-files-found: error
+          retention-days: 30
