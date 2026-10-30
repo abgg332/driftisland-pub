@@ -126,7 +126,6 @@ static BOOL homeBarOn = NO;
 static double homeBarLen = 100.0;      /* 百分比: 10~200 */
 static UIColor *homeBarColor = nil;    /* nil = 不改颜色 */
 static BOOL homeBarFlowOn = NO;             /* 2.5.11: 流光动态(与文字流光同一套) */
-static NSInteger homeBarFlowDir = 0;        /* 2.5.26: 流光方向 0=左→右 1=右→左 2=中间向两边散开 3=两边向中间收紧 */
 static BOOL homeBarHideOn = NO;             /* 2.5.7: 隐藏底部横条 */
 static NSString *homeBarHideMode = @"full"; /* 2.5.7: full 完全隐藏 / fade 渐变隐藏 */
 static BOOL gestureProtectOn = NO;          /* 2.5.7: 手势保护(上滑二次确认) */
@@ -566,7 +565,6 @@ static void refreshPrefs(void) {
     if (homeBarLen < 10) homeBarLen = 10;    /* 2.5.6: 下限 50 → 10 */
     if (homeBarLen > 200) homeBarLen = 200;
     homeBarFlowOn = pBool(@"homeBarFlowOn", NO);   /* 2.5.11 */
-    homeBarFlowDir = pInt(@"homeBarFlowDir", 0);   /* 2.5.26 */
     /* 2.5.7: 隐藏横条 / 渐隐模式 / 手势保护 */
     homeBarHideOn = pBool(@"homeBarHideOn", NO);
     homeBarHideMode = pBool(@"homeBarHideFade", NO) ? @"fade" : @"full";   /* 2.5.11: 子开关 */
@@ -3835,15 +3833,14 @@ static CFAbsoluteTime gLandEnter = -1;   /* -1 = 尚未起算(非横屏) */
 static BOOL gLandHidden = NO;            /* 横屏 2 秒后 = YES, 滑动唤醒置回 NO */
 static CGSize gLandLastSize = CGSizeZero; /* 2.5.19: 横屏形态变化(切应用/换场景)重新计时 */
 static void diResetLandscapeHide(void) { gLandHidden = NO; gLandEnter = -1; }
+static void diRevealBarNow(const char *why);   /* 2.5.23-2: 前置声明(心跳呼回检测用) */
 
 /* 2.5.19: 隐藏状态下"最外层可见容器"的引用 —— 横条外层可能有不透明背景,
    只把横条自己 alpha 置 0 时残留一条实色, 所以连同一并压掉。 */
 static void diApplyBarAlpha(UIView *pill, BOOL hide, BOOL hard);
 
 /* 2.5.18: 方向判定 —— 多依据。横屏时主屏幕 bounds 一定被系统转成宽>高,
-   而游戏/视频的全屏窗口界面方向常仍是竖屏值, 所以屏幕比例优先于场景方向。
-   2.5.24: 加 0.8s 防抖 —— 186 日志显示判定会抖动(设备方向瞬时值不可靠),
-   抖一下就把 gLandHidden 重置了, "已隐藏=1 → 又变回 0"即此因。 */
+   而游戏/视频的全屏窗口界面方向常仍是竖屏值, 所以屏幕比例优先于场景方向。 */
 static BOOL diLandscapeNow(void) {
     UIDeviceOrientation o = UIDevice.currentDevice.orientation;
     CGSize scr = [UIScreen mainScreen].bounds.size;
@@ -3862,6 +3859,8 @@ static BOOL diLandscapeNow(void) {
             if (io == UIInterfaceOrientationPortrait || io == UIInterfaceOrientationPortraitUpsideDown) { raw = NO; break; }
         }
     }
+    /* 2.5.23-2: 0.8s 防抖 —— 186 日志显示方向瞬时值会抖动, 一抖就把 gLandHidden
+       重置了("已隐藏=1 → 又变回 0"即此因)。原始读数与稳定值不一致需持续 0.8s 才翻转。 */
     static BOOL sStable = NO;
     static BOOL sHave = NO;
     static CFAbsoluteTime tFlip = 0;
@@ -4060,20 +4059,9 @@ static void diStylePillView(UIView *pill) {
                不再用 CAAnimation 动 locations(实测在系统 pill 上不动)。 */
             NSMutableArray *fcols = [NSMutableArray array];
             NSMutableArray *flocs = [NSMutableArray array];
-            NSUInteger k = 8;
+            NSUInteger k = 6;
             for (NSUInteger i = 0; i < k; i++) {
-                /* 2.5.26: 四种方向 —— 用"映射坐标 s"统一表达:
-                   0 左→右: s=t;  1 右→左: s=t+phase;
-                   2 中间向两边散开: s=|t-0.5|*2-phase;  3 两边向中间收紧: s=|t-0.5|*2+phase。 */
-                double t = (double)i / (double)(k - 1);
-                double s;
-                switch (homeBarFlowDir) {
-                    case 1:  s = t + gBarPhase; break;
-                    case 2:  s = fabs(t - 0.5) * 2.0 - gBarPhase; break;
-                    case 3:  s = fabs(t - 0.5) * 2.0 + gBarPhase; break;
-                    default: s = t - gBarPhase; break;
-                }
-                UIColor *c = diColorAt(pal, (CGFloat)s);
+                UIColor *c = diColorAt(pal, (CGFloat)i / (CGFloat)k - gBarPhase);   /* 2.5.12: 左→右 */
                 [fcols addObject:(id)c.CGColor];
                 [flocs addObject:@((double)i / (double)(k - 1))];
             }
@@ -4110,66 +4098,52 @@ static void diStylePillView(UIView *pill) {
    锁屏出现时, 在整个 SpringBoard 视图树里按几何找"横条形状"的视图 + 找 grabber 宿主,
    找到后与桌面走同一套上色/登记逻辑, 并在心跳里持续复查。 */
 static void diScanLockBarInView(UIView *v, int depth, NSMutableArray<UIView *> *out) {
-    /* 2.5.26: 整个函数套 @try + 遍历子视图快照副本 —— 188 日志证实常驻扫描会在
-       SpringBoard 改动视图树时"枚举中突变"崩溃, 这是 2.5.24/25 无限注销的根因。 */
-    @try {
-        if (!v || depth > 22) return;
-        CGSize b = v.bounds.size;
-        BOOL shapeOK = (b.height >= 3.0 && b.height <= 9.0 && b.width >= 40.0 && b.width <= 620.0);
-        if (shapeOK && !v.isHidden && v.alpha > 0.01) {
-            NSString *cn = NSStringFromClass(v.class);
-            /* 明确排除状态栏/灵动岛里的细条, 只收"胶囊感"的视图 */
-            BOOL bad = [cn containsString:@"StatusBar"] || [cn containsString:@"Aperture"] ||
-                       [cn containsString:@"Separator"] || [cn containsString:@"Divider"];
-            if (!bad) [out addObject:v];
-        }
-        if ([NSStringFromClass(v.class) containsString:@"HomeGrabber"]) {
-            UIView *pill = nil;
-            @try { pill = [v valueForKey:@"_pillView"]; } @catch (NSException *e) { pill = nil; }
-            if (pill) [out addObject:pill];
-        }
-        NSArray *subs = [v.subviews copy];  /* 快照: 防枚举中突变 */
-        for (UIView *sub in subs) diScanLockBarInView(sub, depth + 1, out);
-    } @catch (NSException *ex) { /* 扫描绝不能带崩 SpringBoard */ }
+    if (!v || depth > 22) return;
+    CGSize b = v.bounds.size;
+    BOOL shapeOK = (b.height >= 3.0 && b.height <= 9.0 && b.width >= 40.0 && b.width <= 620.0);
+    if (shapeOK && !v.isHidden && v.alpha > 0.01) {
+        NSString *cn = NSStringFromClass(v.class);
+        /* 明确排除状态栏/灵动岛里的细条, 只收"胶囊感"的视图 */
+        BOOL bad = [cn containsString:@"StatusBar"] || [cn containsString:@"Aperture"] ||
+                   [cn containsString:@"Separator"] || [cn containsString:@"Divider"];
+        if (!bad) [out addObject:v];
+    }
+    if ([NSStringFromClass(v.class) containsString:@"HomeGrabber"]) {
+        UIView *pill = nil;
+        @try { pill = [v valueForKey:@"_pillView"]; } @catch (NSException *e) { pill = nil; }
+        if (pill) [out addObject:pill];
+    }
+    for (UIView *sub in v.subviews) diScanLockBarInView(sub, depth + 1, out);
 }
 
-/* 2.5.19: 当前是否在锁屏界面(锁屏/通知中心下拉态都算)
-   2.5.24: 废弃 —— 186 日志证实 gLocked 通知在锁屏时并没有让扫描跑起来
-   (锁屏扫描次数=0), 改为扫描器无条件常驻(见心跳), 这个函数保留避免外部引用报错。 */
-__attribute__((unused)) static BOOL diLockScreenShowing(void) {
-    return gLocked;
+/* 2.5.19: 当前是否在锁屏界面(锁屏/通知中心下拉态都算) */
+static BOOL diLockScreenShowing(void) {
+    if (gLocked) return YES;
+    return NO;
 }
 
 static void diScanAndStyleLockBars(void) {
     if (!homeBarOn) return;
     NSMutableArray<UIView *> *found = [NSMutableArray array];
     diForEachWindow(^(UIWindow *w) {
-        @try {
-            if (w.isHidden || w.alpha < 0.01) return;
-            diScanLockBarInView(w, 0, found);
-        } @catch (NSException *ex) { }
+        if (w.isHidden || w.alpha < 0.01) return;
+        diScanLockBarInView(w, 0, found);
     });
     if (!found.count) return;
+    static CFAbsoluteTime lastLog;
+    BOOL logged = (CFAbsoluteTimeGetCurrent() - lastLog < 4.0);
     for (UIView *v in found) {
-        @try {
-            diStylePillView(v);
-            diRegisterBarPill(v);      /* 登记后由心跳持续维持颜色 */
-            di_guardPillLayers(v);
-        } @catch (NSException *ex) { continue; }
-        /* 2.5.24: 只对新出现的签名打日志, 避免刷屏 */
-        static NSMutableSet *seen;
-        if (!seen) seen = [NSMutableSet set];
-        NSString *sig = [NSString stringWithFormat:@"%@|%.0fx%.0f|%@",
-                         NSStringFromClass(v.class), v.bounds.size.width, v.bounds.size.height,
-                         v.superview ? NSStringFromClass(v.superview.class) : @"-"];
-        if (![seen containsObject:sig] && seen.count < 40) {
-            [seen addObject:sig];
-            DLog(@"底栏横条[扫描]: %@ %.0fx%.0f 父=%@ 可见=%d alpha=%.2f",
+        diStylePillView(v);
+        diRegisterBarPill(v);      /* 登记后由心跳持续维持颜色 */
+        di_guardPillLayers(v);
+        if (!logged) {
+            logged = YES;
+            DLog(@"底栏横条[锁屏扫描]: %@ %.0fx%.0f 父=%@",
                  NSStringFromClass(v.class), v.bounds.size.width, v.bounds.size.height,
-                 v.superview ? NSStringFromClass(v.superview.class) : @"-",
-                 (int)(!v.isHidden), v.alpha);
+                 v.superview ? NSStringFromClass(v.superview.class) : @"-");
         }
     }
+    if (logged) lastLog = CFAbsoluteTimeGetCurrent();
 }
 
 /* 2.5.11: 横条流光心跳 —— 推进相位并刷新所有可见 pill */
@@ -4203,6 +4177,23 @@ static void diBarFlowTick(void) {
         /* 横屏强制隐藏: 彻底隐藏并**跳过重涂** —— 只要继续重涂就会反复把 alpha 置回,
            用户"滑动一下显示"永远看不到效果(这是 2.5.17 的隐藏死结)。
            唤回由 diSwiped / diTouched 重置 gLandHidden, 下一拍这里自然会走显示分支。 */
+        /* 2.5.23-2: 呼回检测(修正版) —— 只认"我们压过(带 kAlphaForced 标记)且被
+           抬回 >0.5"的层。隐藏期间我们跳过重涂、只会往下压, 此时 alpha 被抬回
+           只能是系统 home 手势在显示横条(用户上滑呼出) → 重置 gLandHidden +
+           重启 2 秒计时。旧版没查 kAlphaForced, 刚开始隐藏的第一拍横条还是
+           alpha=1, 被误判成呼出, 每拍重置 → 永远藏不住(23-1 的"不会隐藏"即此因)。 */
+        if (landHide) {
+            BOOL external = objc_getAssociatedObject(p, &kAlphaForced) && p.alpha > 0.5;
+            for (UIView *anc = p.superview; anc && anc.window == p.window && anc != anc.superview; anc = anc.superview) {
+                if (objc_getAssociatedObject(anc, &kAlphaForced) && anc.alpha > 0.5) { external = YES; break; }
+                CGSize ab = anc.bounds.size, pb = p.bounds.size;
+                if (ab.height > MAX(pb.height * 3.0, 44.0)) break;   /* 与 diApplyBarAlpha 同一层级边界 */
+            }
+            if (external) {
+                diRevealBarNow("系统唤出横条");
+                landHide = NO;
+            }
+        }
         if (landHide) { diApplyBarAlpha(p, YES, YES); continue; }
         diApplyBarAlpha(p, homeBarHideOn, NO);   /* 普通"隐藏横条"设置 */
         diStylePillView(p);
@@ -4212,13 +4203,11 @@ static void diBarFlowTick(void) {
             p.alpha = 1.0;
     }
 
-    /* 2.5.24: 横条形状视图主动扫描 —— 无条件常驻(每 0.6s 一次)。
-       186 日志实证: 锁屏上系统从不调用 MTLumaDodgePillView layoutSubviews,
-       之前用 gLocked 门控又因锁屏通知未触发而一次都没跑 → 锁屏横条永远原生色。 */
-    {
+    /* 2.5.19: 锁屏横条不在 luma-dodge 上 → 主动扫描(每 0.5s 一次, 只在锁屏/下拉时) */
+    if (diLockScreenShowing()) {
         static CFAbsoluteTime tScan;
         CFAbsoluteTime now = CFAbsoluteTimeGetCurrent();
-        if (now - tScan > 0.6) { tScan = now; diScanAndStyleLockBars(); }
+        if (now - tScan > 0.5) { tScan = now; diScanAndStyleLockBars(); }
     }
 }
 static void diStartBarFlowTicker(void) {
@@ -4382,7 +4371,7 @@ static void diApplyBarAlpha(UIView *pill, BOOL hide, BOOL hard) {
     }
     for (UIView *tv in targets) {
         if (hide) {
-            tv.alpha = (fade && !hard) ? 0.10 : 0.0;   /* 2.5.26: 渐变残影 0.25 太显眼, 降到 0.10 */
+            tv.alpha = (fade && !hard) ? 0.25 : 0.0;
             objc_setAssociatedObject(tv, &kAlphaForced, @YES, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
         } else if (objc_getAssociatedObject(tv, &kAlphaForced)) {
             tv.alpha = 1.0;
@@ -4665,11 +4654,6 @@ static BOOL di_gestureBegin(id self, SEL _cmd, id gesture) {
     [h impactOccurred];
     return NO;
 }
-
-/* 2.5.25: 撤销 2.5.24 的 sendEvent 钩子 —— 187 日志证实 SpringBoard 在
-   MSHookMessageEx(UIApplication sendEvent:) 安装处直接崩溃进安全模式
-   (两次加载都死在同一位置, "已 hook sendEvent"与"手势保护[枚举]"日志均未打出)。
-   唤回改回 2.5.23 的 DIBarSwipeWatcher 手势路径, 方向判定防抖保留。 */
 
 static void diHookGestureProtect(void) {
     static BOOL done = NO;
