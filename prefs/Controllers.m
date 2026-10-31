@@ -18,6 +18,10 @@ static NSString *const kDomain = @"com.abgg332.driftisland";
 static NSString *const kDIAlbumMaskKey = @"diAlbumMaskAsset";
 static NSString *const kDIMaskRoot = @"/var/mobile/灵动岛/遮罩素材";
 
+/* 2.6.11: 通用字符串排序 —— 不用 sortedArrayUsingSelector:@selector(localizedCompare),
+   它在部分系统上会对 __NSCFString 抛 unrecognized selector("点遮罩素材闪退"的根因)。 */
+static NSArray<NSString *> *diSortStrs(NSArray *arr);
+
 /* 偏好字符串读写 */
 static NSString *readPrefString(NSString *key) {
     if (!key.length) return nil;
@@ -67,14 +71,15 @@ static NSArray<NSString *> *videoFilesIn(NSString *dir) {
         if ([ext isEqualToString:@"mp4"] || [ext isEqualToString:@"mov"] || [ext isEqualToString:@"m4v"])
             [out addObject:f];
     }
-    [out sortUsingSelector:@selector(localizedCompare:)];
-    return out;
+    /* 2.6.11: 不用 sortUsingSelector:localizedCompare: —— 对 __NSCFString 会抛
+       unrecognized selector(点素材列表闪退的根因), 统一走 diSortStrs */
+    return diSortStrs(out);
 }
 static NSArray<NSString *> *videoFiles(void) { return videoFilesIn(kMaterialDir); }
 
-/* 2.6.10: 扫描遮罩素材目录(一层递归, 只要 .png), 返回 "文件夹/文件名" 或 "文件名" */
-/* 2.6.11: 排序改用 block 比较器 —— sortedArrayUsingSelector:@selector(localizedCompare)
-   在部分系统上会对 __NSCFString 抛 unrecognized selector, 是"点遮罩素材闪退"的根因 */
+/* 2.6.11: 排序用 block 比较器 —— sortedArrayUsingSelector:@selector(localizedCompare)
+   在部分系统上会对 __NSCFString 抛 unrecognized selector, 是"点遮罩素材闪退"的根因。
+   定义放在所有使用者之前。 */
 static NSArray<NSString *> *diSortStrs(NSArray *arr) {
     if (![arr isKindOfClass:NSArray.class]) return @[];
     return [arr sortedArrayUsingComparator:^NSComparisonResult(id a, id b) {
@@ -84,6 +89,7 @@ static NSArray<NSString *> *diSortStrs(NSArray *arr) {
     }];
 }
 
+/* 2.6.10: 扫描遮罩素材目录(一层递归, 只要 .png), 返回 "文件夹/文件名" 或 "文件名" */
 static NSArray<NSString *> *DIMaskListAssets(void) {
     NSFileManager *fm = [NSFileManager defaultManager];
     NSMutableArray<NSString *> *out = [NSMutableArray array];
@@ -1693,7 +1699,8 @@ static void diWriteColors(NSArray<NSString *> *colors) {
             if ([ext isEqualToString:@"png"] || [ext isEqualToString:@"jpg"] || [ext isEqualToString:@"jpeg"]) hasDirectFrame = YES;
         }
     }
-    [out sortUsingSelector:@selector(localizedCompare:)];
+    /* 2.6.11: 同上, 避开 __NSCFString 抛 selector */
+    out = [diSortStrs(out) mutableCopy];
     if (hasDirectFrame || out.count == 0) [out insertObject:@"默认(全部帧)" atIndex:0];
     return out;
 }
