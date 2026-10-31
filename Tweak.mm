@@ -1288,6 +1288,7 @@ static BOOL diMiniMusicActive(UIView *host) {
 @property (nonatomic, strong) CADisplayLink *link;
 @property (nonatomic, assign) NSInteger miss;
 @property (nonatomic, strong) UIView *haloContainer;
+@property (nonatomic, weak) UIImage *lastCover;   /* 上一帧封面: 换歌才重建 */
 @end
 
 @implementation DIMaskView
@@ -1301,6 +1302,32 @@ static BOOL diMiniMusicActive(UIView *host) {
         [_link addToRunLoop:NSRunLoop.mainRunLoop forMode:NSRunLoopCommonModes];
     }
     return self;
+}
+
+/* 从宿主子树里找专辑封面: 优先正方形 UIImageView(音乐岛封面就是方形), 其次任意有图的 UIImageView。
+   2.6.11: 之前把 haloContainer 同时当 card 和 albumView 传, albumView.image 永远为 nil,
+   于是永远拿不到封面 → 光晕根本画不出来(用户看到"没效果")。 */
+static UIImage *diFindAlbumCover(UIView *host, CGRect inRect) {
+    UIImage *bestImg = nil;
+    CGFloat bestScore = -1;
+    NSMutableArray<UIView *> *stack = [NSMutableArray arrayWithObject:host];
+    int g = 0;
+    while (stack.count && g++ < 400) {
+        UIView *v = stack.firstObject; [stack removeObjectAtIndex:0];
+        for (UIView *s in v.subviews) [stack addObject:s];
+        if (![v isKindOfClass:UIImageView.class]) continue;
+        UIImage *img = ((UIImageView *)v).image;
+        if (!img || img.size.width < 8) continue;
+        CGRect r = [v convertRect:v.bounds toView:host];
+        if (!CGRectIntersectsRect(r, inRect)) continue;
+        /* 打分: 越接近正方形、越靠近左侧越像封面 */
+        CGFloat ratio = img.size.width / MAX(1.0, img.size.height);
+        CGFloat squareScore = 1.0 - MIN(1.0, fabs(ratio - 1.0));
+        CGFloat leftScore = 1.0 - MIN(1.0, fabs(CGRectGetMidX(r) - CGRectGetMidX(inRect)) / MAX(1.0, host.bounds.size.width));
+        CGFloat score = squareScore * 2.0 + leftScore;
+        if (score > bestScore) { bestScore = score; bestImg = img; }
+    }
+    return bestImg;
 }
 
 - (void)step {
@@ -1334,11 +1361,47 @@ static BOOL diMiniMusicActive(UIView *host) {
             [self addSubview:self.haloContainer];
         }
         self.haloContainer.frame = self.bounds;
-        /* 真正的光晕: DIApplyAlbumHalo 会按 tag 清旧的再垫一张新的(封面+maskView) */
-        DIApplyAlbumHalo(self.haloContainer, self.haloContainer, d);
+
+        /* 2.6.11: 只在"封面变了 / 直径变了 / 素材变了"时重建, 不再每帧重建 UIImageView。
+           原来 60fps 每帧 alloc 两个 UIImageView + maskView, 是视频卡顿的主因之一。 */
+        UIImage *cover = diFindAlbumCover(host, albumRect);
+        /* 缓存键 = 素材失效代数 + 直径: 换素材/换直径才重建 */
+        NSString *assetKey = [NSString stringWithFormat:@"%ld@%.0f", (long)DIMaskGeneration(), d];
+        NSString *prevKey = objc_getAssociatedObject(self, "diHaloKey");
+        BOOL sameCover = (cover == _lastCover);
+        if (!self.hidden && sameCover && prevKey && [prevKey isEqualToString:assetKey] && self.haloContainer.subviews.count) {
+            return;   /* 什么都不用做 */
+        }
+        _lastCover = cover;
+        objc_setAssociatedObject(self, "diHaloKey", assetKey, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+
+        if (cover) {
+            /* 直接按"封面图 + 遮罩 png 当 maskView"重建, 垫在容器底层。
+               注意这里不能传 host 当 albumView —— DIApplyAlbumHalo 内部会 convertPoint,
+               而 host 不在容器坐标系里, 会算歪。 */
+            DIClearAlbumHalo(self.haloContainer);
+            UIImage *mask = DIMaskCurrentImage();
+            if (mask) {
+                UIImageView *halo = [[UIImageView alloc] initWithFrame:CGRectMake(0, 0, d, d)];
+                halo.tag = DIAlbumHaloTag;
+                halo.image = cover;
+                halo.contentMode = UIViewContentModeScaleAspectFill;
+                halo.layer.cornerRadius = d / 2.0;
+                halo.clipsToBounds = YES;
+                halo.userInteractionEnabled = NO;
+                UIImageView *mv = [[UIImageView alloc] initWithFrame:CGRectMake(0, 0, d, d)];
+                mv.image = mask;
+                mv.contentMode = UIViewContentModeScaleToFill;   /* 蒙版铺满 */
+                mv.userInteractionEnabled = NO;
+                halo.maskView = mv;                              /* 关键: maskView, 不是 addSubview */
+                halo.center = CGPointMake(CGRectGetMidX(self.bounds), CGRectGetMidY(self.bounds));
+                [self.haloContainer insertSubview:halo atIndex:0];
+            }
+        }
         if (self.hidden) {
             self.hidden = NO;
-            DLog(@"光晕显示: 宿主=%.0fx%.0f 直径=%.0f", bs.width, bs.height, d);
+            DLog(@"光晕显示: 宿主=%.0fx%.0f 直径=%.0f 封面=%dx%d", bs.width, bs.height, d,
+                 (int)cover.size.width, (int)cover.size.height);
         }
     } @catch (NSException *e) { DLog(@"光晕 step 异常(已忽略): %@", e); }
 }
@@ -1394,6 +1457,8 @@ static void syncNativeSpectrum(UIView *bestRoot) {
 /* 2.2.6: 岛上通知样式 —— 关联对象键 */
 static char kLabelOrigColor;   // UILabel 原始颜色(恢复用)
 static char kLabelFlowMask;    // UILabel 流光渐变图层(CAGradientLayer)
+static char kLabelWidths;      // 2.6.11: 每个合成字符的显示宽度缓存(避免每帧测量文本)
+static char kLabelWidthsKey;   // 2.6.11: 宽度缓存对应的文本, 文本变了才重算
 static char kLabelAnyColored;  // 宿主上是否有标签被上过色(NSNumber, 关闭时判断要不要还原)
 
 /* 流光渐变(2.2.8 最终方案): 逐字上色 attributedText。
@@ -1435,28 +1500,47 @@ static BOOL applyFlow(UIView *v, CGFloat phase) {
     NSUInteger n = text.length;
 
     NSMutableAttributedString *as = cur.length ? [cur mutableCopy] : [[NSMutableAttributedString alloc] initWithString:text];
-    /* 只继承非字体属性(段落样式/字距等), 字体保持系统原样 */
+    /* 只继承非字体属性(段落样式/字距等), 字体保持系统原样。
+       2.6.11: 必须顺手把上一帧写进去的 NSForegroundColorAttributeName 抹掉 ——
+       否则 setAttributes 只留了"第一个色块"的颜色, 整串变成单色, 流光就"没效果"了。 */
     if (n) {
         NSDictionary *attrs = [as attributesAtIndex:0 effectiveRange:NULL];
         NSMutableDictionary *keep = [NSMutableDictionary dictionary];
-        for (id k in attrs) if (![k isEqual:NSFontAttributeName]) keep[k] = attrs[k];
+        for (id k in attrs) {
+            if ([k isEqual:NSFontAttributeName]) continue;
+            if ([k isEqual:NSForegroundColorAttributeName]) continue;
+            keep[k] = attrs[k];
+        }
         [as setAttributes:keep range:NSMakeRange(0, n)];
     }
     if (cs.count == 1) {
         [as addAttribute:NSForegroundColorAttributeName value:cs[0] range:NSMakeRange(0, n)];
     } else {
-        /* 按显示宽度分配渐变色, 并按合成字符切段(不破坏 emoji) */
+        /* 按显示宽度分配渐变色, 并按合成字符切段(不破坏 emoji)。
+           2.6.11: 宽度只算一次并缓存在标签上 —— 原来每帧对每个字符做 sizeWithAttributes,
+           长文本下每帧上千次文本测量, 是视频/流光卡顿的主要来源。 */
         UIFont *f = lb.font ?: [UIFont systemFontOfSize:17];
-        NSDictionary *mAttr = @{NSFontAttributeName: f};
-        NSMutableArray<NSNumber *> *ws = [NSMutableArray array];
-        __block CGFloat total = 0;
-        [text enumerateSubstringsInRange:NSMakeRange(0, n) options:NSStringEnumerationByComposedCharacterSequences
-                              usingBlock:^(NSString *sub, NSRange r, NSRange er, BOOL *stop) {
-            CGFloat w = [sub sizeWithAttributes:mAttr].width;
-            if (w <= 0) w = 1;
-            [ws addObject:@(w)];
-            total += w;
-        }];
+        NSArray<NSNumber *> *ws = objc_getAssociatedObject(v, &kLabelWidths);
+        NSString *wsKey = objc_getAssociatedObject(v, &kLabelWidthsKey);
+        CGFloat total = 0;
+        if (!ws || ![wsKey isEqualToString:text]) {
+            NSDictionary *mAttr = @{NSFontAttributeName: f};
+            NSMutableArray<NSNumber *> *tmp = [NSMutableArray array];
+            __block CGFloat t2 = 0;
+            [text enumerateSubstringsInRange:NSMakeRange(0, n) options:NSStringEnumerationByComposedCharacterSequences
+                                  usingBlock:^(NSString *sub, NSRange r, NSRange er, BOOL *stop) {
+                CGFloat w = [sub sizeWithAttributes:mAttr].width;
+                if (w <= 0) w = 1;
+                [tmp addObject:@(w)];
+                t2 += w;
+            }];
+            ws = tmp;
+            objc_setAssociatedObject(v, &kLabelWidths, ws, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+            objc_setAssociatedObject(v, &kLabelWidthsKey, text, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+            total = t2;
+        } else {
+            for (NSNumber *w in ws) total += w.doubleValue;
+        }
         if (total <= 0) total = 1;
         __block CGFloat acc = 0;
         __block NSUInteger bi = 0;
@@ -1500,6 +1584,31 @@ static BOOL diHostLooksLikeNotification(UIView *host, BOOL *detail) {
     return notif;
 }
 
+/* 2.6.11: 流光白名单 —— 只有"通知卡"和"歌词岛"允许上流光。
+   电话来电、NC 电池详情、音量/静音、灵动岛各种状态胶囊都不上, 用原色。
+   判定靠宿主自己的类名/祖先类名 + 内部是否有歌词特征, 不做全局默认开。 */
+static BOOL diHostWantsFlow(UIView *host) {
+    if (!host) return NO;
+    /* 0) 设置页里的"文字颜色预览"小窗: 单独打标记放行 */
+    if (objc_getAssociatedObject(host, "diPreviewAllow")) return YES;
+    /* 1) 通知卡: 结构判定(长文本 + 应用图标), 已有的判定函数直接用 */
+    if (diHostLooksLikeNotification(host, NULL)) return YES;
+    /* 2) 歌词岛: 宿主类名含 Lyrics / NowPlaying, 或子树里有歌词特征标签 */
+    for (Class c = host.class; c && c != [UIView class]; c = class_getSuperclass(c)) {
+        NSString *cn = NSStringFromClass(c);
+        if ([cn containsString:@"Lyrics"] || [cn containsString:@"NowPlaying"]) return YES;
+    }
+    /* 3) 明确排除: 来电 / 电池 / 音量 / 计时 / 录屏等系统状态 */
+    for (Class c = host.class; c && c != [UIView class]; c = class_getSuperclass(c)) {
+        NSString *cn = NSStringFromClass(c);
+        if ([cn containsString:@"Call"] || [cn containsString:@"Battery"]
+            || [cn containsString:@"Volume"] || [cn containsString:@"Ringer"]
+            || [cn containsString:@"Timer"] || [cn containsString:@"Recording"]
+            || [cn containsString:@"Sensor"] || [cn containsString:@"Connect"]) return NO;
+    }
+    return NO;
+}
+
 static void applyNotifyStyle(UIView *host) {
     if (!host) return;
     /* 通知岛判定(只用于"通知不使用视频背景", 与是否开了颜色无关):
@@ -1519,6 +1628,42 @@ static void applyNotifyStyle(UIView *host) {
         /* 着色关闭且本宿主从没被上过色 → 不需要遍历标签(省掉每秒数百次遍历) */
         return;
     }
+    /* 2.6.11: 只有通知卡 / 歌词岛给流光, 其它界面(来电、NC 电池详情、音量等)保持原色。
+       之前是全宿主上色, 所以每个界面都被染色, 且主线程忙 → 视频卡顿。
+       关掉颜色开关时也走这里 → 会把之前上过的色还原干净。 */
+    BOOL wantFlow = notifyColorOn && diHostWantsFlow(host);
+    if (!wantFlow) {
+        /* 撤流光 + 还原原始色, 只处理"曾被我们上过色"的标签 */
+        int restored = 0;
+        NSMutableArray<UIView *> *stack2 = [NSMutableArray arrayWithObject:host];
+        int g2 = 0;
+        while (stack2.count && g2++ < 400) {
+            UIView *v = stack2.firstObject; [stack2 removeObjectAtIndex:0];
+            for (UIView *s in v.subviews) [stack2 addObject:s];
+            if (![v isKindOfClass:UILabel.class]) continue;
+            UILabel *lb = (UILabel *)v;
+            BOOL hadFlow = objc_getAssociatedObject(lb, &kLabelFlowMask) != nil;
+            if (!hadFlow) continue;
+            /* 还原时不能写 lb.text —— 那会把 attributedText 整个丢掉,
+               系统通知里靠 attributedText 渲染的表情/行距/截断都会失效(乱码成因之一)。
+               就地去掉我们加的颜色属性, 其余属性原样保留。 */
+            NSAttributedString *cur = lb.attributedText;
+            NSString *plain = cur.length ? cur.string : lb.text;
+            objc_setAssociatedObject(lb, &kLabelFlowMask, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+            if (cur.length) {
+                NSMutableAttributedString *as = [cur mutableCopy];
+                [as removeAttribute:NSForegroundColorAttributeName range:NSMakeRange(0, as.length)];
+                lb.attributedText = as;
+            } else if (plain.length) {
+                lb.text = plain;
+            }
+            UIColor *orig = objc_getAssociatedObject(lb, &kLabelOrigColor);
+            if (orig) { lb.textColor = orig; objc_setAssociatedObject(lb, &kLabelOrigColor, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC); }
+            restored++;
+        }
+        if (restored) objc_setAssociatedObject(host, &kLabelAnyColored, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        return;
+    }
     CGFloat phase = (CGFloat)fmod(CFAbsoluteTimeGetCurrent() / 2.5, 1.0); // 2.5秒一轮流光
     NSMutableArray<UIView *> *stack = [NSMutableArray arrayWithObject:host];
     int g = 0, colored = 0;
@@ -1528,7 +1673,7 @@ static void applyNotifyStyle(UIView *host) {
         if (![v isKindOfClass:UILabel.class]) continue;
         UILabel *lb = (UILabel *)v;
         if (!lb.text.length && !lb.attributedText.length) continue;
-        if (notifyColorOn) {
+        if (wantFlow) {
             if (!objc_getAssociatedObject(lb, &kLabelOrigColor))
                 objc_setAssociatedObject(lb, &kLabelOrigColor, lb.textColor, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
             /* 关流光: phase 固定 0 → 静态多色渐变(设几个颜色显示几段);
@@ -1540,27 +1685,6 @@ static void applyNotifyStyle(UIView *host) {
                 if (gNotifyColor) lb.textColor = gNotifyColor;
                 colored++;
             }
-        } else {
-            /* 关颜色: 撤流光(还原纯文本)并按需还原原始色 */
-            BOOL hadFlow = objc_getAssociatedObject(lb, &kLabelFlowMask) != nil;
-            if (hadFlow) {
-                /* 2.6.10: 还原时不能写 lb.text —— 那会把 attributedText 整个丢掉,
-                   系统通知里靠 attributedText 渲染的表情/行距/截断都会失效(乱码成因之一)。
-                   改为就地去掉我们加的颜色属性, 其余属性原样保留。 */
-                NSAttributedString *cur = lb.attributedText;
-                NSString *plain = cur.length ? cur.string : lb.text;
-                objc_setAssociatedObject(lb, &kLabelFlowMask, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-                if (cur.length) {
-                    NSMutableAttributedString *as = [cur mutableCopy];
-                    [as removeAttribute:NSForegroundColorAttributeName range:NSMakeRange(0, as.length)];
-                    lb.attributedText = as;
-                } else if (plain.length) {
-                    lb.text = plain;
-                }
-            }
-            UIColor *orig = objc_getAssociatedObject(lb, &kLabelOrigColor);
-            if (orig) { lb.textColor = orig; objc_setAssociatedObject(lb, &kLabelOrigColor, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC); }
-            if (hadFlow) colored++; // 触发一次重绘
         }
     }
     /* 2.2.11: 自检日志(每 5 秒最多一次) —— 用于确认着色是否真的落到标签上 */
@@ -2083,6 +2207,8 @@ static void diShowPreview(void) {
     [wrap addSubview:x];
 
     objc_setAssociatedObject(win, &kPreviewWrap, wrap, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    /* 2.6.11: 预览窗要上流光 → 打放行标记(diHostWantsFlow 只放行通知/歌词/预览) */
+    objc_setAssociatedObject(wrap, "diPreviewAllow", @YES, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
     __weak UIView *ww = wrap;
     NSTimer *t = [NSTimer timerWithTimeInterval:0.06 repeats:YES block:^(NSTimer *_Nonnull tm) {
         UIView *w2 = ww; if (!w2) { [tm invalidate]; return; }
@@ -4249,6 +4375,7 @@ static void lockStateChanged(CFNotificationCenterRef, void *, CFStringRef, const
 
 static void prefsChanged(CFNotificationCenterRef, void *, CFStringRef, const void *, CFDictionaryRef) {
     gFramesDirty = YES; // 偏好变更(可能换了素材文件夹): 立即重扫
+    DIMaskInvalidateCache();   /* 2.6.11: 设置页刚换了遮罩素材 → 立刻重新读图 */
             dispatch_async(dispatch_get_main_queue(), ^{
                 refreshAll(); installKnownHosts();
         /* 2.2.10: 锁屏通知宽度变更后立即重排(不必等下次通知弹出) */
