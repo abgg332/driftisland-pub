@@ -4256,7 +4256,8 @@ static void diStylePillView(UIView *pill) {
                不再用 CAAnimation 动 locations(实测在系统 pill 上不动)。 */
             NSMutableArray *fcols = [NSMutableArray array];
             NSMutableArray *flocs = [NSMutableArray array];
-            NSUInteger k = 8;
+            NSUInteger k = 32;   /* 2.6.0: 8→32 采样点 —— 稀疏采样下散开/收紧的折叠映射
+                                    在中点附近色带突变, 看着一卡一卡; 密采样后过渡平滑如流水 */
             for (NSUInteger i = 0; i < k; i++) {
                 /* 2.5.26: 四种方向 —— 用"映射坐标 s"统一表达:
                    0 左→右: s=t;  1 右→左: s=t+phase;
@@ -4884,8 +4885,11 @@ static void di_sendEvent(id self, SEL _cmd, UIEvent *e) {
             for (UITouch *t in e.allTouches) {
                 if (t.phase != UITouchPhaseBegan && t.phase != UITouchPhaseMoved) continue;
                 CGPoint p = [t locationInView:nil];
-                /* 底部 18% 区域(原生 home 手势区)的触摸 → 呼出横条(带震动) */
-                if (p.y > shortSide - shortSide * 0.18) {
+                /* 2.6.0: 只认"横条中间下方"的触摸 —— 底部 18%(原生 home 手势区) 且
+                   水平方向在屏幕中央 50% 范围内(横条就在中间), 两侧触摸不呼出防误触 */
+                CGFloat half = scr.width * 0.25;
+                if (p.y > shortSide - shortSide * 0.18 &&
+                    fabs(p.x - scr.width * 0.5) <= half) {
                     diRevealBarNow("sendEvent 触摸");
                     break;
                 }
