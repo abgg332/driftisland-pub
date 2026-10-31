@@ -3625,6 +3625,13 @@ static void diOpenHomeBarPickWindow(void) {
     [specs addObject:[self switchSpec:@"启用素材旋转" key:@"maskRotateOn" def:@NO]];
     [specs addObject:[self switchSpec:@"素材旋转反转" key:@"maskRotateReverse" def:@NO]];
     [specs addObject:[self numSliderD:@"旋转速度" key:@"maskRotateSpeed" def:4.0 mn:-12 mx:12]];
+    /* 2.6.7: 贴合微调 —— 默认全 0 = 严丝合缝贴住专辑可见区(圆角自动跟随) */
+    [specs addObject:[self groupSpec:@"遮罩贴合微调" footer:@"默认 0 即自动贴合专辑可见区的最大外接矩形。若素材边缘有留白或想略微放大, 用下面的缩放/偏移微调。镜像只翻转图片本身。"]];
+    [specs addObject:[self numSliderD:@"缩放" key:@"maskScale" def:0 mn:-12 mx:12]];
+    [specs addObject:[self numSlider:@"左右偏移" key:@"maskOffsetX" def:0 mn:-40 mx:40]];
+    [specs addObject:[self numSlider:@"上下偏移" key:@"maskOffsetY" def:0 mn:-40 mx:40]];
+    [specs addObject:[self switchSpec:@"水平镜像" key:@"maskFlipH" def:@NO]];
+    [specs addObject:[self switchSpec:@"垂直镜像" key:@"maskFlipV" def:@NO]];
     return specs;
 }
 @end
