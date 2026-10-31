@@ -2,7 +2,7 @@ Package: com.abgg332.driftisland
 Name: 漂流岛
 Icon: {path: /var/jb/Library/Application Support/DriftIsland/icon.png}
 Depends: mobilesubstrate, preferenceloader
-Version: 2.6.8
+Version: 2.6.9
 Architecture: iphoneos-arm64
 Description: 在灵动岛内加载视频背景。
 Maintainer: 一条鱼的记忆
