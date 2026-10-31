@@ -3693,6 +3693,13 @@ static void diOpenHomeBarPickWindow(void) {
 - (void)viewDidLoad {
     [super viewDidLoad];
     self.title = @"专辑遮罩素材";
+    /* 进页就保证目录存在, 方便用户直接往里面丢 png(不用先手动建目录) */
+    NSFileManager *fm = [NSFileManager defaultManager];
+    BOOL d = NO;
+    if (![fm fileExistsAtPath:kDIMaskRoot isDirectory:&d] || !d) {
+        [fm createDirectoryAtPath:kDIMaskRoot withIntermediateDirectories:YES
+                       attributes:@{NSFilePosixPermissions: @0777} error:NULL];
+    }
 }
 
 - (NSArray *)specifiers {
