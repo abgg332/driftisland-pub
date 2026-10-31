@@ -17,7 +17,9 @@ concurrency:
 
 jobs:
   build:
-    runs-on: macos-14
+    # 2026-11-02 macOS 14 runner 退役, 期间处于 brownout(任务在启动前被撤销);
+    # 换 macos-15, 构建工具链(brew/theos/ldid)完全一致。
+    runs-on: macos-15
     env:
       VERSION: 1.35.0
     steps:
