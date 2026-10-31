@@ -3,6 +3,7 @@
 #import <Preferences/PSSpecifier.h>
 #import <CoreFoundation/CoreFoundation.h>
 #import <objc/message.h>
+#import <objc/runtime.h>
 #import <AVFoundation/AVFoundation.h>
 #import <spawn.h>
 
@@ -583,7 +584,10 @@ static Class diStepSliderClass(void) {
 - (void)toast:(NSString *)msg;
 @end
 
-@interface DILyricsIslandSettings : DIPrefsController @end /* 2.2.24: 歌词岛合并页 = 上半左侧专辑 + 下半右侧音频 */
+@interface DIMiniBaseController : PSListController
+- (NSArray *)buildSpecifiers;
+@end
+@interface DILyricsIslandSettings : DIMiniBaseController @end /* 2.2.24: 歌词岛合并页 = 上半左侧专辑 + 下半右侧音频 */
 @interface DIFrameFoldersMini : DIFrameFolders @end  /* 左侧(mini)帧率素材选择(键 smallAnimFolder) */
 @interface DIFrameFoldersAudio : DIFrameFolders @end /* 右侧音频素材(键 miniAudioFolder) */
 @interface DIPrefsController (ZoneLinkFwd)
@@ -3270,7 +3274,37 @@ static void diOpenHomeBarPickWindow(void) {
 @end
 
 /* 2.6.1: 歌词岛(2.2.45 原版) —— 合并页 = 上半左侧专辑 + 下半右侧音频 */
-@implementation DIPrefsController (LyricsHelpers)
+@implementation DIMiniBaseController
+/* ===== 2.2.45 原版照搬: 歌词岛合并页自管基类 ===== */
+- (NSInteger)diSliderRowForIndexPath:(NSIndexPath *)ip {
+    NSArray *specs = self.specifiers;
+    NSInteger sec = -1, swRow = -1;
+    for (NSUInteger i = 0; i < specs.count; i++) {
+        PSSpecifier *sp = specs[i];
+        if (sp.cellType == PSGroupCell) { sec++; continue; }
+        if (sec == ip.section) {
+            if ([sp propertyForKey:@"range"]) {
+                if (swRow < 0) return -1;
+                NSInteger idx = ip.row - swRow - 1;
+                if (idx >= 0 && idx <= 3) return idx;
+                return -1;
+            }
+            if (sp.cellType == PSSwitchCell) swRow = ip.row;
+        }
+    }
+    return -1;
+}
+
+- (double)numValueD:(NSString *)key def:(double)def {
+    CFPreferencesAppSynchronize((__bridge CFStringRef)kDomain);
+    id v = CFBridgingRelease(CFPreferencesCopyAppValue((__bridge CFStringRef)key, (__bridge CFStringRef)kDomain));
+    return v ? [v doubleValue] : def;
+}
+- (double)numStepForKey:(NSString *)key {
+    return ([key containsString:@"FPS"] ? 1.0 : 0.5);
+}
+- (id)readSmallAnimName:(PSSpecifier *)sp { return [self folderNameForKey:@"smallAnimFolder"]; }
+- (id)readAudioAnimName:(PSSpecifier *)sp { return [self folderNameForKey:@"miniAudioFolder"]; }
 - (NSString *)folderNameForKey:(NSString *)key {
     CFPreferencesAppSynchronize((__bridge CFStringRef)kDomain);
     id v = CFBridgingRelease(CFPreferencesCopyAppValue((__bridge CFStringRef)key, (__bridge CFStringRef)kDomain));
@@ -3282,13 +3316,252 @@ static void diOpenHomeBarPickWindow(void) {
     }
     return @"默认(全部帧)";
 }
-- (id)readSmallAnimName:(PSSpecifier *)sp { return [self folderNameForKey:@"smallAnimFolder"]; }
-- (id)readAudioAnimName:(PSSpecifier *)sp { return [self folderNameForKey:@"miniAudioFolder"]; }
+- (NSString *)numFormat:(double)v {
+    return (fabs(v - round(v)) < 0.01) ? [NSString stringWithFormat:@"%d", (int)round(v)] : [NSString stringWithFormat:@"%.1f", v];
+}
+- (id)readPreferenceValue:(PSSpecifier *)spec {
+    NSString *key = [spec propertyForKey:@"key"];
+    if (!key) return nil;
+    CFPreferencesAppSynchronize((__bridge CFStringRef)kDomain);
+    id v = CFBridgingRelease(CFPreferencesCopyAppValue((__bridge CFStringRef)key, (__bridge CFStringRef)kDomain));
+    if (v && ![v isKindOfClass:NSString.class] && ![v isKindOfClass:NSNumber.class]) v = nil;
+    return v ?: [spec propertyForKey:@"default"];
+}
+- (void)setPreferenceValue:(id)value specifier:(PSSpecifier *)spec {
+    NSString *key = [spec propertyForKey:@"key"];
+    if (!key.length) return;
+    CFPreferencesSetAppValue((__bridge CFStringRef)key, (__bridge CFPropertyListRef)value, (__bridge CFStringRef)kDomain);
+    CFPreferencesAppSynchronize((__bridge CFStringRef)kDomain);
+    CFNotificationCenterPostNotification(CFNotificationCenterGetDarwinNotifyCenter(),
+        (__bridge CFStringRef)kNotifyStr, NULL, NULL, YES);
+}
+- (PSSpecifier *)groupSpec:(NSString *)header footer:(NSString *)footer {
+    PSSpecifier *sp = [PSSpecifier preferenceSpecifierNamed:header target:nil
+        set:NULL get:NULL detail:nil cell:PSGroupCell edit:nil];
+    if (footer) [sp setProperty:footer forKey:@"footerText"];
+    return sp;
+}
+- (PSSpecifier *)switchSpec:(NSString *)name key:(NSString *)key def:(id)def {
+    PSSpecifier *sp = [PSSpecifier preferenceSpecifierNamed:name target:self
+        set:@selector(setPreferenceValue:specifier:) get:@selector(readPreferenceValue:)
+        detail:nil cell:PSSwitchCell edit:nil];
+    [sp setProperty:key forKey:@"key"];
+    [sp setProperty:kDomain forKey:@"defaults"];
+    [sp setProperty:def forKey:@"default"];
+    return sp;
+}
+- (PSSpecifier *)numSlider:(NSString *)label key:(NSString *)key def:(int)def mn:(int)mn mx:(int)mx {
+    double v = [self numValueD:key def:def];
+    if (v < mn) v = mn; if (v > mx) v = mx;
+    PSSpecifier *sp = [PSSpecifier preferenceSpecifierNamed:label
+        target:self set:@selector(setPreferenceValue:specifier:) get:@selector(readPreferenceValue:)
+        detail:nil cell:PSSliderCell edit:nil];
+    [sp setProperty:key forKey:@"key"];
+    [sp setProperty:kDomain forKey:@"defaults"];
+    [sp setProperty:@(def) forKey:@"default"];
+    [sp setProperty:@(mn) forKey:@"min"];
+    [sp setProperty:@(mx) forKey:@"max"];
+    [sp setProperty:@{ @"min": @(mn), @"max": @(mx), @"label": label } forKey:@"range"];
+    return sp;
+}
+- (void)reloadSpecifiers { _specifiers = nil; [super reloadSpecifiers]; }
+
+- (NSArray *)specifiers {
+    if (!_specifiers) _specifiers = [[self buildSpecifiers] mutableCopy];
+    return _specifiers;
+}
+- (NSArray *)buildSpecifiers { return @[]; }
+
+- (void)diWrite:(NSString *)key value:(double)v {
+    if (!key.length) return;
+    CFPreferencesSetAppValue((__bridge CFStringRef)key, (__bridge CFPropertyListRef)@(v), (__bridge CFStringRef)kDomain);
+    CFPreferencesAppSynchronize((__bridge CFStringRef)kDomain);
+    postReload();
+}
+- (void)diApplyValue:(double)v forBox:(UIView *)box syncSlider:(BOOL)sync {
+    double mn = [objc_getAssociatedObject(box, "mn") doubleValue];
+    double mx = [objc_getAssociatedObject(box, "mx") doubleValue];
+    NSString *key = objc_getAssociatedObject(box, "key");
+    double st = [self numStepForKey:key];
+    v = round(v / st) * st;
+    if (v < mn) v = mn; if (v > mx) v = mx;
+    [self diWrite:key value:v];
+    UISlider *sl = objc_getAssociatedObject(box, "slider");
+    UILabel *vl = objc_getAssociatedObject(box, "val");
+    if (sync && sl && fabs(round(sl.value / st) * st - v) > 0.01) sl.value = v;
+    vl.text = [self numFormat:v];
+}
+- (void)diSliderMoved:(UISlider *)sl {
+    UIView *box = sl.superview;
+    NSString *key = objc_getAssociatedObject(box, "key");
+    double st = [self numStepForKey:key];
+    double v = round(sl.value / st) * st;
+    sl.value = v;
+    [self diApplyValue:v forBox:box syncSlider:NO];
+}
+- (void)diStep:(UIButton *)btn {
+    UIView *box = btn.superview;
+    UISlider *sl = objc_getAssociatedObject(box, "slider");
+    NSString *key = objc_getAssociatedObject(box, "key");
+    double st = [self numStepForKey:key];
+    double v = round(sl.value / st) * st + (btn.tag == 1 ? st : -st);
+    [self diApplyValue:v forBox:box syncSlider:YES];
+}
+- (void)diTapValue:(UITapGestureRecognizer *)tap {
+    UIView *box = tap.view.superview;
+    UILabel *vl = objc_getAssociatedObject(box, "val");
+    NSString *label = objc_getAssociatedObject(box, "label");
+    int mn = [objc_getAssociatedObject(box, "mn") intValue];
+    int mx = [objc_getAssociatedObject(box, "mx") intValue];
+    UIAlertController *a = [UIAlertController alertControllerWithTitle:label
+        message:[NSString stringWithFormat:@"范围 %d ~ %d", mn, mx]
+        preferredStyle:UIAlertControllerStyleAlert];
+    [a addTextFieldWithConfigurationHandler:^(UITextField *tf) {
+        tf.text = vl.text;
+        tf.keyboardType = UIKeyboardTypeNumbersAndPunctuation;
+        tf.textAlignment = NSTextAlignmentCenter;
+    }];
+    [a addAction:[UIAlertAction actionWithTitle:@"取消" style:UIAlertActionStyleCancel handler:nil]];
+    __weak UIView *wbox = box;
+    __weak UIViewController *wself = self;
+    [a addAction:[UIAlertAction actionWithTitle:@"确定" style:UIAlertActionStyleDefault handler:^(UIAlertAction *act) {
+        UIView *bb = wbox; UIViewController *ss = wself;
+        if (!bb || !ss) return;
+        double v = [a.textFields.firstObject.text doubleValue];
+        [(DIMiniBaseController *)ss diApplyValue:v forBox:bb syncSlider:YES];
+    }]];
+    [self presentViewController:a animated:YES completion:nil];
+}
+
+- (void)tableView:(UITableView *)tableView willDisplayCell:(UITableViewCell *)cell forRowAtIndexPath:(NSIndexPath *)indexPath {
+    @try {
+        @try { [super tableView:tableView willDisplayCell:cell forRowAtIndexPath:indexPath]; } @catch (__unused NSException *e) {}
+        PSSpecifier *sp = nil;
+        SEL selFP = NSSelectorFromString(@"specifierForIndexPath:");
+        if ([self respondsToSelector:selFP]) {
+            @try {
+                id (*fp)(id, SEL, id) = (id (*)(id, SEL, id))objc_msgSend;
+                sp = fp(self, selFP, indexPath);
+            } @catch (__unused NSException *e) { sp = nil; }
+        }
+        if (!sp) {
+            __block NSInteger cursor = 0; NSInteger target = indexPath.section;
+            NSArray *all = self.specifiers;
+            NSInteger sec = -1;
+            for (NSUInteger i = 0; i < all.count; i++) {
+                PSSpecifier *x = all[i];
+                if (x.cellType == PSGroupCell) { sec++; cursor = 0; continue; }
+                if (sec == target) {
+                    if (cursor == indexPath.row) { sp = x; break; }
+                    cursor++;
+                }
+            }
+        }
+        if (!sp) return;
+        NSDictionary *range0 = [sp propertyForKey:@"range"];
+        if (!range0) {
+            /* 素材名称行: 右侧显示当前文件夹名 */
+            @try {
+                NSString *nk = [sp propertyForKey:@"nameKey"];
+                if (nk) {
+                    NSString *nm = [self folderNameForKey:nk];
+                    if ([cell respondsToSelector:@selector(setValue:)])
+                        ((void (*)(id, SEL, id))objc_msgSend)(cell, @selector(setValue:), nm);
+                    if ([cell respondsToSelector:@selector(valueLabel)]) {
+                        UILabel *vl2 = ((id (*)(id, SEL))objc_msgSend)(cell, @selector(valueLabel));
+                        if (vl2) { vl2.text = nm; vl2.textColor = [UIColor secondaryLabelColor]; }
+                    }
+                    if (cell.detailTextLabel) cell.detailTextLabel.text = nm;
+                }
+            } @catch (__unused NSException *e) {}
+            return;
+        }
+        NSDictionary *range = range0;
+        NSString *key = [sp propertyForKey:@"key"];
+        NSString *label = range[@"label"] ?: sp.name;
+        double mn = [range[@"min"] doubleValue], mx = [range[@"max"] doubleValue];
+        double v = [self numValueD:key def:[[sp propertyForKey:@"default"] doubleValue]];
+        double st = [self numStepForKey:key];
+        v = round(v / st) * st;
+        if (v < mn) v = mn; if (v > mx) v = mx;
+
+        for (UIView *sv in cell.contentView.subviews) if ([sv isKindOfClass:UISlider.class]) sv.hidden = YES;
+        for (UIView *sv in cell.subviews) if ([sv isKindOfClass:UISlider.class]) sv.hidden = YES;
+        cell.textLabel.text = @"";
+        cell.detailTextLabel.text = @"";
+
+        CGFloat cw = cell.contentView.bounds.size.width, ch = cell.contentView.bounds.size.height;
+        if (cw < 10) cw = tableView.bounds.size.width - 20;
+        if (ch < 10) ch = 44;
+        UIView *box = objc_getAssociatedObject(cell, "diMiniBox");
+        if (!box) {
+            box = [[UIView alloc] initWithFrame:CGRectMake(0, 0, cw, ch)];
+            box.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
+            box.backgroundColor = [UIColor clearColor];
+            UIButton *minus = [UIButton buttonWithType:UIButtonTypeSystem];
+            [minus setTitle:@"-" forState:UIControlStateNormal];
+            minus.titleLabel.font = [UIFont systemFontOfSize:24 weight:UIFontWeightMedium];
+            minus.tag = 0;
+            [minus addTarget:self action:@selector(diStep:) forControlEvents:UIControlEventTouchUpInside];
+            UISlider *sl = [UISlider new];
+            sl.minimumTrackTintColor = [UIColor systemBlueColor];
+            [sl addTarget:self action:@selector(diSliderMoved:) forControlEvents:UIControlEventValueChanged];
+            UIButton *plus = [UIButton buttonWithType:UIButtonTypeSystem];
+            [plus setTitle:@"+" forState:UIControlStateNormal];
+            plus.titleLabel.font = [UIFont systemFontOfSize:24 weight:UIFontWeightMedium];
+            plus.tag = 1;
+            [plus addTarget:self action:@selector(diStep:) forControlEvents:UIControlEventTouchUpInside];
+            UILabel *vl = [UILabel new];
+            vl.font = [UIFont monospacedDigitSystemFontOfSize:16 weight:UIFontWeightRegular];
+            vl.textAlignment = NSTextAlignmentRight;
+            vl.textColor = [UIColor systemBlueColor];
+            vl.userInteractionEnabled = YES;
+            [vl addGestureRecognizer:[[UITapGestureRecognizer alloc] initWithTarget:self action:@selector(diTapValue:)]];
+            UILabel *tl = [UILabel new];
+            tl.font = [UIFont systemFontOfSize:14 weight:UIFontWeightMedium];
+            [box addSubview:tl]; [box addSubview:minus]; [box addSubview:sl]; [box addSubview:plus]; [box addSubview:vl];
+            [cell.contentView addSubview:box];
+            objc_setAssociatedObject(cell, "diMiniBox", box, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+            objc_setAssociatedObject(box, "title", tl, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+            objc_setAssociatedObject(box, "slider", sl, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+            objc_setAssociatedObject(box, "val", vl, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+            objc_setAssociatedObject(box, "minus", minus, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+            objc_setAssociatedObject(box, "plus", plus, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        }
+        objc_setAssociatedObject(box, "key", key, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        objc_setAssociatedObject(box, "label", label, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        objc_setAssociatedObject(box, "mn", @(mn), OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        objc_setAssociatedObject(box, "mx", @(mx), OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+
+        box.frame = CGRectMake(0, 0, cw, ch);
+        UILabel *tl = objc_getAssociatedObject(box, "title");
+        UIButton *minus = objc_getAssociatedObject(box, "minus");
+        UIButton *plus = objc_getAssociatedObject(box, "plus");
+        UISlider *sl = objc_getAssociatedObject(box, "slider");
+        UILabel *vl = objc_getAssociatedObject(box, "val");
+        CGFloat pad = 12, tw = 88, bw = 30, vw = 46;
+        tl.text = label;
+        tl.textAlignment = NSTextAlignmentLeft;
+        tl.numberOfLines = 1;
+        tl.adjustsFontSizeToFitWidth = YES;
+        tl.minimumScaleFactor = 0.7;
+        tl.frame = CGRectMake(pad, 0, tw, ch);
+        minus.frame = CGRectMake(pad + tw - 4, 0, bw, ch);
+        plus.frame = CGRectMake(cw - pad - vw - bw, 0, bw, ch);
+        sl.frame = CGRectMake(pad + tw + bw - 6, (ch - 31) / 2, cw - (pad + tw + bw - 6) - (pad + vw + bw) + 4, 31);
+        vl.frame = CGRectMake(cw - pad - vw, 0, vw, ch);
+        sl.minimumValue = mn; sl.maximumValue = mx;
+        if (fabs(sl.value - v) > 0.01) sl.value = v;
+        vl.text = [self numFormat:v];
+        box.hidden = NO;
+        return;
+    } @catch (__unused NSException *e) {}
+}
 @end
 
 @implementation DILyricsIslandSettings
 /* 2.2.24: 歌词岛合并页 —— 上半=左侧专辑设置, 下半=右侧音频设置, 一个页面管完 */
-- (NSArray *)specifiers {
+- (NSArray *)buildSpecifiers {
     NSMutableArray *specs = [NSMutableArray array];
     /* 左侧专辑 */
     [specs addObject:[self groupSpec:@"左侧专辑" footer:nil]];
@@ -3299,6 +3572,7 @@ static void diOpenHomeBarPickWindow(void) {
     [specs addObject:[self numSlider:@"上下偏移" key:@"miniOffsetY" def:0 mn:-20 mx:20]];
     PSSpecifier *nameRow = [PSSpecifier preferenceSpecifierNamed:@"素材名称"
         target:self set:NULL get:@selector(readSmallAnimName:) detail:[DIFrameFoldersMini class] cell:PSLinkCell edit:nil];
+    [nameRow setProperty:@"smallAnimFolder" forKey:@"nameKey"];
     [specs addObject:nameRow];
     /* 右侧音频 */
     [specs addObject:[self groupSpec:@"右侧音频" footer:nil]];
@@ -3309,6 +3583,7 @@ static void diOpenHomeBarPickWindow(void) {
     [specs addObject:[self numSlider:@"上下偏移" key:@"miniAudioOffsetY" def:0 mn:-20 mx:20]];
     PSSpecifier *nameRow2 = [PSSpecifier preferenceSpecifierNamed:@"素材名称"
         target:self set:NULL get:@selector(readAudioAnimName:) detail:[DIFrameFoldersAudio class] cell:PSLinkCell edit:nil];
+    [nameRow2 setProperty:@"miniAudioFolder" forKey:@"nameKey"];
     [specs addObject:nameRow2];
     return specs;
 }
