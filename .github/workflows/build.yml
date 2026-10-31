@@ -8,10 +8,12 @@ on:
 permissions:
   contents: read
 
-# 逐文件推送会触发一串 run, 让它们自动排队不互相取消, 只跑最新的一次
+# 逐文件推送会触发一串 run。这里让它们排队(不互相取消), 保证有一个能跑完;
+# 注意 cancel-in-progress 必须为 false —— 设 true 时每个新 run 都会掐掉上一个,
+# 结果是"全都 cancelled, 一个产物都没有"(2.6.10 踩过的坑)。
 concurrency:
   group: driftisland-build
-  cancel-in-progress: true
+  cancel-in-progress: false
 
 jobs:
   build:
