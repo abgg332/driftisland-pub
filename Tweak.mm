@@ -4,6 +4,7 @@
 #import <QuartzCore/QuartzCore.h>   /* 2.5.6: CAGradientLayer 横条渐变/流光 */
 #import <AVFoundation/AVFoundation.h>
 #import <CoreMedia/CMTime.h>
+#import <MediaPlayer/MediaPlayer.h>   /* 2.6.9: 取正在播放封面(MPNowPlayingInfoCenter) */
 #import <objc/runtime.h>
 #import <objc/message.h>
 #import <dlfcn.h>
@@ -1220,6 +1221,34 @@ static CGRect diAlbumContentHostRect(UIView *host) {
 }
 
 static CALayer *diAlbumContentLayer(UIView *host) { return diDiscoverAlbumLayer(host); }
+
+/* 2.6.9: 专辑正方形(宿主坐标), 0.35 秒吸附 —— 动画中间帧不抖 */
+static CGRect diAlbumRectStable(UIView *host) {
+    static char kHoldKey;
+    CGRect r = diAlbumContentHostRect(host);
+    if (!host) return CGRectNull;
+    if (CGRectIsNull(r) || r.size.width < 4 || r.size.height < 4) r = host.bounds;
+    CGFloat side = MIN(r.size.height, r.size.width);
+    CGRect sq = CGRectMake(CGRectGetMinX(r), CGRectGetMinY(r), side, side);
+    NSMutableDictionary *hold = objc_getAssociatedObject(host, &kHoldKey);
+    if (!hold) { hold = [NSMutableDictionary dictionary]; objc_setAssociatedObject(host, &kHoldKey, hold, OBJC_ASSOCIATION_RETAIN_NONATOMIC); }
+    NSValue *stored = hold[@"rect"];
+    double now = CFAbsoluteTimeGetCurrent();
+    if (!stored) {
+        hold[@"rect"] = [NSValue valueWithCGRect:sq];
+        hold[@"t"] = @(now);
+        return sq;
+    }
+    CGRect old = stored.CGRectValue;
+    BOOL moved = fabs(old.size.width - sq.size.width) > 1.0 ||
+                 fabs(CGRectGetMidX(old) - CGRectGetMidX(sq)) > 1.5 ||
+                 fabs(CGRectGetMidY(old) - CGRectGetMidY(sq)) > 1.5;
+    double t = [hold[@"t"] doubleValue];
+    if (moved && now - t < 0.35) return old;   /* 变化太快 → 先用旧值, 稳住 */
+    hold[@"rect"] = [NSValue valueWithCGRect:sq];
+    hold[@"t"] = @(now);
+    return sq;
+}
 /* 2.2.14: 小岛专辑/音频位置帧率素材(2.2.45 stepMini 原版) */
 - (void)stepMini {
     @try {
@@ -1335,22 +1364,107 @@ static CALayer *diAlbumContentLayer(UIView *host) { return diDiscoverAlbumLayer(
 - (void)dealloc { [_link invalidate]; }
 @end
 
-/* 2.6.4: 遮罩层 —— 一张静态图片, 贴死在"左侧专辑"上:
-   · 位置/尺寸完全跟左侧专辑素材走(同基准矩形 + 同缩放/偏移), 专辑动它就动
-   · 左侧专辑不显示(关掉左侧帧率/没放歌/非音乐岛) → 遮罩一起隐藏
-   · 素材从 /var/mobile/灵动岛/遮罩素材/<文件夹名>/ 里读取一张图片(取第一张)
-   · 可选旋转: 角度按 maskRotateSpeed(度/秒) 连续累加, 反转取负 */
+/* 2.6.9: 专辑光晕遮罩 —— 按标准蒙版做法(不是把图叠上去):
+     1) 取"正在播放歌曲"的封面图(MPNowPlayingInfoCenter / MediaRemote 兜底);
+     2) 封面按 ScaleAspectFill 铺满一个正方形, 圆形裁角;
+     3) **把 Mask.png 挂到这个正方形容器的 maskView 上** —— 蒙版只决定"哪里透出来",
+        绝不会像之前那样把蒙版自己当图片叠上去(那就是一坨黑的来源);
+     4) 整块垫在原生专辑视图下面(insertSubview:belowSubview:), 比专辑大一圈, 形成光晕。
+   位置/尺寸每帧跟着原生专辑的呈现层走, 岛收缩/展开时逐帧贴合。 */
+static UIImage *diMaskPNG(void) {
+    static UIImage *img; static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        /* rootless: /var/jb/Library/...; RootHide: 真实路径; 再看包内相对路径 */
+        NSArray *paths = @[
+            @"/var/jb/Library/PreferenceBundles/DriftIslandPrefs.bundle/Mask.png",
+            @"/Library/PreferenceBundles/DriftIslandPrefs.bundle/Mask.png",
+            [NSBundle.mainBundle.bundlePath stringByAppendingPathComponent:@"Mask.png"]
+        ];
+        for (NSString *p in paths) {
+            UIImage *i = [UIImage imageWithContentsOfFile:p];
+            if (i) { img = i; DLog(@"蒙版载入: %@ %.0fx%.0f", p, i.size.width, i.size.height); break; }
+        }
+        if (!img) {
+            /* 兜底: 代码画一个白色圆, 挂在 maskView 上效果一样 */
+            UIGraphicsImageRenderer *r = [[UIGraphicsImageRenderer alloc] initWithSize:CGSizeMake(256, 256)];
+            img = [r imageWithActions:^(UIGraphicsImageRendererContext *ctx) {
+                [[UIColor whiteColor] setFill];
+                [[UIBezierPath bezierPathWithOvalInRect:CGRectMake(0, 0, 256, 256)] fill];
+            }];
+            DLog(@"蒙版缺失, 已用代码圆形兜底(请把 Mask.png 放进 DriftIslandPrefs.bundle)");
+        }
+    });
+    return img;
+}
+
+/* 正在播放的封面: MediaPlayer 公开接口, 不依赖私有符号 */
+static void diFetchAlbumArt(void (^done)(UIImage *)) {
+    if (!done) return;
+    /* 直接从 nowPlayingInfo 取 artwork 对象(类型是 MPMediaItemArtwork) */
+    id aw = MPNowPlayingInfoCenter.defaultCenter.nowPlayingInfo[MPMediaItemPropertyArtwork];
+    if ([aw respondsToSelector:@selector(imageWithSize:)]) {
+        UIImage *img = ((UIImage *(*)(id, SEL, CGSize))objc_msgSend)(aw, @selector(imageWithSize:), CGSizeMake(512, 512));
+        if (img) { done(img); return; }
+    }
+    /* 兜底: MediaRemote 跨进程查询(部分 App 不上报 nowPlayingInfo) */
+    static void (*mrInfo)(dispatch_queue_t, void (^)(NSDictionary *)) = NULL;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        void *h = dlopen("/System/Library/PrivateFrameworks/MediaRemote.framework/MediaRemote", RTLD_LAZY);
+        if (h) mrInfo = (void (*)(dispatch_queue_t, void (^)(NSDictionary *)))dlsym(h, "MRMediaRemoteGetNowPlayingInfo");
+    });
+    if (!mrInfo) { done(nil); return; }
+    static dispatch_queue_t q;
+    static dispatch_once_t once2;
+    dispatch_once(&once2, ^{ q = dispatch_queue_create("di.artwork", DISPATCH_QUEUE_SERIAL); });
+    dispatch_async(q, ^{
+        mrInfo(q, ^(NSDictionary *info) {
+            NSData *data = info[@"kMRMediaRemoteNowPlayingInfoArtworkData"];
+            UIImage *img = data.length ? [UIImage imageWithData:data] : nil;
+            dispatch_async(dispatch_get_main_queue(), ^{ done(img); });
+        });
+    });
+}
+
 @interface DIMaskView : UIView
-@property (nonatomic, strong) UIImageView *iv;
+@property (nonatomic, strong) UIImageView *iv;        /* 封面(铺满, 圆形) */
+@property (nonatomic, strong) UIImageView *maskIV;    /* 蒙版, 挂给 iv 的 maskView */
 @property (nonatomic, strong) CADisplayLink *link;
 @property (nonatomic, assign) NSInteger miss;
 @property (nonatomic, assign) double rotDeg;
 @property (nonatomic, assign) CFTimeInterval lastTS;
-@property (nonatomic, copy) NSString *loadedFolder;
 @property (nonatomic, strong) UIImage *loadedImg;
+@property (nonatomic, assign) CFTimeInterval lastFetch;
+@property (nonatomic, assign) BOOL fetching;
 @property (nonatomic, strong) NSTimer *pollTimer;
 @property (nonatomic, assign) CGFloat lastFx, lastFy, appliedDeg;
 @end
+
+/* 底衬色: 从封面主色提亮得到, 蒙版半透明区透出来的就是这层"光", 不是死黑 */
+static UIColor *diHaloTint(UIImage *img) {
+    if (!img) return [UIColor colorWithWhite:1.0 alpha:0.35];
+    static NSMutableDictionary *cache;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{ cache = [NSMutableDictionary dictionary]; });
+    NSString *key = [NSString stringWithFormat:@"%p", img];
+    UIColor *c = cache[key];
+    if (c) return c;
+    /* 缩到 1x1 取平均色, 再提亮 */
+    UIGraphicsImageRenderer *r = [[UIGraphicsImageRenderer alloc] initWithSize:CGSizeMake(1, 1)];
+    UIImage *small = [r imageWithActions:^(UIGraphicsImageRendererContext *ctx) { [img drawInRect:CGRectMake(0, 0, 1, 1)]; }];
+    CGImageRef cg = small.CGImage; unsigned char px[4] = {255, 255, 255, 255};
+    CGColorSpaceRef cs = CGColorSpaceCreateDeviceRGB();
+    CGContextRef c2 = CGBitmapContextCreate(px, 1, 1, 8, 4, cs, kCGImageAlphaPremultipliedLast);
+    if (cg && c2) CGContextDrawImage(c2, CGRectMake(0, 0, 1, 1), cg);
+    if (c2) CGContextRelease(c2);
+    CGColorSpaceRelease(cs);
+    CGFloat R = MIN(1.0, px[0] / 255.0 * 1.35 + 0.08);
+    CGFloat G = MIN(1.0, px[1] / 255.0 * 1.35 + 0.08);
+    CGFloat B = MIN(1.0, px[2] / 255.0 * 1.35 + 0.08);
+    c = [UIColor colorWithRed:R green:G blue:B alpha:1.0];
+    if (cache.count < 32) cache[key] = c;
+    return c;
+}
 
 @implementation DIMaskView
 - (instancetype)initWithFrame:(CGRect)frame {
@@ -1359,9 +1473,16 @@ static CALayer *diAlbumContentLayer(UIView *host) { return diDiscoverAlbumLayer(
         self.backgroundColor = [UIColor clearColor];
         self.clipsToBounds = NO;
         _iv = [[UIImageView alloc] initWithFrame:self.bounds];
-        _iv.contentMode = UIViewContentModeScaleAspectFit;
+        _iv.contentMode = UIViewContentModeScaleAspectFill;   /* 封面铺满, 不留白 */
         _iv.userInteractionEnabled = NO;
+        _iv.clipsToBounds = YES;
         [self addSubview:_iv];
+        /* 关键: 蒙版作为 iv 的 maskView, 而不是叠一个子视图上去 */
+        _maskIV = [[UIImageView alloc] initWithFrame:_iv.bounds];
+        _maskIV.contentMode = UIViewContentModeScaleToFill;   /* 蒙版拉伸铺满 */
+        _maskIV.userInteractionEnabled = NO;
+        _maskIV.image = diMaskPNG();
+        _iv.maskView = _maskIV;
         _link = [CADisplayLink displayLinkWithTarget:self selector:@selector(step)];
         _link.preferredFramesPerSecond = 60;
         [_link addToRunLoop:NSRunLoop.mainRunLoop forMode:NSRunLoopCommonModes];
@@ -1369,104 +1490,94 @@ static CALayer *diAlbumContentLayer(UIView *host) { return diDiscoverAlbumLayer(
     return self;
 }
 
-/* 在遮罩素材目录(或其子文件夹)里找一张图片 */
-static NSString *diMaskImagePath(NSString *folderSel) {
-    NSFileManager *fm = [NSFileManager defaultManager];
-    NSMutableArray<NSString *> *dirs = [NSMutableArray array];
-    NSString *sel = folderSel.length ? [kMaskDir stringByAppendingPathComponent:folderSel] : nil;
-    BOOL isDir = NO;
-    if (sel && [fm fileExistsAtPath:sel isDirectory:&isDir] && isDir) [dirs addObject:sel];
-    else {
-        /* 没选/目录不存在: 取遮罩素材下第一个子目录, 再退化到根目录本身 */
-        for (NSString *n in [fm contentsOfDirectoryAtPath:kMaskDir error:NULL]) {
-            NSString *fp = [kMaskDir stringByAppendingPathComponent:n];
-            BOOL d = NO;
-            if ([fm fileExistsAtPath:fp isDirectory:&d] && d) [dirs addObject:fp];
+/* 拉取封面: 换歌时才重新取, 且每 1.2 秒最多一次 */
+- (void)refreshArtworkIfNeeded:(BOOL)force {
+    CFTimeInterval now = CFAbsoluteTimeGetCurrent();
+    if (_fetching) return;
+    if (!force && _loadedImg && now - _lastFetch < 1.2) return;
+    _lastFetch = now;
+    _fetching = YES;
+    __weak DIMaskView *w0 = self;
+    diFetchAlbumArt(^(UIImage *img) {
+        DIMaskView *wSelf = w0;
+        if (!wSelf) return;
+        wSelf.fetching = NO;
+        if (!img) return;
+        wSelf.loadedImg = img;
+        wSelf.iv.image = img;
+        wSelf.backgroundColor = diHaloTint(img);
+        wSelf.maskIV.image = diMaskPNG();
+        wSelf.maskIV.frame = wSelf.iv.bounds;
+        wSelf.iv.maskView = wSelf.maskIV;   /* 蒙版一直挂在 maskView 上 */
+        static CFAbsoluteTime tLog;
+        if (CFAbsoluteTimeGetCurrent() - tLog > 3) {
+            tLog = CFAbsoluteTimeGetCurrent();
+            DLog(@"光晕封面: %.0fx%.0f 蒙版=%@", img.size.width, img.size.height, wSelf.maskIV.image ? @"已挂" : @"缺失");
         }
-        [dirs sortUsingSelector:@selector(localizedCompare:)];
-        [dirs addObject:kMaskDir];
-    }
-    NSArray *exts = @[@"png", @"jpg", @"jpeg", @"heic", @"webp", @"gif"];
-    for (NSString *d in dirs) {
-        NSArray *names = [[fm contentsOfDirectoryAtPath:d error:NULL] sortedArrayUsingSelector:@selector(localizedCompare:)];
-        for (NSString *n in names) {
-            if ([exts containsObject:n.pathExtension.lowercaseString])
-                return [d stringByAppendingPathComponent:n];
-        }
-    }
-    return nil;
+    });
 }
 
 - (void)step {
     @try {
         UIView *host = self.superview;
         if (!host || host.window == nil) { self.hidden = YES; if (++_miss > 15) _link.paused = YES; return; }
-        /* 2.6.6: 显示条件 = 专辑图存在(与专辑同寿命), 只受遮罩开关控制 */
         BOOL mini = host.bounds.size.height > 20 && host.bounds.size.height <= 60 && host.bounds.size.width > 40;
         BOOL active = diMiniMusicActive(host);
         BOOL gate = mini && enabled && !gLocked && maskOn && active && !gRecordingActive;
         if (!gate) {
-            if (!self.hidden) { self.hidden = YES; DLog(@"遮罩隐藏: mini=%d active=%d maskOn=%d", mini, active, maskOn); }
+            if (!self.hidden) { self.hidden = YES; DLog(@"光晕隐藏: mini=%d active=%d maskOn=%d", mini, active, maskOn); }
             if (++_miss > 15) _link.paused = YES;
             return;
         }
-        /* 素材: 按文件夹缓存 */
-        if (![self.loadedFolder isEqualToString:(maskAnimFolder ?: @"")]) {
-            NSString *ip = diMaskImagePath(maskAnimFolder);
-            self.loadedImg = ip ? [UIImage imageWithContentsOfFile:ip] : nil;
-            self.loadedFolder = maskAnimFolder ?: @"";
-            if (self.loadedImg) DLog(@"遮罩素材加载: %@ %.0fx%.0f", ip, self.loadedImg.size.width, self.loadedImg.size.height);
-            else DLog(@"遮罩素材为空: %@ 下没有图片", kMaskDir);
-        }
-        if (!self.loadedImg) { self.hidden = YES; return; }
-        if (self.iv.image != self.loadedImg) self.iv.image = self.loadedImg;
         _miss = 0;
+        [self refreshArtworkIfNeeded:NO];
+        if (!self.loadedImg) { self.hidden = YES; return; }
 
-        /* 2.6.8: 贴合算法 —— 直接镜像"原生专辑图"的位置, 不做任何猜形状。
-           步骤:
-             1) 拿到专辑内容区(宿主坐标系, 即那块 407x488 折过来的区域);
-             2) 取"左侧第一个正方形"作为理论专辑位(原生专辑就在内容区左上角);
-             3) 两种候选(内容区左上角正方形 / 内容区左半幅)按"是否落在内容区内"打分选用。
-           所有计算都在**宿主呈现层坐标系**里做, 与动画逐帧同步, 不会漂。 */
+        /* 专辑区域 = 原生专辑视图的呈现矩形(宿主坐标系), 逐帧跟随 */
         CALayer *pl = host.layer.presentationLayer;
         CGSize bs = pl ? pl.bounds.size : host.bounds.size;
-        CGRect contentR = diAlbumContentHostRect(host);
-        if (CGRectIsNull(contentR) || contentR.size.width < 4 || contentR.size.height < 4)
-            contentR = CGRectMake(0, 0, bs.width, bs.height);
-        CGRect albumRect;
-        {
-            CGFloat side = MIN(contentR.size.height, contentR.size.width);
-            CGRect a = CGRectMake(CGRectGetMinX(contentR), CGRectGetMinY(contentR), side, side);
-            CGRect b = CGRectMake(CGRectGetMinX(contentR), CGRectGetMinY(contentR),
-                                  MIN(contentR.size.width * 0.5, contentR.size.height),
-                                  contentR.size.height);
-            albumRect = (a.size.height <= b.size.height + 0.5) ? a : b;
+        CGRect albumRect = diAlbumRectStable(host);
+        if (CGRectIsNull(albumRect) || albumRect.size.width < 4) {
+            CGFloat side = bs.height;
+            albumRect = CGRectMake(0, 0, side, side);
         }
-        {
-            static CFAbsoluteTime tDbg; static NSString *lastDbg;
-            NSString *dbg = [NSString stringWithFormat:@"遮罩贴合: 宿主=%.0fx%.0f 内容区=%@ 专辑=%@",
-                             bs.width, bs.height, NSStringFromCGRect(contentR), NSStringFromCGRect(albumRect)];
-            if (![dbg isEqualToString:lastDbg] && CFAbsoluteTimeGetCurrent() - tDbg > 2) { tDbg = CFAbsoluteTimeGetCurrent(); lastDbg = dbg; DLog(@"%@", dbg); }
-        }
-        CGFloat k = 1.0 + (CGFloat)maskScale * 0.06;
-        if (k < 0.1) k = 0.1;
-        CGFloat w = albumRect.size.width * k, h = albumRect.size.height * k;
+        /* 光晕比专辑大一圈(默认 1.7 倍, 与参考实现一致), 圆心对齐专辑 */
+        CGFloat base = MIN(albumRect.size.width, albumRect.size.height);
+        CGFloat mul = 1.7 + (CGFloat)maskScale * 0.06;
+        if (mul < 1.0) mul = 1.0;
+        CGFloat d = base * mul;
         CGFloat cx = CGRectGetMidX(albumRect) + (CGFloat)maskOffsetX * 0.4;
         CGFloat cy = CGRectGetMidY(albumRect) + (CGFloat)maskOffsetY * 0.4;
-        CGRect f = CGRectMake(cx - w * 0.5, cy - h * 0.5, w, h);
+        CGRect f = CGRectMake(cx - d * 0.5, cy - d * 0.5, d, d);
         if (!CGRectEqualToRect(self.frame, f)) self.frame = f;
-        if (fabs(self.iv.bounds.size.width - w) > 0.5 || fabs(self.iv.bounds.size.height - h) > 0.5)
-            self.iv.bounds = CGRectMake(0, 0, w, h);
-        self.iv.center = CGPointMake(w * 0.5, h * 0.5);
-        /* 专辑是圆的 → 遮罩裁成圆, 方形素材的角不出圈 */
-        CGFloat rad = MIN(w, h) * 0.5;
-        if (fabs(self.layer.cornerRadius - rad) > 0.5) { self.layer.cornerRadius = rad; self.layer.masksToBounds = YES; }
+        if (fabs(self.iv.bounds.size.width - d) > 0.5) {
+            self.iv.bounds = CGRectMake(0, 0, d, d);
+            self.iv.center = CGPointMake(d * 0.5, d * 0.5);
+            self.iv.layer.cornerRadius = d * 0.5;   /* 只裁封面本身, 蒙版负责外圈形状 */
+            self.maskIV.frame = self.iv.bounds;
+        }
         if (self.hidden) {
             self.hidden = NO;
-            DLog(@"遮罩显示: 宿主=%@ frame=%@ 素材=%@", NSStringFromClass(host.class), NSStringFromCGRect(f), maskAnimFolder);
+            DLog(@"光晕显示: 宿主=%@ 专辑=%@ 光晕=%@", NSStringFromClass(host.class),
+                 NSStringFromCGRect(albumRect), NSStringFromCGRect(f));
         }
 
-        /* 旋转(静态图, 只用 display link 累加角度) */
+        /* 层序守护: 必须在专辑内容层之下(垫在下面, 不是盖在上面) */
+        {
+            static CFAbsoluteTime tOrder;
+            if (CFAbsoluteTimeGetCurrent() - tOrder > 0.5) {
+                tOrder = CFAbsoluteTimeGetCurrent();
+                CALayer *al = diAlbumContentLayer(host);
+                if (al && al.superlayer == host.layer && self.layer.superlayer == host.layer) {
+                    NSInteger mi = [host.layer.sublayers indexOfObjectIdenticalTo:self.layer];
+                    NSInteger ai = [host.layer.sublayers indexOfObjectIdenticalTo:al];
+                    if (mi != NSNotFound && ai != NSNotFound && mi > ai)
+                        [host.layer insertSublayer:self.layer below:al];
+                }
+            }
+        }
+
+        /* 旋转(可选): 只转封面+蒙版整体, 不改变光晕中心 */
         CFTimeInterval now = _link.timestamp;
         if (!_lastTS) _lastTS = now;
         double dt = now - _lastTS; _lastTS = now;
@@ -1477,37 +1588,30 @@ static NSString *diMaskImagePath(NSString *folderSel) {
             if (_rotDeg >= 360.0) _rotDeg -= 360.0;
             if (_rotDeg <= -360.0) _rotDeg += 360.0;
         }
-        /* 2.6.7: 镜像(对图片本身做, 不影响旋转) */
         CGFloat fx = maskFlipH ? -1.0 : 1.0, fy = maskFlipV ? -1.0 : 1.0;
-        if (fx != _lastFx || fy != _lastFy) { _lastFx = fx; _lastFy = fy; [self applyTransforms]; }
-        if (fabs(_appliedDeg - _rotDeg) > 0.05) [self applyTransforms];
-    } @catch (NSException *e) { DLog(@"遮罩 step 异常(已忽略): %@", e); }
+        if (fx != _lastFx || fy != _lastFy || fabs(_appliedDeg - _rotDeg) > 0.05) {
+            _lastFx = fx; _lastFy = fy;
+            CGAffineTransform t = CGAffineTransformMakeRotation((CGFloat)(_rotDeg * M_PI / 180.0));
+            t = CGAffineTransformScale(t, fx, fy);
+            self.iv.transform = t;
+            _appliedDeg = _rotDeg;
+        }
+    } @catch (NSException *e) { DLog(@"光晕 step 异常(已忽略): %@", e); }
 }
 
-/* 2.6.7: 宿主要一直在里面看着 —— displayLink 一旦因 15 次 miss 停掉, 之后就算挂上去也不会再走 step。
-   所以另挂一个 0.2s 的 NSTimer: 只要还被挂在宿主上就把 displayLink 叫醒。
-   之前"打开开关后要切一次岛才出现"就是这个原因。 */
 - (void)poll {
-    if (!self.superview) return;
-    if (self.superview.window == nil) return;
+    if (!self.superview || self.superview.window == nil) return;
     if (_link.isPaused) { _miss = 0; _link.paused = NO; }
 }
 - (void)activate {
     _miss = 0;
     _link.paused = NO;
+    [self refreshArtworkIfNeeded:YES];
     if (!_pollTimer) {
         _pollTimer = [NSTimer timerWithTimeInterval:0.2 target:self selector:@selector(poll) userInfo:nil repeats:YES];
         [NSRunLoop.mainRunLoop addTimer:_pollTimer forMode:NSRunLoopCommonModes];
     }
 }
-/* 2.6.7: 旋转 + 镜像一起合成, 避免两者互相覆盖 */
-- (void)applyTransforms {
-    CGAffineTransform t = CGAffineTransformMakeRotation((CGFloat)(_rotDeg * M_PI / 180.0));
-    t = CGAffineTransformScale(t, _lastFx, _lastFy);
-    self.iv.transform = t;
-    _appliedDeg = _rotDeg;
-}
-
 - (void)dealloc { [_link invalidate]; [_pollTimer invalidate]; }
 @end
 
