@@ -921,6 +921,33 @@ static BOOL diIsVolumeIsland(UIView *host) {
         return;
     }
     _missCount = 0;
+    /* 2.6.6: 小岛层必须有"音乐岛结构特征"才显示 —— 只看尺寸会在充电/人脸岛弹出动画的
+       中间帧误判(闪一下帧率再消失)。这里要求宿主内存在 407x488 级别的跨进程内容层,
+       且连续 2 帧成立才显示(去掉 1 帧的过渡误差), 一旦不成立立即隐藏(无延时)。 */
+    if (!self.expandedLayer) {
+        static CFAbsoluteTime tMine;
+        BOOL musicShape = NO;
+        {
+            NSMutableArray<CALayer *> *stk = [NSMutableArray arrayWithObject:host.layer];
+            int g = 0;
+            while (stk.count && g++ < 300) {
+                CALayer *l = stk.firstObject; [stk removeObjectAtIndex:0];
+                if ([NSStringFromClass(l.class) containsString:@"CALayerHost"] &&
+                    l.bounds.size.height >= 200 && l.bounds.size.width >= 150) { musicShape = YES; break; }
+                for (CALayer *x in l.sublayers) [stk addObject:x];
+            }
+        }
+        if (!musicShape) {
+            tMine = 0;
+            if (!self.hidden) { self.hidden = YES; if (self.player.timeControlStatus == AVPlayerTimeControlStatusPlaying) [self.player pause]; }
+            return;
+        }
+        if (tMine == 0) tMine = CFAbsoluteTimeGetCurrent();
+        else if (CFAbsoluteTimeGetCurrent() - tMine < 0.03) {   /* 需连续成立约 2 帧 */
+            if (!self.hidden) { self.hidden = YES; if (self.player.timeControlStatus == AVPlayerTimeControlStatusPlaying) [self.player pause]; }
+            return;
+        }
+    }
     // 形态判定用呈现层高度: 动画收尾才越过阈值
     CGFloat ph = pl ? pl.bounds.size.height : host.bounds.size.height;
     BOOL expanded = ph > 60; // 小岛高约36, 展开高 51~223
@@ -1314,82 +1341,87 @@ static NSString *diMaskImagePath(NSString *folderSel) {
 - (void)step {
     @try {
         UIView *host = self.superview;
-        /* 2.6.4 诊断: 每种宿主(按 类名+尺寸)第一次出现时, 打印它是否被认作音乐岛 */
-        static NSMutableSet<NSString *> *probed;
-        if (!probed) probed = [NSMutableSet set];
-        NSString *pk = [NSString stringWithFormat:@"%@ %.0fx%.0f", NSStringFromClass(host.class), host.bounds.size.width, host.bounds.size.height];
-        if (host && ![probed containsObject:pk]) {
-            [probed addObject:pk];
-            diProbePortals(host, [NSString stringWithFormat:@"宿主首次 %@", pk].UTF8String);
-        }
         if (!host || host.window == nil) { self.hidden = YES; if (++_miss > 15) _link.paused = YES; return; }
-        /* 2.6.5: 显示条件 = "专辑图是否存在"(与专辑完全一致), 与左侧帧率开关无关:
-           关掉左侧帧率素材(miniAnimOn=NO)时专辑照常显示 → 遮罩也必须显示。
-           只有遮罩自己的开关 maskOn 能控制它显示/隐藏。 */
+        /* 2.6.6: 显示条件 = 专辑图存在(与专辑同寿命), 只受遮罩开关控制 */
         BOOL mini = host.bounds.size.height > 20 && host.bounds.size.height <= 60 && host.bounds.size.width > 40;
         BOOL active = diMiniMusicActive(host);
         BOOL gate = mini && enabled && !gLocked && maskOn && active && !gRecordingActive;
         if (!gate) {
-            if (!self.hidden) self.hidden = YES;
+            if (!self.hidden) { self.hidden = YES; DLog(@"遮罩隐藏: mini=%d active=%d maskOn=%d", mini, active, maskOn); }
             if (++_miss > 15) _link.paused = YES;
             return;
         }
-        /* 素材: 按文件夹缓存, 只在文件夹变化时重新读取 */
+        /* 素材: 按文件夹缓存 */
         if (![self.loadedFolder isEqualToString:(maskAnimFolder ?: @"")]) {
             NSString *ip = diMaskImagePath(maskAnimFolder);
             self.loadedImg = ip ? [UIImage imageWithContentsOfFile:ip] : nil;
             self.loadedFolder = maskAnimFolder ?: @"";
-            if (self.loadedImg) DLog(@"遮罩素材加载: %@", ip);
+            if (self.loadedImg) DLog(@"遮罩素材加载: %@ %.0fx%.0f", ip, self.loadedImg.size.width, self.loadedImg.size.height);
             else DLog(@"遮罩素材为空: %@ 下没有图片", kMaskDir);
         }
         if (!self.loadedImg) { self.hidden = YES; return; }
         if (self.iv.image != self.loadedImg) self.iv.image = self.loadedImg;
         _miss = 0;
 
+        /* 2.6.6: 贴合"专辑内容层"的真实矩形 —— 196/197 实测那是 CALayerHost(407x488),
+           在宿主坐标系里被缩放/位移到可见位置。这里取它相对宿主的矩形作为专辑区域。 */
+        CALayer *albumLayer = nil;
+        {
+            NSMutableArray<CALayer *> *stk = [NSMutableArray arrayWithObject:host.layer];
+            int g = 0;
+            while (stk.count && g++ < 300) {
+                CALayer *l = stk.firstObject; [stk removeObjectAtIndex:0];
+                if ([NSStringFromClass(l.class) containsString:@"CALayerHost"] &&
+                    l.bounds.size.height >= 200 && l.bounds.size.width >= 150) { albumLayer = l; break; }
+                for (CALayer *x in l.sublayers) [stk addObject:x];
+            }
+        }
         CALayer *pl = host.layer.presentationLayer;
         CGSize bs = pl ? pl.bounds.size : host.bounds.size;
-        /* 与左侧专辑素材同矩形/同缩放偏移 → 严丝合缝贴在上面 */
+        CGRect albumRect = CGRectMake(0, 0, bs.width * 0.52, bs.height); // 默认: 左半幅
+        if (albumLayer) {
+            /* 内容层在宿主里的可见矩形(用它自己的 bounds 经 transform 折算) */
+            CGRect rInHost = [host.layer convertRect:albumLayer.bounds fromLayer:albumLayer];
+            /* 内容层可能远大于宿主(407x488), 取它与宿主左半区的交集作为专辑可见区 */
+            CGRect leftHalf = CGRectMake(0, 0, bs.width * 0.52, bs.height);
+            CGRect inter = CGRectIntersection(rInHost, leftHalf);
+            if (!CGRectIsNull(inter) && inter.size.width > 4 && inter.size.height > 4) albumRect = inter;
+            static CFAbsoluteTime tDbg; static NSString *lastDbg;
+            NSString *dbg = [NSString stringWithFormat:@"遮罩贴合: 宿主=%.0fx%.0f 内容层=%@ 内容层在宿主=%@ 采用=%@",
+                             bs.width, bs.height, NSStringFromCGRect(albumLayer.bounds), NSStringFromCGRect(rInHost), NSStringFromCGRect(albumRect)];
+            if (![dbg isEqualToString:lastDbg] && CFAbsoluteTimeGetCurrent() - tDbg > 2) { tDbg = CFAbsoluteTimeGetCurrent(); lastDbg = dbg; DLog(@"%@", dbg); }
+        }
         CGFloat unit = bs.height > 6 ? bs.height : 38.0;
         CGFloat k = 1.0 + (CGFloat)miniScale * 0.06;
         if (k < 0.1) k = 0.1;
-        CGFloat w = bs.width * 0.52 * k, h = bs.height * k;
-        CGFloat cx = bs.width * 0.52 * 0.5 + (CGFloat)miniOffsetX * unit * 0.04;
-        CGFloat cy = bs.height * 0.5 + (CGFloat)miniOffsetY * unit * 0.04;
+        CGFloat w = albumRect.size.width * k, h = albumRect.size.height * k;
+        CGFloat cx = CGRectGetMidX(albumRect) + (CGFloat)miniOffsetX * unit * 0.04;
+        CGFloat cy = CGRectGetMidY(albumRect) + (CGFloat)miniOffsetY * unit * 0.04;
         CGRect f = CGRectMake(cx - w * 0.5, cy - h * 0.5, w, h);
         if (!CGRectEqualToRect(self.frame, f)) self.frame = f;
         if (fabs(self.iv.bounds.size.width - w) > 0.5 || fabs(self.iv.bounds.size.height - h) > 0.5)
             self.iv.bounds = CGRectMake(0, 0, w, h);
         self.iv.center = CGPointMake(w * 0.5, h * 0.5);
-        if (self.hidden) self.hidden = NO;
-        /* 2.6.5: 层序守护 —— 每帧确认自己仍在"专辑内容层之下"(系统重排可能把我提上去) */
+        if (self.hidden) {
+            self.hidden = NO;
+            DLog(@"遮罩显示: 宿主=%@ frame=%@ 素材=%@", NSStringFromClass(host.class), NSStringFromCGRect(f), maskAnimFolder);
+        }
+
+        /* 层序守护: 必须在专辑内容层之下 */
         {
             static CFAbsoluteTime tOrder;
             if (CFAbsoluteTimeGetCurrent() - tOrder > 0.5) {
                 tOrder = CFAbsoluteTimeGetCurrent();
-                CALayer *albumLayer = nil;
-                NSMutableArray<CALayer *> *stk = [NSMutableArray arrayWithObject:host.layer];
-                int g3 = 0;
-                while (stk.count && g3++ < 300) {
-                    CALayer *l = stk.firstObject; [stk removeObjectAtIndex:0];
-                    if ([NSStringFromClass(l.class) containsString:@"CALayerHost"] &&
-                        l.bounds.size.height >= 200 && l.bounds.size.width >= 150) { albumLayer = l; break; }
-                    for (CALayer *x in l.sublayers) [stk addObject:x];
-                }
                 if (albumLayer && albumLayer.superlayer == host.layer && self.layer.superlayer == host.layer) {
                     NSInteger mi = [host.layer.sublayers indexOfObjectIdenticalTo:self.layer];
                     NSInteger ai = [host.layer.sublayers indexOfObjectIdenticalTo:albumLayer];
                     if (mi != NSNotFound && ai != NSNotFound && mi > ai)
                         [host.layer insertSublayer:self.layer below:albumLayer];
                 }
-                /* 左侧帧率素材层必须在遮罩之上 */
-                for (UIView *sv in host.subviews) {
-                    if ([sv isKindOfClass:[DIAnimView class]] && ((DIAnimView *)sv).miniMode)
-                        [host bringSubviewToFront:sv];
-                }
             }
         }
 
-        /* 旋转(图片不帧率推进, 只用 display link 算角度) */
+        /* 旋转(静态图, 只用 display link 累加角度) */
         CFTimeInterval now = _link.timestamp;
         if (!_lastTS) _lastTS = now;
         double dt = now - _lastTS; _lastTS = now;
@@ -1406,9 +1438,6 @@ static NSString *diMaskImagePath(NSString *folderSel) {
     } @catch (NSException *e) { DLog(@"遮罩 step 异常(已忽略): %@", e); }
 }
 @end
-
-
-
 
 /* 音频开关: 开→在音频门户层(CALayerHost)上用掩码挖洞, 只隐藏右上角波形, 按钮/专辑/歌词不受影响; 关→移除掩码
    注意: 只在展开稳定态应用(收缩态岛尺寸太小, 算出的洞坐标是乱值会遮到歌词); 洞用展开态实测固定坐标(波形 x≈353-381 y≈42-65) */
@@ -1861,17 +1890,30 @@ static void updateSingleVideo(UIWindow *win) {
         maskV = [[DIMaskView alloc] initWithFrame:CGRectZero];
         objc_setAssociatedObject(win, &kWinMask, maskV, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
     }
-    BOOL maskWanted = enabled && !gRecordingActive && maskOn && diMiniMusicActive(bestRoot);
+    BOOL maskMusic = diMiniMusicActive(bestRoot);
+    BOOL maskWanted = enabled && !gRecordingActive && maskOn && maskMusic;
+    {
+        static CFAbsoluteTime tMLog; static NSString *lastMLog;
+        NSString *now = [NSString stringWithFormat:@"遮罩挂载检查: 宿主=%@ %.0fx%.0f 音乐岛=%d 开关=%d 想要=%d 当前super=%@",
+                         NSStringFromClass(bestRoot.class), bestRoot.bounds.size.width, bestRoot.bounds.size.height,
+                         maskMusic, maskOn, maskWanted, maskV.superview ? NSStringFromClass(maskV.superview.class) : @"(无)"];
+        if (![now isEqualToString:lastMLog] && CFAbsoluteTimeGetCurrent() - tMLog > 2) {
+            tMLog = CFAbsoluteTimeGetCurrent(); lastMLog = now; DLog(@"%@", now);
+        }
+    }
     if (!maskWanted) {
         if (maskV.superview) { [maskV removeFromSuperview]; maskV.hidden = YES; }
         maskV.link.paused = YES;
     } else {
+        /* 2.6.6: 用 layer 级插入(UIView addSubview + insertSublayer 混用会让 UIView 层级表错乱,
+           遮罩会被系统重排到看不见的位置)。先 addSubview 建立 superview 关系,
+           再对 layer 做"插到专辑内容层之下", 让 maskV.layer 与 UIView 保持一致。 */
         if (maskV.superview != bestRoot) {
             [maskV removeFromSuperview];
+            maskV.frame = CGRectMake(0, 0, bestRoot.bounds.size.width, bestRoot.bounds.size.height);
             [bestRoot addSubview:maskV];
             maskV.hidden = YES;
         }
-        /* 插到"专辑内容层"下方: 找第一个尺寸远大于宿主的 CALayerHost 作为专辑图 */
         CALayer *albumLayer = nil;
         NSMutableArray<CALayer *> *stk = [NSMutableArray arrayWithObject:bestRoot.layer];
         int g2 = 0;
@@ -1882,11 +1924,15 @@ static void updateSingleVideo(UIWindow *win) {
             for (CALayer *x in l.sublayers) [stk addObject:x];
         }
         if (albumLayer && albumLayer.superlayer == bestRoot.layer) {
-            [bestRoot.layer insertSublayer:maskV.layer below:albumLayer];
-        } else if (bestRoot.subviews.count > 0) {
-            /* 找不到专辑层时退化为"最底层之上" —— 仍保证在左侧素材层之下 */
-            [bestRoot bringSubviewToFront:maskV];
-            [bestRoot sendSubviewToBack:maskV];
+            NSInteger mi = [bestRoot.layer.sublayers indexOfObjectIdenticalTo:maskV.layer];
+            NSInteger ai = [bestRoot.layer.sublayers indexOfObjectIdenticalTo:albumLayer];
+            if (mi != NSNotFound && ai != NSNotFound && mi > ai) {
+                [maskV.layer removeFromSuperlayer];
+                [bestRoot.layer insertSublayer:maskV.layer below:albumLayer];
+                /* 同步 UIView 的 subviews 顺序, 否则 UIKit 下一次 layout 会把 layer 挪回去 */
+                [bestRoot bringSubviewToFront:maskV];
+                [bestRoot sendSubviewToBack:maskV];
+            }
         }
         maskV.link.paused = NO;
     }
