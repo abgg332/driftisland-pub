@@ -20,3 +20,9 @@ void DIApplyAlbumHalo(UIView *card, UIView *albumView, CGFloat haloDiameter);
 
 // 清掉卡片里所有旧光晕(换歌/刷新时调)
 void DIClearAlbumHalo(UIView *card);
+
+// 让素材缓存失效(设置页选完素材后调, 立刻换图)
+void DIMaskInvalidateCache(void);
+
+// 素材失效代数: 每次 Invalidate 自增, 外部拿来做"素材是否换过"的缓存键
+NSInteger DIMaskGeneration(void);
