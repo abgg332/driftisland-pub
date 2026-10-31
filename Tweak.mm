@@ -4922,21 +4922,14 @@ static void di_sendEvent(id self, SEL _cmd, UIEvent *e) {
                用 statusBarOrientation 区分朝向, 只认横条真实所在的那一小块区域。 */
             CGSize scr = [UIScreen mainScreen].bounds.size;
             CGFloat pw = MIN(scr.width, scr.height), ph = MAX(scr.width, scr.height); // 竖屏宽高
-            UIInterfaceOrientation o = UIInterfaceOrientationUnknown;
-            #pragma clang diagnostic push
-            #pragma clang diagnostic ignored "-Wdeprecated-declarations"
-            if ([self respondsToSelector:@selector(statusBarOrientation)])
-                o = (UIInterfaceOrientation)[(UIApplication *)self statusBarOrientation];
-            #pragma clang diagnostic pop
+            /* 2.6.2: statusBarOrientation 在 SpringBoard 不可靠(193 实测横条处无触发),
+               改为不辨朝向: 左右两短缘(横条原长度) ∩ 竖屏高度中部 50% —— 其他区域一概不触发 */
             for (UITouch *t in e.allTouches) {
                 if (t.phase != UITouchPhaseBegan && t.phase != UITouchPhaseMoved) continue;
                 CGPoint p = [t locationInView:nil];
-                /* 横条区域 = 朝向对应的边缘 ∩ 竖屏高度中部 50% —— 其他地方一概不触发 */
-                BOOL inSide = NO;
-                if (o == UIInterfaceOrientationLandscapeLeft)        inSide = (p.x > pw * 0.82);
-                else if (o == UIInterfaceOrientationLandscapeRight)  inSide = (p.x < pw * 0.18);
+                BOOL inEdge = (p.x < pw * 0.18 || p.x > pw * 0.82);
                 BOOL inMiddle = (fabs(p.y - ph * 0.5) < ph * 0.25);
-                if (inSide && inMiddle) {
+                if (inEdge && inMiddle) {
                     diRevealBarNow("sendEvent 触摸");
                     break;
                 }
