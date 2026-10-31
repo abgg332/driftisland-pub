@@ -4,7 +4,7 @@ ARCHS = arm64 arm64e
 include $(THEOS)/makefiles/common.mk
 
 TWEAK_NAME = DriftIsland
-DriftIsland_FILES = Tweak.mm
+DriftIsland_FILES = Tweak.mm DIAlbumMask.mm
 DriftIsland_CFLAGS = -fobjc-arc -std=c++17
 DriftIsland_PACKAGE_RESOURCES = Mask.png
 DriftIsland_FRAMEWORKS = UIKit Foundation AVFoundation CoreMedia CoreFoundation MediaPlayer
