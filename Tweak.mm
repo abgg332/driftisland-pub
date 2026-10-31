@@ -38,10 +38,14 @@ static BOOL maskRotateOn = NO;    // 启用素材旋转
 static BOOL maskRotateReverse = NO; // 素材旋转反转
 static double maskRotateSpeed = 4.0; // 旋转速度
 static NSString *maskAnimFolder;  // 遮罩素材文件夹(帧率素材下的子目录)
+static double maskScale = 0, maskOffsetX = 0, maskOffsetY = 0; // 2.6.7: 遮罩微调(0 = 完全贴合专辑)
+static BOOL maskFlipH = NO, maskFlipV = NO;                   // 2.6.7: 遮罩水平/垂直镜像
 static BOOL gRecordingActive = NO; // 2.6.1: 不带录屏岛, 恒 NO(保留 stepMini 原条件结构)
 static void migrateLyricsParamsBase(void);
 static NSString *diElementId(UIView *host);
 static BOOL diMiniMusicActive(UIView *host); // 2.6.3: 前置(遮罩层使用)
+/* 2.6.7: 专辑内容层(CALayerHost 407x488)查找 —— 遮罩/原生隐藏共用 */
+static CALayer *diAlbumContentLayer(UIView *host);
 static os_log_t logHandle;
 
 // 运行日志: 写入 /var/mobile/Library/Logs/DriftIsland/driftisland.log (供"导出日志报告"抓取)
@@ -616,6 +620,12 @@ static void refreshPrefs(void) {
     maskRotateSpeed = pDouble(@"maskRotateSpeed", 4.0);
     if (maskRotateSpeed < -12) maskRotateSpeed = -12; if (maskRotateSpeed > 12) maskRotateSpeed = 12;
     maskAnimFolder = pString(@"maskAnimFolder");
+    /* 2.6.7: 遮罩微调(默认 0/0/0 = 严丝合缝贴住专辑可见区) */
+    maskScale = pDouble(@"maskScale", 0);     if (maskScale < -12) maskScale = -12; if (maskScale > 12) maskScale = 12;
+    maskOffsetX = pDouble(@"maskOffsetX", 0); if (maskOffsetX < -40) maskOffsetX = -40; if (maskOffsetX > 40) maskOffsetX = 40;
+    maskOffsetY = pDouble(@"maskOffsetY", 0); if (maskOffsetY < -40) maskOffsetY = -40; if (maskOffsetY > 40) maskOffsetY = 40;
+    maskFlipH = pBool(@"maskFlipH", NO);
+    maskFlipV = pBool(@"maskFlipV", NO);
     /* 2.5.7: 隐藏横条 / 渐隐模式 / 手势保护 */
     homeBarHideOn = pBool(@"homeBarHideOn", NO);
     homeBarHideMode = pBool(@"homeBarHideFade", NO) ? @"fade" : @"full";   /* 2.5.11: 子开关 */
@@ -1163,6 +1173,75 @@ static BOOL diMiniMusicActive(UIView *host) {
     return YES;
 }
 
+/* 2.6.7: 找到音乐岛的"专辑内容层"(CALayerHost 407x488)。
+   198 日志显示：宿主 185x52 时它被摆到 x=-111 —— 也就是宿主里其实只露出右边那截，
+   左边 111pt 在宿主矩形外面。所以"专辑图"并不是宿主的左半幅，得从这层里再细分。 */
+static CALayer *diAlbumContentLayer(UIView *host) {
+    if (!host) return nil;
+    NSMutableArray<CALayer *> *stack = [NSMutableArray arrayWithObject:host.layer];
+    int guard = 0;
+    while (stack.count && guard++ < 400) {
+        CALayer *l = stack.firstObject; [stack removeObjectAtIndex:0];
+        if ([NSStringFromClass(l.class) containsString:@"CALayerHost"] &&
+            l.bounds.size.height >= 200 && l.bounds.size.width >= 150) return l;
+        for (CALayer *x in l.sublayers) [stack addObject:x];
+    }
+    return nil;
+}
+
+/* 2.6.7: 专辑"可见矩形" —— 在宿主坐标系里。
+   做法：拿 CALayerHost 对应的 UIView(通常是 _UIPortalView)，把它整棵子树里
+   最大的那个"可见子树矩形"算出来(叶子子视图 + 层自身)，再折算到宿主坐标。
+   这样无论是"层被放大"还是"子视图被内缩"，都能拿到真正画专辑的那块区域；
+   宿主本身会裁切显示，最后再与宿主 bounds 求交，得到屏幕上真实看到的那一坨。 */
+static CGRect diAlbumVisibleRect(UIView *host, CALayer *albumLayer, CGRect *rawOut) {
+    if (!host) return CGRectNull;
+    CGRect hostB = host.bounds;
+    if (!albumLayer) { if (rawOut) *rawOut = CGRectNull; return hostB; }
+    /* layer → UIView */
+    UIView *lv = nil;
+    {
+        NSMutableArray<UIView *> *st = [NSMutableArray arrayWithObject:host];
+        int g = 0;
+        while (st.count && g++ < 600) {
+            UIView *v = st.firstObject; [st removeObjectAtIndex:0];
+            if (v.layer == albumLayer) { lv = v; break; }
+            for (UIView *s in v.subviews) [st addObject:s];
+        }
+    }
+    CGRect raw;
+    if (lv) {
+        /* 子树里最大的可见矩形（叶子优先，避免把整棵容器算进来） */
+        CGRect best = CGRectNull;
+        NSMutableArray<UIView *> *st = [NSMutableArray arrayWithObject:lv];
+        int g = 0;
+        while (st.count && g++ < 600) {
+            UIView *v = st.firstObject; [st removeObjectAtIndex:0];
+            if (v.subviews.count == 0 && v.bounds.size.width > 2 && v.bounds.size.height > 2) {
+                CGRect r = [host convertRect:v.bounds fromView:v];
+                if (CGRectIsNull(best)) best = r;
+                else {
+                    CGRect u = CGRectUnion(best, r);
+                    /* 取"面积最大"而不是并集：并集会随子视图飘动而抖动 */
+                    if (r.size.width * r.size.height > best.size.width * best.size.height) best = r;
+                    (void)u;
+                }
+            }
+            for (UIView *s in v.subviews) [st addObject:s];
+        }
+        if (CGRectIsNull(best) || best.size.width < 2 || best.size.height < 2)
+            best = [host convertRect:lv.bounds fromView:lv];
+        raw = best;
+    } else {
+        raw = [host.layer convertRect:albumLayer.bounds fromLayer:albumLayer];
+    }
+    if (rawOut) *rawOut = raw;
+    /* 宿主会裁切 → 屏幕上真实可见 = raw ∩ 宿主 */
+    CGRect vis = CGRectIntersection(raw, hostB);
+    if (CGRectIsNull(vis) || vis.size.width < 1 || vis.size.height < 1) vis = CGRectIntersection(raw, hostB);
+    return vis;
+}
+
 /* 2.2.14: 小岛专辑/音频位置帧率素材(2.2.45 stepMini 原版) */
 - (void)stepMini {
     @try {
@@ -1291,6 +1370,8 @@ static BOOL diMiniMusicActive(UIView *host) {
 @property (nonatomic, assign) CFTimeInterval lastTS;
 @property (nonatomic, copy) NSString *loadedFolder;
 @property (nonatomic, strong) UIImage *loadedImg;
+@property (nonatomic, strong) NSTimer *pollTimer;
+@property (nonatomic, assign) CGFloat lastFx, lastFy, appliedDeg;
 @end
 
 @implementation DIMaskView
@@ -1363,62 +1444,43 @@ static NSString *diMaskImagePath(NSString *folderSel) {
         if (self.iv.image != self.loadedImg) self.iv.image = self.loadedImg;
         _miss = 0;
 
-        /* 2.6.6: 贴合"专辑内容层"的真实矩形 —— 196/197 实测那是 CALayerHost(407x488),
-           在宿主坐标系里被缩放/位移到可见位置。这里取它相对宿主的矩形作为专辑区域。 */
-        CALayer *albumLayer = nil;
-        {
-            NSMutableArray<CALayer *> *stk = [NSMutableArray arrayWithObject:host.layer];
-            int g = 0;
-            while (stk.count && g++ < 300) {
-                CALayer *l = stk.firstObject; [stk removeObjectAtIndex:0];
-                if ([NSStringFromClass(l.class) containsString:@"CALayerHost"] &&
-                    l.bounds.size.height >= 200 && l.bounds.size.width >= 150) { albumLayer = l; break; }
-                for (CALayer *x in l.sublayers) [stk addObject:x];
-            }
-        }
+        /* 2.6.7: 贴合"专辑可见区" —— 198 实测内容层 407x488 被摆到宿主 x=-111 处,
+           宿主只露出右边一截。所以不能拿"内容层矩形 ∩ 左半幅"(会得到全宽 → 盖住整个岛),
+           要拿"内容层里真正画专辑的那块子树"折到宿主坐标再与宿主求交。 */
+        CALayer *albumLayer = diAlbumContentLayer(host);
         CALayer *pl = host.layer.presentationLayer;
         CGSize bs = pl ? pl.bounds.size : host.bounds.size;
-        CGRect albumRect = CGRectMake(0, 0, bs.width * 0.52, bs.height); // 默认: 左半幅
-        if (albumLayer) {
-            /* 内容层在宿主里的可见矩形(用它自己的 bounds 经 transform 折算) */
-            CGRect rInHost = [host.layer convertRect:albumLayer.bounds fromLayer:albumLayer];
-            /* 内容层可能远大于宿主(407x488), 取它与宿主左半区的交集作为专辑可见区 */
-            CGRect leftHalf = CGRectMake(0, 0, bs.width * 0.52, bs.height);
-            CGRect inter = CGRectIntersection(rInHost, leftHalf);
-            if (!CGRectIsNull(inter) && inter.size.width > 4 && inter.size.height > 4) albumRect = inter;
+        CGRect rawR = CGRectNull;
+        CGRect albumRect = diAlbumVisibleRect(host, albumLayer, &rawR);
+        if (CGRectIsNull(albumRect) || albumRect.size.width < 4 || albumRect.size.height < 4)
+            albumRect = CGRectMake(0, 0, bs.width * 0.52, bs.height); // 兜底: 左半幅
+        {
             static CFAbsoluteTime tDbg; static NSString *lastDbg;
-            NSString *dbg = [NSString stringWithFormat:@"遮罩贴合: 宿主=%.0fx%.0f 内容层=%@ 内容层在宿主=%@ 采用=%@",
-                             bs.width, bs.height, NSStringFromCGRect(albumLayer.bounds), NSStringFromCGRect(rInHost), NSStringFromCGRect(albumRect)];
+            NSString *dbg = [NSString stringWithFormat:@"遮罩贴合: 宿主=%.0fx%.0f 内容层=%@ 原始=%@ 采用=%@",
+                             bs.width, bs.height, albumLayer ? NSStringFromCGRect(albumLayer.bounds) : @"(无)",
+                             NSStringFromCGRect(rawR), NSStringFromCGRect(albumRect)];
             if (![dbg isEqualToString:lastDbg] && CFAbsoluteTimeGetCurrent() - tDbg > 2) { tDbg = CFAbsoluteTimeGetCurrent(); lastDbg = dbg; DLog(@"%@", dbg); }
         }
         CGFloat unit = bs.height > 6 ? bs.height : 38.0;
-        CGFloat k = 1.0 + (CGFloat)miniScale * 0.06;
+        CGFloat k = 1.0 + (CGFloat)maskScale * 0.06;
         if (k < 0.1) k = 0.1;
         CGFloat w = albumRect.size.width * k, h = albumRect.size.height * k;
-        CGFloat cx = CGRectGetMidX(albumRect) + (CGFloat)miniOffsetX * unit * 0.04;
-        CGFloat cy = CGRectGetMidY(albumRect) + (CGFloat)miniOffsetY * unit * 0.04;
+        CGFloat cx = CGRectGetMidX(albumRect) + (CGFloat)maskOffsetX * unit * 0.04;
+        CGFloat cy = CGRectGetMidY(albumRect) + (CGFloat)maskOffsetY * unit * 0.04;
         CGRect f = CGRectMake(cx - w * 0.5, cy - h * 0.5, w, h);
         if (!CGRectEqualToRect(self.frame, f)) self.frame = f;
         if (fabs(self.iv.bounds.size.width - w) > 0.5 || fabs(self.iv.bounds.size.height - h) > 0.5)
             self.iv.bounds = CGRectMake(0, 0, w, h);
         self.iv.center = CGPointMake(w * 0.5, h * 0.5);
+        /* 圆角跟随宿主(灵动岛是胶囊) —— 遮罩超出的地方会被宿主裁掉, 这里再加一道保险 */
+        CGFloat rad = MIN(h, w) * 0.5;
+        if (fabs(self.layer.cornerRadius - rad) > 0.5) {
+            self.layer.cornerRadius = rad;
+            self.layer.masksToBounds = YES;
+        }
         if (self.hidden) {
             self.hidden = NO;
             DLog(@"遮罩显示: 宿主=%@ frame=%@ 素材=%@", NSStringFromClass(host.class), NSStringFromCGRect(f), maskAnimFolder);
-        }
-
-        /* 层序守护: 必须在专辑内容层之下 */
-        {
-            static CFAbsoluteTime tOrder;
-            if (CFAbsoluteTimeGetCurrent() - tOrder > 0.5) {
-                tOrder = CFAbsoluteTimeGetCurrent();
-                if (albumLayer && albumLayer.superlayer == host.layer && self.layer.superlayer == host.layer) {
-                    NSInteger mi = [host.layer.sublayers indexOfObjectIdenticalTo:self.layer];
-                    NSInteger ai = [host.layer.sublayers indexOfObjectIdenticalTo:albumLayer];
-                    if (mi != NSNotFound && ai != NSNotFound && mi > ai)
-                        [host.layer insertSublayer:self.layer below:albumLayer];
-                }
-            }
         }
 
         /* 旋转(静态图, 只用 display link 累加角度) */
@@ -1431,12 +1493,39 @@ static NSString *diMaskImagePath(NSString *folderSel) {
             _rotDeg += dir * maskRotateSpeed * dt;
             if (_rotDeg >= 360.0) _rotDeg -= 360.0;
             if (_rotDeg <= -360.0) _rotDeg += 360.0;
-            self.iv.transform = CGAffineTransformMakeRotation((CGFloat)(_rotDeg * M_PI / 180.0));
-        } else if (self.iv.transform.a != 1.0 || self.iv.transform.b != 0.0) {
-            self.iv.transform = CGAffineTransformIdentity;
         }
+        /* 2.6.7: 镜像(对图片本身做, 不影响旋转) */
+        CGFloat fx = maskFlipH ? -1.0 : 1.0, fy = maskFlipV ? -1.0 : 1.0;
+        if (fx != _lastFx || fy != _lastFy) { _lastFx = fx; _lastFy = fy; [self applyTransforms]; }
+        if (fabs(_appliedDeg - _rotDeg) > 0.05) [self applyTransforms];
     } @catch (NSException *e) { DLog(@"遮罩 step 异常(已忽略): %@", e); }
 }
+
+/* 2.6.7: 宿主要一直在里面看着 —— displayLink 一旦因 15 次 miss 停掉, 之后就算挂上去也不会再走 step。
+   所以另挂一个 0.2s 的 NSTimer: 只要还被挂在宿主上就把 displayLink 叫醒。
+   之前"打开开关后要切一次岛才出现"就是这个原因。 */
+- (void)poll {
+    if (!self.superview) return;
+    if (self.superview.window == nil) return;
+    if (_link.isPaused) { _miss = 0; _link.paused = NO; }
+}
+- (void)activate {
+    _miss = 0;
+    _link.paused = NO;
+    if (!_pollTimer) {
+        _pollTimer = [NSTimer timerWithTimeInterval:0.2 target:self selector:@selector(poll) userInfo:nil repeats:YES];
+        [NSRunLoop.mainRunLoop addTimer:_pollTimer forMode:NSRunLoopCommonModes];
+    }
+}
+/* 2.6.7: 旋转 + 镜像一起合成, 避免两者互相覆盖 */
+- (void)applyTransforms {
+    CGAffineTransform t = CGAffineTransformMakeRotation((CGFloat)(_rotDeg * M_PI / 180.0));
+    t = CGAffineTransformScale(t, _lastFx, _lastFy);
+    self.iv.transform = t;
+    _appliedDeg = _rotDeg;
+}
+
+- (void)dealloc { [_link invalidate]; [_pollTimer invalidate]; }
 @end
 
 /* 音频开关: 开→在音频门户层(CALayerHost)上用掩码挖洞, 只隐藏右上角波形, 按钮/专辑/歌词不受影响; 关→移除掩码
@@ -1515,32 +1604,42 @@ static UIColor *diColorAt(NSArray<UIColor *> *colors, CGFloat t) {
 static BOOL applyFlow(UIView *v, CGFloat phase) {
     UILabel *lb = [v isKindOfClass:UILabel.class] ? (UILabel *)v : nil;
     if (!lb) return NO;
-    NSString *text = lb.attributedText.length ? lb.attributedText.string : lb.text;
+    NSAttributedString *orig = lb.attributedText;
+    NSString *text = orig.length ? orig.string : lb.text;
     if (!text.length) return NO;
     NSArray<UIColor *> *cs = gNotifyColors;
     if (!cs.count) cs = @[gNotifyColor ?: [UIColor whiteColor]];
+    /* 2.6.7: 用 NSString 显示宽度(而不是逐字符)来分配渐变色 —— 表情/组合字符占宽不同,
+       按字符下标算会让渐变在表情处突变; 另外切段只用 composed character range,
+       不去改写任何字符, 从而杜绝"表情变方块/乱码"(以前按 UTF-16 单字符切片会切散代理对)。 */
+    NSMutableAttributedString *as = [orig.length ? orig : [[NSAttributedString alloc] initWithString:text] mutableCopy];
+    UIFont *f = lb.font ?: [as attribute:NSFontAttributeName atIndex:0 effectiveRange:NULL] ?: [UIFont systemFontOfSize:17];
     NSUInteger n = text.length;
-    NSMutableAttributedString *as = [[NSMutableAttributedString alloc] initWithString:text];
-    /* 继承原 attributedText 的全部属性(字体/对齐/字距), 只覆盖颜色 → 排版尺度完全不变。
-       注意: 不能手动塞默认字体, 否则会覆盖系统真实字号导致重排。 */
-    if (lb.attributedText.length == n) {
-        [as setAttributes:[lb.attributedText attributesAtIndex:0 effectiveRange:NULL] range:NSMakeRange(0, n)];
-    } else if (lb.font) {
-        [as addAttribute:NSFontAttributeName value:lb.font range:NSMakeRange(0, n)];
-    }
-    if (lb.textAlignment != NSTextAlignmentNatural) {
-        NSMutableParagraphStyle *p = [NSMutableParagraphStyle new];
-        p.alignment = lb.textAlignment;
-        [as addAttribute:NSParagraphStyleAttributeName value:p range:NSMakeRange(0, n)];
-    }
-    /* 单色(只设了 1 个颜色)时不必逐字处理, 直接整体上色 */
+    /* 单色(只设了 1 个颜色)时不必逐段处理, 直接整体上色 */
     if (cs.count == 1) {
         [as addAttribute:NSForegroundColorAttributeName value:cs[0] range:NSMakeRange(0, n)];
     } else {
-        for (NSUInteger i = 0; i < n; i++) {
-            CGFloat t = (CGFloat)i / (CGFloat)MAX((NSInteger)1, (NSInteger)n - 1) + phase;
-            [as addAttribute:NSForegroundColorAttributeName value:diColorAt(cs, t) range:NSMakeRange(i, 1)];
-        }
+        __block CGFloat totalW = 0;
+        NSMutableArray<NSNumber *> *ws = [NSMutableArray arrayWithCapacity:8];
+        [text enumerateSubstringsInRange:NSMakeRange(0, n) options:NSStringEnumerationByComposedCharacterSequences
+                              usingBlock:^(NSString *sub, NSRange r, NSRange er, BOOL *stop) {
+            static NSDictionary *attrs;
+            if (!attrs) attrs = @{NSFontAttributeName: f};
+            CGFloat w = [sub sizeWithAttributes:attrs].width;
+            if (w <= 0) w = 1;
+            [ws addObject:@(w)];
+            totalW += w;
+        }];
+        if (totalW <= 0) totalW = 1;
+        __block CGFloat acc = 0;
+        __block NSUInteger bi = 0;
+        [text enumerateSubstringsInRange:NSMakeRange(0, n) options:NSStringEnumerationByComposedCharacterSequences
+                              usingBlock:^(NSString *sub, NSRange r, NSRange er, BOOL *stop) {
+            CGFloat w = bi < ws.count ? ws[bi].doubleValue : 1;
+            CGFloat t = (acc + w * 0.5) / totalW + phase;
+            [as addAttribute:NSForegroundColorAttributeName value:diColorAt(cs, t) range:r];
+            acc += w; bi++;
+        }];
     }
     lb.attributedText = as;
     objc_setAssociatedObject(v, &kLabelFlowMask, @YES, OBJC_ASSOCIATION_RETAIN_NONATOMIC); // 标记"已上色"
@@ -1608,15 +1707,28 @@ static void applyNotifyStyle(UIView *host) {
             /* 关流光: phase 固定 0 → 静态多色渐变(设几个颜色显示几段);
                开流光: phase 随时间推进 → 同一串颜色滚动流动。
                两种情况都上色, 不再退化成"只用第一个颜色"。 */
-            if (gNotifyColor) lb.textColor = gNotifyColor; // 底色兜底(attributedText 未覆盖的片段)
-            if (applyFlow(lb, notifyFlowOn ? phase : 0)) colored++;
+            /* 2.6.7: 先 applyFlow(它保留原 attributedText 的全部属性), 再用 textColor 兜底剩余片段。
+               顺序反了会把 textColor 也带进 attributedText, 关流体时还原不干净。 */
+            if (applyFlow(lb, notifyFlowOn ? phase : 0)) {
+                if (gNotifyColor) lb.textColor = gNotifyColor; // 底色兜底(attributedText 未覆盖的片段)
+                colored++;
+            }
         } else {
             /* 关颜色: 撤流光(还原纯文本)并按需还原原始色 */
             BOOL hadFlow = objc_getAssociatedObject(lb, &kLabelFlowMask) != nil;
             if (hadFlow) {
-                NSString *plain = lb.attributedText.length ? lb.attributedText.string : lb.text;
+                /* 2.6.7: 还原成**纯字符串 + 原字体**, 而不是 lb.text = 字符串。
+                   原先直接赋 text 会把 attributedText 整个丢掉, 系统通知里靠
+                   attributedText 渲染的表情/行距/截断都会失效 → 就是"显示一坨乱码"的成因。 */
+                NSAttributedString *cur = lb.attributedText;
+                NSString *plain = cur.length ? cur.string : lb.text;
+                UIFont *kf = lb.font ?: (cur.length ? [cur attribute:NSFontAttributeName atIndex:0 effectiveRange:NULL] : nil);
                 objc_setAssociatedObject(lb, &kLabelFlowMask, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-                if (plain.length) lb.text = plain;
+                if (plain.length) {
+                    if (kf) lb.attributedText = [[NSAttributedString alloc] initWithString:plain
+                        attributes:@{NSFontAttributeName: kf}];
+                    else { lb.attributedText = nil; lb.text = plain; }
+                }
             }
             UIColor *orig = objc_getAssociatedObject(lb, &kLabelOrigColor);
             if (orig) { lb.textColor = orig; objc_setAssociatedObject(lb, &kLabelOrigColor, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC); }
@@ -1902,10 +2014,15 @@ static void updateSingleVideo(UIWindow *win) {
         }
     }
     if (!maskWanted) {
-        if (maskV.superview) { [maskV removeFromSuperview]; maskV.hidden = YES; }
-        maskV.link.paused = YES;
+        /* 2.6.7: 只隐藏, 不摘除 —— 宿主换了(小岛↔展开)再挂上去时 layer 级顺序还在,
+           摘掉再挂会被系统重排到专辑层上面(就是之前"盖一坨黑"的原因之一)。
+           移出视图树只在窗口消失时做, 这里仅隐藏 + 暂停。 */
+        if (maskV.superview) {
+            maskV.hidden = YES;
+            maskV.link.paused = YES;
+        }
     } else {
-        /* 2.6.6: 用 layer 级插入(UIView addSubview + insertSublayer 混用会让 UIView 层级表错乱,
+        /* 2.6.7: 用 layer 级插入(UIView addSubview + insertSublayer 混用会让 UIView 层级表错乱,
            遮罩会被系统重排到看不见的位置)。先 addSubview 建立 superview 关系,
            再对 layer 做"插到专辑内容层之下", 让 maskV.layer 与 UIView 保持一致。 */
         if (maskV.superview != bestRoot) {
@@ -1914,15 +2031,7 @@ static void updateSingleVideo(UIWindow *win) {
             [bestRoot addSubview:maskV];
             maskV.hidden = YES;
         }
-        CALayer *albumLayer = nil;
-        NSMutableArray<CALayer *> *stk = [NSMutableArray arrayWithObject:bestRoot.layer];
-        int g2 = 0;
-        while (stk.count && g2++ < 300) {
-            CALayer *l = stk.firstObject; [stk removeObjectAtIndex:0];
-            if ([NSStringFromClass(l.class) containsString:@"CALayerHost"] &&
-                l.bounds.size.height >= 200 && l.bounds.size.width >= 150) { albumLayer = l; break; }
-            for (CALayer *x in l.sublayers) [stk addObject:x];
-        }
+        CALayer *albumLayer = diAlbumContentLayer(bestRoot);
         if (albumLayer && albumLayer.superlayer == bestRoot.layer) {
             NSInteger mi = [bestRoot.layer.sublayers indexOfObjectIdenticalTo:maskV.layer];
             NSInteger ai = [bestRoot.layer.sublayers indexOfObjectIdenticalTo:albumLayer];
@@ -1934,7 +2043,7 @@ static void updateSingleVideo(UIWindow *win) {
                 [bestRoot sendSubviewToBack:maskV];
             }
         }
-        maskV.link.paused = NO;
+        [maskV activate]; // 2.6.7: 叫醒 displayLink(之前停过就再也不走了)
     }
     /* 2.6.5: 歌词岛隐藏原生内容 —— 判据按 196 日志实测(音乐岛结构):
          · 三个小图标 CAPortalLayer(26x22 / 26x22 / 22x22)  —— 是"左图标/右图标", 需要藏
@@ -1951,17 +2060,25 @@ static void updateSingleVideo(UIWindow *win) {
         for (CALayer *l in found) if (l.isHidden) l.hidden = NO;
         if (found.count) [found removeAllObjects];
         if (wantL || wantR) {
+            /* 2.6.7: 先按"层矩形是否落在右半区"分左右隐藏;
+               关键修正:CALayerHost(407x488)被摆到 x=-111 时, 它整块的 rect 横跨两侧,
+               按中线分会导致左右都不敢藏 → 专辑/波形一直露着。所以加一条硬规则:
+               **跨进程内容层(CALayerHost, 尺寸远大于宿主)一律隐藏**, 它的位置在哪都不看。 */
             CGFloat halfW = bestRoot.bounds.size.width * 0.5;
+            CGSize hb = bestRoot.bounds.size;
             NSMutableArray<CALayer *> *stack = [NSMutableArray arrayWithObject:bestRoot.layer];
             int guard = 0;
-            while (stack.count && guard++ < 300) {
+            while (stack.count && guard++ < 400) {
                 CALayer *l = stack.firstObject; [stack removeObjectAtIndex:0];
                 NSString *cn = NSStringFromClass(l.class);
-                BOOL isPortal = [cn containsString:@"CAPortalLayer"] || [cn containsString:@"CALayerHost"];
+                BOOL isHostLayer = [cn containsString:@"CALayerHost"];
+                BOOL isPortal = [cn containsString:@"CAPortalLayer"] || isHostLayer;
                 if (isPortal) {
+                    BOOL bigContent = isHostLayer && l.bounds.size.width > hb.width * 0.9 && l.bounds.size.height > hb.height * 1.2;
                     CGRect r = [bestRoot.layer convertRect:l.bounds fromLayer:l];
                     BOOL isAudioSide = (CGRectGetMidX(r) >= halfW);
-                    if ((isAudioSide && wantR) || (!isAudioSide && wantL)) {
+                    BOOL want = bigContent ? YES : ((isAudioSide && wantR) || (!isAudioSide && wantL));
+                    if (want) {
                         l.hidden = YES;
                         [found addObject:l];
                     }
