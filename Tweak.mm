@@ -1110,9 +1110,11 @@ static BOOL diMiniMusicActive(UIView *host) {
     while (stack.count && guard++ < 300) {
         CALayer *l = stack.firstObject; [stack removeObjectAtIndex:0];
         NSString *cn = NSStringFromClass(l.class);
-        if ([cn containsString:@"CALayerHost"] || [cn containsString:@"CAPortalLayer"]) {
-            CGRect r = [host.layer convertRect:l.bounds fromLayer:l];
-            if (r.size.height >= hh * 0.8 && r.size.width >= ww * 0.35) { hasFullHost = YES; break; }
+        /* 音乐岛核心特征(196 实测): 一个尺寸远大于宿主的内容层
+           CALayerHost 407x488 挂在 133x39 的小岛上 —— 这是专辑图/波形来源。
+           充电/人脸只有 26x22 级别的小图标 portal, 尺寸远小于此。 */
+        if ([cn containsString:@"CALayerHost"] && l.bounds.size.height >= 200 && l.bounds.size.width >= 150) {
+            hasFullHost = YES; break;
         }
         for (CALayer *x in l.sublayers) [stack addObject:x];
     }
@@ -1321,10 +1323,12 @@ static NSString *diMaskImagePath(NSString *folderSel) {
             diProbePortals(host, [NSString stringWithFormat:@"宿主首次 %@", pk].UTF8String);
         }
         if (!host || host.window == nil) { self.hidden = YES; if (++_miss > 15) _link.paused = YES; return; }
-        /* 显示条件 = 左侧专辑素材的显示条件(完全跟随): 音乐岛 + 在播 + 播放中 + 左侧开关开 + 有遮罩素材 */
+        /* 2.6.5: 显示条件 = "专辑图是否存在"(与专辑完全一致), 与左侧帧率开关无关:
+           关掉左侧帧率素材(miniAnimOn=NO)时专辑照常显示 → 遮罩也必须显示。
+           只有遮罩自己的开关 maskOn 能控制它显示/隐藏。 */
         BOOL mini = host.bounds.size.height > 20 && host.bounds.size.height <= 60 && host.bounds.size.width > 40;
         BOOL active = diMiniMusicActive(host);
-        BOOL gate = mini && enabled && !gLocked && maskOn && active && miniAnimOn && !gRecordingActive;
+        BOOL gate = mini && enabled && !gLocked && maskOn && active && !gRecordingActive;
         if (!gate) {
             if (!self.hidden) self.hidden = YES;
             if (++_miss > 15) _link.paused = YES;
@@ -1357,6 +1361,33 @@ static NSString *diMaskImagePath(NSString *folderSel) {
             self.iv.bounds = CGRectMake(0, 0, w, h);
         self.iv.center = CGPointMake(w * 0.5, h * 0.5);
         if (self.hidden) self.hidden = NO;
+        /* 2.6.5: 层序守护 —— 每帧确认自己仍在"专辑内容层之下"(系统重排可能把我提上去) */
+        {
+            static CFAbsoluteTime tOrder;
+            if (CFAbsoluteTimeGetCurrent() - tOrder > 0.5) {
+                tOrder = CFAbsoluteTimeGetCurrent();
+                CALayer *albumLayer = nil;
+                NSMutableArray<CALayer *> *stk = [NSMutableArray arrayWithObject:host.layer];
+                int g3 = 0;
+                while (stk.count && g3++ < 300) {
+                    CALayer *l = stk.firstObject; [stk removeObjectAtIndex:0];
+                    if ([NSStringFromClass(l.class) containsString:@"CALayerHost"] &&
+                        l.bounds.size.height >= 200 && l.bounds.size.width >= 150) { albumLayer = l; break; }
+                    for (CALayer *x in l.sublayers) [stk addObject:x];
+                }
+                if (albumLayer && albumLayer.superlayer == host.layer && self.layer.superlayer == host.layer) {
+                    NSInteger mi = [host.layer.sublayers indexOfObjectIdenticalTo:self.layer];
+                    NSInteger ai = [host.layer.sublayers indexOfObjectIdenticalTo:albumLayer];
+                    if (mi != NSNotFound && ai != NSNotFound && mi > ai)
+                        [host.layer insertSublayer:self.layer below:albumLayer];
+                }
+                /* 左侧帧率素材层必须在遮罩之上 */
+                for (UIView *sv in host.subviews) {
+                    if ([sv isKindOfClass:[DIAnimView class]] && ((DIAnimView *)sv).miniMode)
+                        [host bringSubviewToFront:sv];
+                }
+            }
+        }
 
         /* 旋转(图片不帧率推进, 只用 display link 算角度) */
         CFTimeInterval now = _link.timestamp;
@@ -1821,7 +1852,9 @@ static void updateSingleVideo(UIWindow *win) {
         [bestRoot bringSubviewToFront:mv];
         mv.link.paused = NO;
     }
-    /* 2.6.4: 遮罩层 —— 只挂在音乐岛上, 且必须在左侧专辑素材之上 */
+    /* 2.6.5: 遮罩层 —— 与专辑同寿命, 且叠在"专辑图层之下"(下一层):
+       做法: 加到 bestRoot 后, 用 insertSublayer:below: 把它插到专辑内容层(CALayerHost)下面。
+       左侧帧率素材层 miniAnim 保持在最前, 遮罩在它和专辑图之间, 视觉上是"专辑底衬"。 */
     static char kWinMask;
     DIMaskView *maskV = objc_getAssociatedObject(win, &kWinMask);
     if (!maskV) {
@@ -1838,18 +1871,37 @@ static void updateSingleVideo(UIWindow *win) {
             [bestRoot addSubview:maskV];
             maskV.hidden = YES;
         }
-        [bestRoot bringSubviewToFront:maskV];  /* 压在所有素材层之上(含左侧专辑) */
+        /* 插到"专辑内容层"下方: 找第一个尺寸远大于宿主的 CALayerHost 作为专辑图 */
+        CALayer *albumLayer = nil;
+        NSMutableArray<CALayer *> *stk = [NSMutableArray arrayWithObject:bestRoot.layer];
+        int g2 = 0;
+        while (stk.count && g2++ < 300) {
+            CALayer *l = stk.firstObject; [stk removeObjectAtIndex:0];
+            if ([NSStringFromClass(l.class) containsString:@"CALayerHost"] &&
+                l.bounds.size.height >= 200 && l.bounds.size.width >= 150) { albumLayer = l; break; }
+            for (CALayer *x in l.sublayers) [stk addObject:x];
+        }
+        if (albumLayer && albumLayer.superlayer == bestRoot.layer) {
+            [bestRoot.layer insertSublayer:maskV.layer below:albumLayer];
+        } else if (bestRoot.subviews.count > 0) {
+            /* 找不到专辑层时退化为"最底层之上" —— 仍保证在左侧素材层之下 */
+            [bestRoot bringSubviewToFront:maskV];
+            [bestRoot sendSubviewToBack:maskV];
+        }
         maskV.link.paused = NO;
     }
-    /* 2.6.3: 歌词岛开启时隐藏音乐岛原生内容 —— 只认"确认过的音乐岛"(identifier+类名校验),
-       充电/人脸/来电/录屏/通知等其它岛一律不碰, 各自原生内容照常显示。 */
+    /* 2.6.5: 歌词岛隐藏原生内容 —— 判据按 196 日志实测(音乐岛结构):
+         · 三个小图标 CAPortalLayer(26x22 / 26x22 / 22x22)  —— 是"左图标/右图标", 需要藏
+         · 一个巨大的 CALayerHost(407x488, 原尺寸远大于宿主) —— 是专辑图/波形内容层, 需要藏
+       只认"音乐岛"(diMiniMusicActive), 充电/人脸/来电/录屏 一律不碰。 */
     {
-        static char kHiddenPortals; static CFAbsoluteTime tHideLog;
+        static char kHiddenPortals;
         NSMutableArray *found = objc_getAssociatedObject(win, &kHiddenPortals) ?: [NSMutableArray array];
         BOOL isMusicIsland = diMiniMusicActive(bestRoot);
         BOOL wantL = isMusicIsland && miniAnimOn;
         BOOL wantR = isMusicIsland && miniAudioOn;
-        /* 先恢复上一轮隐藏的(每轮重建列表, 避免残留到别的形态) */
+        /* 动画收尾的过渡期(宿主高度正在 36→55 之间变化)也视为音乐岛, 避免一闪一闪 */
+        if (!isMusicIsland && wantL == NO) { /* 非音乐岛: 下面统一恢复 */ }
         for (CALayer *l in found) if (l.isHidden) l.hidden = NO;
         if (found.count) [found removeAllObjects];
         if (wantL || wantR) {
@@ -1859,12 +1911,8 @@ static void updateSingleVideo(UIWindow *win) {
             while (stack.count && guard++ < 300) {
                 CALayer *l = stack.firstObject; [stack removeObjectAtIndex:0];
                 NSString *cn = NSStringFromClass(l.class);
-                /* 2.6.4: 只隐藏"满高内容层"(专辑图/波形), 绝不碰小图标 portal ——
-                   否则充电/人脸等形态下放歌时原生图标会被一起藏掉 */
-                CGFloat hh2 = bestRoot.bounds.size.height, ww2 = bestRoot.bounds.size.width;
-                if (([cn containsString:@"CAPortalLayer"] || [cn containsString:@"CALayerHost"]) &&
-                    l.bounds.size.height >= hh2 * 0.8 && l.bounds.size.width >= ww2 * 0.3 &&
-                    l.bounds.size.height < 200) {
+                BOOL isPortal = [cn containsString:@"CAPortalLayer"] || [cn containsString:@"CALayerHost"];
+                if (isPortal) {
                     CGRect r = [bestRoot.layer convertRect:l.bounds fromLayer:l];
                     BOOL isAudioSide = (CGRectGetMidX(r) >= halfW);
                     if ((isAudioSide && wantR) || (!isAudioSide && wantL)) {
@@ -1872,11 +1920,7 @@ static void updateSingleVideo(UIWindow *win) {
                         [found addObject:l];
                     }
                 }
-                for (CALayer *s in l.sublayers) [stack addObject:s];
-            }
-            if (CFAbsoluteTimeGetCurrent() - tHideLog > 3 && found.count) {
-                tHideLog = CFAbsoluteTimeGetCurrent();
-                DLog(@"歌词岛: 隐藏音乐岛原生内容 左侧=%d 右侧=%d 层数=%lu", wantL, wantR, (unsigned long)found.count);
+                for (CALayer *s2 in l.sublayers) [stack addObject:s2];
             }
         }
         objc_setAssociatedObject(win, &kHiddenPortals, found, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
@@ -1945,6 +1989,29 @@ static void updateHost(UIView *host) {
         }
     }
 }
+
+/* 2.6.5: 几何守护 —— 宿主尺寸一变(sendEvent/layout 都可能晚一拍)立刻重跑 updateHost,
+   让"离开音乐岛形态 → 立即隐藏素材"不再有 ~1 秒延时。0.2s 一轮, 开销只有几个 bounds 读取。 */
+static void diInstallGeometryWatch(void) {
+    static BOOL done = NO;
+    if (done) return; done = YES;
+    __block NSTimer *t = [NSTimer scheduledTimerWithTimeInterval:0.2 repeats:YES block:^(NSTimer *timer) {
+        @try {
+            if (!hostTable) return;
+            for (UIView *h in hostTable.allObjects) {
+                if (!h || h.window == nil) continue;
+                NSString *key = [NSString stringWithFormat:@"%.1f,%.1f", h.bounds.size.width, h.bounds.size.height];
+                NSString *last = objc_getAssociatedObject(h, "diGeoKey");
+                if (![key isEqualToString:last]) {
+                    objc_setAssociatedObject(h, "diGeoKey", key, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+                    updateHost(h);   /* 几何变化 → 立刻重判形态(隐藏/显示即时生效) */
+                }
+            }
+        } @catch (__unused NSException *e) {}
+    }];
+    [NSRunLoop.mainRunLoop addTimer:t forMode:NSRunLoopCommonModes];
+}
+
 
 /* 流光常驻驱动: 岛静止时 layoutSubviews 不再触发, 靠这个定时器推进相位 */
 static void diFlowTick(void) {
@@ -3974,7 +4041,7 @@ static void layoutHook(UIView *self, SEL selector) {
     }
     if (lockWOn) applyLockWidth(self); // 2.2.10: 锁屏通知宽度(先于 updateHost, 避免岛相关开销)
     applyLockStyle(self);              // 2.2.17: 锁屏通知边框/背景/阴影
-    if (NSThread.isMainThread) updateHost(self);
+    if (NSThread.isMainThread) { diInstallGeometryWatch(); updateHost(self); }
 }
 
 static void installKnownHosts(void);
