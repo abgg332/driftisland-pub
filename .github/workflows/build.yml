@@ -8,6 +8,11 @@ on:
 permissions:
   contents: read
 
+# 逐文件推送会触发一串 run, 让它们自动排队不互相取消, 只跑最新的一次
+concurrency:
+  group: driftisland-build
+  cancel-in-progress: true
+
 jobs:
   build:
     runs-on: macos-14
