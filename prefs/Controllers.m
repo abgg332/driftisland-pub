@@ -14,6 +14,23 @@
 #define DI_FIELD_BG  [UIColor tertiarySystemGroupedBackgroundColor]
 
 static NSString *const kDomain = @"com.abgg332.driftisland";
+/* 2.6.10: 专辑光晕遮罩 —— 与 Tweak 侧 DIAlbumMask.h 保持一致 */
+static NSString *const kDIAlbumMaskKey = @"diAlbumMaskAsset";
+static NSString *const kDIMaskRoot = @"/var/mobile/灵动岛/遮罩素材";
+
+/* 偏好字符串读写 */
+static NSString *readPrefString(NSString *key) {
+    if (!key.length) return nil;
+    CFPreferencesAppSynchronize((__bridge CFStringRef)kDomain);
+    id v = CFBridgingRelease(CFPreferencesCopyAppValue((__bridge CFStringRef)key, (__bridge CFStringRef)kDomain));
+    return [v isKindOfClass:NSString.class] ? (NSString *)v : nil;
+}
+static void writePrefString(NSString *value, NSString *key) {
+    if (!key.length) return;
+    CFPreferencesSetAppValue((__bridge CFStringRef)key, (__bridge CFPropertyListRef)(value ?: @""),
+                             (__bridge CFStringRef)kDomain);
+    CFPreferencesAppSynchronize((__bridge CFStringRef)kDomain);
+}
 static NSString *const kNotifyStr = @"com.abgg332.driftisland.reload";
 static NSString *const kMaterialDir = @"/var/mobile/灵动岛";
 static NSString *const kFrameDir = @"/var/mobile/灵动岛/帧率素材";
@@ -54,6 +71,32 @@ static NSArray<NSString *> *videoFilesIn(NSString *dir) {
     return out;
 }
 static NSArray<NSString *> *videoFiles(void) { return videoFilesIn(kMaterialDir); }
+
+/* 2.6.10: 扫描遮罩素材目录(一层递归, 只要 .png), 返回 "文件夹/文件名" 或 "文件名" */
+static NSArray<NSString *> *DIMaskListAssets(void) {
+    NSFileManager *fm = [NSFileManager defaultManager];
+    NSMutableArray<NSString *> *out = [NSMutableArray array];
+    BOOL isDir = NO;
+    if (![fm fileExistsAtPath:kDIMaskRoot isDirectory:&isDir] || !isDir) return out;
+    NSArray<NSString *> *items = [[fm contentsOfDirectoryAtPath:kDIMaskRoot error:NULL]
+                                  sortedArrayUsingSelector:@selector(localizedCompare)];
+    for (NSString *name in items) {
+        NSString *full = [kDIMaskRoot stringByAppendingPathComponent:name];
+        BOOL d = NO;
+        if (![fm fileExistsAtPath:full isDirectory:&d]) continue;
+        if (!d) {
+            if ([name.pathExtension.lowercaseString isEqualToString:@"png"]) [out addObject:name];
+        } else {
+            NSArray *subs = [[fm contentsOfDirectoryAtPath:full error:NULL]
+                             sortedArrayUsingSelector:@selector(localizedCompare)];
+            for (NSString *f in subs)
+                if ([f.pathExtension.lowercaseString isEqualToString:@"png"])
+                    [out addObject:[name stringByAppendingPathComponent:f]];
+        }
+    }
+    return out;
+}
+
 
 /* matMode: 0=小岛素材 1=展开素材 */
 static NSInteger indexForKey(NSString *key) {
@@ -3310,6 +3353,16 @@ static void diOpenHomeBarPickWindow(void) {
 }
 - (id)readSmallAnimName:(PSSpecifier *)sp { return [self folderNameForKey:@"smallAnimFolder"]; }
 - (id)readAudioAnimName:(PSSpecifier *)sp { return [self folderNameForKey:@"miniAudioFolder"]; }
+/* 2.6.10: 专辑遮罩素材摘要(独立页选完后主页面显示当前项) */
+- (id)readAlbumMaskName:(PSSpecifier *)sp {
+    NSString *cur = readPrefString(kDIAlbumMaskKey);
+    if ([cur isEqualToString:@"__none__"]) return @"不遮罩";
+    NSArray<NSString *> *list = DIMaskListAssets();
+    if (!list.count) return @"(目录无 png)";
+    if (cur.length && [list containsObject:cur]) return cur;
+    return [NSString stringWithFormat:@"%@（默认）", list.firstObject];
+}
+
 - (id)readMaskAnimName:(PSSpecifier *)sp {
     CFPreferencesAppSynchronize((__bridge CFStringRef)kDomain);
     id v = CFBridgingRelease(CFPreferencesCopyAppValue(CFSTR("maskAnimFolder"), (__bridge CFStringRef)kDomain));
@@ -3588,6 +3641,11 @@ static void diOpenHomeBarPickWindow(void) {
 }
 @end
 
+/* 2.6.10: 专辑遮罩素材选择页 —— 独立 PSListController, 不继承主控制器。
+   前置声明必须写在 DILyricsIslandSettings 之前, 因为下面的 specifiers 里要引用它的 class */
+@interface DIMaskPicker : PSListController
+@end
+
 @implementation DILyricsIslandSettings
 /* 2.2.24: 歌词岛合并页 —— 上半=左侧专辑设置, 下半=右侧音频设置, 一个页面管完 */
 - (NSArray *)buildSpecifiers {
@@ -3615,24 +3673,91 @@ static void diOpenHomeBarPickWindow(void) {
     [nameRow2 setProperty:@"miniAudioFolder" forKey:@"nameKey"];
     [specs addObject:nameRow2];
 
-    /* 2.6.3: 遮罩设置 —— 素材贴合在左侧专辑上, 跟随专辑位置/尺寸, 可旋转 */
-    [specs addObject:[self groupSpec:@"遮罩设置" footer:@"遮罩是一张图片, 严丝合缝贴在左侧专辑上, 显示/隐藏完全跟随左侧专辑(关掉左侧帧率素材或退出音乐, 遮罩一起隐藏)。素材目录: /var/mobile/灵动岛/遮罩素材"]];
+    /* 2.6.10: 遮罩设置 —— 专辑光晕(封面本体 + 遮罩 png 当 maskView, 垫在封面下面)
+       素材目录: /var/mobile/灵动岛/遮罩素材 (可直接放 png, 也可一层子文件夹)
+       选素材走独立页 DIMaskPicker(与主控制器完全独立), 点选即写 diAlbumMaskAsset 并广播刷新 */
+    [specs addObject:[self groupSpec:@"遮罩设置" footer:@"光晕 = 封面本体 + 遮罩 png(靠 alpha 通道)。素材目录: /var/mobile/灵动岛/遮罩素材。目录里没有 png 时不做遮罩(不会出现黑块)。改完素材不必重编译, 回设置里重选即可。"]];
     [specs addObject:[self switchSpec:@"启用遮罩" key:@"maskOn" def:@NO]];
-    PSSpecifier *maskName = [PSSpecifier preferenceSpecifierNamed:@"素材名"
-        target:self set:NULL get:@selector(readMaskAnimName:) detail:[DIFrameFoldersMask class] cell:PSLinkCell edit:nil];
-    [maskName setProperty:@"maskAnimFolder" forKey:@"nameKey"];
+    PSSpecifier *maskName = [PSSpecifier preferenceSpecifierNamed:@"专辑遮罩素材"
+        target:self set:NULL get:@selector(readAlbumMaskName:) detail:[DIMaskPicker class] cell:PSLinkCell edit:nil];
+    [maskName setProperty:[NSNumber numberWithBool:YES] forKey:@"enabled"];
     [specs addObject:maskName];
     [specs addObject:[self switchSpec:@"启用素材旋转" key:@"maskRotateOn" def:@NO]];
     [specs addObject:[self switchSpec:@"素材旋转反转" key:@"maskRotateReverse" def:@NO]];
     [specs addObject:[self numSliderD:@"旋转速度" key:@"maskRotateSpeed" def:4.0 mn:-12 mx:12]];
-    /* 2.6.7: 贴合微调 —— 默认全 0 = 严丝合缝贴住专辑可见区(圆角自动跟随) */
-    [specs addObject:[self groupSpec:@"遮罩贴合微调" footer:@"默认 0 即自动贴合专辑可见区的最大外接矩形。若素材边缘有留白或想略微放大, 用下面的缩放/偏移微调。镜像只翻转图片本身。"]];
-    [specs addObject:[self numSliderD:@"缩放" key:@"maskScale" def:0 mn:-12 mx:12]];
-    [specs addObject:[self numSlider:@"左右偏移" key:@"maskOffsetX" def:0 mn:-40 mx:40]];
-    [specs addObject:[self numSlider:@"上下偏移" key:@"maskOffsetY" def:0 mn:-40 mx:40]];
-    [specs addObject:[self switchSpec:@"水平镜像" key:@"maskFlipH" def:@NO]];
-    [specs addObject:[self switchSpec:@"垂直镜像" key:@"maskFlipV" def:@NO]];
     return specs;
+}
+@end
+
+@implementation DIMaskPicker
+- (void)viewDidLoad {
+    [super viewDidLoad];
+    self.title = @"专辑遮罩素材";
+}
+
+- (NSArray *)specifiers {
+    if (!_specifiers) {
+        NSMutableArray *specs = [NSMutableArray array];
+        NSArray<NSString *> *list = DIMaskListAssets();
+        NSString *cur = readPrefString(kDIAlbumMaskKey);
+
+        PSSpecifier *none = [PSSpecifier preferenceSpecifierNamed:@"不遮罩（关闭遮罩）"
+                                                           target:self set:nil get:@selector(currentValueForSpecifier:)
+                                                           detail:nil cell:PSListItemCell edit:nil];
+        [none setProperty:@"__none__" forKey:@"diKey"];
+        [none setProperty:[NSNumber numberWithBool:[cur isEqualToString:@"__none__"]] forKey:@"diChecked"];
+        [specs addObject:none];
+
+        if (!list.count) {
+            PSSpecifier *empty = [PSSpecifier preferenceSpecifierNamed:@"（目录里还没有 png 素材）"
+                                                                target:nil set:nil get:nil detail:nil
+                                                                cell:PSListItemCell edit:nil];
+            [empty setProperty:@"把 png 放进 /var/mobile/灵动岛/遮罩素材 即可, 无需重编译" forKey:@"footerText"];
+            [specs addObject:empty];
+        } else {
+            NSString *eff = cur.length ? cur : list.firstObject;
+            for (NSString *rel in list) {
+                PSSpecifier *sp = [PSSpecifier preferenceSpecifierNamed:rel
+                                                                 target:self set:nil get:@selector(currentValueForSpecifier:)
+                                                                 detail:nil cell:PSListItemCell edit:nil];
+                [sp setProperty:rel forKey:@"diKey"];
+                [sp setProperty:[NSNumber numberWithBool:[rel isEqualToString:eff]] forKey:@"diChecked"];
+                [specs addObject:sp];
+            }
+        }
+        _specifiers = specs;
+    }
+    return _specifiers;
+}
+
+- (id)currentValueForSpecifier:(PSSpecifier *)spec {
+    return nil;
+}
+
+- (void)tableView:(UITableView *)tv didSelectRowAtIndexPath:(NSIndexPath *)ip {
+    PSSpecifier *sp = [self specifierAtIndexPath:ip];
+    NSString *key = [sp propertyForKey:@"diKey"];
+    if (key) {
+        writePrefString(key, kDIAlbumMaskKey);
+        /* 让悬浮岛立刻刷新 */
+        CFNotificationCenterPostNotification(CFNotificationCenterGetDarwinNotifyCenter(),
+                                             CFSTR("com.abgg332.driftisland/prefsChanged"), NULL, NULL, YES);
+        [tv deselectRowAtIndexPath:ip animated:YES];
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.15 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+            [self reloadSpecifiers];
+        });
+    }
+}
+
+/* 选中项打勾 */
+- (void)tableView:(UITableView *)tv willDisplayCell:(UITableViewCell *)cell forRowAtIndexPath:(NSIndexPath *)ip {
+    PSSpecifier *sp = [self specifierAtIndexPath:ip];
+    BOOL on = [[sp propertyForKey:@"diChecked"] boolValue];
+    cell.accessoryType = on ? UITableViewCellAccessoryCheckmark : UITableViewCellAccessoryNone;
+}
+
+- (NSString *)tableView:(UITableView *)tv titleForHeaderInSection:(NSInteger)section {
+    return @"点选即生效（无需重启）";
 }
 @end
 
