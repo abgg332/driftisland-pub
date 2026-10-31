@@ -19,6 +19,8 @@ static NSString *const kRecDir = @"/var/mobile/灵动岛/录屏素材"; // 2.2.5
 
 static BOOL logEnabled; // 日志开关
 static BOOL gLocked = NO; // 锁屏状态: 锁屏期间所有岛视频/帧率动画全停(锁屏界面组件也是岛视图, 不停会一直亮屏)
+static NSDictionary *gZonePrefs; // 2.5.23-3: 歌词岛分区动画偏好(从老版 2.2.x 迁移, 只保留歌词岛左右分区)
+static void diReloadZonesAsync(void);
 static os_log_t logHandle;
 
 // 运行日志: 写入 /var/mobile/Library/Logs/DriftIsland/driftisland.log (供"导出日志报告"抓取)
@@ -126,6 +128,7 @@ static BOOL homeBarOn = NO;
 static double homeBarLen = 100.0;      /* 百分比: 10~200 */
 static UIColor *homeBarColor = nil;    /* nil = 不改颜色 */
 static BOOL homeBarFlowOn = NO;             /* 2.5.11: 流光动态(与文字流光同一套) */
+static NSInteger homeBarFlowDir = 0;        /* 2.5.26: 流光方向 0=左→右 1=右→左 2=中间向两边散开 3=两边向中间收紧 */
 static BOOL homeBarHideOn = NO;             /* 2.5.7: 隐藏底部横条 */
 static NSString *homeBarHideMode = @"full"; /* 2.5.7: full 完全隐藏 / fade 渐变隐藏 */
 static BOOL gestureProtectOn = NO;          /* 2.5.7: 手势保护(上滑二次确认) */
@@ -473,6 +476,16 @@ static NSString *materialPathFor(BOOL expanded) {
 
 static void refreshPrefs(void) {
     enabled = pBool(@"enabled", NO);
+    gZonePrefs = CFBridgingRelease(CFPreferencesCopyMultiple(NULL, (__bridge CFStringRef)kDomain, kCFPreferencesCurrentUser, kCFPreferencesAnyHost)) ?: @{}; // 歌词岛: 整体读取
+    {   /* 歌词岛: 素材/参数签名变化 → 重载分区层(轮询里每 0.5s 比对一次, 变化才重载) */
+        static NSString *lastZoneSig;
+        NSString *sig = [NSString stringWithFormat:@"%@|%@|%@|%@|%@|%@|%@|%@|%@|%@|%@|%@|%@|%@|%@|%@|%@|%@",
+            gZonePrefs[@"zoneMiniOn"], gZonePrefs[@"zoneMiniFPS"], gZonePrefs[@"zoneMiniRotate"], gZonePrefs[@"zoneMiniRotateRev"],
+            gZonePrefs[@"zoneMiniRotateFPS"], gZonePrefs[@"zoneMiniScale"], gZonePrefs[@"zoneMiniOX"], gZonePrefs[@"zoneMiniOY"], gZonePrefs[@"zoneMiniAsset"],
+            gZonePrefs[@"zoneTrailOn"], gZonePrefs[@"zoneTrailFPS"], gZonePrefs[@"zoneTrailRotate"], gZonePrefs[@"zoneTrailRotateRev"],
+            gZonePrefs[@"zoneTrailRotateFPS"], gZonePrefs[@"zoneTrailScale"], gZonePrefs[@"zoneTrailOX"], gZonePrefs[@"zoneTrailOY"], gZonePrefs[@"zoneTrailAsset"]];
+        if (![sig isEqualToString:lastZoneSig]) { lastZoneSig = sig; diReloadZonesAsync(); }
+    }
     notifyColorOn = pBool(@"notifyColorOn", NO);
     notifyBgOff = pBool(@"notifyBgOff", NO);
     notifyFlowOn = pBool(@"notifyFlowOn", NO);
@@ -565,6 +578,7 @@ static void refreshPrefs(void) {
     if (homeBarLen < 10) homeBarLen = 10;    /* 2.5.6: 下限 50 → 10 */
     if (homeBarLen > 200) homeBarLen = 200;
     homeBarFlowOn = pBool(@"homeBarFlowOn", NO);   /* 2.5.11 */
+    homeBarFlowDir = pInt(@"homeBarFlowDir", 0);   /* 2.5.26 */
     /* 2.5.7: 隐藏横条 / 渐隐模式 / 手势保护 */
     homeBarHideOn = pBool(@"homeBarHideOn", NO);
     homeBarHideMode = pBool(@"homeBarHideFade", NO) ? @"fade" : @"full";   /* 2.5.11: 子开关 */
@@ -1478,6 +1492,184 @@ static void updateSingleVideo(UIWindow *win) {
     animV.link.paused = NO; // 岛活动期间保持动画循环, 内部按开关自隐藏
 }
 
+
+#pragma mark - 歌词岛分区动画(2.5.23-3 从老版 2.2.x 完整迁移, 只保留歌词岛左右分区, 录屏岛不用)
+
+/* 键: [role][0..8] = 开关/帧率/旋转/反转/旋转速度/缩放/左右偏移/上下偏移/素材名(帧率素材子目录) */
+static NSString *zoneKeys[2][9] = {
+    {@"zoneMiniOn",       @"zoneMiniFPS",       @"zoneMiniRotate",       @"zoneMiniRotateRev",       @"zoneMiniRotateFPS",       @"zoneMiniScale",       @"zoneMiniOX", @"zoneMiniOY", @"zoneMiniAsset"},       // 歌词岛 左(Mini)
+    {@"zoneTrailOn",      @"zoneTrailFPS",      @"zoneTrailRotate",      @"zoneTrailRotateRev",      @"zoneTrailRotateFPS",      @"zoneTrailScale",      @"zoneTrailOX",@"zoneTrailOY",@"zoneTrailAsset"},      // 歌词岛 右
+};
+
+static double zNum(NSInteger role, NSInteger ki, double def, double lo, double hi) {
+    id v = gZonePrefs[zoneKeys[role][ki]];
+    double n = [v respondsToSelector:@selector(doubleValue)] ? [v doubleValue] : def;
+    if (n != n) n = def; // NaN 兜底
+    return fmin(hi, fmax(lo, n));
+}
+static BOOL zFlag(NSInteger role, NSInteger ki) {
+    id v = gZonePrefs[zoneKeys[role][ki]];
+    return [v respondsToSelector:@selector(boolValue)] ? [v boolValue] : NO;
+}
+
+@class DIZoneView;
+
+@interface DIZoneTick : NSObject
+@property (nonatomic, weak) DIZoneView *target;
+@end
+
+@interface DIZoneView : UIView
+@property (nonatomic, assign) NSInteger role; // 0=左侧专辑 1=右侧音频
+@property (nonatomic, strong) UIImageView *iv;
+@property (nonatomic, strong) NSArray<UIImage *> *frames;
+@property (nonatomic, strong) CADisplayLink *link;
+@property (nonatomic, strong) DIZoneTick *tickProxy;
+@property (nonatomic, copy) NSString *curAsset;
+@property (nonatomic, assign) double phase, angle, prevT;
+- (instancetype)initWithZoneRole:(NSInteger)role;
+- (void)reloadZone;
+- (void)setZoneVisible:(BOOL)v;
+@end
+
+static NSHashTable *zoneTable; // 弱引用所有分区层(偏好变化时统一重载)
+
+@implementation DIZoneView
+- (instancetype)initWithZoneRole:(NSInteger)role {
+    if ((self = [super initWithFrame:CGRectZero])) {
+        _role = role; self.userInteractionEnabled = NO; self.backgroundColor = UIColor.clearColor;
+        _iv = [[UIImageView alloc] initWithFrame:self.bounds];
+        _iv.contentMode = UIViewContentModeScaleAspectFit;
+        [self addSubview:_iv];
+        if (!zoneTable) zoneTable = [NSHashTable weakObjectsHashTable];
+        [zoneTable addObject:self];
+        DIZoneTick *p = [DIZoneTick new]; p.target = self; _tickProxy = p;
+        _link = [CADisplayLink displayLinkWithTarget:p selector:@selector(tick:)];
+        _link.preferredFramesPerSecond = 60;
+        [_link addToRunLoop:NSRunLoop.mainRunLoop forMode:NSRunLoopCommonModes];
+        [self reloadZone];
+    }
+    return self;
+}
+- (void)dealloc { [_link invalidate]; }
+- (void)reloadZone {
+    NSString *name = gZonePrefs[zoneKeys[self.role][8]];
+    if (![name isKindOfClass:NSString.class]) name = nil;
+    name = [name stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceAndNewlineCharacterSet];
+    self.curAsset = name;
+    self.frames = @[];
+    if (name.length && ![name isEqualToString:@"builtin"]) {
+        NSString *dir = [kFrameDir stringByAppendingPathComponent:name]; // /var/mobile/灵动岛/帧率素材/<素材名>/
+        NSArray *files = [[NSFileManager.defaultManager contentsOfDirectoryAtPath:dir error:NULL]
+            sortedArrayUsingComparator:^NSComparisonResult(NSString *a, NSString *b){ return [a compare:b options:NSNumericSearch]; }];
+        NSMutableArray *arr = [NSMutableArray array];
+        for (NSString *f in files) {
+            NSString *ext = f.pathExtension.lowercaseString;
+            if (![@[@"png", @"jpg", @"jpeg", @"gif", @"webp"] containsObject:ext]) continue;
+            NSString *p = [dir stringByAppendingPathComponent:f];
+            CGImageSourceRef src = CGImageSourceCreateWithURL((__bridge CFURLRef)[NSURL fileURLWithPath:p], NULL);
+            if (!src) continue;
+            for (size_t i = 0; i < CGImageSourceGetCount(src) && arr.count < 120; i++) {
+                NSDictionary *opts = @{(id)kCGImageSourceCreateThumbnailFromImageAlways:@YES, (id)kCGImageSourceThumbnailMaxPixelSize:@256, (id)kCGImageSourceCreateThumbnailWithTransform:@YES};
+                CGImageRef cg = CGImageSourceCreateThumbnailAtIndex(src, i, (__bridge CFDictionaryRef)opts);
+                if (cg) { [arr addObject:[UIImage imageWithCGImage:cg]]; CGImageRelease(cg); }
+            }
+            CFRelease(src);
+            if (arr.count >= 120) break;
+        }
+        self.frames = arr;
+        DLog(@"歌词岛(%@) 加载素材 %@: %lu 帧", (self.role == 0 ? @"左侧专辑" : @"右侧音频"), name, (unsigned long)arr.count);
+    }
+    self.phase = 0;
+    self.iv.image = self.frames.firstObject;
+}
+- (void)setZoneVisible:(BOOL)v {
+    BOOL want = v && enabled && !gLocked && zFlag(self.role, 0) && self.frames.count > 0
+        && self.superview && !self.superview.isHidden && self.superview.bounds.size.height < 60; // 只在小岛形态
+    if (self.hidden != !want) self.hidden = !want;
+}
+- (void)zoneTick:(CADisplayLink *)link {
+    if (!self.window || self.hidden) { self.prevT = 0; return; }
+    double dt = self.prevT ? MIN(0.1, link.timestamp - self.prevT) : 0; self.prevT = link.timestamp;
+    if (!self.frames.count) return;
+    double fps = zNum(self.role, 1, 30, 1, 120);
+    self.phase += dt * fps;
+    self.iv.image = self.frames[(NSUInteger)self.phase % self.frames.count];
+    if (zFlag(self.role, 2)) self.angle += dt * zNum(self.role, 4, 5, 0, 10) * 0.2 * M_PI * (zFlag(self.role, 3) ? -1 : 1);
+    else self.angle = 0;
+    double scale = zNum(self.role, 5, 100, 50, 200) / 100.0, ox = zNum(self.role, 6, 0, -10, 10), oy = zNum(self.role, 7, 0, -10, 10);
+    CGAffineTransform t = CGAffineTransformMakeTranslation(ox, oy);
+    t = CGAffineTransformScale(t, scale, scale);
+    self.iv.transform = CGAffineTransformRotate(t, self.angle);
+}
+@end
+
+@implementation DIZoneTick
+- (void)tick:(CADisplayLink *)link { [self.target zoneTick:link]; }
+@end
+
+static void reloadAllZones(void) {
+    for (DIZoneView *v in zoneTable.allObjects) { [v reloadZone]; [v setZoneVisible:YES]; }
+}
+
+static char kZoneL, kZoneR;
+
+/* slot 上取 UIView 返回值方法(leadingView/trailingView/detachedMinimalView), 类型校验防崩溃 */
+static UIView *zoneObjectView(id obj, NSString *sel) {
+    SEL s = NSSelectorFromString(sel);
+    Method m = class_getInstanceMethod([obj class], s);
+    if (!m || method_getNumberOfArguments(m) != 2) return nil;
+    char *t = method_copyReturnType(m); BOOL ok = t && t[0] == '@'; free(t);
+    if (!ok) return nil;
+    id r = ((id(*)(id, SEL))objc_msgSend)(obj, s);
+    return [r isKindOfClass:UIView.class] ? r : nil;
+}
+
+static DIZoneView *zoneFor(UIView *slot, NSInteger role) {
+    void *key = role == 0 ? (void *)&kZoneL : (void *)&kZoneR;
+    DIZoneView *v = objc_getAssociatedObject(slot, key);
+    if (!v) {
+        v = [[DIZoneView alloc] initWithZoneRole:role];
+        objc_setAssociatedObject(slot, key, v, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        [slot addSubview:v];
+        DLog(@"歌词岛分区层挂载(%@) host=%@", (role == 0 ? @"左侧专辑" : @"右侧音频"), NSStringFromClass(slot.class));
+    }
+    return v;
+}
+
+static void zoneApply(UIView *slot, NSInteger role, BOOL mini) {
+    if (!slot || slot.bounds.size.width < 2 || slot.bounds.size.height < 2) return;
+    DIZoneView *v = zoneFor(slot, role);
+    if (!CGRectEqualToRect(v.frame, slot.bounds)) v.frame = slot.bounds;
+    [v setZoneVisible:mini];
+}
+
+/* MRU 播放岛宿主: leadingView(左专辑)+trailingView(右音频) 挂分区动画; 只在小岛形态显示
+   2.5.23-3: 录屏岛分支不迁移(用户指定只要歌词岛) */
+static void zoneUpdate(UIView *host) {
+    if (!host || !host.window) return;
+    NSString *cn = NSStringFromClass(host.class);
+    if (![cn containsString:@"MRUActivity"]) return;
+    BOOL mini = host.bounds.size.height < 60 && host.bounds.size.width <= 120;
+    UIView *l = nil, *r = nil;
+    if ([cn containsString:@"MRUActivityNowPlayingView"]) {
+        l = zoneObjectView(host, @"detachedMinimalView") ?: zoneObjectView(host, @"leadingView");
+        r = zoneObjectView(host, @"trailingView");
+        if (!l && !r && mini) l = host; // 兜底: 系统未暴露插槽时挂小岛本体(左侧)
+        zoneApply(l, 0, mini);
+        zoneApply(r, 1, mini);
+        static CFAbsoluteTime lastZLog; // 插槽诊断日志: 10秒限频
+        CFAbsoluteTime nowT = CFAbsoluteTimeGetCurrent();
+        if (nowT - lastZLog > 10) {
+            lastZLog = nowT;
+            DLog(@"歌词岛插槽: 左=%@ 右=%@ (host=%@ %@)", l ? NSStringFromClass(l.class) : @"无", r ? NSStringFromClass(r.class) : @"无", cn, NSStringFromCGRect(host.bounds));
+        }
+        return;
+    }
+    if ([cn containsString:@"MRUActivityAccessoryView"]) {
+        if (mini) zoneApply(host, 1, mini); // 歌词岛右侧兜底宿主
+    }
+}
+
 static void updateHost(UIView *host) {
     if (!viewHasToken(host, @"SAUIElementView")) {
         /* 探针(每类名只记一次): 记录"岛尺寸"但未被识别的视图类, 用于定位 iOS17 临时岛宿主特征 */
@@ -1499,6 +1691,7 @@ static void updateHost(UIView *host) {
         if (!last || now - [last doubleValue] > 0.25) {
             objc_setAssociatedObject(host.window, &kLastUpd, @(now), OBJC_ASSOCIATION_RETAIN_NONATOMIC);
             updateSingleVideo(host.window);
+            zoneUpdate(host);   /* 2.5.23-3: 歌词岛分区动画挂载/刷新 */
         }
         /* 2.2.6: 通知样式(文字颜色上色/关闭时恢复 + 通知岛判定)
            流光需要持续重绘 → 取 0.06s(约 16fps) 让文字真正流动; 不流光时 0.3s 足够 */
@@ -1542,6 +1735,10 @@ static char kCloserKey;
     }
 }
 @end
+
+/* 2.5.23-3: 偏好变化 → 歌词岛分区层统一重载素材/参数 */
+static void reloadAllZones(void);
+static void diReloadZonesAsync(void) { dispatch_async(dispatch_get_main_queue(), ^{ reloadAllZones(); }); }
 
 static void diShowPreview(void) {
     if (!NSThread.isMainThread) { dispatch_async(dispatch_get_main_queue(), ^{ diShowPreview(); }); return; }
@@ -4059,9 +4256,20 @@ static void diStylePillView(UIView *pill) {
                不再用 CAAnimation 动 locations(实测在系统 pill 上不动)。 */
             NSMutableArray *fcols = [NSMutableArray array];
             NSMutableArray *flocs = [NSMutableArray array];
-            NSUInteger k = 6;
+            NSUInteger k = 8;
             for (NSUInteger i = 0; i < k; i++) {
-                UIColor *c = diColorAt(pal, (CGFloat)i / (CGFloat)k - gBarPhase);   /* 2.5.12: 左→右 */
+                /* 2.5.26: 四种方向 —— 用"映射坐标 s"统一表达:
+                   0 左→右: s=t;  1 右→左: s=t+phase;
+                   2 中间向两边散开: s=|t-0.5|*2-phase;  3 两边向中间收紧: s=|t-0.5|*2+phase。 */
+                double t = (double)i / (double)(k - 1);
+                double s;
+                switch (homeBarFlowDir) {
+                    case 1:  s = t + gBarPhase; break;
+                    case 2:  s = fabs(t - 0.5) * 2.0 - gBarPhase; break;
+                    case 3:  s = fabs(t - 0.5) * 2.0 + gBarPhase; break;
+                    default: s = t - gBarPhase; break;
+                }
+                UIColor *c = diColorAt(pal, (CGFloat)s);
                 [fcols addObject:(id)c.CGColor];
                 [flocs addObject:@((double)i / (double)(k - 1))];
             }
@@ -4257,6 +4465,12 @@ static void diRevealBarNow(const char *why) {
     BOOL wasHidden = gLandHidden;
     diResetLandscapeHide();
     gLandHidden = NO;
+    if (wasHidden) {   /* 2.5.23-3: 原生同款 —— 呼出横条时轻震一下, 防误触感知 */
+        dispatch_async(dispatch_get_main_queue(), ^{
+            UIImpactFeedbackGenerator *h = [[UIImpactFeedbackGenerator alloc] initWithStyle:UIImpactFeedbackStyleLight];
+            [h impactOccurred];
+        });
+    }
     for (UIView *p in gBarPills) if (p.window) p.alpha = 1.0;
     if (!wasHidden) return;
     static CFAbsoluteTime lastLog;
@@ -4655,9 +4869,44 @@ static BOOL di_gestureBegin(id self, SEL _cmd, id gesture) {
     return NO;
 }
 
+/* 2.5.23-3: 横屏呼回主通道 —— hook UIApplication sendEvent。
+   SpringBoard 能收到 home 手势区域的触摸(系统上滑退出就走这条通道, 186 实证
+   窗口级手势识别器反而收不到 —— TouchPassThrough 根视图)。
+   2.5.24 曾以为钩子会崩 SpringBoard, 后来 2.5.25(无钩子)同样崩, 证实真凶是
+   扫描器的枚举突变, 钩子本身安全。 */
+static void (*orig_sendEvent)(id self, SEL _cmd, UIEvent *e);
+static void di_sendEvent(id self, SEL _cmd, UIEvent *e) {
+    @try {
+        if (gestureProtectOn && gLandHidden && diLandscapeNow() &&
+            e && e.type == UIEventTypeTouches) {
+            CGSize scr = [UIScreen mainScreen].bounds.size;
+            CGFloat shortSide = MIN(scr.width, scr.height);
+            for (UITouch *t in e.allTouches) {
+                if (t.phase != UITouchPhaseBegan && t.phase != UITouchPhaseMoved) continue;
+                CGPoint p = [t locationInView:nil];
+                /* 底部 18% 区域(原生 home 手势区)的触摸 → 呼出横条(带震动) */
+                if (p.y > shortSide - shortSide * 0.18) {
+                    diRevealBarNow("sendEvent 触摸");
+                    break;
+                }
+            }
+        }
+    } @catch (NSException *ex) { /* 事件回调绝不抛 */ }
+    if (orig_sendEvent) orig_sendEvent(self, _cmd, e);
+}
+
 static void diHookGestureProtect(void) {
     static BOOL done = NO;
     if (done) return;
+    {   /* 2.5.23-3: sendEvent 钩子 —— 横屏"滑动呼出"主通道 */
+        static BOOL seDone = NO;
+        if (!seDone) {
+            seDone = YES;
+            MSHookMessageEx([UIApplication class], @selector(sendEvent:),
+                            (IMP)di_sendEvent, (IMP *)&orig_sendEvent);
+            DLog(@"横条[手势]: 已 hook UIApplication sendEvent (横屏呼回主通道)");
+        }
+    }
     /* 2.5.8: ① 枚举 SpringBoard 内所有手势相关类和方法(带类型编码), 一次打尽写日志,
        下一版按真实类名/方法名精确 hook。② 同时仍尝试 hook 已知候选。 */
     {
