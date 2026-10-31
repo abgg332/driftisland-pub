@@ -73,25 +73,37 @@ static NSArray<NSString *> *videoFilesIn(NSString *dir) {
 static NSArray<NSString *> *videoFiles(void) { return videoFilesIn(kMaterialDir); }
 
 /* 2.6.10: 扫描遮罩素材目录(一层递归, 只要 .png), 返回 "文件夹/文件名" 或 "文件名" */
+/* 2.6.11: 排序改用 block 比较器 —— sortedArrayUsingSelector:@selector(localizedCompare)
+   在部分系统上会对 __NSCFString 抛 unrecognized selector, 是"点遮罩素材闪退"的根因 */
+static NSArray<NSString *> *diSortStrs(NSArray *arr) {
+    if (![arr isKindOfClass:NSArray.class]) return @[];
+    return [arr sortedArrayUsingComparator:^NSComparisonResult(id a, id b) {
+        NSString *sa = [a isKindOfClass:NSString.class] ? (NSString *)a : @"";
+        NSString *sb = [b isKindOfClass:NSString.class] ? (NSString *)b : @"";
+        return [sa compare:sb options:NSCaseInsensitiveSearch | NSNumericSearch];
+    }];
+}
+
 static NSArray<NSString *> *DIMaskListAssets(void) {
     NSFileManager *fm = [NSFileManager defaultManager];
     NSMutableArray<NSString *> *out = [NSMutableArray array];
     BOOL isDir = NO;
     if (![fm fileExistsAtPath:kDIMaskRoot isDirectory:&isDir] || !isDir) return out;
-    NSArray<NSString *> *items = [[fm contentsOfDirectoryAtPath:kDIMaskRoot error:NULL]
-                                  sortedArrayUsingSelector:@selector(localizedCompare)];
+    NSArray<NSString *> *items = diSortStrs([fm contentsOfDirectoryAtPath:kDIMaskRoot error:NULL]);
     for (NSString *name in items) {
+        if (![name isKindOfClass:NSString.class]) continue;
         NSString *full = [kDIMaskRoot stringByAppendingPathComponent:name];
         BOOL d = NO;
         if (![fm fileExistsAtPath:full isDirectory:&d]) continue;
         if (!d) {
             if ([name.pathExtension.lowercaseString isEqualToString:@"png"]) [out addObject:name];
         } else {
-            NSArray *subs = [[fm contentsOfDirectoryAtPath:full error:NULL]
-                             sortedArrayUsingSelector:@selector(localizedCompare)];
-            for (NSString *f in subs)
+            NSArray *subs = diSortStrs([fm contentsOfDirectoryAtPath:full error:NULL]);
+            for (NSString *f in subs) {
+                if (![f isKindOfClass:NSString.class]) continue;
                 if ([f.pathExtension.lowercaseString isEqualToString:@"png"])
                     [out addObject:[name stringByAppendingPathComponent:f]];
+            }
         }
     }
     return out;
