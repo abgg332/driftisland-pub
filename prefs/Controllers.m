@@ -16,6 +16,7 @@ static NSString *const kDomain = @"com.abgg332.driftisland";
 static NSString *const kNotifyStr = @"com.abgg332.driftisland.reload";
 static NSString *const kMaterialDir = @"/var/mobile/灵动岛";
 static NSString *const kFrameDir = @"/var/mobile/灵动岛/帧率素材";
+
 static NSString *const kRecDir = @"/var/mobile/灵动岛/录屏素材"; // 2.2.50: 录屏岛素材目录(录屏时替换小岛背景)
 
 /* 现场日志: 不受日志开关控制, 设置页崩溃时也要留痕(与 Tweak.mm 的 DI_STEP 同一格式) */
@@ -580,6 +581,15 @@ static Class diStepSliderClass(void) {
     NSInteger _expandRow; /* 展开素材选择 行号 */
 }
 - (void)toast:(NSString *)msg;
+@end
+
+@interface DIZoneBaseController : DIPrefsController @end
+@interface DIZoneLyricsMini : DIZoneBaseController @end
+@interface DIZoneLyricsTrail : DIZoneBaseController @end
+@interface DIZoneFolderLyricsMini : PSListController @end
+@interface DIZoneFolderLyricsTrail : PSListController @end
+@interface DIPrefsController (ZoneLinkFwd)
+- (PSSpecifier *)linkSpec:(NSString *)name detail:(Class)cls;
 @end
 
 static BOOL diGridPicked = NO; // 网格选中标记: 主页据此刷新按钮标题
@@ -1173,6 +1183,10 @@ static void diWriteColors(NSArray<NSString *> *colors) {
         PSSpecifier *smallMat = [self buttonSpec:@"素材选择" action:@selector(openSmallGrid:)];
         [specs addObject:[self switchSpec:@"小岛显示素材" key:@"smallOn" def:@YES]];
         [specs addObject:smallMat];
+        /* 2.5.23-3: 歌词岛(老版 2.2.x 完整迁移, 只歌词岛不含录屏岛) */
+        [specs addObject:[self groupSpec:@"歌词岛" footer:@"播放音乐的小岛: 左侧=专辑区域, 右侧=音频区域, 各自播放独立序列帧动画。素材取自 /var/mobile/灵动岛/帧率素材 下的文件夹。仅小岛(非展开)生效。"]];
+        [specs addObject:[self linkSpec:@"左侧专辑设置" detail:[DIZoneLyricsMini class]]];
+        [specs addObject:[self linkSpec:@"右侧音频设置" detail:[DIZoneLyricsTrail class]]];
         /* 展开素材: 开关 + 素材选择按钮 */
         [specs addObject:[self groupSpec:@"展开素材" footer:nil]];
         PSSpecifier *expandMat = [self buttonSpec:@"素材选择" action:@selector(openExpandGrid:)];
@@ -3236,3 +3250,137 @@ static void diOpenHomeBarPickWindow(void) {
     w.hidden = NO;
     gBarWin = w;
 }
+
+#pragma mark - 歌词岛(2.5.23-3 从老版 2.2.x 完整迁移, 只保留歌词岛, 录屏岛不用)
+
+
+@implementation DIPrefsController (ZoneLink)
+- (PSSpecifier *)linkSpec:(NSString *)name detail:(Class)cls {
+    PSSpecifier *s = [PSSpecifier preferenceSpecifierNamed:name target:self
+        set:NULL get:NULL detail:cls cell:PSLinkCell edit:nil];
+    return s;
+}
+@end
+
+/* 当前素材名显示(无=不显示) */
+static NSString *zoneAssetDisplayName(NSString *prefix) {
+    CFPreferencesAppSynchronize((__bridge CFStringRef)kDomain);
+    id v = CFBridgingRelease(CFPreferencesCopyAppValue((__bridge CFStringRef)[prefix stringByAppendingString:@"Asset"], (__bridge CFStringRef)kDomain));
+    NSString *n = [v isKindOfClass:NSString.class] ? v : nil;
+    return (n.length && ![n isEqualToString:@"__none__"]) ? n : @"无";
+}
+
+@interface DIZoneBaseController ()
+- (NSString *)zonePrefix;   /* 偏好键前缀 */
+- (NSString *)zoneTitle;    /* 页面标题 */
+@end
+
+/* 复用主页的构建 helper(同文件实现) */
+@interface DIPrefsController (ZoneHelpers)
+- (PSSpecifier *)groupSpec:(NSString *)header footer:(NSString *)footer;
+- (PSSpecifier *)switchSpec:(NSString *)name key:(NSString *)key def:(id)def;
+- (PSSpecifier *)numSlider:(NSString *)label key:(NSString *)key def:(int)def mn:(int)mn mx:(int)mx;
+@end
+
+@implementation DIZoneBaseController {
+    NSArray *_zoneSpecs; /* 缓存已构建的设置项 */
+}
+- (NSString *)zonePrefix { return @"zoneMini"; }
+- (NSString *)zoneTitle { return @"左侧专辑"; }
+- (void)reloadSpecifiers { _zoneSpecs = nil; [super reloadSpecifiers]; } // 从素材选择页返回时重建(刷新当前素材名显示)
+- (NSArray *)specifiers {
+    if (_zoneSpecs) return _zoneSpecs;
+    NSString *p = [self zonePrefix];
+    NSMutableArray *specs = [NSMutableArray array];
+    [specs addObject:[self groupSpec:[self zoneTitle] footer:@"序列帧动画: 素材名 = /var/mobile/灵动岛/帧率素材 下的子目录名(png/jpg, 按文件名数字顺序播放), 留空不显示。缩放 100=1.0倍。仅小岛(非展开)生效。"]];
+    [specs addObject:[self switchSpec:@"启用动画" key:[p stringByAppendingString:@"On"] def:@NO]];
+    [specs addObject:[self groupSpec:@"动画设置" footer:nil]];
+    [specs addObject:[self numSlider:@"动画帧率" key:[p stringByAppendingString:@"FPS"] def:30 mn:1 mx:60]];
+    [specs addObject:[self switchSpec:@"启用素材旋转" key:[p stringByAppendingString:@"Rotate"] def:@NO]];
+    [specs addObject:[self switchSpec:@"素材旋转反转" key:[p stringByAppendingString:@"RotateRev"] def:@NO]];
+    [specs addObject:[self numSlider:@"旋转速度" key:[p stringByAppendingString:@"RotateFPS"] def:5 mn:0 mx:10]];
+    [specs addObject:[self groupSpec:@"位置缩放设置" footer:nil]];
+    [specs addObject:[self numSlider:@"缩放倍数" key:[p stringByAppendingString:@"Scale"] def:100 mn:50 mx:200]];
+    [specs addObject:[self numSlider:@"X偏移" key:[p stringByAppendingString:@"OX"] def:0 mn:-10 mx:10]];
+    [specs addObject:[self numSlider:@"Y偏移" key:[p stringByAppendingString:@"OY"] def:0 mn:-10 mx:10]];
+    [specs addObject:[self groupSpec:@"素材设置" footer:@"素材目录: /var/mobile/灵动岛/帧率素材 (png/jpg 序列帧, 按文件名数字顺序播放)"]];
+    Class fc = [p isEqualToString:@"zoneMini"] ? [DIZoneFolderLyricsMini class] : [DIZoneFolderLyricsTrail class];
+    [specs addObject:[self linkSpec:[NSString stringWithFormat:@"素材名 (%@)", zoneAssetDisplayName(p)] detail:fc]];
+    _zoneSpecs = specs;
+    return _zoneSpecs;
+}
+@end
+
+@implementation DIZoneLyricsMini
+- (NSString *)zonePrefix { return @"zoneMini"; }
+- (NSString *)zoneTitle { return @"歌词岛 · 左侧专辑"; }
+@end
+@implementation DIZoneLyricsTrail
+- (NSString *)zonePrefix { return @"zoneTrail"; }
+- (NSString *)zoneTitle { return @"歌词岛 · 右侧音频"; }
+@end
+
+/* 素材文件夹选择页: 列出 /var/mobile/灵动岛/帧率素材 下全部文件夹, 点击保存到对应分区键 */
+@interface DIZoneFolderPicker : PSListController
+- (NSString *)zonePrefix;
+@end
+
+@implementation DIZoneFolderPicker {
+    NSArray *_pickedSpecs;
+}
+- (NSString *)zonePrefix { return @"zoneMini"; }
+- (NSString *)zoneKey { return [[self zonePrefix] stringByAppendingString:@"Asset"]; }
+- (void)saveFolder:(NSString *)name { // name=nil 清空(不显示)
+    CFPreferencesSetAppValue((__bridge CFStringRef)[self zoneKey], (__bridge CFPropertyListRef)(name ?: @"__none__"), (__bridge CFStringRef)kDomain);
+    CFPreferencesAppSynchronize((__bridge CFStringRef)kDomain);
+    CFNotificationCenterPostNotification(CFNotificationCenterGetDarwinNotifyCenter(),
+        (__bridge CFStringRef)kNotifyStr, NULL, NULL, YES);
+}
+- (void)reloadSpecifiers { _pickedSpecs = nil; [super reloadSpecifiers]; }
+- (NSArray *)specifiers {
+    if (_pickedSpecs) return _pickedSpecs;
+    NSMutableArray *specs = [NSMutableArray array];
+    PSSpecifier *g = [PSSpecifier preferenceSpecifierNamed:@"选择素材文件夹" target:nil
+        set:NULL get:NULL detail:nil cell:PSGroupCell edit:nil];
+    [g setProperty:@"素材目录: /var/mobile/灵动岛/帧率素材 下的全部文件夹, 点击选择" forKey:@"footerText"];
+    [specs addObject:g];
+    CFPreferencesAppSynchronize((__bridge CFStringRef)kDomain);
+    id v = CFBridgingRelease(CFPreferencesCopyAppValue((__bridge CFStringRef)[self zoneKey], (__bridge CFStringRef)kDomain));
+    NSString *cur = [v isKindOfClass:NSString.class] ? v : nil;
+    NSMutableArray *folders = [NSMutableArray array];
+    for (NSString *n in [[NSFileManager defaultManager] contentsOfDirectoryAtPath:kFrameDir error:NULL]) {
+        BOOL isDir = NO;
+        if ([[NSFileManager defaultManager] fileExistsAtPath:[kFrameDir stringByAppendingPathComponent:n] isDirectory:&isDir] && isDir)
+            [folders addObject:n];
+    }
+    [folders sortUsingSelector:@selector(localizedCompare:)];
+    [folders insertObject:@"无(不显示)" atIndex:0];
+    for (NSString *f in folders) {
+        BOOL none = [f isEqualToString:@"无(不显示)"];
+        BOOL isCur = none ? !(cur.length && ![cur isEqualToString:@"__none__"]) : [f isEqualToString:cur];
+        PSSpecifier *s = [PSSpecifier preferenceSpecifierNamed:(isCur ? [NSString stringWithFormat:@"✓ %@", f] : f) target:self
+            set:NULL get:NULL detail:nil cell:PSButtonCell edit:nil];
+        [s setButtonAction:@selector(pick:)];
+        [s setProperty:f forKey:@"folder"];
+        [specs addObject:s];
+    }
+    _pickedSpecs = specs;
+    return _pickedSpecs;
+}
+- (void)pick:(PSSpecifier *)spec {
+    NSString *f = [spec propertyForKey:@"folder"];
+    [self saveFolder:[f isEqualToString:@"无(不显示)"] ? nil : f];
+    NSArray *vcs = self.navigationController.viewControllers;
+    UIViewController *parent = (vcs.count >= 2) ? vcs[vcs.count - 2] : nil;
+    [self.navigationController popViewControllerAnimated:YES];
+    if ([parent respondsToSelector:@selector(reloadSpecifiers)])
+        [(id)parent performSelector:@selector(reloadSpecifiers)];
+}
+@end
+
+@implementation DIZoneFolderLyricsMini
+- (NSString *)zonePrefix { return @"zoneMini"; }
+@end
+@implementation DIZoneFolderLyricsTrail
+- (NSString *)zonePrefix { return @"zoneTrail"; }
+@end
