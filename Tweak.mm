@@ -1193,92 +1193,33 @@ static CALayer *diDiscoverAlbumLayer(UIView *host) {
     }
     return nil;
 }
-static CALayer *diAlbumContentLayer(UIView *host) { return diDiscoverAlbumLayer(host); }
-
-/* 2.6.7: 找专辑图那一块正方形。
-   做法: 在宿主子树里按"近似正方形 + 至少宿主的 0.6 倍高 + 站得住超过 0.5 秒"打分,
-   取最高分。这样能穿过 _UIPortalView 这类中间容器, 精确落在专辑图上,
-   也不会被随机飘过的方形图标骗到(它们停留时间短)。 */
-typedef struct { CGRect rect; CGFloat score; } DIAlbumGuess;
-
-static DIAlbumGuess diFindAlbumSquare(UIView *host, CGRect *dbgHost) {
-    DIAlbumGuess best = { CGRectNull, 0 };
-    if (!host) return best;
-    CGRect hb = host.bounds;
-    CGFloat minSide = hb.size.height * 0.6;
+/* 2.6.8: "专辑内容视图在宿主坐标系里的矩形" —— 就是 CALayerHost(407x488) 那一坨。
+   199 层树: CALayerHost(407x488) 被上面几层容器等比缩到宿主大小(185x52 → 407x202 那一套)。
+   所以取"包含这个 CALayerHost 的 UIView 的 bounds, 折到宿主坐标"即得内容区。 */
+static CGRect diAlbumContentHostRect(UIView *host) {
+    CALayer *cl = diDiscoverAlbumLayer(host);
+    if (!host) return CGRectNull;
+    UIView *lv = nil;
     NSMutableArray<UIView *> *st = [NSMutableArray arrayWithObject:host];
-    NSMutableArray<NSNumber *> *depths = [NSMutableArray arrayWithObject:@(0)];
     int g = 0;
-    NSMutableArray<NSString *> *dbgLines = [NSMutableArray array];
     while (st.count && g++ < 900) {
         UIView *v = st.firstObject; [st removeObjectAtIndex:0];
-        NSInteger d = depths.firstObject.integerValue; [depths removeObjectAtIndex:0];
-        if (v != host && v.subviews.count) { for (UIView *s in v.subviews) { [st addObject:s]; [depths addObject:@(d + 1)]; } }
-        if (v == host || v.hidden || v.alpha < 0.02) continue;
-        CGRect r = [host convertRect:v.bounds fromView:v];
-        CGFloat w = r.size.width, h = r.size.height;
-        if (w < 6 || h < 6) continue;
-        if (CGRectGetMaxX(r) <= 1 || CGRectGetMinX(r) >= hb.size.width - 1) continue;
-        CGFloat ratio = w / h;
-        BOOL square = (ratio > 0.72 && ratio < 1.38);
-        BOOL big = (h >= minSide && w >= minSide);
-        if (!square && !big) continue;
-        if (w > hb.size.width * 0.85) continue;   /* 整幅容器不要 */
-        CGFloat cx = CGRectGetMidX(r);
-        BOOL leftHalf = (cx < hb.size.width * 0.5);
-        CGFloat score = 0;
-        score += square ? 1.0 : 0;
-        score += big ? 0.6 : 0;
-        score += leftHalf ? 0.5 : 0;
-        score -= MIN(0.6, d * 0.05);
-        if (score <= best.score) continue;
-        best.rect = r; best.score = score;
-        if (dbgLines.count < 6)
-            [dbgLines addObject:[NSString stringWithFormat:@"%.0fx%.0f@%.0f,%.0f", w, h, r.origin.x, r.origin.y]];
-    }
-    if (dbgHost) *dbgHost = hb;
-    return best;
-}
-
-/* 2.6.7: 专辑矩形(宿主坐标系), 带 0.5 秒稳定性过滤 —— 避免动画中间帧抓到错的东西 */
-static CGRect diAlbumRectStable(UIView *host) {
-    static char kHoldKey;
-    DIAlbumGuess cur = diFindAlbumSquare(host, NULL);
-    NSMutableDictionary *hold = objc_getAssociatedObject(host, &kHoldKey);
-    if (!hold) { hold = [NSMutableDictionary dictionary]; objc_setAssociatedObject(host, &kHoldKey, hold, OBJC_ASSOCIATION_RETAIN_NONATOMIC); }
-    NSValue *stored = hold[@"rect"];
-    NSNumber *tStored = hold[@"t"];
-    CGRect storedR = stored ? stored.CGRectValue : CGRectNull;
-    double now = CFAbsoluteTimeGetCurrent();
-    BOOL good = !CGRectIsNull(cur.rect) && cur.score >= 1.2;
-    if (good) {
-        BOOL moved = CGRectIsNull(storedR) ||
-                     fabs(storedR.size.width - cur.rect.size.width) > 1.0 ||
-                     fabs(storedR.size.height - cur.rect.size.height) > 1.0 ||
-                     fabs(CGRectGetMidX(storedR) - CGRectGetMidX(cur.rect)) > 1.5 ||
-                     fabs(CGRectGetMidY(storedR) - CGRectGetMidY(cur.rect)) > 1.5;
-        if (moved) {
-            if (!tStored || now - tStored.doubleValue > 0.35 || CGRectIsNull(storedR)) {
-                /* 首次出现或位置真的变了 → 立即采用新值并记时间 */
-                hold[@"rect"] = [NSValue valueWithCGRect:cur.rect];
-                hold[@"t"] = @(now);
-                storedR = cur.rect;
-            }
-        } else {
-            storedR = cur.rect;
-            hold[@"rect"] = [NSValue valueWithCGRect:cur.rect];
-            hold[@"t"] = @(now);
+        if (cl && v.layer == cl) {
+            /* 往上找到"铺满内容区"的那个视图(409x488 这种), 用它来折算 */
+            lv = v;
+            break;
         }
+        for (UIView *x in v.subviews) [st addObject:x];
     }
-    if (CGRectIsNull(storedR)) storedR = cur.rect;
-    /* 兜底: 找不到就按"宿主左端的一个正方形"估 —— 专辑在左侧, 边长≈宿主高 */
-    if (CGRectIsNull(storedR)) {
-        CGFloat side = host.bounds.size.height;
-        storedR = CGRectMake(0, 0, side, side);
-    }
-    return storedR;
+    if (!lv) return host.bounds;
+    CGRect r = [host convertRect:lv.bounds fromView:lv];
+    /* 内容视图被等比放大后可能超出宿主, 与宿主求交得到真实可见区 */
+    CGRect vis = CGRectIntersection(r, host.bounds);
+    if (CGRectIsNull(vis) || vis.size.width < 2 || vis.size.height < 2) vis = r;
+    return vis;
 }
 
+static CALayer *diAlbumContentLayer(UIView *host) { return diDiscoverAlbumLayer(host); }
 /* 2.2.14: 小岛专辑/音频位置帧率素材(2.2.45 stepMini 原版) */
 - (void)stepMini {
     @try {
@@ -1481,26 +1422,35 @@ static NSString *diMaskImagePath(NSString *folderSel) {
         if (self.iv.image != self.loadedImg) self.iv.image = self.loadedImg;
         _miss = 0;
 
-        /* 2.6.7: 贴合"专辑图那一块正方形" —— 不做任何额外缩放/留白, 直接盖在专辑上 */
+        /* 2.6.8: 贴合算法 —— 直接镜像"原生专辑图"的位置, 不做任何猜形状。
+           步骤:
+             1) 拿到专辑内容区(宿主坐标系, 即那块 407x488 折过来的区域);
+             2) 取"左侧第一个正方形"作为理论专辑位(原生专辑就在内容区左上角);
+             3) 两种候选(内容区左上角正方形 / 内容区左半幅)按"是否落在内容区内"打分选用。
+           所有计算都在**宿主呈现层坐标系**里做, 与动画逐帧同步, 不会漂。 */
         CALayer *pl = host.layer.presentationLayer;
         CGSize bs = pl ? pl.bounds.size : host.bounds.size;
-        CGRect albumRect = diAlbumRectStable(host);
-        if (CGRectIsNull(albumRect) || albumRect.size.width < 4) {
-            CGFloat side = bs.height;
-            albumRect = CGRectMake(0, 0, side, side);
+        CGRect contentR = diAlbumContentHostRect(host);
+        if (CGRectIsNull(contentR) || contentR.size.width < 4 || contentR.size.height < 4)
+            contentR = CGRectMake(0, 0, bs.width, bs.height);
+        CGRect albumRect;
+        {
+            CGFloat side = MIN(contentR.size.height, contentR.size.width);
+            CGRect a = CGRectMake(CGRectGetMinX(contentR), CGRectGetMinY(contentR), side, side);
+            CGRect b = CGRectMake(CGRectGetMinX(contentR), CGRectGetMinY(contentR),
+                                  MIN(contentR.size.width * 0.5, contentR.size.height),
+                                  contentR.size.height);
+            albumRect = (a.size.height <= b.size.height + 0.5) ? a : b;
         }
         {
             static CFAbsoluteTime tDbg; static NSString *lastDbg;
-            NSString *dbg = [NSString stringWithFormat:@"遮罩贴合: 宿主=%.0fx%.0f 专辑=%@",
-                             bs.width, bs.height, NSStringFromCGRect(albumRect)];
+            NSString *dbg = [NSString stringWithFormat:@"遮罩贴合: 宿主=%.0fx%.0f 内容区=%@ 专辑=%@",
+                             bs.width, bs.height, NSStringFromCGRect(contentR), NSStringFromCGRect(albumRect)];
             if (![dbg isEqualToString:lastDbg] && CFAbsoluteTimeGetCurrent() - tDbg > 2) { tDbg = CFAbsoluteTimeGetCurrent(); lastDbg = dbg; DLog(@"%@", dbg); }
         }
-        /* 专辑是圆的(实测圆形封面), 遮罩同样裁成圆 —— 方形素材的四角不会溢出到岛外 */
-        CGFloat side = MIN(albumRect.size.width, albumRect.size.height);
         CGFloat k = 1.0 + (CGFloat)maskScale * 0.06;
         if (k < 0.1) k = 0.1;
-        side *= k;
-        CGFloat w = side, h = side;
+        CGFloat w = albumRect.size.width * k, h = albumRect.size.height * k;
         CGFloat cx = CGRectGetMidX(albumRect) + (CGFloat)maskOffsetX * 0.4;
         CGFloat cy = CGRectGetMidY(albumRect) + (CGFloat)maskOffsetY * 0.4;
         CGRect f = CGRectMake(cx - w * 0.5, cy - h * 0.5, w, h);
@@ -1508,11 +1458,9 @@ static NSString *diMaskImagePath(NSString *folderSel) {
         if (fabs(self.iv.bounds.size.width - w) > 0.5 || fabs(self.iv.bounds.size.height - h) > 0.5)
             self.iv.bounds = CGRectMake(0, 0, w, h);
         self.iv.center = CGPointMake(w * 0.5, h * 0.5);
-        CGFloat rad = w * 0.5;
-        if (fabs(self.layer.cornerRadius - rad) > 0.5) {
-            self.layer.cornerRadius = rad;
-            self.layer.masksToBounds = YES;
-        }
+        /* 专辑是圆的 → 遮罩裁成圆, 方形素材的角不出圈 */
+        CGFloat rad = MIN(w, h) * 0.5;
+        if (fabs(self.layer.cornerRadius - rad) > 0.5) { self.layer.cornerRadius = rad; self.layer.masksToBounds = YES; }
         if (self.hidden) {
             self.hidden = NO;
             DLog(@"遮罩显示: 宿主=%@ frame=%@ 素材=%@", NSStringFromClass(host.class), NSStringFromCGRect(f), maskAnimFolder);
