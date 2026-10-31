@@ -9,6 +9,6 @@ DriftIslandPrefs_CFLAGS = -fobjc-arc
 DriftIslandPrefs_FRAMEWORKS = UIKit Foundation CoreFoundation
 DriftIslandPrefs_PRIVATE_FRAMEWORKS = Preferences
 DriftIslandPrefs_INSTALL_PATH = /Library/PreferenceBundles
-DriftIslandPrefs_BUNDLE_RESOURCES = Root.plist icon.png
+DriftIslandPrefs_BUNDLE_RESOURCES = Root.plist icon.png Mask.png
 
 include $(THEOS_MAKE_PATH)/bundle.mk
