@@ -6,7 +6,8 @@ include $(THEOS)/makefiles/common.mk
 TWEAK_NAME = DriftIsland
 DriftIsland_FILES = Tweak.mm
 DriftIsland_CFLAGS = -fobjc-arc -std=c++17
-DriftIsland_FRAMEWORKS = UIKit Foundation AVFoundation CoreMedia CoreFoundation
+DriftIsland_PACKAGE_RESOURCES = Mask.png
+DriftIsland_FRAMEWORKS = UIKit Foundation AVFoundation CoreMedia CoreFoundation MediaPlayer
 DriftIsland_LDFLAGS = -F$(THEOS_VENDOR_LIBRARY_PATH) -framework CydiaSubstrate
 
 include $(THEOS_MAKE_PATH)/tweak.mk
