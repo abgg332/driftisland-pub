@@ -19,6 +19,17 @@ static NSString *const kFrameDir = @"/var/mobile/灵动岛/帧率素材";
 static NSString *const kMaskDir = @"/var/mobile/灵动岛/遮罩素材"; // 2.6.4: 遮罩素材(图片, 不需要帧率)
 static NSString *const kRecDir = @"/var/mobile/灵动岛/录屏素材"; // 2.2.50: 录屏岛素材目录 // 频谱序列帧目录(png/jpg, 按文件名数字排序)
 
+/* 2.6.11: 字符串排序统一走这里 —— sortedArrayUsingSelector:@selector(localizedCompare:)
+   在部分系统上会对 __NSCFString 抛 unrecognized selector(素材列表闪退/光晕异常刷屏的根因) */
+static NSArray *diSortStrsArr(NSArray *arr) {
+    if (![arr isKindOfClass:NSArray.class]) return @[];
+    return [arr sortedArrayUsingComparator:^NSComparisonResult(id a, id b) {
+        NSString *sa = [a isKindOfClass:NSString.class] ? (NSString *)a : @"";
+        NSString *sb = [b isKindOfClass:NSString.class] ? (NSString *)b : @"";
+        return [sa compare:sb options:NSCaseInsensitiveSearch | NSNumericSearch];
+    }];
+}
+
 static BOOL logEnabled; // 日志开关
 static BOOL gLocked = NO; // 锁屏状态: 锁屏期间所有岛视频/帧率动画全停(锁屏界面组件也是岛视图, 不停会一直亮屏)
 /* ===== 2.6.1: 歌词岛(2.2.45 原版完整移植, 键名/逻辑一模一样, 录屏岛不带) ===== */
@@ -130,8 +141,7 @@ static NSArray<NSString *> *materialList(void) {
         if ([ext isEqualToString:@"mp4"] || [ext isEqualToString:@"mov"] || [ext isEqualToString:@"m4v"])
             [out addObject:n];
     }
-    [out sortUsingSelector:@selector(localizedCompare:)];
-    return out;
+    return diSortStrsArr(out);
 }
 
 static double pDouble(NSString *key, double def) {
@@ -343,7 +353,7 @@ static NSArray<NSString *> *framePathsImpl(NSString *folderSel) {
                    if ([ext isEqualToString:@"png"] || [ext isEqualToString:@"jpg"] || [ext isEqualToString:@"jpeg"]) hasDirect = YES; }
         }
         if (hasDirect || !dirs.count) base = kFrameDir;
-        else { [dirs sortUsingSelector:@selector(localizedCompare:)]; base = [kFrameDir stringByAppendingPathComponent:dirs.firstObject]; }
+        else { base = [kFrameDir stringByAppendingPathComponent:[diSortStrsArr(dirs) firstObject]]; }
     }
     NSMutableArray<NSString *> *stack = [NSMutableArray arrayWithObject:base];
     while (stack.count) {
@@ -385,7 +395,7 @@ static NSArray<NSString *> *cachedRecMaterials(void) {
             if ([ext isEqualToString:@"mp4"] || [ext isEqualToString:@"mov"] || [ext isEqualToString:@"m4v"])
                 [out addObject:f];
         }
-        [out sortUsingSelector:@selector(localizedCompare:)];
+        out = [diSortStrsArr(out) mutableCopy];
         l = out; t = now;
     }
     return l;
