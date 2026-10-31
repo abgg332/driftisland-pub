@@ -17,6 +17,7 @@ static NSString *const kDomain = @"com.abgg332.driftisland";
 static NSString *const kNotifyStr = @"com.abgg332.driftisland.reload";
 static NSString *const kMaterialDir = @"/var/mobile/灵动岛";
 static NSString *const kFrameDir = @"/var/mobile/灵动岛/帧率素材";
+static NSString *const kMaskDir = @"/var/mobile/灵动岛/遮罩素材"; // 2.6.4: 遮罩素材(图片)
 
 static NSString *const kRecDir = @"/var/mobile/灵动岛/录屏素材"; // 2.2.50: 录屏岛素材目录(录屏时替换小岛背景)
 
@@ -1620,12 +1621,15 @@ static void diWriteColors(NSArray<NSString *> *colors) {
         (__bridge CFStringRef)kNotifyStr, NULL, NULL, YES);
 }
 
+/* 2.6.4: 素材根目录 —— 默认帧率素材; 遮罩素材选择页覆写为遮罩素材目录 */
+- (NSString *)rootDir { return kFrameDir; }
+
 - (NSArray<NSString *> *)folders {
     NSFileManager *fm = [NSFileManager defaultManager];
     NSMutableArray *out = [NSMutableArray array];
     BOOL hasDirectFrame = NO;
-    for (NSString *n in [fm contentsOfDirectoryAtPath:kFrameDir error:NULL]) {
-        NSString *p = [kFrameDir stringByAppendingPathComponent:n];
+    for (NSString *n in [fm contentsOfDirectoryAtPath:[self rootDir] error:NULL]) {
+        NSString *p = [[self rootDir] stringByAppendingPathComponent:n];
         BOOL isDir = NO;
         if (![fm fileExistsAtPath:p isDirectory:&isDir]) continue;
         if (isDir) [out addObject:n];
@@ -1644,7 +1648,7 @@ static void diWriteColors(NSArray<NSString *> *colors) {
         NSMutableArray *specs = [NSMutableArray array];
         PSSpecifier *g = [PSSpecifier preferenceSpecifierNamed:@"选择素材" target:nil
             set:NULL get:NULL detail:nil cell:PSGroupCell edit:nil];
-        [g setProperty:@"点击选择帧率素材文件夹。素材目录: /var/mobile/灵动岛/帧率素材" forKey:@"footerText"];
+        [g setProperty:[NSString stringWithFormat:@"点击选择素材文件夹。素材目录: %@", [self rootDir]] forKey:@"footerText"];
         [specs addObject:g];
         NSString *cur = nil;
         CFPreferencesAppSynchronize((__bridge CFStringRef)kDomain);
@@ -3306,7 +3310,17 @@ static void diOpenHomeBarPickWindow(void) {
 }
 - (id)readSmallAnimName:(PSSpecifier *)sp { return [self folderNameForKey:@"smallAnimFolder"]; }
 - (id)readAudioAnimName:(PSSpecifier *)sp { return [self folderNameForKey:@"miniAudioFolder"]; }
-- (id)readMaskAnimName:(PSSpecifier *)sp { return [self folderNameForKey:@"maskAnimFolder"]; }
+- (id)readMaskAnimName:(PSSpecifier *)sp {
+    CFPreferencesAppSynchronize((__bridge CFStringRef)kDomain);
+    id v = CFBridgingRelease(CFPreferencesCopyAppValue(CFSTR("maskAnimFolder"), (__bridge CFStringRef)kDomain));
+    NSString *name = ([v isKindOfClass:NSString.class] && [(NSString *)v length]) ? v : nil;
+    if (name) {
+        BOOL isDir = NO;
+        NSString *p = [kMaskDir stringByAppendingPathComponent:name];
+        if ([[NSFileManager defaultManager] fileExistsAtPath:p isDirectory:&isDir] && isDir) return name;
+    }
+    return @"未选择";
+}
 /* 2.6.3: 遮罩/旋转用带小数的滑杆行(range + 自定义渲染已支持 0.5 步进) */
 - (PSSpecifier *)numSliderD:(NSString *)label key:(NSString *)key def:(double)def mn:(double)mn mx:(double)mx {
     PSSpecifier *sp = [PSSpecifier preferenceSpecifierNamed:label
@@ -3602,7 +3616,7 @@ static void diOpenHomeBarPickWindow(void) {
     [specs addObject:nameRow2];
 
     /* 2.6.3: 遮罩设置 —— 素材贴合在左侧专辑上, 跟随专辑位置/尺寸, 可旋转 */
-    [specs addObject:[self groupSpec:@"遮罩设置" footer:@"遮罩素材贴合在左侧专辑(放歌时小岛左侧)上, 位置与大小随专辑走。素材取自 /var/mobile/灵动岛/帧率素材 下的文件夹。"]];
+    [specs addObject:[self groupSpec:@"遮罩设置" footer:@"遮罩是一张图片, 严丝合缝贴在左侧专辑上, 显示/隐藏完全跟随左侧专辑(关掉左侧帧率素材或退出音乐, 遮罩一起隐藏)。素材目录: /var/mobile/灵动岛/遮罩素材"]];
     [specs addObject:[self switchSpec:@"启用遮罩" key:@"maskOn" def:@NO]];
     PSSpecifier *maskName = [PSSpecifier preferenceSpecifierNamed:@"素材名"
         target:self set:NULL get:@selector(readMaskAnimName:) detail:[DIFrameFoldersMask class] cell:PSLinkCell edit:nil];
@@ -3624,5 +3638,6 @@ static void diOpenHomeBarPickWindow(void) {
 @end
 @implementation DIFrameFoldersMask
 - (NSString *)prefKey { return @"maskAnimFolder"; }
+- (NSString *)rootDir { return kMaskDir; }  /* 2.6.4: 遮罩素材独立目录 */
 @end
 
