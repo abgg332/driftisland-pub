@@ -30,9 +30,17 @@ static BOOL miniAudioOn = YES; static double miniAudioFPS = 50, miniAudioScale =
 static NSString *smallAnimFolder; // 左侧(mini)素材文件夹
 static NSString *miniAudioFolder; // 右侧音频素材独立键
 static NSString *gMusicIslandId;  // 已确认音乐岛的 identifier(2.2.29 校验)
+static NSString *gMusicIslandCls; // 2.6.3: 音乐岛宿主类名(强校验, 排除充电/人脸等其它岛)
+/* 2.6.3: 遮罩 —— 贴合在左侧专辑上的序列帧层(跟随专辑位置/尺寸), 带旋转 */
+static BOOL maskOn = NO;          // 启用遮罩素材
+static BOOL maskRotateOn = NO;    // 启用素材旋转
+static BOOL maskRotateReverse = NO; // 素材旋转反转
+static double maskRotateSpeed = 4.0; // 旋转速度
+static NSString *maskAnimFolder;  // 遮罩素材文件夹(帧率素材下的子目录)
 static BOOL gRecordingActive = NO; // 2.6.1: 不带录屏岛, 恒 NO(保留 stepMini 原条件结构)
 static void migrateLyricsParamsBase(void);
 static NSString *diElementId(UIView *host);
+static BOOL diMiniMusicActive(UIView *host); // 2.6.3: 前置(遮罩层使用)
 static os_log_t logHandle;
 
 // 运行日志: 写入 /var/mobile/Library/Logs/DriftIsland/driftisland.log (供"导出日志报告"抓取)
@@ -485,6 +493,8 @@ static NSString *materialPathFor(BOOL expanded) {
 }
 
 static void refreshPrefs(void) {
+    /* 2.6.3: 每次重载都清空音乐岛学习结果, 由下一次在播音乐时重新确认, 避免沿用旧的错误 id */
+    gMusicIslandId = nil; gMusicIslandCls = nil;
     enabled = pBool(@"enabled", NO);
     notifyColorOn = pBool(@"notifyColorOn", NO);
     notifyBgOff = pBool(@"notifyBgOff", NO);
@@ -598,6 +608,13 @@ static void refreshPrefs(void) {
     miniAudioScale = aAdj + miniAudioScaleBase;
     miniAudioOffsetX = pDouble(@"miniAudioOffsetX", 0) + miniAudioOffsetXBase; if (miniAudioOffsetX < -40) miniAudioOffsetX = -40; if (miniAudioOffsetX > 40) miniAudioOffsetX = 40;
     miniAudioOffsetY = pDouble(@"miniAudioOffsetY", 0); if (miniAudioOffsetY < -20) miniAudioOffsetY = -20; if (miniAudioOffsetY > 20) miniAudioOffsetY = 20;
+    /* 2.6.3: 遮罩(贴合左侧专辑) */
+    maskOn = pBool(@"maskOn", NO);
+    maskRotateOn = pBool(@"maskRotateOn", NO);
+    maskRotateReverse = pBool(@"maskRotateReverse", NO);
+    maskRotateSpeed = pDouble(@"maskRotateSpeed", 4.0);
+    if (maskRotateSpeed < -12) maskRotateSpeed = -12; if (maskRotateSpeed > 12) maskRotateSpeed = 12;
+    maskAnimFolder = pString(@"maskAnimFolder");
     /* 2.5.7: 隐藏横条 / 渐隐模式 / 手势保护 */
     homeBarHideOn = pBool(@"homeBarHideOn", NO);
     homeBarHideMode = pBool(@"homeBarHideFade", NO) ? @"fade" : @"full";   /* 2.5.11: 子开关 */
@@ -1047,6 +1064,32 @@ static void syncNativeSpectrum(UIView *bestRoot); // 前向声明: step 每帧�
     return self;
 }
 
+/* 2.6.3: 收集宿主内 portal 层类名(判定是不是音乐岛素材层) */
+static NSArray<NSString *> *diPortalClassNames(UIView *host) {
+    if (!host) return @[];
+    NSMutableArray<NSString *> *out = [NSMutableArray array];
+    NSMutableArray<CALayer *> *stack = [NSMutableArray arrayWithObject:host.layer];
+    int guard = 0;
+    while (stack.count && guard++ < 400) {
+        CALayer *l = stack.firstObject; [stack removeObjectAtIndex:0];
+        NSString *cn = NSStringFromClass(l.class);
+        if ([cn containsString:@"CAPortalLayer"] || [cn containsString:@"CALayerHost"]) {
+            if (![out containsObject:cn]) [out addObject:cn];
+            /* 也把 portal 的来源视图层类名带上(音乐岛里通常是 MediaControls/Artwork 系) */
+            SEL s0 = NSSelectorFromString(@"sourceLayer");
+            if ([l respondsToSelector:s0]) {
+                CALayer *src = ((id(*)(id, SEL))objc_msgSend)(l, s0);
+                if (src) {
+                    NSString *sc = NSStringFromClass(src.class);
+                    if (sc && ![out containsObject:sc]) [out addObject:sc];
+                }
+            }
+        }
+        for (CALayer *x in l.sublayers) [stack addObject:x];
+    }
+    return out;
+}
+
 /* 2.2.25: 判定宿主内"音乐岛特征层"(左右两半各有跨进程 portal) */
 static int diPortalCountInHost(UIView *host, BOOL *leftHas, BOOL *rightHas) {
     if (!host) return 0;
@@ -1070,6 +1113,8 @@ static int diPortalCountInHost(UIView *host, BOOL *leftHas, BOOL *rightHas) {
 }
 
 /* 2.2.29: 音乐岛判定 —— 双 portal + 在播 + identifier 校验 */
+/* 2.6.3: 音乐岛强校验 —— 记录音乐岛自身的 elementIdentifier 与宿主类名,
+   stepMini / 原生隐藏 都只认这个 id, 充电/人脸/通话/录屏 等其他岛一律不认 */
 static BOOL diMiniMusicActive(UIView *host) {
     if (!host) return NO;
     BOOL L = NO, R = NO;
@@ -1079,8 +1124,19 @@ static BOOL diMiniMusicActive(UIView *host) {
     if (!playing) return NO;
     NSString *eid = diElementId(host);
     if (eid) {
-        if (!gMusicIslandId) { gMusicIslandId = [eid copy]; DLog(@"确认音乐岛 identifier=%@", eid); }
+        if (!gMusicIslandId) {
+            gMusicIslandId = [eid copy];
+            gMusicIslandCls = NSStringFromClass(host.class);
+            for (NSString *cn in diPortalClassNames(host)) {
+                if ([cn.lowercaseString containsString:@"media"] || [cn.lowercaseString containsString:@"music"] ||
+                    [cn.lowercaseString containsString:@"artwork"]) {
+                    DLog(@"确认音乐岛 identifier=%@ 宿主=%@ portal类=%@", eid, gMusicIslandCls, cn);
+                    break;
+                }
+            }
+        }
         if (![eid isEqualToString:gMusicIslandId]) return NO;
+        if (gMusicIslandCls && ![NSStringFromClass(host.class) isEqualToString:gMusicIslandCls]) return NO;
     }
     return YES;
 }
@@ -1199,6 +1255,96 @@ static BOOL diMiniMusicActive(UIView *host) {
 
 - (void)dealloc { [_link invalidate]; }
 @end
+
+/* 2.6.3: 遮罩层 —— 贴在"左侧专辑"上的序列帧, 尺寸/位置每帧跟随专辑, 可旋转
+   专辑矩形 = 音乐岛左半幅(与 stepMini 左侧同基准), 所以遮罩直接覆盖在专辑上。
+   旋转: 角度按 maskRotateSpeed(度/秒) 累加, 反转取负。 */
+@interface DIMaskView : UIView
+@property (nonatomic, strong) UIImageView *iv;
+@property (nonatomic, strong) CADisplayLink *link;
+@property (nonatomic, assign) NSInteger idx;
+@property (nonatomic, assign) double advAcc;
+@property (nonatomic, assign) NSInteger miss;
+@property (nonatomic, assign) double rotDeg;
+@property (nonatomic, assign) CFTimeInterval lastTS;
+@end
+
+@implementation DIMaskView
+- (instancetype)initWithFrame:(CGRect)frame {
+    if ((self = [super initWithFrame:frame])) {
+        self.userInteractionEnabled = NO;
+        self.backgroundColor = [UIColor clearColor];
+        self.clipsToBounds = NO;
+        _iv = [[UIImageView alloc] initWithFrame:self.bounds];
+        _iv.contentMode = UIViewContentModeScaleAspectFit;
+        _iv.userInteractionEnabled = NO;
+        [self addSubview:_iv];
+        _link = [CADisplayLink displayLinkWithTarget:self selector:@selector(step)];
+        _link.preferredFramesPerSecond = 60;
+        [_link addToRunLoop:NSRunLoop.mainRunLoop forMode:NSRunLoopCommonModes];
+    }
+    return self;
+}
+- (void)step {
+    @try {
+        UIView *host = self.superview;
+        if (!host || host.window == nil) { self.hidden = YES; if (++_miss > 15) _link.paused = YES; return; }
+        BOOL mini = host.bounds.size.height > 20 && host.bounds.size.height <= 60 && host.bounds.size.width > 40;
+        BOOL active = diMiniMusicActive(host);
+        NSArray<NSString *> *frames = framePathsFor(maskAnimFolder);
+        if (!mini || !enabled || gLocked || !maskOn || !active || !frames.count || gRecordingActive) {
+            if (!self.hidden) self.hidden = YES;
+            if (_iv.image) _iv.image = nil;
+            if (++_miss > 15) _link.paused = YES;
+            return;
+        }
+        _miss = 0;
+        CALayer *pl = host.layer.presentationLayer;
+        CGSize bs = pl ? pl.bounds.size : host.bounds.size;
+        /* 贴合专辑: 与左侧专辑同基准矩形(左半幅) + 同样的缩放/偏移参数 */
+        CGFloat unit = bs.height > 6 ? bs.height : 38.0;
+        CGFloat k = 1.0 + (CGFloat)miniScale * 0.06;
+        if (k < 0.1) k = 0.1;
+        CGFloat baseW = bs.width * 0.52, baseH = bs.height;
+        CGFloat w = baseW * k, h = baseH * k;
+        CGPoint c = CGPointMake(baseW * 0.5 + (CGFloat)miniOffsetX * unit * 0.04,
+                                baseH * 0.5 + (CGFloat)miniOffsetY * unit * 0.04);
+        CGRect f = CGRectMake(c.x - w * 0.5, c.y - h * 0.5, w, h);
+        if (!CGRectEqualToRect(self.frame, f)) self.frame = f;
+        if (_iv.frame.size.width != w || _iv.frame.size.height != h)
+            _iv.frame = CGRectMake(0, 0, w, h);
+        if (self.hidden) self.hidden = NO;
+
+        CFTimeInterval now = _link.timestamp;
+        if (!_lastTS) _lastTS = now;
+        double dt = now - _lastTS; _lastTS = now;
+        if (dt > 0.5) dt = 0.5;
+        /* 帧推进(与左侧专辑同速) */
+        _advAcc += dt * miniFPS;
+        while (_advAcc >= 1.0) { _advAcc -= 1.0; _idx = (_idx + 1) % (NSInteger)frames.count; }
+        UIImage *img = frameImage(frames[_idx]);
+        if (img && _iv.image != img) _iv.image = img;
+        /* 旋转 */
+        if (maskRotateOn) {
+            double dir = maskRotateReverse ? -1.0 : 1.0;
+            _rotDeg += dir * maskRotateSpeed * dt;
+            if (_rotDeg >= 360.0) _rotDeg -= 360.0;
+            if (_rotDeg <= -360.0) _rotDeg += 360.0;
+            _iv.transform = CGAffineTransformMakeRotation((CGFloat)(_rotDeg * M_PI / 180.0));
+        } else if (_iv.transform.a != 1.0 || _iv.transform.b != 0.0) {
+            _iv.transform = CGAffineTransformIdentity;
+        }
+        static BOOL loggedMask;
+        if (!loggedMask) {
+            loggedMask = YES;
+            DLog(@"遮罩素材显示: 共 %lu 帧 (目录 %@) 旋转=%d 反转=%d 速度=%.2f",
+                 (unsigned long)frames.count, maskAnimFolder ?: @"默认第一个文件夹", maskRotateOn, maskRotateReverse, maskRotateSpeed);
+        }
+    } @catch (NSException *e) { DLog(@"遮罩 step 异常(已忽略): %@", e); }
+}
+@end
+
+
 
 
 /* 音频开关: 开→在音频门户层(CALayerHost)上用掩码挖洞, 只隐藏右上角波形, 按钮/专辑/歌词不受影响; 关→移除掩码
@@ -1643,40 +1789,59 @@ static void updateSingleVideo(UIWindow *win) {
         [bestRoot bringSubviewToFront:mv];
         mv.link.paused = NO;
     }
-    /* 2.6.1: 歌词岛开启时隐藏小岛原生内容(2.2.9/2.2.21 逻辑) */
+    /* 2.6.3: 遮罩层 —— 贴在左侧专辑上, 与 mini 层同宿主 */
+    static char kWinMask;
+    DIMaskView *maskV = objc_getAssociatedObject(win, &kWinMask);
+    if (!maskV) {
+        maskV = [[DIMaskView alloc] initWithFrame:CGRectZero];
+        objc_setAssociatedObject(win, &kWinMask, maskV, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    }
+    if (!enabled || gRecordingActive || !maskOn) {
+        if (maskV.superview) { [maskV removeFromSuperview]; maskV.hidden = YES; }
+        if (maskV.iv.image) maskV.iv.image = nil;
+        maskV.link.paused = YES;
+    } else {
+        if (maskV.superview != bestRoot) {
+            [maskV removeFromSuperview];
+            [bestRoot addSubview:maskV];
+            maskV.hidden = YES;
+            maskV.iv.image = nil;
+        }
+        [bestRoot bringSubviewToFront:maskV];  // 遮罩必须在专辑素材之上
+        maskV.link.paused = NO;
+    }
+    /* 2.6.3: 歌词岛开启时隐藏音乐岛原生内容 —— 只认"确认过的音乐岛"(identifier+类名校验),
+       充电/人脸/来电/录屏/通知等其它岛一律不碰, 各自原生内容照常显示。 */
     {
-        BOOL L = NO, R = NO;
-        int pc = diPortalCountInHost(bestRoot, &L, &R);
-        BOOL mediaActive = AVAudioSession.sharedInstance.isOtherAudioPlaying || (mrQueryOK && musicPlaying) || (diFindAudioLayer(bestRoot) != nil);
-        BOOL hideL = miniAnimOn && (pc >= 2 && L && R) && mediaActive && bestRoot.bounds.size.height <= 60;
-        BOOL hideR = miniAudioOn && mediaActive && bestRoot.bounds.size.height <= 60;
         static char kHiddenPortals; static CFAbsoluteTime tHideLog;
         NSMutableArray *found = objc_getAssociatedObject(win, &kHiddenPortals) ?: [NSMutableArray array];
-        for (CALayer *l in found) if (!l.isHidden) { l.hidden = YES; }
-        if (hideL || hideR) {
+        BOOL isMusicIsland = diMiniMusicActive(bestRoot);
+        BOOL wantL = isMusicIsland && miniAnimOn;
+        BOOL wantR = isMusicIsland && miniAudioOn;
+        /* 先恢复上一轮隐藏的(每轮重建列表, 避免残留到别的形态) */
+        for (CALayer *l in found) if (l.isHidden) l.hidden = NO;
+        if (found.count) [found removeAllObjects];
+        if (wantL || wantR) {
             CGFloat halfW = bestRoot.bounds.size.width * 0.5;
             NSMutableArray<CALayer *> *stack = [NSMutableArray arrayWithObject:bestRoot.layer];
             int guard = 0;
             while (stack.count && guard++ < 300) {
                 CALayer *l = stack.firstObject; [stack removeObjectAtIndex:0];
                 NSString *cn = NSStringFromClass(l.class);
-                if (([cn containsString:@"CAPortalLayer"] || [cn containsString:@"CALayerHost"]) && l.bounds.size.height < 200) {
+                if (([cn containsString:@"CAPortalLayer"] || [cn containsString:@"CALayerHost"]) &&
+                    l.bounds.size.height < 200 && l.bounds.size.width > 6) {
                     CGRect r = [bestRoot.layer convertRect:l.bounds fromLayer:l];
                     BOOL isAudioSide = (CGRectGetMidX(r) >= halfW);
-                    if ((isAudioSide && hideR) || (!isAudioSide && hideL)) {
+                    if ((isAudioSide && wantR) || (!isAudioSide && wantL)) {
                         l.hidden = YES;
-                        if (![found containsObject:l]) [found addObject:l];
+                        [found addObject:l];
                     }
                 }
                 for (CALayer *s in l.sublayers) [stack addObject:s];
             }
-        } else {
-            static CFAbsoluteTime tRestore;
-            if (found.count && CFAbsoluteTimeGetCurrent() - tRestore > 0.5) {
-                tRestore = CFAbsoluteTimeGetCurrent();
-                for (CALayer *l in found) l.hidden = NO;
-                [found removeAllObjects];
-                if (CFAbsoluteTimeGetCurrent() - tHideLog > 3) { tHideLog = CFAbsoluteTimeGetCurrent(); DLog(@"歌词岛: 开关关闭/退出音乐, 恢复小岛原生内容"); }
+            if (CFAbsoluteTimeGetCurrent() - tHideLog > 3 && found.count) {
+                tHideLog = CFAbsoluteTimeGetCurrent();
+                DLog(@"歌词岛: 隐藏音乐岛原生内容 左侧=%d 右侧=%d 层数=%lu", wantL, wantR, (unsigned long)found.count);
             }
         }
         objc_setAssociatedObject(win, &kHiddenPortals, found, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
