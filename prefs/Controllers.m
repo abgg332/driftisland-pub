@@ -588,6 +588,7 @@ static Class diStepSliderClass(void) {
 - (NSArray *)buildSpecifiers;
 @end
 @interface DILyricsIslandSettings : DIMiniBaseController @end /* 2.2.24: 歌词岛合并页 = 上半左侧专辑 + 下半右侧音频 */
+@interface DIFrameFoldersMask : DIFrameFolders @end /* 2.6.3: 遮罩素材选择(键 maskAnimFolder) */
 @interface DIFrameFoldersMini : DIFrameFolders @end  /* 左侧(mini)帧率素材选择(键 smallAnimFolder) */
 @interface DIFrameFoldersAudio : DIFrameFolders @end /* 右侧音频素材(键 miniAudioFolder) */
 @interface DIPrefsController (ZoneLinkFwd)
@@ -3305,6 +3306,20 @@ static void diOpenHomeBarPickWindow(void) {
 }
 - (id)readSmallAnimName:(PSSpecifier *)sp { return [self folderNameForKey:@"smallAnimFolder"]; }
 - (id)readAudioAnimName:(PSSpecifier *)sp { return [self folderNameForKey:@"miniAudioFolder"]; }
+- (id)readMaskAnimName:(PSSpecifier *)sp { return [self folderNameForKey:@"maskAnimFolder"]; }
+/* 2.6.3: 遮罩/旋转用带小数的滑杆行(range + 自定义渲染已支持 0.5 步进) */
+- (PSSpecifier *)numSliderD:(NSString *)label key:(NSString *)key def:(double)def mn:(double)mn mx:(double)mx {
+    PSSpecifier *sp = [PSSpecifier preferenceSpecifierNamed:label
+        target:self set:@selector(setPreferenceValue:specifier:) get:@selector(readPreferenceValue:)
+        detail:nil cell:PSSliderCell edit:nil];
+    [sp setProperty:key forKey:@"key"];
+    [sp setProperty:kDomain forKey:@"defaults"];
+    [sp setProperty:@(def) forKey:@"default"];
+    [sp setProperty:@(mn) forKey:@"min"];
+    [sp setProperty:@(mx) forKey:@"max"];
+    [sp setProperty:@{ @"min": @(mn), @"max": @(mx), @"label": label } forKey:@"range"];
+    return sp;
+}
 - (NSString *)folderNameForKey:(NSString *)key {
     CFPreferencesAppSynchronize((__bridge CFStringRef)kDomain);
     id v = CFBridgingRelease(CFPreferencesCopyAppValue((__bridge CFStringRef)key, (__bridge CFStringRef)kDomain));
@@ -3585,6 +3600,17 @@ static void diOpenHomeBarPickWindow(void) {
         target:self set:NULL get:@selector(readAudioAnimName:) detail:[DIFrameFoldersAudio class] cell:PSLinkCell edit:nil];
     [nameRow2 setProperty:@"miniAudioFolder" forKey:@"nameKey"];
     [specs addObject:nameRow2];
+
+    /* 2.6.3: 遮罩设置 —— 素材贴合在左侧专辑上, 跟随专辑位置/尺寸, 可旋转 */
+    [specs addObject:[self groupSpec:@"遮罩设置" footer:@"遮罩素材贴合在左侧专辑(放歌时小岛左侧)上, 位置与大小随专辑走。素材取自 /var/mobile/灵动岛/帧率素材 下的文件夹。"]];
+    [specs addObject:[self switchSpec:@"启用遮罩" key:@"maskOn" def:@NO]];
+    PSSpecifier *maskName = [PSSpecifier preferenceSpecifierNamed:@"素材名"
+        target:self set:NULL get:@selector(readMaskAnimName:) detail:[DIFrameFoldersMask class] cell:PSLinkCell edit:nil];
+    [maskName setProperty:@"maskAnimFolder" forKey:@"nameKey"];
+    [specs addObject:maskName];
+    [specs addObject:[self switchSpec:@"启用素材旋转" key:@"maskRotateOn" def:@NO]];
+    [specs addObject:[self switchSpec:@"素材旋转反转" key:@"maskRotateReverse" def:@NO]];
+    [specs addObject:[self numSliderD:@"旋转速度" key:@"maskRotateSpeed" def:4.0 mn:-12 mx:12]];
     return specs;
 }
 @end
@@ -3595,5 +3621,8 @@ static void diOpenHomeBarPickWindow(void) {
 @end
 @implementation DIFrameFoldersAudio
 - (NSString *)prefKey { return @"miniAudioFolder"; }
+@end
+@implementation DIFrameFoldersMask
+- (NSString *)prefKey { return @"maskAnimFolder"; }
 @end
 
