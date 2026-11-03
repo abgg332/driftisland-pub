@@ -152,6 +152,9 @@ static BOOL enabled, smallOn = YES, expandOn = YES, spectrumOn, materialOn = YES
 /* 2.8.25: 隐藏黑块 —— 把灵动岛的黑色本体(材质底/黑框/挖孔区黑块)整体隐藏,
    截屏/录屏里不再出现那个黑色胶囊。设置页位于「总开关」和「隐藏小岛」之间。 */
 static BOOL hideCoreOn;
+static void diUntameBlackLayers(void);   /* 2.8.25: 还原被藏掉的黑层(实现在 DIVideoView 区) */
+static void diTameBlackLayers(UIView *root); /* 2.8.25: 治理黑色底/黑框 */
+static BOOL diIsCallIsland(UIView *host);    /* 2.8.25: 来电岛识别 */
 /* 2.2.59: 小岛边框流光 —— 把选中的小岛素材贴在外轮廓上循环跑 */
 static BOOL smallEdgeOn = NO;
 static CGFloat smallEdgeW = 3.0;       /* 流光带宽度(pt) */
@@ -797,9 +800,6 @@ static void refreshPrefs(void) {
 
 static char kWinVideoSmall, kWinVideoExpand, kWinVideoRec, kWinVideoSpec;
 static CGFloat diVideoBleed(UIView *host);   /* 2.8.24: 视频层贴边外扩量(实现见 updateSingleVideo 之前) */
-static void diTameBlackLayers(UIView *host); /* 2.8.25: 治理岛上的黑色底/黑框(黑边+隐藏黑块) */
-static void diUntameBlackLayers(void);       /* 2.8.25: 还原全部被我们藏掉的黑层 */
-static BOOL diIsCallIsland(UIView *host);    /* 2.8.25: 来电岛识别(展开素材黑名单, 实现见 updateSingleVideo 之前) */
 
 /* ===== 音频会话: 2.3.2 定稿(2.3.1 删错了一次, 这里写清楚为什么必须保留) =====
 
