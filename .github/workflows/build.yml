@@ -19,7 +19,10 @@ jobs:
   build:
     # 2026-11-02 macOS 14 runner 退役, 期间处于 brownout(任务在启动前被撤销);
     # 换 macos-15, 构建工具链(brew/theos/ldid)完全一致。
-    runs-on: macos-15
+    # 2026-11-03: macos-15(arm64) runner 容量紧张, 连续两次排队 15 分钟
+    # 未被调度(hosted runner not acquired)后 cancelled。Theos 交叉编译
+    # 不依赖 Mac 架构, 换 x86_64 的 macos-15-intel, 工具链完全一致。
+    runs-on: macos-15-intel
     steps:
       - name: Checkout
         uses: actions/checkout@v4
