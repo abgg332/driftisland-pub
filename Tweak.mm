@@ -783,6 +783,7 @@ static void refreshPrefs(void) {
 @end
 
 static char kWinVideoSmall, kWinVideoExpand, kWinVideoRec, kWinVideoSpec;
+static CGFloat diVideoBleed(UIView *host);   /* 2.8.24: 视频层贴边外扩量(实现见 updateSingleVideo 之前) */
 
 /* ===== 音频会话: 2.3.2 定稿(2.3.1 删错了一次, 这里写清楚为什么必须保留) =====
 
@@ -1204,7 +1205,8 @@ static BOOL diIsVolumeIsland(UIView *host) {
             float spd = (float)(animFPS / 50.0); if (spd < 0.1) spd = 0.1; if (spd > 4) spd = 4; // 帧率速度滑杆映射为视频播放速率(50=原速)
             self.playRate = spd;
             if (spd > 0 && fabsf(liveP.rate - spd) > 0.01f) [liveP setRate:spd];
-            [[self seamless ? self.playerB : self.player] setRate:spd];
+            AVQueuePlayer *idleP = self.useB ? self.player : self.playerB;
+            [idleP setRate:spd];
             if (++_stallCount > 120) { _stallCount = 0; [self loadVideo:want]; DLog(@"播放器连续2秒起不来, 重载素材: %@", want); } // 看门狗: 约2秒仍不播则重载
         } else {
             _stallCount = 0;
