@@ -5475,8 +5475,12 @@ static void diGainMapApply(UIView *v, BOOL enabled) {
 static void diScanDetachGainMaps(void) {
     if (![NSThread isMainThread] || !hideCoreOn) return;
     UIWindow *ap = nil;
-    for (UIWindow *w in UIApplication.sharedApplication.windows)
-        if ([w isKindOfClass:NSClassFromString(@"SBSystemApertureWindow")]) { ap = w; break; }
+    for (UIScene *s in UIApplication.sharedApplication.connectedScenes) {
+        if (![s isKindOfClass:[UIWindowScene class]]) continue;
+        for (UIWindow *w in ((UIWindowScene *)s).windows)
+            if ([w isKindOfClass:NSClassFromString(@"SBSystemApertureWindow")]) { ap = w; break; }
+        if (ap) break;
+    }
     if (!ap) return;
     NSMutableArray<UIView *> *stk = [NSMutableArray arrayWithObject:ap];
     int g = 0;
