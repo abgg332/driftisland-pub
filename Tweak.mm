@@ -3210,6 +3210,9 @@ static UIImage *diInvertMaskImage(UIImage *m);
 @property (nonatomic, assign) CGFloat lastGlassSide; /* 上次画玻璃的边长, 用于藏层节流 */
 @property (nonatomic, assign) CGPoint lastGlassCenter;
 @property (nonatomic, assign) CFAbsoluteTime paintT;     /* 上次真正画玻璃的时间, 稳定态短路用 */
+/* 2.8.39: 上次确认"正在播放"的时间 —— 遮罩锁死用(308 反馈: 切歌/门户重建时
+   判定瞬断就拆玻璃, 用户看到"先方形后遮罩"; 播放中或 30s 内播放过就永不拆)。 */
+@property (nonatomic, assign) CFAbsoluteTime lastPlayT;
 /* 2.7.45: 素材指纹状态改成实例属性 ——
    2.7.42~2.7.44 用函数内 static, 而小岛/展开岛各有一个 DIMaskView 实例,
    两个实例抢同一组 static: A 刚记录完指纹, B 立刻判"变了"→ 又重建,
@@ -3758,6 +3761,15 @@ static BOOL diApplyMaskToCover(UIView *cover, UIImage *shape) {
         UIView *host = self.superview;
         if (!host || host.window == nil) { [self diTeardown]; if (++_miss > 20) _link.paused = YES; return; }
 
+        /* 2.8.39: 遮罩锁死状态(308 反馈: "切歌变回方形然后才遮罩; 展开岛/切换歌曲
+           不要影响, 一直显示遮罩")。播放中 → 记 lastPlayT; 玻璃在 + 30s 内播放过
+           → lockMask=YES: 门户重建/指纹变化/判定瞬断/展开过渡一律不拆玻璃,
+           只重扫校准位置。真停了 30s 以上或关开关才收(见下面各分支)。 */
+        CFAbsoluteTime nowX = CFAbsoluteTimeGetCurrent();
+        BOOL playingX = mrQueryOK ? musicPlaying : AVAudioSession.sharedInstance.isOtherAudioPlaying;
+        if (playingX) self.lastPlayT = nowX;
+        BOOL lockMask = self.glassOn && (nowX - self.lastPlayT < 30.0);
+
         CALayer *pl = host.layer.presentationLayer;
         CGSize bs = pl ? pl.bounds.size : host.bounds.size;
 
@@ -3776,6 +3788,13 @@ static BOOL diApplyMaskToCover(UIView *cover, UIImage *shape) {
             }
             if (self.fpCount > 0 && (sc != self.fpCount || f1 != self.fpFirst || f2 != self.fpLast)) {
                 self.fpCount = sc; self.fpFirst = f1; self.fpLast = f2;
+                /* 2.8.39: 锁死时门户重建(切歌/App 重建内容层)不再拆玻璃 ——
+                   只重扫校准封面位置, 用户看不到"先方后遮罩"。 */
+                if (lockMask) {
+                    self.stableFrm = 0;
+                    self.scanT = 0;          /* 立即重扫(重新定位封面) */
+                    return;
+                }
                 if (self.glassOn || !self.hidden) {
                     [self diRestorePainted];
                     self.glassOn = NO;
@@ -3806,6 +3825,13 @@ static BOOL diApplyMaskToCover(UIView *cover, UIImage *shape) {
         if (sizeChanged) self.stableFrm = 0;
         else if (self.stableFrm < 2) self.stableFrm++;
         if (growing && (self.glassOn || !self.hidden)) {
+            /* 2.8.39: 锁死时展开起手也不拆 —— 玻璃保持在原位(展开动画结束后
+               由展开态挂载路径重定位到展开方块层), 用户看到遮罩从头到尾不断。 */
+            if (lockMask) {
+                self.stableFrm = 0;
+                self.bigT = CFAbsoluteTimeGetCurrent();
+                return;
+            }
             /* 展开起手: 立即收玻璃 + 还原系统专辑, 并记住"不再参与"直到缩回 */
             [self diRestorePainted];
             self.glassOn = NO;
@@ -3830,7 +3856,13 @@ static BOOL diApplyMaskToCover(UIView *cover, UIImage *shape) {
         BOOL isMini = (bs.height >= 24 && bs.height <= 62
                        && bs.width >= 100 && bs.width <= 208
                        && bs.width > bs.height * 1.55);
-        BOOL isExpand = NO;   /* 2.8.18: 展开态不再参与(用户明确不要) */
+        /* 2.8.39: 展开态重新参与(308: "展开岛什么的不要影响, 一直显示遮罩")。
+           窗口 = 媒体展开宿主实测 407x201 / 330x72 系; 收紧高度下限 120 挡掉
+           来电展开(330x72 高 72)和一切过渡中间帧(259x98 / 313x131 都 < 120 或宽超),
+           上限 300x440 挡掉 DriftIsland 全屏信息页(430x932)和充电岛(430x360 高 360)。
+           充电岛虽然尺寸命中, 但下面音乐岛结构判定(diIsNowPlayingHostCached)会挡住。 */
+        BOOL isExpand = (bs.height >= 120 && bs.height <= 300
+                         && bs.width >= 280 && bs.width <= 440);
         {
             static CGFloat sLastW, sLastH; static CFAbsoluteTime sSzT;
             if ((fabs(bs.width - sLastW) > 6 || fabs(bs.height - sLastH) > 6)
@@ -3859,9 +3891,11 @@ static BOOL diApplyMaskToCover(UIView *cover, UIImage *shape) {
                 DLog(@"遮罩跳过: 宿主 %.0fx%.0f 不是正在播放的音乐岛(通知岛/暂停), 不遮罩",
                      bs.width, bs.height);
             }
-            /* 2.8.21: 判定瞬断不拆玻璃 —— 小岛↔compact 换形态时门户会重建一两帧,
-               旧代码立刻 teardown, 用户看到"先显示方的然后才显示遮罩"。
-               播放停止 / 换岛仍然立刻收(只有"播放中 + 玻璃刚画过 + 形态还在"才保留)。 */
+            /* 2.8.39: 判定瞬断**永不拆玻璃**(锁死) —— 2.8.21 的"刚画过 1.0s 内保留"
+               在切歌时不够: 门户重建经常超过 1s, 用户看到"先显示方的然后才显示遮罩"。
+               播放中或 30s 内播放过 → 直接 return 保留玻璃, 等判定恢复自然续上。
+               真停了 30s 以上 → 落到下面 diTeardown 正常收。 */
+            if (lockMask) return;
             BOOL playing = mrQueryOK ? musicPlaying : AVAudioSession.sharedInstance.isOtherAudioPlaying;
             if (playing && self.glassOn && CFAbsoluteTimeGetCurrent() - self.paintT < 1.0) return;
         }
@@ -3870,11 +3904,16 @@ static BOOL diApplyMaskToCover(UIView *cover, UIImage *shape) {
                ①形态不对(展开岛 / 充电岛 / 大岛): 只把玻璃收起来、系统专辑还原,
                  但**保留封面/方块缓存**, 这样缩回小岛的第一帧就能直接按缓存画,
                  中间不会再有"系统方形专辑"露出来;
-               ②根本不是音乐岛(暂停 / 通知岛): 才整体 teardown, 探针该歇就歇。 */
+               ②根本不是音乐岛(暂停 / 通知岛): 才整体 teardown, 探针该歇就歇。
+               2.8.39: 锁死(播放中/30s 内播放过 + 玻璃在)时①也不收 ——
+               "切换歌曲、展开岛都不要影响, 一直显示遮罩"(308)。 */
             BOOL shapeOnly = (enabled && maskOn && !gRecordingActive
                               && !isMini && !isExpand
                               && (self.glassOn || self.cacheCoverV != nil));
             if (shapeOnly) {
+                /* 锁死: 保持玻璃等待(展开态由 isExpand 分支接管, 充电/来电大岛
+                   不锁死 —— 它们不是播放中的音乐岛, lockMask 不会为 YES)。 */
+                if (lockMask) return;
                 if (self.glassOn || !self.hidden) {
                     [self diRestorePainted];
                     self.glassOn = NO;
@@ -5237,7 +5276,16 @@ static void diGainRestoreState(DIGainMapState *s) {
     UIView *v = s.view, *parent = s.parent;
     [gGainStates() removeObjectIdenticalTo:s];
     if (!parent || v.superview || parent == v || [parent isDescendantOfView:v]) return;
-    [parent insertSubview:v atIndex:MIN(s.index, parent.subviews.count)];
+    /* 2.8.39: 别插到我们自己的底层素材层(DIVideoView/DIAnimView 等 DI* 层垫在
+       index 0)前面 —— 会把背景视频整个盖住, 用户看到"展开背景黑屏/暂停"(308)。
+       记录的 index 是摘除时的位置, 而底层视频层是后来 insertSubview:0 加的,
+       原样插回 index 0 就会压住它。 */
+    NSUInteger idx = MIN(s.index, parent.subviews.count);
+    if (idx == 0) {
+        UIView *first = parent.subviews.firstObject;
+        if (first && first != v && [NSStringFromClass(first.class) hasPrefix:@"DI"]) idx = 1;
+    }
+    [parent insertSubview:v atIndex:idx];
 }
 /* 2.8.38: 展开态判定 —— 307 实测: 展开的媒体岛(407x489 门户)和 DriftIsland
    展开页(DIVideoView 411x228)里, 内容衬底被摘就会"一闪一闪甚至整页黑";
@@ -5705,7 +5753,32 @@ static void updateSingleVideo(UIWindow *win) {
         if (a > bestA) { bestA = a; bigRoot = root; }
     }
     UIView *matRoot = musicRoot;                                    /* 素材: 只跟音乐岛 */
+    /* 2.8.39: 音乐岛瞬断/暂停**粘滞**(308: "展开背景有时候暂停, 播放完就黑屏")。
+       根因: 切歌/暂停时 diIsNowPlayingHostCached 断或系统 MediaRemote 报未播放,
+       matRoot 置 nil → expandV 被 pause+hidden, 恢复后又重挂, 用户看到
+       "暂停一下/黑一下"。背景素材是 DriftIsland 自己的循环视频, 不该跟着
+       系统播放状态反复起停 —— 只要**宿主岛还活着**(还在窗口/树上)就一路用,
+       只有岛真的消失(切 App/锁屏音乐岛注销)才撤。 */
+    static __weak UIView *sStickyMat;
+    if (matRoot) {
+        sStickyMat = matRoot;
+    } else if (sStickyMat && sStickyMat.window == win && sStickyMat.superview) {
+        matRoot = sStickyMat;   /* 暂停/切歌/门户重建: 保持原宿主, 素材不断 */
+    } else {
+        sStickyMat = nil;
+    }
     UIView *bestRoot = newestRoot ?: musicRoot ?: (stickyAlive ?: bigRoot);  /* 视频: 最新岛优先 */
+    /* 2.8.39: 视频宿主切换宽限 —— smallV 已挂的 root 还活着就别搬
+       (removeFromSuperview + insertSubview = 黑一下, 308 "循环播放会黑一下")。
+       新 root 只是"更新"(hostTable 枚举顺序/新岛出现)时保持旧的, 2s 宽限。 */
+    static __weak UIView *sVideoRoot; static CFAbsoluteTime sVideoT = 0;
+    if (bestRoot != sVideoRoot && sVideoRoot && sVideoRoot.window == win && sVideoRoot.superview) {
+        if (sVideoT == 0) sVideoT = CFAbsoluteTimeGetCurrent();
+        if (CFAbsoluteTimeGetCurrent() - sVideoT < 2.0) bestRoot = sVideoRoot;
+        else sVideoT = 0;
+    } else {
+        sVideoRoot = bestRoot; sVideoT = 0;
+    }
     sStickyRoot = bestRoot;
     if (!bestRoot && !matRoot) {
         for (DIVideoView *v in diLayers(smallV, expandV)) {
@@ -7847,6 +7920,15 @@ static void diSyncEdgeGlowAll(void) {
     for (UIView *isl in islands) diApplyEdgeGlow(isl);
 }
 
+/* 2.8.39: 颜色 → 6 位 hex(签名早退用, 保证单色/多色切换都能被签名识别) */
+static NSString *diColorHex(UIColor *c) {
+    if (!c) return @"-";
+    CGFloat r, g, b, a;
+    if (![c getRed:&r green:&g blue:&b alpha:&a]) return @"-";
+    return [NSString stringWithFormat:@"%02X%02X%02X",
+            (int)(r * 255 + 0.5), (int)(g * 255 + 0.5), (int)(b * 255 + 0.5)];
+}
+
 static void diStylePlatter(UIView *platter) {
     if (!platter) return;
     /* 2.5.3: 2.3.2 的媒体卡跳过已移除(恢复原版 2.3.0)。 */
@@ -7857,6 +7939,50 @@ static void diStylePlatter(UIView *platter) {
        圆角 = face 自己的 cornerRadius(夹到半高), 跟随自定义宽高自适应。 */
     CGFloat br = 0;
     CGRect brect = diSystemCardRect(platter, &br);
+    /* 2.8.39: 新 platter 前几帧子层还没布局好, diSystemCardRect 只能退回
+       platter.bounds 猜圆角(来源=fallback)。这时候画 shadow/border, 等真卡片
+       层量到了又要改一次 —— 用户看到的就是"注销播放器再放歌, 发光闪一下
+       再适应"(308)。量不到就等几帧; 1.5s 兜底放行(保证最终一定生效,
+       不会永远不画; 注销→放歌整个门户重建远慢于 1.5s, 等得到)。 */
+    if ([diLastCornerSource() isEqualToString:@"fallback"]) {
+        static char kFaceWaitT;
+        NSNumber *t0 = objc_getAssociatedObject(platter, &kFaceWaitT);
+        if (!t0) {
+            objc_setAssociatedObject(platter, &kFaceWaitT, @(CFAbsoluteTimeGetCurrent()),
+                                     OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+            [CATransaction commit];
+            return;
+        }
+        if (CFAbsoluteTimeGetCurrent() - t0.doubleValue < 1.5) {
+            [CATransaction commit];
+            return;
+        }
+    } else {
+        static char kFaceWaitT;
+        objc_setAssociatedObject(platter, &kFaceWaitT, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    }
+    /* 2.8.39: 整块配置签名早退 —— 0.5s 自愈 tick 反复重入本函数, 原来每 tick
+       都重写 shadow/border/path(层属性反复赋值会触发隐式动画, 观感就是微闪)。
+       签名含三个开关 + 色表(含单色, 306 的"颜色切换无效"不能复发) + 边框宽 +
+       发光/阴影半径 + 卡片矩形圆角, 全同才跳过。 */
+    {
+        static char kStyleSig;
+        NSMutableString *cs = [NSMutableString string];
+        for (UIColor *c in lkBdColors)  [cs appendFormat:@"%@,", diColorHex(c)];
+        if (lkBdColor)  [cs appendFormat:@"#%@", diColorHex(lkBdColor)];
+        [cs appendString:@"|"];
+        for (UIColor *c in lkShColors)  [cs appendFormat:@"%@,", diColorHex(c)];
+        if (lkShColor)  [cs appendFormat:@"#%@", diColorHex(lkShColor)];
+        [cs appendString:@"|"];
+        for (UIColor *c in lkGlowColors) [cs appendFormat:@"%@,", diColorHex(c)];
+        if (lkGlowColor) [cs appendFormat:@"#%@", diColorHex(lkGlowColor)];
+        NSString *sig = [NSString stringWithFormat:@"%d|%d|%d|%.1f|%.1f|%.1f|%.0f,%.0f,%.0f,%.0f r%.0f|%@",
+                         lkBdOn, lkShOn, lkGlowOn, lkBdW, lkShR, lkGlowR,
+                         brect.origin.x, brect.origin.y, brect.size.width, brect.size.height, br, cs];
+        NSString *prev = objc_getAssociatedObject(platter, &kStyleSig);
+        if ([sig isEqualToString:prev]) { [CATransaction commit]; return; }
+        objc_setAssociatedObject(platter, &kStyleSig, sig, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    }
     static char kLastLog;
     {
         NSString *key = [NSString stringWithFormat:@"%.0fx%.0f@%.0f,%.0f r%.0f",
