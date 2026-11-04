@@ -7939,27 +7939,39 @@ static void diStylePlatter(UIView *platter) {
        圆角 = face 自己的 cornerRadius(夹到半高), 跟随自定义宽高自适应。 */
     CGFloat br = 0;
     CGRect brect = diSystemCardRect(platter, &br);
-    /* 2.8.39: 新 platter 前几帧子层还没布局好, diSystemCardRect 只能退回
-       platter.bounds 猜圆角(来源=fallback)。这时候画 shadow/border, 等真卡片
-       层量到了又要改一次 —— 用户看到的就是"注销播放器再放歌, 发光闪一下
-       再适应"(308)。量不到就等几帧; 1.5s 兜底放行(保证最终一定生效,
-       不会永远不画; 注销→放歌整个门户重建远慢于 1.5s, 等得到)。 */
-    if ([diLastCornerSource() isEqualToString:@"fallback"]) {
+    /* 2.8.39/2.8.40: 无效卡片帧不画(合并两类"先错后改"):
+       ① 新 platter 前几帧子层还没布局好, diSystemCardRect 只能退回
+          platter.bounds 猜圆角(来源=fallback) —— 画了等真卡片层量到又要改,
+          用户看到"发光闪一下再适应"(308);
+       ② 注销后第一次进锁屏, 系统给卡片内部形变层做入场动画, 过渡帧的
+          bounds 是缩放前的原始值 —— 309 日志实锤: platter 301x106 时量到
+          "卡片 401x167 / 401x142"(比视觉卡片宽 100pt), shadowPath 按它画,
+          光晕从卡片两侧外溢一大团, 就是"第一次进锁屏发光外溢"(309 视频)。
+       校验: 卡片宽超过 platter 宽 1.2 倍(+4pt 容差)、高超过 1.5 倍(+8pt)、
+       或宽度 < 40, 判无效帧 → 跳过本次配置等稳定; 1.5s 兜底放行
+       (保证最终一定生效, 不会永远不画)。 */
+    {
+        CGFloat pw0 = platter.bounds.size.width, ph0 = platter.bounds.size.height;
+        BOOL invalidFrame = [diLastCornerSource() isEqualToString:@"fallback"]
+            || brect.size.width > pw0 * 1.2 + 4
+            || brect.size.height > ph0 * 1.5 + 8
+            || brect.size.width < 40;
         static char kFaceWaitT;
-        NSNumber *t0 = objc_getAssociatedObject(platter, &kFaceWaitT);
-        if (!t0) {
-            objc_setAssociatedObject(platter, &kFaceWaitT, @(CFAbsoluteTimeGetCurrent()),
-                                     OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-            [CATransaction commit];
-            return;
+        if (invalidFrame) {
+            NSNumber *t0 = objc_getAssociatedObject(platter, &kFaceWaitT);
+            if (!t0) {
+                objc_setAssociatedObject(platter, &kFaceWaitT, @(CFAbsoluteTimeGetCurrent()),
+                                         OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+                [CATransaction commit];
+                return;
+            }
+            if (CFAbsoluteTimeGetCurrent() - t0.doubleValue < 1.5) {
+                [CATransaction commit];
+                return;
+            }
+        } else {
+            objc_setAssociatedObject(platter, &kFaceWaitT, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
         }
-        if (CFAbsoluteTimeGetCurrent() - t0.doubleValue < 1.5) {
-            [CATransaction commit];
-            return;
-        }
-    } else {
-        static char kFaceWaitT;
-        objc_setAssociatedObject(platter, &kFaceWaitT, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
     }
     /* 2.8.39: 整块配置签名早退 —— 0.5s 自愈 tick 反复重入本函数, 原来每 tick
        都重写 shadow/border/path(层属性反复赋值会触发隐式动画, 观感就是微闪)。
