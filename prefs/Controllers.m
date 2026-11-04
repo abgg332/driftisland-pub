@@ -204,6 +204,7 @@ static NSInteger indexForKey(NSString *key) {
 static void diOpenHomeBarPanelWindow(void);   /* 2.5.10 横条颜色面板 */
 static void diOpenHomeBarPickWindow(void);    /* 2.5.12 横条配色预设面板 */
 static void diCloseBarWindow(void);           /* 2.7.35: 前置声明(安全收掉横条颜色窗口) */
+static void diPushPanel(UIViewController *panel, NSString *title, UIWindow **legacyWin);  /* 2.8.36: 前置声明 */
 static void postReload(void) {
     CFNotificationCenterPostNotification(CFNotificationCenterGetDarwinNotifyCenter(),
         (__bridge CFStringRef)kNotifyStr, NULL, NULL, YES);
