@@ -10435,6 +10435,7 @@ static void diCCHookedCCWillLayout(id self, SEL _cmd) {
 static id diCCHookedCCBeginPres(id self, SEL _cmd, BOOL animated, BOOL interactive) {
     id r = nil;
     if (diOrigCCBeginPres) r = ((id (*)(id, SEL, BOOL, BOOL))diOrigCCBeginPres)(self, _cmd, animated, interactive);
+    RLog(@"[控制中心] beginPresentation animated=%d interactive=%d", (int)animated, (int)interactive);
     @try {
         diCCAttachTo(self, diCCBackgroundOf(self));
         diCCSetVisible(YES);
@@ -10453,10 +10454,11 @@ static void diCCHookedCCWillDismiss(id self, SEL _cmd) {
     if (diOrigCCWillDismiss) ((void (*)(id, SEL))diOrigCCWillDismiss)(self, _cmd);
 }
 
-/* 收起: 先隐藏(不等系统动画), 再交回 %orig */
+/* 2.8.59: 仅交互式 beginDismissal 不预先藏背景；交互可能取消。
+   非交互保留原行为。viewDidDisappear 作为真正离场时的清理入口。 */
 static id diCCHookedCCBeginDis(id self, SEL _cmd, BOOL animated, BOOL interactive) {
-    @try { diCCSetVisible(NO); }
-    @catch (__unused NSException *e) {}
+    RLog(@"[控制中心] beginDismissal animated=%d interactive=%d", (int)animated, (int)interactive);
+    if (!interactive) { @try { diCCSetVisible(NO); } @catch (__unused NSException *e) {} }
     if (diOrigCCBeginDis) return ((id (*)(id, SEL, BOOL, BOOL))diOrigCCBeginDis)(self, _cmd, animated, interactive);
     return nil;
 }
@@ -10465,6 +10467,7 @@ static void diCCHookedCCDidDisappear(id self, SEL _cmd, BOOL animated) {
     if (diOrigCCDidDisappear) ((void (*)(id, SEL, BOOL))diOrigCCDidDisappear)(self, _cmd, animated);
     @try {
         UIViewController *vc = (UIViewController *)self;
+        RLog(@"[控制中心] viewDidDisappear window=%@", vc.view.window ? NSStringFromClass(vc.view.window.class) : @"无");
         if (!vc.view.window) diCCSetVisible(NO);
     } @catch (__unused NSException *e) {}
 }
