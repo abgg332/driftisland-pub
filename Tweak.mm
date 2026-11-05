@@ -179,6 +179,7 @@ static BOOL gCCOverlayHooked;          /* 2.7.27: overlay 路径已成立 → MT
 static void diCCInstallOverlayHook(void);   /* 2.8.41: 前置声明(prefsChanged/启动时补装) */
 static void diCCInstallLayoutHook(void);    /* 2.8.42: 前置声明(overlay 失败退回旧路径) */
 static void diCCInstallScrollHook(void);    /* 2.8.43: 前置声明(overlay 装好后压制滚动区白底) */
+static void diCCTameScrollBackdrop(UIView *sv);   /* 2.8.46: 前置声明(layout 时也跑压制) */
 static NSString *wpLightAsset;         /* 2.7.32: 壁纸改成**单素材**, 这是唯一生效的键 */
 static NSString *wpDarkAsset;          /* 旧"深色"键, 只在新键为空时兜底, UI 已移除 */
 static BOOL wpFollowDark = YES;        /* 旧"跟随深色", 不再参与控制中心判定 */
@@ -10153,6 +10154,10 @@ static void diCCLayoutSurface(id vc) {
         }
     }
     gCCSurface.frame = bg.frame;
+    /* 2.8.46: layout 时也跑一次滚动区压制(不依赖滚动事件) */
+    for (UIView *sub in bg.superview.subviews)
+        if ([NSStringFromClass(sub.class) containsString:@"CCUIScrollView"])
+            diCCTameScrollBackdrop(sub);
     [CATransaction begin];
     [CATransaction setDisableActions:YES];
     for (CALayer *l in gCCSurface.layer.sublayers) {
@@ -10296,12 +10301,22 @@ static BOOL diCCTameOne(UIView *v, CGSize ws, int depth) {
                 DLog(@"[控制中心] 压制磨砂底 %@ (%.0fx%.0f) depth=%d", cn, bs.width, bs.height, depth);
             }
         } else if (![cn containsString:@"BackdropEffect"]) {
+            /* 2.8.46: 314 日志实锤 —— 白底真身是 CCUIScrollView 里那个 430x974 opaque=1
+               的模块内容容器 UIView: bg=null 逃过底色清理, 但 opaque=1, 交互时画白底。
+               对策: 非 clear 底色清空 + opaque 清 NO(大面积层才动, 模块小卡不碰)。 */
+            BOOL changed = NO;
             UIColor *bg = v.backgroundColor;
             if (bg && ![bg isEqual:UIColor.clearColor]) {
                 v.backgroundColor = nil;
-                found = YES;
+                changed = YES;
                 DLog(@"[控制中心] 清除色底 %@ (%.0fx%.0f) bg=%@ depth=%d", cn, bs.width, bs.height, bg, depth);
             }
+            if (v.isOpaque) {
+                v.opaque = NO;
+                changed = YES;
+                DLog(@"[控制中心] 清除不透明标记 %@ (%.0fx%.0f) depth=%d", cn, bs.width, bs.height, depth);
+            }
+            if (changed) found = YES;
         } else {
             found = YES;
             DLog(@"[控制中心][诊断] 大面积复合底 %@ (%.0fx%.0f) alpha=%.2f bg=%@ depth=%d 未处理",
