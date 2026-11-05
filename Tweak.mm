@@ -9390,6 +9390,73 @@ static void diCCTameAffordanceLayers(void) {
         l.opacity = 0.0;
     }
 }
+/* 2.8.51: 模块 collection 自身在壁纸上方合成不透明底色。只在它的
+   backgroundView 中镜像同一素材，位于所有 cell 下方，不改变手势/模块响应链。 */
+static UIView *gCCModuleMirror;
+static __weak UICollectionView *gCCMirrorCollection;
+static __weak UIView *gCCMirrorHost;
+static void diCCRemoveModuleMirror(void) {
+    if (gCCModuleMirror) {
+        for (CALayer *l in [gCCModuleMirror.layer.sublayers copy]) [l removeFromSuperlayer];
+        [gCCModuleMirror removeFromSuperview];
+    }
+    gCCModuleMirror = nil;
+    gCCMirrorCollection = nil;
+    gCCMirrorHost = nil;
+}
+static void diCCSyncModuleMirror(UIView *sv) {
+    if (!wpOn || !gCCVisible || !gCCSurface || gCCSurface.isHidden || !gCCSurface.window || !sv.window) {
+        diCCRemoveModuleMirror(); return;
+    }
+    UICollectionView *cv = nil;
+    for (UIView *v in sv.subviews) {
+        if ([v isKindOfClass:[UICollectionView class]] &&
+            [NSStringFromClass(v.class) isEqualToString:@"CCUIModuleCollectionView"]) { cv = (UICollectionView *)v; break; }
+        for (UIView *c in v.subviews)
+            if ([c isKindOfClass:[UICollectionView class]] &&
+                [NSStringFromClass(c.class) isEqualToString:@"CCUIModuleCollectionView"]) { cv = (UICollectionView *)c; break; }
+        if (cv) break;
+    }
+    if (!cv || cv.window != gCCSurface.window) return;
+    UIView *background = cv.backgroundView;
+    if (gCCMirrorCollection != cv || gCCMirrorHost != background ||
+        (gCCModuleMirror && gCCModuleMirror.superview != (background ?: (UIView *)cv)))
+        diCCRemoveModuleMirror();
+    if (!gCCModuleMirror) {
+        UIView *mirror = [UIView new];
+        mirror.userInteractionEnabled = NO;
+        mirror.clipsToBounds = YES;
+        /* 系统背景视图不改动；镜像作为最底层的非交互子视图。 */
+        if (background) [background insertSubview:mirror atIndex:0];
+        else [cv insertSubview:mirror atIndex:0];
+        gCCModuleMirror = mirror;
+        gCCMirrorCollection = cv;
+        gCCMirrorHost = background;
+        RLog(@"[控制中心] 模块背景镜像已装 (backgroundView=%@)",
+             background ? NSStringFromClass(background.class) : @"无");
+    }
+    UIView *mirror = gCCModuleMirror;
+    mirror.frame = background ? background.bounds : cv.bounds;
+    CALayer *source = gCCSurface.layer.sublayers.firstObject;
+    if (!source) { mirror.hidden = YES; return; }
+    mirror.hidden = NO;
+    CALayer *replica = mirror.layer.sublayers.firstObject;
+    BOOL video = [source isKindOfClass:[AVPlayerLayer class]];
+    if (!replica || (video != [replica isKindOfClass:[AVPlayerLayer class]])) {
+        for (CALayer *l in [mirror.layer.sublayers copy]) [l removeFromSuperlayer];
+        replica = video ? [AVPlayerLayer layer] : [CALayer layer];
+        [mirror.layer addSublayer:replica];
+    }
+    if (video) {
+        ((AVPlayerLayer *)replica).player = gCCPlayer;
+        ((AVPlayerLayer *)replica).videoGravity = AVLayerVideoGravityResizeAspectFill;
+    } else {
+        replica.contents = source.contents;
+        replica.contentsGravity = source.contentsGravity;
+    }
+    CGRect r = [gCCSurface convertRect:gCCSurface.bounds toView:mirror];
+    [CATransaction begin]; [CATransaction setDisableActions:YES]; replica.frame = r; [CATransaction commit];
+}
 static UIView *gCCHiddenMaterial;   /* 被我们透明化的背景磨砂层(收起时还原) */
 static void diCCHideBackdropMaterial(void) {
     if (!wpOn || !gCCVisible || !gCCSurface) return;
@@ -9576,7 +9643,7 @@ static void diCCReleasePlayer(void) {
 
 /* 素材路径变了 / 开关变了 / 显隐变了 → 重建或释放播放器 */
 static void diCCReloadSurface(void) {
-    if (!wpOn) { diCCReleasePlayer(); diCCLoopInvalidate(); if (gCCSurface) gCCSurface.hidden = YES; diCCRestoreBackdropMaterial(); diCCRestoreAffordanceLayers(); return; }
+    if (!wpOn) { diCCReleasePlayer(); diCCLoopInvalidate(); if (gCCSurface) gCCSurface.hidden = YES; diCCRestoreBackdropMaterial(); diCCRestoreAffordanceLayers(); diCCRemoveModuleMirror(); return; }
 
     /* 2.7.32: 单素材模式; 开了循环播放就轮播目录下全部素材 */
     NSString *path = nil;
@@ -10297,7 +10364,7 @@ static void diCCSetVisible(BOOL visible) {
     gCCVisible = visible;
     if (visible) sCCDeepDumpN = 0;   /* 2.8.47: 每次展开重新计数, 深 dump 打前 2 次滚动 */
     else diCCRestoreBackdropMaterial();   /* 2.8.48: 收起时还原系统磨砂层 */
-    if (!visible) diCCRestoreAffordanceLayers();
+    if (!visible) { diCCRestoreAffordanceLayers(); diCCRemoveModuleMirror(); }
     diCCReloadSurface();
     /* 收起时把中央素材面板一并撤掉(纯 removeFromSuperview, 不碰响应链) */
     if (!visible) [DICCPickerPanel hideAll];
@@ -10339,6 +10406,9 @@ static id diCCHookedCCBeginPres(id self, SEL _cmd, BOOL animated, BOOL interacti
     @try {
         diCCAttachTo(self, diCCBackgroundOf(self));
         diCCSetVisible(YES);
+        UIView *bg = diCCBackgroundOf(self);
+        for (UIView *sub in bg.superview.subviews)
+            if ([NSStringFromClass(sub.class) isEqualToString:@"CCUIScrollView"]) diCCSyncModuleMirror(sub);
     } @catch (__unused NSException *e) {}
     return r;
 }
@@ -10591,6 +10661,7 @@ static void diCCTameScrollBackdrop(UIView *sv) {
         /* 2.8.48: 滚动时重申透明化(系统重建磨砂层/改配方都在这拍压住) */
         diCCHideBackdropMaterial();
         diCCTameAffordanceLayers();
+        diCCSyncModuleMirror(sv);
         /* scrollview 自身 */
         UIColor *sb = sv.backgroundColor;
         if (sb && ![sb isEqual:UIColor.clearColor]) {
