@@ -10273,6 +10273,7 @@ static void diCCInstallOverlayHook(void) {
    alpha 清 0、底色清空, 让壁纸透出来。模块按钮自己的小磨砂卡不受影响
    (它们不是全屏, 且保持半透明反而更贴合系统观感)。 */
 static void (*diOrigScrollLayout)(id, SEL);
+static void (*diOrigScrollOffset)(id, SEL, CGPoint);   /* 2.8.45: setContentOffset: 原实现 */
 
 /* 2.8.44: 312 日志证明白底不是 scrollview 的直接子层(压制日志 0 条, 白底依旧)。
    扩大范围: ① scrollview 自身 backgroundColor 也可能被系统设白;
@@ -10281,13 +10282,15 @@ static void (*diOrigScrollLayout)(id, SEL);
       其余 UIView → backgroundColor 非 clear 就清空(纯色底才这么处理,
       带 _UIBackdropEffectView 的复合层不碰, 只打日志留证)。
    每个处理动作都打日志, 下一轮日志直接能看出白底真身是什么类。 */
-static void diCCTameOne(UIView *v, CGSize ws, int depth) {
-    if (!v || depth > 2) return;
+static BOOL diCCTameOne(UIView *v, CGSize ws, int depth) {
+    if (!v || depth > 2) return NO;
+    BOOL found = NO;
     CGSize bs = v.bounds.size;
     BOOL big = (bs.width >= ws.width * 0.9 && bs.height >= ws.height * 0.5);
     if (big) {
         NSString *cn = NSStringFromClass(v.class);
         if ([v isKindOfClass:NSClassFromString(@"MTMaterialView")]) {
+            found = YES;
             if (v.alpha != 0.0) {
                 v.alpha = 0.0;
                 DLog(@"[控制中心] 压制磨砂底 %@ (%.0fx%.0f) depth=%d", cn, bs.width, bs.height, depth);
@@ -10296,33 +10299,72 @@ static void diCCTameOne(UIView *v, CGSize ws, int depth) {
             UIColor *bg = v.backgroundColor;
             if (bg && ![bg isEqual:UIColor.clearColor]) {
                 v.backgroundColor = nil;
+                found = YES;
                 DLog(@"[控制中心] 清除色底 %@ (%.0fx%.0f) bg=%@ depth=%d", cn, bs.width, bs.height, bg, depth);
             }
         } else {
+            found = YES;
             DLog(@"[控制中心][诊断] 大面积复合底 %@ (%.0fx%.0f) alpha=%.2f bg=%@ depth=%d 未处理",
                  cn, bs.width, bs.height, v.alpha, v.backgroundColor, depth);
         }
     }
-    for (UIView *c in v.subviews) diCCTameOne(c, ws, depth + 1);
+    for (UIView *c in v.subviews) found |= diCCTameOne(c, ws, depth + 1);
+    return found;
 }
 
+/* 2.8.45: 313 日志证明 layoutSubviews 在滚动时根本不触发(UIScrollView 滚 contentOffset
+   不重排), 所以压制一次都没跑。补 hook setContentOffset: —— MSHookMessageEx 挂到
+   CCUIScrollView 子类上只影响它的实例, 不波及其他 scrollview。
+   另外无发现时打诊断 + dump 子树 + 确认壁纸层还在不在(防止 surface 被挤走)。 */
 static void diCCTameScrollBackdrop(UIView *sv) {
     if (!wpOn || !gCCSurface || !sv) return;
     CGSize ws = sv.bounds.size;
     if (ws.width < 10) return;
     @try {
+        /* 先确认壁纸层还在容器里(滚动/布局若把它挤走, 露出的就是容器白底) */
+        if (gCCSurface.superview != sv.superview) {
+            RLog(@"[控制中心] 壁纸层被挤走, 重挂(原父=%@)", gCCSurface.superview ? NSStringFromClass(gCCSurface.superview.class) : @"nil");
+            [gCCSurface removeFromSuperview];
+            NSInteger idx = [sv.superview.subviews indexOfObject:sv];
+            if (idx == NSNotFound) idx = 0;
+            [sv.superview insertSubview:gCCSurface atIndex:idx];
+        }
         /* scrollview 自身 */
         UIColor *sb = sv.backgroundColor;
         if (sb && ![sb isEqual:UIColor.clearColor]) {
             sv.backgroundColor = nil;
             DLog(@"[控制中心] 清除滚动区自身色底 %@ bg=%@", NSStringFromClass(sv.class), sb);
         }
-        for (UIView *c in sv.subviews) diCCTameOne(c, ws, 0);
+        BOOL found = NO;
+        for (UIView *c in sv.subviews) found |= diCCTameOne(c, ws, 0);
+        /* 诊断: 没发现任何大面积层时, dump 前 6 个子视图找真身 */
+        if (!found) {
+            static CFAbsoluteTime tDiag;
+            CFAbsoluteTime now = CFAbsoluteTimeGetCurrent();
+            if (now - tDiag > 2.0) {
+                tDiag = now;
+                NSMutableString *d = [NSMutableString string];
+                NSUInteger n = 0;
+                for (UIView *c in sv.subviews) {
+                    if (n++ >= 6) break;
+                    [d appendFormat:@"\n    %@ %.0fx%.0f a%.2f opaque=%d bg=%@", NSStringFromClass(c.class),
+                         c.bounds.size.width, c.bounds.size.height, c.alpha, c.isOpaque, c.backgroundColor];
+                }
+                RLog(@"[控制中心][诊断] 滚动区无大面积层(共%lu 子视图):%@", (unsigned long)sv.subviews.count, d);
+            }
+        }
     } @catch (__unused NSException *e) {}
 }
 
 static void diCCHookedCCScrollLayout(id self, SEL _cmd) {
     if (diOrigScrollLayout) diOrigScrollLayout(self, _cmd);
+    @try { diCCTameScrollBackdrop((UIView *)self); }
+    @catch (__unused NSException *e) {}
+}
+
+/* 2.8.45: 滚动时 layoutSubviews 不触发, 补 setContentOffset: 入口 */
+static void diCCHookedCCScrollOffset(id self, SEL _cmd, CGPoint off) {
+    if (diOrigScrollOffset) ((void (*)(id, SEL, CGPoint))diOrigScrollOffset)(self, _cmd, off);
     @try { diCCTameScrollBackdrop((UIView *)self); }
     @catch (__unused NSException *e) {}
 }
@@ -10336,7 +10378,15 @@ static void diCCInstallScrollHook(void) {
         if (![c instancesRespondToSelector:lay]) { RLog(@"[控制中心] CCUIScrollView 无 layoutSubviews, 白底压制跳过"); return; }
         diOrigScrollLayout = (void (*)(id, SEL))di_MethodImp(c, lay);
         MSHookMessageEx(c, lay, (IMP)diCCHookedCCScrollLayout, (IMP *)&diOrigScrollLayout);
-        RLog(@"[控制中心] CCUIScrollView hook 已就位(滚动区磨砂底压制, 修交互白底)");
+        /* 2.8.45: setContentOffset: 入口(滚动时真正会走的路) */
+        SEL off = NSSelectorFromString(@"setContentOffset:");
+        if ([c instancesRespondToSelector:off]) {
+            diOrigScrollOffset = (void (*)(id, SEL, CGPoint))di_MethodImp(c, off);
+            MSHookMessageEx(c, off, (IMP)diCCHookedCCScrollOffset, (IMP *)&diOrigScrollOffset);
+            RLog(@"[控制中心] CCUIScrollView hook 已就位(layoutSubviews + setContentOffset:, 修交互白底)");
+        } else {
+            RLog(@"[控制中心] CCUIScrollView hook 已就位(仅 layoutSubviews, 无 setContentOffset:)");
+        }
     });
 }
 
