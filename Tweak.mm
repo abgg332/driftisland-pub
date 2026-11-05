@@ -9390,59 +9390,51 @@ static void diCCTameAffordanceLayers(void) {
         l.opacity = 0.0;
     }
 }
-/* 2.8.51: 模块 collection 自身在壁纸上方合成不透明底色。只在它的
-   backgroundView 中镜像同一素材，位于所有 cell 下方，不改变手势/模块响应链。 */
+/* 2.8.52: 深 dump 显示壁纸之上为 scroll > content > CCUIModuleCollectionView。
+   51 的 UICollectionView 类型门槛从未命中；直接按真实类名把镜像放进模块
+   视图内部的最底层，覆盖模块自身 opaque 底板，仍在所有卡片/控件下面。 */
 static UIView *gCCModuleMirror;
-static __weak UICollectionView *gCCMirrorCollection;
 static __weak UIView *gCCMirrorHost;
 static void diCCRemoveModuleMirror(void) {
-    if (gCCModuleMirror) {
-        for (CALayer *l in [gCCModuleMirror.layer.sublayers copy]) [l removeFromSuperlayer];
-        [gCCModuleMirror removeFromSuperview];
-    }
+    [gCCModuleMirror removeFromSuperview];
     gCCModuleMirror = nil;
-    gCCMirrorCollection = nil;
     gCCMirrorHost = nil;
 }
 static void diCCSyncModuleMirror(UIView *sv) {
     if (!wpOn || !gCCVisible || !gCCSurface || gCCSurface.isHidden || !gCCSurface.window || !sv.window) {
         diCCRemoveModuleMirror(); return;
     }
-    UICollectionView *cv = nil;
+    UIView *host = nil;
     for (UIView *v in sv.subviews) {
-        if ([v isKindOfClass:[UICollectionView class]] &&
-            [NSStringFromClass(v.class) isEqualToString:@"CCUIModuleCollectionView"]) { cv = (UICollectionView *)v; break; }
-        for (UIView *c in v.subviews)
-            if ([c isKindOfClass:[UICollectionView class]] &&
-                [NSStringFromClass(c.class) isEqualToString:@"CCUIModuleCollectionView"]) { cv = (UICollectionView *)c; break; }
-        if (cv) break;
+        if ([NSStringFromClass(v.class) isEqualToString:@"CCUIModuleCollectionView"]) { host = v; break; }
+        for (UIView *child in v.subviews)
+            if ([NSStringFromClass(child.class) isEqualToString:@"CCUIModuleCollectionView"]) { host = child; break; }
+        if (host) break;
     }
-    if (!cv || cv.window != gCCSurface.window) return;
-    UIView *background = cv.backgroundView;
-    if (gCCMirrorCollection != cv || gCCMirrorHost != background ||
-        (gCCModuleMirror && gCCModuleMirror.superview != (background ?: (UIView *)cv)))
-        diCCRemoveModuleMirror();
+    if (!host || host.window != gCCSurface.window) {
+        static CFAbsoluteTime t; CFAbsoluteTime now = CFAbsoluteTimeGetCurrent();
+        if (now - t > 3) { t = now; RLog(@"[控制中心] 模块镜像等待视图: sv=%@ child=%lu visible=%d window=%d",
+            NSStringFromClass(sv.class), (unsigned long)sv.subviews.count, (int)gCCVisible, (int)(sv.window != nil)); }
+        return;
+    }
+    CALayer *source = gCCSurface.layer.sublayers.firstObject;
+    if (!source) return;
+    if (gCCMirrorHost != host || gCCModuleMirror.superview != host) diCCRemoveModuleMirror();
     if (!gCCModuleMirror) {
         UIView *mirror = [UIView new];
         mirror.userInteractionEnabled = NO;
         mirror.clipsToBounds = YES;
-        /* 系统背景视图不改动；镜像作为最底层的非交互子视图。 */
-        if (background) [background insertSubview:mirror atIndex:0];
-        else [cv insertSubview:mirror atIndex:0];
-        gCCModuleMirror = mirror;
-        gCCMirrorCollection = cv;
-        gCCMirrorHost = background;
-        RLog(@"[控制中心] 模块背景镜像已装 (backgroundView=%@)",
-             background ? NSStringFromClass(background.class) : @"无");
+        [host insertSubview:mirror atIndex:0];
+        gCCModuleMirror = mirror; gCCMirrorHost = host;
+        RLog(@"[控制中心] 模块背景镜像已装: %@ %.0fx%.0f", NSStringFromClass(host.class),
+             host.bounds.size.width, host.bounds.size.height);
     }
     UIView *mirror = gCCModuleMirror;
-    mirror.frame = background ? background.bounds : cv.bounds;
-    CALayer *source = gCCSurface.layer.sublayers.firstObject;
-    if (!source) { mirror.hidden = YES; return; }
-    mirror.hidden = NO;
+    if (host.subviews.firstObject != mirror) [host insertSubview:mirror atIndex:0];
+    mirror.frame = host.bounds;
     CALayer *replica = mirror.layer.sublayers.firstObject;
     BOOL video = [source isKindOfClass:[AVPlayerLayer class]];
-    if (!replica || (video != [replica isKindOfClass:[AVPlayerLayer class]])) {
+    if (!replica || video != [replica isKindOfClass:[AVPlayerLayer class]]) {
         for (CALayer *l in [mirror.layer.sublayers copy]) [l removeFromSuperlayer];
         replica = video ? [AVPlayerLayer layer] : [CALayer layer];
         [mirror.layer addSublayer:replica];
@@ -9642,6 +9634,15 @@ static void diCCReleasePlayer(void) {
 }
 
 /* 素材路径变了 / 开关变了 / 显隐变了 → 重建或释放播放器 */
+static BOOL diCCDarkAppearance(void) {
+    if (gCCSurface.window) return gCCSurface.window.traitCollection.userInterfaceStyle == UIUserInterfaceStyleDark;
+    for (UIScene *scene in UIApplication.sharedApplication.connectedScenes) {
+        if (![scene isKindOfClass:[UIWindowScene class]]) continue;
+        for (UIWindow *w in ((UIWindowScene *)scene).windows)
+            if (w.isKeyWindow) return w.traitCollection.userInterfaceStyle == UIUserInterfaceStyleDark;
+    }
+    return UITraitCollection.currentTraitCollection.userInterfaceStyle == UIUserInterfaceStyleDark;
+}
 static void diCCReloadSurface(void) {
     if (!wpOn) { diCCReleasePlayer(); diCCLoopInvalidate(); if (gCCSurface) gCCSurface.hidden = YES; diCCRestoreBackdropMaterial(); diCCRestoreAffordanceLayers(); diCCRemoveModuleMirror(); return; }
 
@@ -9653,8 +9654,9 @@ static void diCCReloadSurface(void) {
         if (gCCLoopIdx >= (NSInteger)list.count || gCCLoopIdx < 0) gCCLoopIdx = 0;
         path = list[gCCLoopIdx];
     } else {
-        path = diWallpaperResolveAny(wpLightAsset);
-        if (!path) path = diWallpaperResolveAny(wpDarkAsset);   /* 老用户只存过"深色"的情况 */
+        BOOL dark = diCCDarkAppearance();
+        path = diWallpaperResolveAny(dark ? wpDarkAsset : wpLightAsset);
+        if (!path) path = diWallpaperResolveAny(dark ? wpLightAsset : wpDarkAsset); /* 旧用户兜底 */
     }
     if (!path.length) { diCCReleasePlayer(); diCCLoopInvalidate(); if (gCCSurface) gCCSurface.hidden = YES; return; }
 
@@ -10347,6 +10349,7 @@ static void diCCLayoutSurface(id vc) {
         }
     }
     gCCSurface.frame = bg.frame;
+    if (gCCVisible && !wpLoopOn) diCCReloadSurface(); /* 外观切换时比较素材路径 */
     /* 2.8.46: layout 时也跑一次滚动区压制(不依赖滚动事件) */
     for (UIView *sub in bg.superview.subviews)
         if ([NSStringFromClass(sub.class) containsString:@"CCUIScrollView"])

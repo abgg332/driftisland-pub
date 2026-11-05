@@ -18,7 +18,7 @@
 
 static NSString *const kDomain = @"com.abgg332.driftisland";
 /* 2.6.25: 设置页底部显示的版本号 */
-static NSString *const DI_VERSION_STR = @"2.8.51";
+static NSString *const DI_VERSION_STR = @"2.8.52";
 /* 2.6.10: 专辑光晕遮罩 —— 与 Tweak 侧 DIAlbumMask.h 保持一致 */
 static NSString *const kDIAlbumMaskKey = @"diAlbumMaskAsset";
 static NSString *const kDIMaskRoot = @"/var/mobile/灵动岛/遮罩素材";
@@ -4805,7 +4805,7 @@ static void diOpenHomeBarPickWindow(void) {
 @property (nonatomic, copy) NSString *prefKey;
 @property (nonatomic, assign) BOOL isDark;
 @end
-
+@interface DIWallpaperPickerDark : DIWallpaperPicker @end
 
 @implementation DIMaskPicker
 - (void)viewDidLoad {
@@ -4896,10 +4896,9 @@ static void diOpenHomeBarPickWindow(void) {
    网格照旧铺满, 不再自己造返回按钮。 */
 - (void)viewDidLoad {
     [super viewDidLoad];
-    /* 2.7.32: 只有一套, 恒 wpLightAsset */
-    self.isDark = NO;
-    self.prefKey = @"wpLightAsset";
-    self.title = @"壁纸更换";
+    self.isDark = [self isKindOfClass:[DIWallpaperPickerDark class]];
+    self.prefKey = self.isDark ? @"wpDarkAsset" : @"wpLightAsset";
+    self.title = self.isDark ? @"深色素材" : @"浅色素材";
     self.navigationController.navigationBar.hidden = NO;
     self.navigationController.interactivePopGestureRecognizer.enabled = YES;
 
@@ -5057,7 +5056,7 @@ static void diOpenHomeBarPickWindow(void) {
     [imp openPickerFrom:self];
 }
 @end
-
+@implementation DIWallpaperPickerDark @end
 
 /* 小岛素材选择页(键独立, 与主页展开岛素材分开) */
 @implementation DIFrameFoldersMini
@@ -5127,9 +5126,14 @@ static void diOpenHomeBarPickWindow(void) {
     NSMutableArray *specs = [NSMutableArray array];
     [specs addObject:[self groupSpec:@"控制中心" footer:@"控制中心播放器背景素材(图片/视频), 素材目录: /var/mobile/灵动岛/壁纸素材"]];
     [specs addObject:[self switchSpec:@"启用背景" key:@"wpOn" def:@NO]];
-    PSSpecifier *wpRow = [PSSpecifier preferenceSpecifierNamed:@"背景素材"
+    PSSpecifier *wpRow = [PSSpecifier preferenceSpecifierNamed:@"浅色素材"
         target:self set:NULL get:@selector(readWallpaperName:) detail:[DIWallpaperPicker class] cell:PSLinkCell edit:nil];
+    [wpRow setProperty:@"wpLightAsset" forKey:@"nameKey"];
     [specs addObject:wpRow];
+    PSSpecifier *darkRow = [PSSpecifier preferenceSpecifierNamed:@"深色素材"
+        target:self set:NULL get:@selector(readWallpaperName:) detail:[DIWallpaperPickerDark class] cell:PSLinkCell edit:nil];
+    [darkRow setProperty:@"wpDarkAsset" forKey:@"nameKey"];
+    [specs addObject:darkRow];
     [specs addObject:[self switchSpec:@"循环播放" key:@"wpLoopOn" def:@NO]];
     [specs addObject:[self numSlider:@"背景模糊" key:@"wpBlur" def:0 mn:0 mx:100]];
     [specs addObject:[self switchSpec:@"声音" key:@"ccSoundOn" def:@NO]];
@@ -5137,8 +5141,8 @@ static void diOpenHomeBarPickWindow(void) {
     return specs;
 }
 - (id)readWallpaperName:(PSSpecifier *)sp {
-    NSString *cur = readPrefString(@"wpLightAsset");
-    if (!cur.length) return @"未选择";
+    NSString *cur = readPrefString([sp propertyForKey:@"nameKey"] ?: @"wpLightAsset");
+    if (!cur.length || [cur isEqualToString:@"__none__"]) return @"未选择";
     return [cur.lastPathComponent.stringByDeletingPathExtension copy];
 }
 @end
