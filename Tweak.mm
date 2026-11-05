@@ -9622,24 +9622,23 @@ static void diCCReloadSurface(void) {
         return;
     }
 
-    diCCReleasePlayer();
+    /* 2.8.54: 切素材前先确认新图片能解码；旧画面保持在原位置。
+       不再先清空 surface 后读文件。 */
     if (![[NSFileManager defaultManager] isReadableFileAtPath:path]) return;
-
     if (!diWallpaperIsVideo(path)) {
-        /* 静态图: 直接给 surface 加一个 contents 层, 不建 AVFoundation 对象
-           2.7.31: 先清掉旧图片层(此前每次切换都往上叠一层, 旧图永远在最底下) */
-        for (CALayer *old in [gCCSurface.layer.sublayers copy]) [old removeFromSuperlayer];
         UIImage *im = [UIImage imageWithContentsOfFile:path];
         if (!im) return;
-        /* 2.7.32: 背景模糊 —— 静态图直接用 CoreImage 预渲染一次, 后面每帧零成本 */
-        if (wpBlur > 0) im = diBlurredImage(im, (CGFloat)wpBlur / 100.0 * 40.0);   /* 2.7.36: 上限 30→40, 100 更糊 */
+        if (wpBlur > 0) im = diBlurredImage(im, (CGFloat)wpBlur / 100.0 * 40.0);
         CALayer *l = [CALayer layer];
         l.contents = (__bridge id)im.CGImage;
         l.contentsGravity = kCAGravityResizeAspectFill;
         l.masksToBounds = YES;
         l.frame = gCCSurface.bounds;
+        [CATransaction begin]; [CATransaction setDisableActions:YES];
+        [gCCSurface.layer addSublayer:l]; /* 先显示新内容，再释放旧播放器 */
+        [CATransaction commit];
+        diCCReleasePlayer();
         [gCCSurface.layer addSublayer:l];
-        gCCLayer = nil;
         gCCPath = path;
         gCCSurface.hidden = !gCCVisible;
         diCCApplyBlur();
@@ -9684,14 +9683,17 @@ static void diCCReloadSurface(void) {
     pl.automaticallyWaitsToMinimizeStalling = YES;
     if ([pl respondsToSelector:@selector(setPreventsDisplaySleepDuringVideoPlayback:)])
         pl.preventsDisplaySleepDuringVideoPlayback = NO;
+    AVQueuePlayer *oldPlayer = gCCPlayer;
+    AVPlayerLooper *oldLooper = gCCLooper;
+    NSString *oldPath = gCCPath;
+    NSArray<CALayer *> *oldLayers = [gCCSurface.layer.sublayers copy];
     gCCLooper = [AVPlayerLooper playerLooperWithPlayer:pl templateItem:item];
     gCCLayer = [AVPlayerLayer playerLayerWithPlayer:pl];
     gCCLayer.videoGravity = AVLayerVideoGravityResizeAspectFill;
     gCCLayer.frame = gCCSurface.bounds;
     gCCLayer.masksToBounds = YES;
-    /* 2.7.36: 视频也要先清旧层 —— 图片分支的 CALayer 是局部变量不归 gCCLayer 管,
-       diCCReleasePlayer 只移除 gCCLayer, 图片→视频切换时旧图片层残留 → 图视频同屏叠加 */
-    for (CALayer *old in [gCCSurface.layer.sublayers copy]) [old removeFromSuperlayer];
+    /* 新帧未就绪时保留旧图层；readyForDisplay 后再一起撤下。 */
+    gCCLayer.opacity = oldLayers.count ? 0.0f : 1.0f;
     [gCCSurface.layer addSublayer:gCCLayer];
     gCCPlayer = pl;
     gCCPath = path;
@@ -9700,6 +9702,41 @@ static void diCCReloadSurface(void) {
     if (gCCVisible) {
         [pl play];
         if (wantSound) diCCAudioSession(YES);
+    }
+    /* 等新视频真的渲染出第一帧，再在同一 CATransaction 替换画面。
+       不让空 AVPlayerLayer 提前盖住原画面；超时则继续显示旧画面。 */
+    if (oldLayers.count) {
+        AVPlayerLayer *nextLayer = gCCLayer;
+        AVPlayerLooper *nextLooper = gCCLooper;
+        __block int checks = 0;
+        __block void (^checkFrame)(void) = nil;
+        checkFrame = ^{
+            if (gCCLayer != nextLayer || !wpOn) {
+                /* 新一次切换可能仍把这些旧层作为兜底，不抢先移除。 */
+                if (!wpOn) { [oldPlayer pause]; [oldLooper disableLooping]; }
+                checkFrame = nil; return;
+            }
+            if (nextLayer.readyForDisplay || ++checks >= 90) {
+                if (nextLayer.readyForDisplay) {
+                    [CATransaction begin]; [CATransaction setDisableActions:YES];
+                    nextLayer.opacity = 1.0f;
+                    for (CALayer *l in oldLayers) [l removeFromSuperlayer];
+                    [CATransaction commit];
+                    [oldPlayer pause]; [oldLooper disableLooping];
+                    DLog(@"[控制中心] 新视频首帧已显示，旧素材撤下");
+                } else {
+                    DLog(@"[控制中心] 新视频首帧超时，保留旧画面");
+                    [pl pause]; [nextLooper disableLooping];
+                    [nextLayer removeFromSuperlayer];
+                    gCCPlayer = oldPlayer; gCCLooper = oldLooper;
+                    gCCLayer = [oldLayers.firstObject isKindOfClass:[AVPlayerLayer class]] ? (AVPlayerLayer *)oldLayers.firstObject : nil;
+                    gCCPath = oldPath; /* 继续显示旧画面 */
+                }
+                checkFrame = nil; return;
+            }
+            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.05 * NSEC_PER_SEC)), dispatch_get_main_queue(), checkFrame);
+        };
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.05 * NSEC_PER_SEC)), dispatch_get_main_queue(), checkFrame);
     }
     if (wpLoopOn && gCCVisible) diCCLoopSchedule(diCCLoopIntervalFor(path)); else diCCLoopInvalidate();
     DLog(@"[控制中心] 壁纸就绪(视频): %@ (%@)%@", path.lastPathComponent, wantSound ? @"带声音" : @"静音",
