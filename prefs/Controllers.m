@@ -18,7 +18,7 @@
 
 static NSString *const kDomain = @"com.abgg332.driftisland";
 /* 2.6.25: 设置页底部显示的版本号 */
-static NSString *const DI_VERSION_STR = @"2.8.40";
+static NSString *const DI_VERSION_STR = @"2.8.41";
 /* 2.6.10: 专辑光晕遮罩 —— 与 Tweak 侧 DIAlbumMask.h 保持一致 */
 static NSString *const kDIAlbumMaskKey = @"diAlbumMaskAsset";
 static NSString *const kDIMaskRoot = @"/var/mobile/灵动岛/遮罩素材";
@@ -735,6 +735,8 @@ static Class diStepSliderClass(void) {
 /* 2.8.12: 歌词岛合并页回归(2.8.4/2.8.5 下架后恢复) ——
    上半=左侧专辑帧率, 下半=右侧音频帧率, 下面=专辑遮罩设置(2.2.24 原版形态) */
 @interface DILyricsIslandSettings : DIMiniBaseController @end
+/* 2.8.41: 控制中心页回归(单素材=浅色键 wpLightAsset, 无深浅色分组) */
+@interface DICCSettings : DIMiniBaseController @end
 @interface DIFrameFoldersMask : DIFrameFolders @end /* 2.6.3: 遮罩素材选择(键 maskAnimFolder) */
 @interface DIFrameFoldersMini : DIFrameFolders @end  /* 左侧(mini)帧率素材选择(键 smallAnimFolder) */
 @interface DIFrameFoldersAudio : DIFrameFolders @end /* 右侧音频素材(键 miniAudioFolder) */
@@ -1420,6 +1422,8 @@ static void diWriteColors(NSArray<NSString *> *colors) {
         DI_ADD([self linkSpec:@"锁屏通知" detail:[DILockScreenPage class]]);
         /* 2.8.22: "歌词岛"更名"专辑遮罩"(左侧专辑帧率 + 右侧音频帧率 + 专辑遮罩) */
         DI_ADD([self linkSpec:@"专辑遮罩" detail:[DILyricsIslandSettings class]]);
+        /* 2.8.41: 控制中心入口回归 */
+        DI_ADD([self linkSpec:@"控制中心" detail:[DICCSettings class]]);
 
         _smallRow = _expandRow = -1;
         {
@@ -5107,11 +5111,35 @@ static void diOpenHomeBarPickWindow(void) {
         target:self set:NULL get:@selector(readAlbumMaskName:) detail:[DIMaskPicker class] cell:PSLinkCell edit:nil];
     [specs addObject:maskRow];
     /* 2.8.16: 遮罩尺寸可调 —— 用户反馈"加遮罩后专辑大了一点点, 边上被裁剪" */
-    [specs addObject:[self numSlider:@"遮罩大小(%)" key:@"diAlbumMaskScale" def:88 mn:50 mx:115]];
+    /* 2.8.41: 遮罩大小新刻度 —— 旧设定 115 为基准 100, 范围 50~150 */
+    [specs addObject:[self numSlider:@"遮罩大小(%)" key:@"diAlbumMaskScale2" def:100 mn:50 mx:150]];
     [specs addObject:[self switchSpec:@"旋转(专辑+遮罩)" key:@"maskRotateOn" def:@NO]];
     [specs addObject:[self switchSpec:@"反向旋转" key:@"maskRotateReverse" def:@NO]];
     [specs addObject:[self numSlider:@"旋转速度" key:@"maskRotateSpeed" def:45 mn:0 mx:360]];
     return specs;
+}
+@end
+
+/* ===== 2.8.41: 控制中心页回归 —— 底包 DICC 实现零改动, 只恢复开关与入口 =====
+   单素材(恒 wpLightAsset, 2.7.32 形态), 无深浅色分组 */
+@implementation DICCSettings
+- (NSArray *)buildSpecifiers {
+    NSMutableArray *specs = [NSMutableArray array];
+    [specs addObject:[self groupSpec:@"控制中心" footer:@"控制中心播放器背景素材(图片/视频), 素材目录: /var/mobile/灵动岛/壁纸素材"]];
+    [specs addObject:[self switchSpec:@"启用背景" key:@"wpOn" def:@NO]];
+    PSSpecifier *wpRow = [PSSpecifier preferenceSpecifierNamed:@"背景素材"
+        target:self set:NULL get:@selector(readWallpaperName:) detail:[DIWallpaperPicker class] cell:PSLinkCell edit:nil];
+    [specs addObject:wpRow];
+    [specs addObject:[self switchSpec:@"循环播放" key:@"wpLoopOn" def:@NO]];
+    [specs addObject:[self numSlider:@"背景模糊" key:@"wpBlur" def:0 mn:0 mx:100]];
+    [specs addObject:[self switchSpec:@"声音" key:@"ccSoundOn" def:@NO]];
+    [specs addObject:[self switchSpec:@"长按换素材" key:@"ccLongPressOn" def:@YES]];
+    return specs;
+}
+- (id)readWallpaperName:(PSSpecifier *)sp {
+    NSString *cur = readPrefString(@"wpLightAsset");
+    if (!cur.length) return @"未选择";
+    return [cur.lastPathComponent.stringByDeletingPathExtension copy];
 }
 @end
 

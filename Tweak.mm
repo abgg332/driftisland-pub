@@ -727,7 +727,7 @@ static void refreshPrefs(void) {
     miniAudioOffsetY = pDouble(@"miniAudioOffsetY", 0);
     if (miniAudioOffsetY < -20) miniAudioOffsetY = -20; if (miniAudioOffsetY > 20) miniAudioOffsetY = 20;
     /* 2.7.0: 换壁纸 */
-    wpOn = NO; /* pBool(@"wpOn", NO); */ /* 2.8.5: 控制中心壁纸已下架, 强制关闭 */
+    wpOn = pBool(@"wpOn", NO);   /* 2.8.41: 控制中心壁纸恢复(用户要求, 单素材=浅色键) */
     wpLightAsset = pString(@"wpLightAsset");
     wpDarkAsset = pString(@"wpDarkAsset");
     wpFollowDark = pBool(@"wpFollowDark", YES);
@@ -747,10 +747,14 @@ static void refreshPrefs(void) {
     maskRotateReverse = pBool(@"maskRotateReverse", NO);
     maskRotateSpeed = pDouble(@"maskRotateSpeed", 45.0);
     if (maskRotateSpeed < -720) maskRotateSpeed = -720; if (maskRotateSpeed > 720) maskRotateSpeed = 720;
-    /* 2.8.16: 遮罩大小(%) —— 默认 88, 越小越不会顶到岛边被裁 */
-    maskScale = pDouble(@"diAlbumMaskScale", 88.0);
-    if (maskScale < 50.0) maskScale = 50.0;
-    if (maskScale > 115.0) maskScale = 115.0;
+    /* 2.8.41: 遮罩大小新刻度 —— 用户旧设定 115 为新基准 100, 滑杆 50~150, 实际缩放 = 显示值 × 1.15 */
+    {
+        double shown = pDouble(@"diAlbumMaskScale2", -1.0);
+        if (shown < 0) shown = pDouble(@"diAlbumMaskScale", 115.0) / 1.15;   /* 旧键迁移: 115 → 100 */
+        if (shown < 50.0) shown = 50.0;
+        if (shown > 150.0) shown = 150.0;
+        maskScale = shown * 1.15;
+    }
     maskAnimFolder = pString(@"maskAnimFolder");
     /* 2.5.7: 隐藏横条 / 渐隐模式 / 手势保护 */
     homeBarHideOn = pBool(@"homeBarHideOn", NO);
