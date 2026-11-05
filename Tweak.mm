@@ -9331,6 +9331,7 @@ static IMP diOrigCCWillLayout;
 static IMP diOrigCCBeginPres;
 static IMP diOrigCCBeginDis;
 static IMP diOrigCCDidDisappear;
+static IMP diOrigCCWillPresent, diOrigCCWillDismiss;
 
 /* 取控制器的 overlayBackgroundView。这是私有属性, 用 KVC 取最稳 ——
    respondsToSelector 先探, 探不到退 valueForKey, 都没有就返回 nil。 */
@@ -9365,7 +9366,7 @@ static void diCCRestoreAffordanceLayers(void) {
     }
     [gCCLightLayers removeAllObjects];
 }
-static void diCCTameAffordanceLayers(void) {
+__attribute__((unused)) static void diCCTameAffordanceLayers(void) {
     if (!wpOn || !gCCVisible || !gCCSurface || gCCSurface.isHidden || !gCCSurface.window) return;
     UIView *parent = gCCSurface.superview;
     if (!parent) return;
@@ -9393,7 +9394,7 @@ static void diCCTameAffordanceLayers(void) {
 /* 2.8.53: 52 在模块视图内部 insertSubview 后 SpringBoard 重启。
    回退到 ccvideobg 已验证的背景兄弟层；不在滚动 hook 中插入模块子视图。 */
 static UIView *gCCHiddenMaterial;   /* 被我们透明化的背景磨砂层(收起时还原) */
-static void diCCHideBackdropMaterial(void) {
+__attribute__((unused)) static void diCCHideBackdropMaterial(void) {
     if (!wpOn || !gCCVisible || !gCCSurface) return;
     UIView *parent = gCCSurface.superview;
     if (!parent) return;
@@ -10310,31 +10311,15 @@ static void diCCAttachTo(id vc, UIView *background) {
     }
     gCCSurface.frame = background.frame;
     diCCReloadSurface();
-    diCCHideBackdropMaterial();   /* 2.8.48: 挂载即透明化背景磨砂层(拔白底根源) */
-    diCCTameAffordanceLayers();
     if (ccLongPressOn) diCCInstallPressGesture(vc, background);
 }
 
 static void diCCLayoutSurface(id vc) {
     UIView *bg = diCCBackgroundOf(vc);
     if (!bg || !gCCSurface) return;
-    /* 2.8.48: 每次布局都重申一次(系统可能重建磨砂层实例) */
-    diCCHideBackdropMaterial();
-    diCCTameAffordanceLayers();
-    /* 2.8.44: 背景容器自身也可能被系统设白(盖住壁纸), 一并清掉 */
-    if (bg.superview) {
-        UIColor *cb = bg.superview.backgroundColor;
-        if (cb && ![cb isEqual:UIColor.clearColor]) {
-            bg.superview.backgroundColor = nil;
-            DLog(@"[控制中心] 清除背景容器色底 %@ bg=%@", NSStringFromClass(bg.superview.class), cb);
-        }
-    }
+    /* 与 ccvideobg 一致：只更新自己的 surface，不透明化/修改系统视图。 */
     gCCSurface.frame = bg.frame;
     if (gCCVisible && !wpLoopOn) diCCReloadSurface(); /* 外观切换时比较素材路径 */
-    /* 2.8.46: layout 时也跑一次滚动区压制(不依赖滚动事件) */
-    for (UIView *sub in bg.superview.subviews)
-        if ([NSStringFromClass(sub.class) containsString:@"CCUIScrollView"])
-            diCCTameScrollBackdrop(sub);
     [CATransaction begin];
     [CATransaction setDisableActions:YES];
     for (CALayer *l in gCCSurface.layer.sublayers) {
@@ -10394,6 +10379,17 @@ static id diCCHookedCCBeginPres(id self, SEL _cmd, BOOL animated, BOOL interacti
     return r;
 }
 
+/* 参考插件真正使用的展示/收起通知；签名均为 void、无额外参数。 */
+static void diCCHookedCCWillPresent(id self, SEL _cmd) {
+    if (diOrigCCWillPresent) ((void (*)(id, SEL))diOrigCCWillPresent)(self, _cmd);
+    @try { diCCAttachTo(self, diCCBackgroundOf(self)); diCCSetVisible(YES); }
+    @catch (__unused NSException *e) {}
+}
+static void diCCHookedCCWillDismiss(id self, SEL _cmd) {
+    @try { diCCSetVisible(NO); } @catch (__unused NSException *e) {}
+    if (diOrigCCWillDismiss) ((void (*)(id, SEL))diOrigCCWillDismiss)(self, _cmd);
+}
+
 /* 收起: 先隐藏(不等系统动画), 再交回 %orig */
 static id diCCHookedCCBeginDis(id self, SEL _cmd, BOOL animated, BOOL interactive) {
     @try { diCCSetVisible(NO); }
@@ -10417,10 +10413,15 @@ static void diCCInstallOverlayHook(void) {
         /* ControlCenterUI 可能比 tweak 构造晚加载, 与 ccvideobg 一样先 dlopen */
         dlopen("/System/Library/PrivateFrameworks/ControlCenterUI.framework/ControlCenterUI", RTLD_LAZY);
         Class c = NSClassFromString(@"CCUIModularControlCenterOverlayViewController");
-        if (!c) { RLog(@"[控制中心] 找不到 CCUIModularControlCenterOverlayViewController, 退回 MTMaterialView 旧路径"); diCCInstallLayoutHook(); return; }
+        if (!c) { RLog(@"[控制中心] 找不到 overlay 控制器；保持系统原样"); return; }
+        Method mWillPres = class_getInstanceMethod(c, NSSelectorFromString(@"_willPresentView"));
+        Method mWillDis = class_getInstanceMethod(c, NSSelectorFromString(@"_willDismissView"));
+        BOOL refLifecycle = (mWillPres && mWillDis);
         Method mPres = class_getInstanceMethod(c, NSSelectorFromString(@"_beginPresentationAnimated:interactive:"));
-        Method mDis  = class_getInstanceMethod(c, NSSelectorFromString(@"_beginDismissalAnimated:interactive:"));
-        if (!mPres || !mDis) { RLog(@"[控制中心] overlay 展开/收起方法不可用, 退回 MTMaterialView 旧路径"); diCCInstallLayoutHook(); return; }
+        Method mDis = class_getInstanceMethod(c, NSSelectorFromString(@"_beginDismissalAnimated:interactive:"));
+        if (!refLifecycle && (!mPres || !mDis)) {
+            RLog(@"[控制中心] 无可用展开/收起时机；不接管系统图层"); return;
+        }
 
         SEL sVDL  = NSSelectorFromString(@"viewDidLoad");
         SEL sWill = NSSelectorFromString(@"viewWillLayoutSubviews");
@@ -10436,18 +10437,28 @@ static void diCCInstallOverlayHook(void) {
             diOrigCCWillLayout = di_MethodImp(c, sWill);
             MSHookMessageEx(c, sWill, (IMP)diCCHookedCCWillLayout, &diOrigCCWillLayout);
         }
-        diOrigCCBeginPres = di_MethodImp(c, sPres);
-        MSHookMessageEx(c, sPres, (IMP)diCCHookedCCBeginPres, &diOrigCCBeginPres);
-        diOrigCCBeginDis = di_MethodImp(c, sDis);
-        MSHookMessageEx(c, sDis, (IMP)diCCHookedCCBeginDis, &diOrigCCBeginDis);
+        if (refLifecycle) {
+            SEL pres = NSSelectorFromString(@"_willPresentView");
+            SEL dis = NSSelectorFromString(@"_willDismissView");
+            diOrigCCWillPresent = di_MethodImp(c, pres);
+            MSHookMessageEx(c, pres, (IMP)diCCHookedCCWillPresent, &diOrigCCWillPresent);
+            diOrigCCWillDismiss = di_MethodImp(c, dis);
+            MSHookMessageEx(c, dis, (IMP)diCCHookedCCWillDismiss, &diOrigCCWillDismiss);
+            RLog(@"[控制中心] 按参考插件装载 _willPresentView/_willDismissView");
+        } else {
+            diOrigCCBeginPres = di_MethodImp(c, sPres);
+            MSHookMessageEx(c, sPres, (IMP)diCCHookedCCBeginPres, &diOrigCCBeginPres);
+            diOrigCCBeginDis = di_MethodImp(c, sDis);
+            MSHookMessageEx(c, sDis, (IMP)diCCHookedCCBeginDis, &diOrigCCBeginDis);
+            RLog(@"[控制中心] 参考时机不存在，沿用 begin 生命周期");
+        }
         if ([c instancesRespondToSelector:sDid]) {
             diOrigCCDidDisappear = di_MethodImp(c, sDid);
             MSHookMessageEx(c, sDid, (IMP)diCCHookedCCDidDisappear, &diOrigCCDidDisappear);
         }
         gCCOverlayHooked = YES;
         RLog(@"[控制中心] overlay hook 已就位(移植 ccvideobg: 兄弟层 + 展开/收起精确时机)");
-        /* 2.8.43: 顺手装 CCUIScrollView hook —— 交互时系统把滚动区磨砂底置白, 会盖住壁纸(311 视频) */
-        diCCInstallScrollHook();
+        RLog(@"[控制中心] 2.8.55 使用参考插件纯兄弟层，未安装滚动区改层 hook");
     });
 }
 
@@ -10600,7 +10611,7 @@ static void diCCDeepDump(UIView *sv) {
    ① collectionView 的 backgroundView(不在 subviews, 前几版全漏)
    ② 壁纸层父层里的纯 CALayer(系统直接挂 layer, 不对应 UIView)
    ③ 层序: 壁纸层必须在所有兄弟 MTMaterialView 之上(系统滚动时会把磨砂层提到前面) */
-static void diCCTameScrollBackdrop(UIView *sv) {
+__attribute__((unused)) static void diCCTameScrollBackdrop(UIView *sv) {
     if (!wpOn || !gCCSurface || !sv) return;
     CGSize ws = sv.bounds.size;
     if (ws.width < 10) return;
@@ -10699,7 +10710,7 @@ static void diCCHookedCCScrollOffset(id self, SEL _cmd, CGPoint off) {
     @catch (__unused NSException *e) {}
 }
 
-static void diCCInstallScrollHook(void) {
+__attribute__((unused)) static void diCCInstallScrollHook(void) {
     static dispatch_once_t once;
     dispatch_once(&once, ^{
         Class c = NSClassFromString(@"CCUIScrollView");
