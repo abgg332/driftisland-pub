@@ -18,7 +18,7 @@
 
 static NSString *const kDomain = @"com.abgg332.driftisland";
 /* 2.6.25: 设置页底部显示的版本号 */
-static NSString *const DI_VERSION_STR = @"2.8.55";
+static NSString *const DI_VERSION_STR = @"2.8.56";
 /* 2.6.10: 专辑光晕遮罩 —— 与 Tweak 侧 DIAlbumMask.h 保持一致 */
 static NSString *const kDIAlbumMaskKey = @"diAlbumMaskAsset";
 static NSString *const kDIMaskRoot = @"/var/mobile/灵动岛/遮罩素材";
@@ -1440,8 +1440,9 @@ static void diWriteColors(NSArray<NSString *> *colors) {
         DI_ADD([self buttonSpec:@"跳转素材目录" action:@selector(openMaterialDir)]);
         DI_ADD([self buttonSpec:@"跳转帧率目录" action:@selector(openFrameDir)]);
 
-        DI_ADD([self groupSpec:nil footer:@"日志开关打开后，运行日志自动生成在 /var/mobile/灵动岛/driftisland.log"]);
+        DI_ADD([self groupSpec:nil footer:@"灵动岛图层调试默认关闭；打开后分别记录小岛、展开岛、录屏岛的视图树与图层树。导出日志报告会包含这些记录。"]);
         DI_ADD([self switchSpec:@"日志开关" key:@"logging" def:@NO]);
+        DI_ADD([self switchSpec:@"灵动岛图层调试" key:@"islandDumpOn" def:@NO]);
 
         /* ---- 2.6.28: 版本号单独一组, 放在整页最底部(与日志分开) ---- */
         DI_ADD([self groupSpec:nil footer:nil]);
@@ -1824,6 +1825,7 @@ static void diWriteColors(NSArray<NSString *> *colors) {
 
         NSArray *files = @[
             [kMaterialDir stringByAppendingPathComponent:@"driftisland.log"],
+            [kMaterialDir stringByAppendingPathComponent:@"driftisland-island-tree.log"],
             @"/var/mobile/灵动岛/driftisland_crash.log",
         ];
         for (NSString *f in files) {

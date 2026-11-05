@@ -743,8 +743,9 @@ static void refreshPrefs(void) {
     wpLoopOn = pBool(@"wpLoopOn", NO);
     wpBlur = (NSInteger)pInt(@"wpBlur", 0);
     if (wpBlur < 0) wpBlur = 0; if (wpBlur > 100) wpBlur = 100;
-    /* 2.7.29: 岛全量图层调试日志 —— 2.8.3 存档: 设置入口已删, 稳定版强制关闭 */
-    islandDumpOn = NO; /* pBool(@"islandDumpOn", NO); */
+    /* 2.8.56: 默认关闭；打开时采集岛窗口的视图/图层及封面候选。 */
+    islandDumpOn = pBool(@"islandDumpOn", NO);
+    if (islandDumpOn) logEnabled = YES; /* 调试开关独立生效，无需另开日志总闸 */
     /* 2.6.3: 遮罩(贴合左侧专辑) */
     maskOn = pBool(@"maskOn", NO);
     maskRotateOn = pBool(@"maskRotateOn", NO);
@@ -2918,8 +2919,9 @@ static UIImageView *diFindAlbumCoverView(UIView *host, CGRect *outFrame) {
    开关: 设置 → 岛图层调试日志。默认关, 打开后每 4 秒最多抓一次, 总共最多 12 次,
    免得把日志撑爆。 */
 
-static CFAbsoluteTime gDiDumpLast = 0;
-static int gDiDumpCount = 0;
+static CFAbsoluteTime gDiDumpLast[3] = {0};
+static int gDiDumpCount[3] = {0};
+static BOOL gDiDumpWasOn = NO;
 
 /* contents 到底是什么: CGImage / UIImage / 其它 CF 类型, 尺寸一并打出 */
 static NSString *diContentsDesc(CALayer *l) {
@@ -3001,18 +3003,19 @@ static CGFloat diAlbumScoreOf(UIView *v, CGRect r, CGSize hs, BOOL *outCA) {
 
 static void diDumpIslandFull(UIView *root, NSString *why) {
     if (!islandDumpOn || !root) return;
+    int kind = [why containsString:@"录屏"] ? 2 : ([why containsString:@"展开"] ? 1 : 0);
     CFAbsoluteTime now = CFAbsoluteTimeGetCurrent();
-    if (now - gDiDumpLast < 4.0) return;
-    if (gDiDumpCount >= 12) return;
-    gDiDumpLast = now;
-    gDiDumpCount++;
+    if (!gDiDumpWasOn) { memset(gDiDumpLast, 0, sizeof(gDiDumpLast)); memset(gDiDumpCount, 0, sizeof(gDiDumpCount)); gDiDumpWasOn = YES; }
+    if (now - gDiDumpLast[kind] < 4.0 || gDiDumpCount[kind] >= 3) return;
+    gDiDumpLast[kind] = now;
+    gDiDumpCount[kind]++;
 
     /* 从**岛窗口根**开始, 这样能看到窗口里所有元素/门户/容器, 而不只是宿主那一块 */
     UIView *top = root;
     @try { if (root.window) top = root.window; } @catch (__unused NSException *e) {}
 
     NSMutableString *s = [NSMutableString string];
-    [s appendFormat:@"===== 岛全量图层 dump #%d (%@) =====\n", gDiDumpCount, why];
+    [s appendFormat:@"===== 岛全量图层 dump #%d (%@) =====\n", gDiDumpCount[kind], why];
     [s appendFormat:@"宿主: %@ frame=%@ bounds=%@\n", NSStringFromClass(root.class),
         NSStringFromCGRect(root.frame), NSStringFromCGRect(root.bounds)];
     [s appendFormat:@"抓取根: %@ frame=%@\n", NSStringFromClass(top.class), NSStringFromCGRect(top.frame)];
@@ -3056,8 +3059,21 @@ static void diDumpIslandFull(UIView *root, NSString *why) {
             d[@"r"], [d[@"a"] doubleValue], [d[@"h"] boolValue]];
     }
     if (!cand.count) [s appendString:@"  (宿主里没有任何像封面的候选 —— 说明岛此刻不是音乐岛, 或内容还在跨进程门户里)\n"];
-    [s appendFormat:@"===== dump #%d 结束(视图 %d 个 / 层 %d 个) =====\n", gDiDumpCount, n1, n2];
-    DLog(@"%@", s);
+    [s appendFormat:@"===== dump #%d 结束(视图 %d 个 / 层 %d 个) =====\n", gDiDumpCount[kind], n1, n2];
+    /* 完整树独立存放：主日志只写索引，避免 512KB 轮转覆盖前一类岛。 */
+    NSString *dumpPath = [kMaterialDir stringByAppendingPathComponent:@"driftisland-island-tree.log"];
+    NSString *entry = [NSString stringWithFormat:@"[%@] %@\n", [NSDate date], s];
+    NSData *data = [entry dataUsingEncoding:NSUTF8StringEncoding];
+    NSFileManager *fm = [NSFileManager defaultManager];
+    NSDictionary *attr = [fm attributesOfItemAtPath:dumpPath error:NULL];
+    if ([attr[NSFileSize] unsignedLongLongValue] > 2 * 1024 * 1024)
+        [data writeToFile:dumpPath atomically:YES];
+    else {
+        if (![fm fileExistsAtPath:dumpPath]) [data writeToFile:dumpPath atomically:YES];
+        else { NSFileHandle *handle = [NSFileHandle fileHandleForWritingAtPath:dumpPath];
+               [handle seekToEndOfFile]; [handle writeData:data]; [handle closeFile]; }
+    }
+    DLog(@"[岛图层调试] %@ #%d 已存 %@ (视图%d 层%d)", why, gDiDumpCount[kind], dumpPath, n1, n2);
 }
 
 /* 在小岛宿主里找"大内容层"(CALayerHost, 面积 > 宿主 30%), 返回它换算到宿主坐标的 frame */
@@ -5797,6 +5813,7 @@ static void updateSingleVideo(UIWindow *win) {
        近方形, 猜尺寸会误伤)。它有自己的录屏素材层(函数开头单独挂), 放歌时录屏中
        它后出现会按"最新岛"把背景视频抢走, 音乐/充电岛反而变裸岛。 */
     UIView *recHost = enabled ? diRecIslandHost() : nil;
+    if (islandDumpOn && recHost && recHost.window == win) diDumpIslandFull(recHost, @"录屏岛");
     UIView *musicRoot = nil, *stickyAlive = nil, *bigRoot = nil, *newestRoot = nil;
     CGFloat bestA = 0; CFAbsoluteTime newestT = 0;
     for (UIView *h in hostTable) {
@@ -5923,7 +5940,10 @@ static void updateSingleVideo(UIWindow *win) {
     }
     /* 2.7.29: 岛全量图层调试日志(开关打开才抓, 内部限频 4s/最多 12 次)。
        收缩态也要抓 —— 专辑遮罩只在小岛生效, 不知道收缩态长什么样就没法排查。 */
-    diDumpIslandFull(bestRoot, bestRoot.bounds.size.height > 60 ? @"展开态" : @"收缩态");
+    if (islandDumpOn && matRoot)
+        diDumpIslandFull(matRoot, matRoot.bounds.size.height >= 120 ? @"音乐展开岛" : @"音乐小岛");
+    if (bestRoot != matRoot)
+        diDumpIslandFull(bestRoot, bestRoot.bounds.size.height >= 120 ? @"展开态" : @"收缩态");
     // 频谱帧率动画层: 序列帧播放, 盖在展开岛右上角(跨进程频谱上方), 加在最顶层
     // 开关关/无帧素材: 隐藏本层 → 露出系统频谱(关闭=显示原生频谱)
     DIAnimView *animV = objc_getAssociatedObject(win, &kWinVideoSpec);
@@ -6062,8 +6082,12 @@ static void updateSingleVideo(UIWindow *win) {
        跟着 bestRoot 搬来搬去, 上一块玻璃(专辑画面+遮罩)会被原地搬到来电卡片上,
        就是用户 289 说的"展开岛你做的那个遮挡在电话界面走显示了"。
        2.8.22: 探针跟着 matRoot(音乐岛)走, 与"视频挂最新岛"彻底解耦。 */
-    BOOL maskHost = musicHost
-        && matRoot.bounds.size.width <= 240.0 && matRoot.bounds.size.height <= 62.0;
+    /* 2.8.56: 仅已识别的音乐岛 matRoot 可承载同一专辑遮罩。
+       探针 step 自身仍以 isMini/isExpand + 播放状态双重校验；不放行通知/来电岛。 */
+    BOOL maskMiniHost = musicHost && matRoot.bounds.size.width <= 240.0 && matRoot.bounds.size.height <= 62.0;
+    BOOL maskExpandHost = musicHost && matRoot.bounds.size.width >= 280.0 && matRoot.bounds.size.width <= 440.0
+        && matRoot.bounds.size.height >= 120.0 && matRoot.bounds.size.height <= 300.0;
+    BOOL maskHost = maskMiniHost || maskExpandHost;
     if (!maskHost) {
         /* 只隐藏、不 removeFromSuperview —— 拆了 superview 后探针会在下一帧
            判定"宿主没了"而整体 teardown, 把小岛那份缓存(封面/方块/尺寸)一起清掉,
