@@ -9709,12 +9709,12 @@ static void diCCReloadSurface(void) {
         AVPlayerLayer *nextLayer = gCCLayer;
         AVPlayerLooper *nextLooper = gCCLooper;
         __block int checks = 0;
-        __block void (^checkFrame)(void) = nil;
-        checkFrame = ^{
+        __block __weak void (^weakCheckFrame)(void) = nil;
+        void (^checkFrame)(void) = ^{
             if (gCCLayer != nextLayer || !wpOn) {
                 /* 新一次切换可能仍把这些旧层作为兜底，不抢先移除。 */
                 if (!wpOn) { [oldPlayer pause]; [oldLooper disableLooping]; }
-                checkFrame = nil; return;
+                return;
             }
             if (nextLayer.readyForDisplay || ++checks >= 90) {
                 if (nextLayer.readyForDisplay) {
@@ -9732,10 +9732,11 @@ static void diCCReloadSurface(void) {
                     gCCLayer = [oldLayers.firstObject isKindOfClass:[AVPlayerLayer class]] ? (AVPlayerLayer *)oldLayers.firstObject : nil;
                     gCCPath = oldPath; /* 继续显示旧画面 */
                 }
-                checkFrame = nil; return;
+                return;
             }
-            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.05 * NSEC_PER_SEC)), dispatch_get_main_queue(), checkFrame);
+            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.05 * NSEC_PER_SEC)), dispatch_get_main_queue(), weakCheckFrame);
         };
+        weakCheckFrame = checkFrame;
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.05 * NSEC_PER_SEC)), dispatch_get_main_queue(), checkFrame);
     }
     if (wpLoopOn && gCCVisible) diCCLoopSchedule(diCCLoopIntervalFor(path)); else diCCLoopInvalidate();
