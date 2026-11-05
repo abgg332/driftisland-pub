@@ -6082,12 +6082,10 @@ static void updateSingleVideo(UIWindow *win) {
        跟着 bestRoot 搬来搬去, 上一块玻璃(专辑画面+遮罩)会被原地搬到来电卡片上,
        就是用户 289 说的"展开岛你做的那个遮挡在电话界面走显示了"。
        2.8.22: 探针跟着 matRoot(音乐岛)走, 与"视频挂最新岛"彻底解耦。 */
-    /* 2.8.56: 仅已识别的音乐岛 matRoot 可承载同一专辑遮罩。
-       探针 step 自身仍以 isMini/isExpand + 播放状态双重校验；不放行通知/来电岛。 */
-    BOOL maskMiniHost = musicHost && matRoot.bounds.size.width <= 240.0 && matRoot.bounds.size.height <= 62.0;
-    BOOL maskExpandHost = musicHost && matRoot.bounds.size.width >= 280.0 && matRoot.bounds.size.width <= 440.0
-        && matRoot.bounds.size.height >= 120.0 && matRoot.bounds.size.height <= 300.0;
-    BOOL maskHost = maskMiniHost || maskExpandHost;
+    /* 2.8.57: 展开态封面实际在跨进程 CALayerHost 内；当前探针只认
+       26x22 accessory，会额外叠一张小专辑。未找到真实大专辑前不挂展开探针。 */
+    BOOL maskHost = musicHost && matRoot.bounds.size.width <= 240.0
+        && matRoot.bounds.size.height <= 62.0;
     if (!maskHost) {
         /* 只隐藏、不 removeFromSuperview —— 拆了 superview 后探针会在下一帧
            判定"宿主没了"而整体 teardown, 把小岛那份缓存(封面/方块/尺寸)一起清掉,
@@ -10341,6 +10339,26 @@ static void diCCAttachTo(id vc, UIView *background) {
 static void diCCLayoutSurface(id vc) {
     UIView *bg = diCCBackgroundOf(vc);
     if (!bg || !gCCSurface) return;
+    if (gCCVisible) {
+        static CFAbsoluteTime last;
+        CFAbsoluteTime now = CFAbsoluteTimeGetCurrent();
+        if (now - last > 2.0) {
+            last = now;
+            UIView *parent = bg.superview;
+            NSMutableString *siblings = [NSMutableString string];
+            for (UIView *v in parent.subviews) {
+                if (siblings.length > 700) break;
+                [siblings appendFormat:@" %@:%@ a%.2f op%d hidden%d%@;", NSStringFromClass(v.class),
+                    NSStringFromCGRect(v.frame), v.alpha, (int)v.opaque, (int)v.hidden,
+                    v == gCCSurface ? @"[壁纸]" : @""];
+            }
+            RLog(@"[控制中心诊断] 布局 bg=%@ surface.hidden=%d 层=%lu/%lu 内容层=%lu 兄弟:%@",
+                NSStringFromCGRect(bg.frame), (int)gCCSurface.hidden,
+                (unsigned long)[parent.subviews indexOfObject:gCCSurface],
+                (unsigned long)parent.subviews.count,
+                (unsigned long)gCCSurface.layer.sublayers.count, siblings);
+        }
+    }
     /* 与 ccvideobg 一致：只更新自己的 surface，不透明化/修改系统视图。 */
     gCCSurface.frame = bg.frame;
     if (gCCVisible && !wpLoopOn) diCCReloadSurface(); /* 外观切换时比较素材路径 */
@@ -10355,6 +10373,9 @@ static void diCCLayoutSurface(id vc) {
 static int sCCDeepDumpN = 0;   /* 2.8.47: 每次展开前 2 次滚动打深 dump, 防爆日志 */
 static void diCCSetVisible(BOOL visible) {
     gCCVisible = visible;
+    RLog(@"[控制中心诊断] 显隐=%d surface=%@ window=%@ 当前素材=%@",
+         (int)visible, gCCSurface ? NSStringFromCGRect(gCCSurface.frame) : @"无",
+         gCCSurface.window ? NSStringFromClass(gCCSurface.window.class) : @"无", gCCPath.lastPathComponent ?: @"无");
     if (visible) sCCDeepDumpN = 0;   /* 2.8.47: 每次展开重新计数, 深 dump 打前 2 次滚动 */
     else diCCRestoreBackdropMaterial();   /* 2.8.48: 收起时还原系统磨砂层 */
     if (!visible) { diCCRestoreAffordanceLayers(); }
@@ -10406,7 +10427,7 @@ static id diCCHookedCCBeginPres(id self, SEL _cmd, BOOL animated, BOOL interacti
 /* 参考插件真正使用的展示/收起通知；签名均为 void、无额外参数。 */
 static void diCCHookedCCWillPresent(id self, SEL _cmd) {
     if (diOrigCCWillPresent) ((void (*)(id, SEL))diOrigCCWillPresent)(self, _cmd);
-    @try { diCCAttachTo(self, diCCBackgroundOf(self)); diCCSetVisible(YES); }
+    @try { RLog(@"[控制中心诊断] _willPresentView 类=%@ bg=%d", NSStringFromClass([self class]), (int)(diCCBackgroundOf(self) != nil)); diCCAttachTo(self, diCCBackgroundOf(self)); diCCSetVisible(YES); }
     @catch (__unused NSException *e) {}
 }
 static void diCCHookedCCWillDismiss(id self, SEL _cmd) {
