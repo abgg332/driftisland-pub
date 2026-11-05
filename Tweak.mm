@@ -176,6 +176,8 @@ static NSString *miniAudioFolder;      // 右侧音频素材独立键
 
 static BOOL wpOn = NO;                 /* 启用壁纸 */
 static BOOL gCCOverlayHooked;          /* 2.7.27: overlay 路径已成立 → MTMaterialView 旧路径让位 */
+static void diCCInstallOverlayHook(void);   /* 2.8.41: 前置声明(prefsChanged/启动时补装) */
+static void diCCInstallLayoutHook(void);    /* 2.8.42: 前置声明(overlay 失败退回旧路径) */
 static NSString *wpLightAsset;         /* 2.7.32: 壁纸改成**单素材**, 这是唯一生效的键 */
 static NSString *wpDarkAsset;          /* 旧"深色"键, 只在新键为空时兜底, UI 已移除 */
 static BOOL wpFollowDark = YES;        /* 旧"跟随深色", 不再参与控制中心判定 */
@@ -10220,10 +10222,10 @@ static void diCCInstallOverlayHook(void) {
         /* ControlCenterUI 可能比 tweak 构造晚加载, 与 ccvideobg 一样先 dlopen */
         dlopen("/System/Library/PrivateFrameworks/ControlCenterUI.framework/ControlCenterUI", RTLD_LAZY);
         Class c = NSClassFromString(@"CCUIModularControlCenterOverlayViewController");
-        if (!c) { RLog(@"[控制中心] 找不到 CCUIModularControlCenterOverlayViewController, 沿用旧路径"); return; }
+        if (!c) { RLog(@"[控制中心] 找不到 CCUIModularControlCenterOverlayViewController, 退回 MTMaterialView 旧路径"); diCCInstallLayoutHook(); return; }
         Method mPres = class_getInstanceMethod(c, NSSelectorFromString(@"_beginPresentationAnimated:interactive:"));
         Method mDis  = class_getInstanceMethod(c, NSSelectorFromString(@"_beginDismissalAnimated:interactive:"));
-        if (!mPres || !mDis) { RLog(@"[控制中心] overlay 展开/收起方法不可用, 沿用旧路径"); return; }
+        if (!mPres || !mDis) { RLog(@"[控制中心] overlay 展开/收起方法不可用, 退回 MTMaterialView 旧路径"); diCCInstallLayoutHook(); return; }
 
         SEL sVDL  = NSSelectorFromString(@"viewDidLoad");
         SEL sWill = NSSelectorFromString(@"viewWillLayoutSubviews");
@@ -10463,6 +10465,8 @@ static void prefsChanged(CFNotificationCenterRef, void *, CFStringRef, const voi
             dispatch_async(dispatch_get_main_queue(), ^{
                 NSInteger oldBlur = wpBlur; BOOL oldLoop = wpLoopOn;
                 refreshAll(); installKnownHosts();
+                /* 2.8.41: 控制中心恢复 —— 开关打开时补装 overlay hook(dispatch_once 保证幂等) */
+                if (wpOn) diCCInstallOverlayHook();
                 /* 2.7.32: 控制中心开关(循环播放 / 背景模糊 / 启用 / 声音)改了 → 立刻生效。
                    模糊值变了必须强制重建, 否则会走"同路径"廉价出口, 图还是原来那张不糊的。 */
                 if (oldBlur != wpBlur || oldLoop != wpLoopOn) {
@@ -11645,6 +11649,8 @@ __attribute__((constructor)) static void init(void) {
            而且连日志都不会留(248 日志里 [壁纸图层] 0 条就是这么来的)。
            现在先装 hook, 再进主队列做其余的事, 各自独立兜底。 */
         /* 2.8.5: 控制中心壁纸已随设置入口一并下架, 三个 hook 不再安装(代码留档, git 可找回) */
+        /* 2.8.41: 控制中心壁纸恢复(用户要求) —— wpOn 开启时装 overlay hook(ccvideobg 机制, 2.7.37 形态) */
+        if (wpOn) diCCInstallOverlayHook();
         dispatch_async(dispatch_get_main_queue(), ^{
             @try {
                 refreshAll(); installKnownHosts();
