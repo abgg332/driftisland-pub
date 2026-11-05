@@ -1009,7 +1009,13 @@ static BOOL diIsVolumeIsland(UIView *host) {
 // 无岛活动时两层连续 20 帧不可见才暂停循环(省电); 岛可见期间循环保持活跃
 - (void)syncFrameToHost {
     UIView *host = self.superview;
-    if (!host || host.window == nil) { _syncLink.paused = YES; return; }
+    if (!host || host.window == nil) {
+        _syncLink.paused = YES;
+        /* 2.8.48: 未挂岛(含解锁预载的待命层)也必须停播 —— 否则 loadVideo 里的
+           延迟补播会让播放器空转解码, 白耗电。 */
+        if (self.player.timeControlStatus != AVPlayerTimeControlStatusPaused) [self.player pause];
+        return;
+    }
     /* 2.2.59: 边框流光层 —— 几何完全由 diApplyEdgeGlow 自己算(mask 环 + 缩放),
        绝不能走下面的主同步(那会把 frame 改成宿主 bounds, 并把 mask 顶掉),
        所以这里只做"播放/隐藏"两件事。 */
@@ -1218,6 +1224,9 @@ static BOOL diIsVolumeIsland(UIView *host) {
        (不依赖 mrQueryOK: 部分系统版本 MediaRemote 回调不可用, 靠音频层兜底) */
     if (want && !self.expandedLayer && hideNoMusic) {
         BOOL mediaActive = (diFindAudioLayer(host) != nil) || (mrQueryOK && musicPlaying);
+        /* 2.8.48: 用户要求"解锁即加载, 不需要放歌触发" —— 已解锁即视为有素材活动;
+           锁屏/息屏仍全停(gLocked=YES 时这里依旧隐藏), 功耗策略不变。 */
+        if (!mediaActive && !gLocked) mediaActive = YES;
         if (!mediaActive) want = nil;
     }
     if (mine && want) {
@@ -5670,6 +5679,55 @@ static void diRefreshContour(void) {
     }
 }
 
+/* 2.8.48: 解锁即预载两层素材 —— 用户反馈"注销后通知岛/展开岛没素材, 要放一次
+   歌曲才有"。根因: 视频层要等岛出现才 loadVideo(建播放器+剥音轨+首帧解码
+   有耗时), 展开层更是只挂音乐岛。现在解锁/启动后就把小岛+展开两层素材预加载
+   好(播放器/循环建好、暂停待命), 岛一出现直接挂上即播, 不需要放歌触发。
+   锁屏期间不预载(gLocked=YES 直接返回), 功耗策略不变。 */
+static void diPreloadIslandVideos(void) {
+    if (!enabled || gLocked) return;
+    for (UIScene *s in UIApplication.sharedApplication.connectedScenes) {
+        if (![s isKindOfClass:[UIWindowScene class]]) continue;
+        for (UIWindow *w in ((UIWindowScene *)s).windows) {
+            /* 只预载岛窗口(灵动岛/通知岛都住 SBSystemApertureWindow) —— 避免给
+               状态栏/控制中心等无关窗口各建一套播放器, 白占内存和解码 */
+            if (![NSStringFromClass(w.class) containsString:@"SystemAperture"]) continue;
+            DIVideoView *smallV = objc_getAssociatedObject(w, &kWinVideoSmall);
+            DIVideoView *expandV = objc_getAssociatedObject(w, &kWinVideoExpand);
+            if (!smallV) {
+                smallV = [[DIVideoView alloc] initWithFrame:CGRectZero];
+                smallV.expandedLayer = NO;
+                smallV.hidden = YES;
+                objc_setAssociatedObject(w, &kWinVideoSmall, smallV, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+            }
+            if (!expandV) {
+                expandV = [[DIVideoView alloc] initWithFrame:CGRectZero];
+                expandV.expandedLayer = YES;
+                expandV.hidden = YES;
+                objc_setAssociatedObject(w, &kWinVideoExpand, expandV, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+            }
+            for (DIVideoView *v in diLayers(smallV, expandV)) {
+                NSString *mp = materialPathFor(v.expandedLayer);
+                if (!mp.length) continue;
+                if ([mp isEqualToString:v.currentPath]) continue;   // 已就绪
+                [v loadVideo:mp];
+                [v.player pause];
+                /* loadVideo 尾部有个 dispatch_async 延迟补播, 会在下一轮 runloop 再 play 一次;
+                   预载层没挂岛, displayLink 已自停不会有人再停它 → 0.3s 后补一刀暂停,
+                   压住那个延迟补播(挂上岛后 want 逻辑会重新 play, 不影响正常显示)。 */
+                dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.3 * NSEC_PER_SEC)),
+                               dispatch_get_main_queue(), ^{
+                    __weak DIVideoView *wv = v;
+                    if (wv && !wv.superview && wv.player.timeControlStatus != AVPlayerTimeControlStatusPaused)
+                        [wv.player pause];
+                });
+                if (!v.hidden) v.hidden = YES;
+                DLog(@"[解锁预载] %@素材已就绪: %@", v.expandedLayer ? @"展开" : @"小岛", mp.lastPathComponent);
+            }
+        }
+    }
+}
+
 static void updateSingleVideo(UIWindow *win) {
     if (!win) return;
     diRefreshContour();
@@ -9292,6 +9350,34 @@ static UIView *diCCBackgroundOf(id vc) {
     return bg;
 }
 
+/* 2.8.48: 白底根治 —— 316 深挖 + 录屏像素实锤: 滚动时整屏(除模块卡片)变亮
+   (实测边缘像素 203~228), 而视图树里没有任何白色层(底色/opaque 全清过也没用)。
+   结论: 系统磨砂层滚动时切到更厚更亮的配方, 经 backdrop 渲染通道盖在壁纸之上。
+   壁纸静态时本就完全遮住磨砂层 → 直接把背景磨砂层透明化, 静态视觉零变化,
+   白底根源拔掉; 收起/关开关时还原 alpha, 不污染系统其它场景。 */
+static UIView *gCCHiddenMaterial;   /* 被我们透明化的背景磨砂层(收起时还原) */
+static void diCCHideBackdropMaterial(void) {
+    if (!wpOn || !gCCVisible || !gCCSurface) return;
+    UIView *parent = gCCSurface.superview;
+    if (!parent) return;
+    Class mt = NSClassFromString(@"MTMaterialView");
+    for (UIView *v in parent.subviews) {
+        if (v == gCCSurface || ![v isKindOfClass:mt]) continue;
+        if (v.alpha != 0.0) {
+            v.alpha = 0.0;
+            RLog(@"[控制中心] 背景磨砂层透明化(拔白底根源): %@ %.0fx%.0f",
+                 NSStringFromClass(v.class), v.bounds.size.width, v.bounds.size.height);
+        }
+        gCCHiddenMaterial = v;
+    }
+}
+static void diCCRestoreBackdropMaterial(void) {
+    if (gCCHiddenMaterial) {
+        if (gCCHiddenMaterial.alpha == 0.0) gCCHiddenMaterial.alpha = 1.0;
+        gCCHiddenMaterial = nil;
+    }
+}
+
 /* ===== 2.7.28 ① 浅色 / 深色素材彻底分开 =====
 
    之前: 浅色和深色共用同一个目录 /var/mobile/灵动岛/壁纸素材,
@@ -9455,7 +9541,7 @@ static void diCCReleasePlayer(void) {
 
 /* 素材路径变了 / 开关变了 / 显隐变了 → 重建或释放播放器 */
 static void diCCReloadSurface(void) {
-    if (!wpOn) { diCCReleasePlayer(); diCCLoopInvalidate(); if (gCCSurface) gCCSurface.hidden = YES; return; }
+    if (!wpOn) { diCCReleasePlayer(); diCCLoopInvalidate(); if (gCCSurface) gCCSurface.hidden = YES; diCCRestoreBackdropMaterial(); return; }
 
     /* 2.7.32: 单素材模式; 开了循环播放就轮播目录下全部素材 */
     NSString *path = nil;
@@ -10139,12 +10225,15 @@ static void diCCAttachTo(id vc, UIView *background) {
     }
     gCCSurface.frame = background.frame;
     diCCReloadSurface();
+    diCCHideBackdropMaterial();   /* 2.8.48: 挂载即透明化背景磨砂层(拔白底根源) */
     if (ccLongPressOn) diCCInstallPressGesture(vc, background);
 }
 
 static void diCCLayoutSurface(id vc) {
     UIView *bg = diCCBackgroundOf(vc);
     if (!bg || !gCCSurface) return;
+    /* 2.8.48: 每次布局都重申一次(系统可能重建磨砂层实例) */
+    diCCHideBackdropMaterial();
     /* 2.8.44: 背景容器自身也可能被系统设白(盖住壁纸), 一并清掉 */
     if (bg.superview) {
         UIColor *cb = bg.superview.backgroundColor;
@@ -10170,6 +10259,7 @@ static int sCCDeepDumpN = 0;   /* 2.8.47: 每次展开前 2 次滚动打深 dump
 static void diCCSetVisible(BOOL visible) {
     gCCVisible = visible;
     if (visible) sCCDeepDumpN = 0;   /* 2.8.47: 每次展开重新计数, 深 dump 打前 2 次滚动 */
+    else diCCRestoreBackdropMaterial();   /* 2.8.48: 收起时还原系统磨砂层 */
     diCCReloadSurface();
     /* 收起时把中央素材面板一并撤掉(纯 removeFromSuperview, 不碰响应链) */
     if (!visible) [DICCPickerPanel hideAll];
@@ -10363,6 +10453,29 @@ static void diCCDeepDump(UIView *sv) {
                  (unsigned long)i, NSStringFromClass(l.class), NSStringFromCGRect(l.frame),
                  l.opacity, (int)l.opaque, l.backgroundColor);
         }
+        /* 3.5) 2.8.48: 壁纸层自己的内容子层(白底若是因为素材层丢了, 这里能看出) */
+        RLog(@"[深dump] 壁纸层 hidden=%d alpha=%.2f z=%.1f 子层数=%lu",
+             (int)gCCSurface.isHidden, gCCSurface.alpha, gCCSurface.layer.zPosition,
+             (unsigned long)gCCSurface.layer.sublayers.count);
+        for (NSUInteger i = 0; i < gCCSurface.layer.sublayers.count; i++) {
+            CALayer *l = gCCSurface.layer.sublayers[i];
+            RLog(@"[深dump] 壁纸子层[%lu] %@ %@ op=%.2f hidden=%d contents=%@",
+                 (unsigned long)i, NSStringFromClass(l.class), NSStringFromCGRect(l.frame),
+                 l.opacity, (int)l.isHidden, l.contents ? @"有" : @"无");
+        }
+        /* 3.6) 2.8.48: 壁纸父层之上(手势层/窗口)有没有盖住整屏的层 */
+        for (UIView *p = parent.superview; p && ![p isKindOfClass:[UIWindow class]]; p = p.superview) {
+            RLog(@"[深dump] 上层%@ %@ a%.2f hidden=%d", NSStringFromClass(p.class),
+                 NSStringFromCGRect(p.bounds), p.alpha, (int)p.isHidden);
+            for (NSUInteger i = 0; i < p.layer.sublayers.count; i++) {
+                CALayer *l = p.layer.sublayers[i];
+                if (l.isHidden || l.opacity < 0.05) continue;
+                if (l.frame.size.width >= p.bounds.size.width * 0.9 && l.frame.size.height >= p.bounds.size.height * 0.4)
+                    RLog(@"[深dump] 上层Layer[%lu] %@ %@ op=%.2f o=%d z=%.1f bg=%@",
+                         (unsigned long)i, NSStringFromClass(l.class), NSStringFromCGRect(l.frame),
+                         l.opacity, (int)l.opaque, l.zPosition, l.backgroundColor);
+            }
+        }
         /* 4) collectionView 的 backgroundView(不在 subviews 里, 专查) */
         if ([sv isKindOfClass:[UICollectionView class]]) {
             UIView *bv = ((UICollectionView *)sv).backgroundView;
@@ -10411,11 +10524,12 @@ static void diCCTameScrollBackdrop(UIView *sv) {
             if (idx == NSNotFound) idx = 0;
             [sv.superview insertSubview:gCCSurface atIndex:idx];
         }
-        /* 2.8.47③: 层序纠偏 —— 任何兄弟磨砂层排在壁纸前面, 立刻把壁纸提到它上面 */
+        /* 2.8.47③: 层序纠偏 —— 任何兄弟磨砂层排在壁纸前面, 立刻把壁纸提到它上面
+           (2.8.48: 磨砂层已直接透明化, 这里兜底; 遍历用 copy 防枚举中 mutation) */
         UIView *parent = gCCSurface.superview;
         if (parent) {
             Class mt = NSClassFromString(@"MTMaterialView");
-            for (UIView *v in parent.subviews) {
+            for (UIView *v in [parent.subviews copy]) {
                 if (v == gCCSurface) continue;
                 if (![v isKindOfClass:mt]) continue;
                 if ([parent.subviews indexOfObject:v] > [parent.subviews indexOfObject:gCCSurface]) {
@@ -10436,6 +10550,8 @@ static void diCCTameScrollBackdrop(UIView *sv) {
                 }
             }
         }
+        /* 2.8.48: 滚动时重申透明化(系统重建磨砂层/改配方都在这拍压住) */
+        diCCHideBackdropMaterial();
         /* scrollview 自身 */
         UIColor *sb = sv.backgroundColor;
         if (sb && ![sb isEqual:UIColor.clearColor]) {
@@ -10704,6 +10820,8 @@ static void applyLockState(BOOL locked) {
         if ([s isKindOfClass:[UIWindowScene class]])
             for (UIWindow *w in ((UIWindowScene *)s).windows) updateSingleVideo(w);
     if (!locked) refreshAll();
+    /* 2.8.48: 解锁即预载两层素材(不需要放歌触发), 锁屏仍全停 */
+    if (!locked) diPreloadIslandVideos();
 }
 static void lockStateChanged(CFNotificationCenterRef, void *, CFStringRef, const void *, CFDictionaryRef) {
     dispatch_async(dispatch_get_main_queue(), ^{
@@ -11958,7 +12076,7 @@ __attribute__((constructor)) static void init(void) {
             // 私有类可能加载较晚, 分阶段重试
             for (int s : {2, 5, 15, 30, 60})
                 dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)s * NSEC_PER_SEC),
-                    dispatch_get_main_queue(), ^{ installKnownHosts(); refreshAll(); diHookHomeBarGrabberRetry(); });
+                    dispatch_get_main_queue(), ^{ installKnownHosts(); refreshAll(); diPreloadIslandVideos(); diHookHomeBarGrabberRetry(); });
         });
     }
 }
