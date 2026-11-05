@@ -104,10 +104,21 @@ static void RLog(NSString *fmt, ...) {
     df.dateFormat = @"yyyy-MM-dd HH:mm:ss";
     NSString *out = [NSString stringWithFormat:@"[%@] [现场] %@\n", [df stringFromDate:[NSDate date]], line];
     NSFileHandle *h = [NSFileHandle fileHandleForWritingAtPath:path];
-    if (!h) { [out writeToFile:path atomically:YES encoding:NSUTF8StringEncoding error:NULL]; return; }
-    [h seekToEndOfFile];
-    [h writeData:[out dataUsingEncoding:NSUTF8StringEncoding]];
-    [h closeFile];
+    if (!h) [out writeToFile:path atomically:YES encoding:NSUTF8StringEncoding error:NULL];
+    else { [h seekToEndOfFile]; [h writeData:[out dataUsingEncoding:NSUTF8StringEncoding]]; [h closeFile]; }
+    if ([line hasPrefix:@"[控制中心诊断]"] || [line hasPrefix:@"[控制中心]"]) {
+        NSString *ccPath = [kMaterialDir stringByAppendingPathComponent:@"driftisland-cc-diagnostic.log"];
+        NSData *data = [out dataUsingEncoding:NSUTF8StringEncoding];
+        NSDictionary *attr = [[NSFileManager defaultManager] attributesOfItemAtPath:ccPath error:NULL];
+        if ([attr[NSFileSize] unsignedLongLongValue] > 1024 * 1024)
+            [data writeToFile:ccPath atomically:YES];
+        else if (![[NSFileManager defaultManager] fileExistsAtPath:ccPath])
+            [data writeToFile:ccPath atomically:YES];
+        else {
+            NSFileHandle *outHandle = [NSFileHandle fileHandleForWritingAtPath:ccPath];
+            [outHandle seekToEndOfFile]; [outHandle writeData:data]; [outHandle closeFile];
+        }
+    }
 }
 #define DI_STEP(fmt, ...) RLog(fmt, ##__VA_ARGS__)
 
@@ -3805,6 +3816,13 @@ static BOOL diApplyMaskToCover(UIView *cover, UIImage *shape) {
 
         CALayer *pl = host.layer.presentationLayer;
         CGSize bs = pl ? pl.bounds.size : host.bounds.size;
+        /* 展开大专辑在跨进程内容中；当前探针只有小门户坐标。
+           即使小岛的玻璃被播放锁定，也不能在展开宿主上重显 25pt 的副本。 */
+        if (bs.width >= 280.0 && bs.height >= 120.0) {
+            if (self.glassOn || !self.hidden) [self diTeardown];
+            _link.paused = YES;
+            return;
+        }
 
         /* ===== 2.8.20: 宿主内容指纹 —— 来电/充电/通知岛出现瞬间立即收玻璃 =====
            290 反馈: "打电话岛第一时间还是显示那个蒙版, 后面才隐藏"。
@@ -3985,14 +4003,14 @@ static BOOL diApplyMaskToCover(UIView *cover, UIImage *shape) {
              · gMaskGen 变了(设置页点了选择, 强制重建)
            三条任一命中才重建蒙版; 否则保持现状, 不再每秒重建十几次。 */
         NSString *selNow = pString(@"diAlbumMaskAsset");
-        BOOL genChanged = (gMaskGen != self.fpGen) || (self.fpGen == 0);
+        BOOL genChanged = (gMaskGen != self.fpGen); /* 初始 0 是有效代数，首次由 !maskImg 触发 */
         /* 2.7.45: stat 也是共享资源, 但两个探针要的完全是同一份数据, 所以保留 static 缓存;
            只是把它挪到"每个实例都会读"的公共函数里, 见 diMaskStatOf */
         double mtimeVal = 0; unsigned long long sizeVal = 0; BOOL statOK = diMaskStatOf(path, &mtimeVal, &sizeVal);
         BOOL selChanged = !((selNow == self.fpSel) || [selNow isEqualToString:self.fpSel]);
         BOOL mtChanged = statOK && (llround(mtimeVal * 100.0) != llround(self.fpMtime * 100.0));
         BOOL pathChanged = ![self.loadedPath isEqualToString:path];
-        BOOL needRebuild = pathChanged || !self.maskImg || selChanged || mtChanged || genChanged || self.fpGen == 0;
+        BOOL needRebuild = pathChanged || !self.maskImg || selChanged || mtChanged || genChanged;
         {
             static CFAbsoluteTime sDbgT;
             if (CFAbsoluteTimeGetCurrent() - sDbgT > 3.0) {
@@ -4188,7 +4206,7 @@ static BOOL diApplyMaskToCover(UIView *cover, UIImage *shape) {
            正方形(圆永远是圆的), 小岛/展开/旋转开关切来切去都是同一条路、同一个大小,
            不会再出现"重开旋转才正常圆形"。旋转开关只决定加不加旋转 transform。
            只有拿不到专辑图(MediaRemote 无 artworkData)才退回系统 mask 老路兜底。 */
-        diFetchSharedArt(genChanged || self.fpGen == 0);
+        diFetchSharedArt(genChanged);
         BOOL wantGlass = (gSharedArt != nil);
         if (!gSharedArt) {
             if (!_loggedNoArtTip) {
