@@ -18,7 +18,7 @@
 
 static NSString *const kDomain = @"com.abgg332.driftisland";
 /* 2.6.25: 设置页底部显示的版本号 */
-static NSString *const DI_VERSION_STR = @"2.8.59";
+static NSString *const DI_VERSION_STR = @"2.8.60";
 /* 2.6.10: 专辑光晕遮罩 —— 与 Tweak 侧 DIAlbumMask.h 保持一致 */
 static NSString *const kDIAlbumMaskKey = @"diAlbumMaskAsset";
 static NSString *const kDIMaskRoot = @"/var/mobile/灵动岛/遮罩素材";
@@ -735,11 +735,14 @@ static Class diStepSliderClass(void) {
 /* 2.8.12: 歌词岛合并页回归(2.8.4/2.8.5 下架后恢复) ——
    上半=左侧专辑帧率, 下半=右侧音频帧率, 下面=专辑遮罩设置(2.2.24 原版形态) */
 @interface DILyricsIslandSettings : DIMiniBaseController @end
+@interface DIRecordingIslandSettings : DIMiniBaseController @end
 /* 2.8.41: 控制中心页回归(单素材=浅色键 wpLightAsset, 无深浅色分组) */
 @interface DICCSettings : DIMiniBaseController @end
 @interface DIFrameFoldersMask : DIFrameFolders @end /* 2.6.3: 遮罩素材选择(键 maskAnimFolder) */
 @interface DIFrameFoldersMini : DIFrameFolders @end  /* 左侧(mini)帧率素材选择(键 smallAnimFolder) */
 @interface DIFrameFoldersAudio : DIFrameFolders @end /* 右侧音频素材(键 miniAudioFolder) */
+@interface DIFrameFoldersRecMini : DIFrameFolders @end
+@interface DIFrameFoldersRecTrailing : DIFrameFolders @end
 @interface DIPrefsController (ZoneLinkFwd)
 - (PSSpecifier *)linkSpec:(NSString *)name detail:(Class)cls;
 - (void)diOpenPage:(PSSpecifier *)spec;
@@ -1422,6 +1425,7 @@ static void diWriteColors(NSArray<NSString *> *colors) {
         DI_ADD([self linkSpec:@"锁屏通知" detail:[DILockScreenPage class]]);
         /* 2.8.22: "歌词岛"更名"专辑遮罩"(左侧专辑帧率 + 右侧音频帧率 + 专辑遮罩) */
         DI_ADD([self linkSpec:@"专辑遮罩" detail:[DILyricsIslandSettings class]]);
+        DI_ADD([self linkSpec:@"录屏岛" detail:[DIRecordingIslandSettings class]]);
         /* 2.8.41: 控制中心入口回归 */
         DI_ADD([self linkSpec:@"控制中心" detail:[DICCSettings class]]);
 
@@ -5068,6 +5072,12 @@ static void diOpenHomeBarPickWindow(void) {
 @implementation DIFrameFoldersAudio
 - (NSString *)prefKey { return @"miniAudioFolder"; }
 @end
+@implementation DIFrameFoldersRecMini
+- (NSString *)prefKey { return @"diRecMiniFolder"; }
+@end
+@implementation DIFrameFoldersRecTrailing
+- (NSString *)prefKey { return @"diRecTrailingFolder"; }
+@end
 @implementation DIFrameFoldersMask
 - (NSString *)prefKey { return @"maskAnimFolder"; }
 - (NSString *)rootDir { return kMaskDir; }  /* 2.6.4: 遮罩素材独立目录 */
@@ -5119,6 +5129,41 @@ static void diOpenHomeBarPickWindow(void) {
     [specs addObject:[self switchSpec:@"反向旋转" key:@"maskRotateReverse" def:@NO]];
     [specs addObject:[self numSlider:@"旋转速度" key:@"maskRotateSpeed" def:45 mn:0 mx:360]];
     return specs;
+}
+@end
+
+/* 录屏岛：左/右槽位各自独立帧目录与动画参数，默认关闭以免影响原录屏素材。 */
+@implementation DIRecordingIslandSettings
+- (NSArray *)buildSpecifiers {
+    NSMutableArray *specs = [NSMutableArray array];
+    [specs addObject:[self groupSpec:@"录屏岛 · 左侧 mini" footer:@"素材目录：/var/mobile/灵动岛/帧率素材"]];
+    [specs addObject:[self switchSpec:@"启用动画" key:@"diRecMiniOn" def:@NO]];
+    [specs addObject:[self numSlider:@"动画帧率" key:@"diRecMiniFPS" def:60 mn:1 mx:120]];
+    [specs addObject:[self switchSpec:@"素材旋转" key:@"diRecMiniRotate" def:@NO]];
+    [specs addObject:[self switchSpec:@"反向旋转" key:@"diRecMiniReverse" def:@NO]];
+    [specs addObject:[self numSlider:@"旋转速度(度/秒)" key:@"diRecMiniSpeed" def:5 mn:0 mx:360]];
+    [specs addObject:[self numSlider:@"缩放倍数(%)" key:@"diRecMiniScale" def:100 mn:50 mx:200]];
+    [specs addObject:[self numSlider:@"X偏移" key:@"diRecMiniX" def:0 mn:-40 mx:40]];
+    [specs addObject:[self numSlider:@"Y偏移" key:@"diRecMiniY" def:0 mn:-40 mx:40]];
+    PSSpecifier *left = [PSSpecifier preferenceSpecifierNamed:@"素材名" target:self set:NULL
+        get:@selector(diRecFrameName:) detail:[DIFrameFoldersRecMini class] cell:PSLinkCell edit:nil];
+    [left setProperty:@"diRecMiniFolder" forKey:@"nameKey"]; [specs addObject:left];
+    [specs addObject:[self groupSpec:@"录屏岛 · 右侧" footer:nil]];
+    [specs addObject:[self switchSpec:@"启用动画" key:@"diRecTrailingOn" def:@NO]];
+    [specs addObject:[self numSlider:@"动画帧率" key:@"diRecTrailingFPS" def:60 mn:1 mx:120]];
+    [specs addObject:[self switchSpec:@"素材旋转" key:@"diRecTrailingRotate" def:@NO]];
+    [specs addObject:[self switchSpec:@"反向旋转" key:@"diRecTrailingReverse" def:@NO]];
+    [specs addObject:[self numSlider:@"旋转速度(度/秒)" key:@"diRecTrailingSpeed" def:5 mn:0 mx:360]];
+    [specs addObject:[self numSlider:@"缩放倍数(%)" key:@"diRecTrailingScale" def:100 mn:50 mx:200]];
+    [specs addObject:[self numSlider:@"X偏移" key:@"diRecTrailingX" def:0 mn:-40 mx:40]];
+    [specs addObject:[self numSlider:@"Y偏移" key:@"diRecTrailingY" def:0 mn:-40 mx:40]];
+    PSSpecifier *right = [PSSpecifier preferenceSpecifierNamed:@"素材名" target:self set:NULL
+        get:@selector(diRecFrameName:) detail:[DIFrameFoldersRecTrailing class] cell:PSLinkCell edit:nil];
+    [right setProperty:@"diRecTrailingFolder" forKey:@"nameKey"]; [specs addObject:right];
+    return specs;
+}
+- (id)diRecFrameName:(PSSpecifier *)sp {
+    return [self folderNameForKey:[sp propertyForKey:@"nameKey"] ?: @"diRecMiniFolder"];
 }
 @end
 

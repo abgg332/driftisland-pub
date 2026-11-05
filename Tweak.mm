@@ -182,6 +182,13 @@ static BOOL miniAnimOn = NO;           /* 2.8.12: 左侧专辑帧率(歌词岛�
 static double miniFPS = 50, miniScale = 0, miniOffsetX, miniOffsetY;
 static BOOL miniAudioOn = NO;          /* 2.8.12: 右侧音频帧率(歌词岛页「启用动画」) */
 static double miniAudioFPS = 50, miniAudioScale = 0, miniAudioOffsetX, miniAudioOffsetY;
+/* 录屏岛：两槽独立序列帧；仅录屏指示岛出现且正在录屏时运行。 */
+static BOOL diRecMiniOn, diRecTrailingOn;
+static NSString *diRecMiniFolder, *diRecTrailingFolder;
+static double diRecMiniFPS, diRecTrailingFPS;
+static double diRecMiniScale, diRecTrailingScale, diRecMiniX, diRecMiniY, diRecTrailingX, diRecTrailingY;
+static BOOL diRecMiniRotate, diRecTrailingRotate, diRecMiniReverse, diRecTrailingReverse;
+static double diRecMiniSpeed, diRecTrailingSpeed;
 static NSString *smallAnimFolder;      // 左侧(mini)素材文件夹
 static NSString *miniAudioFolder;      // 右侧音频素材独立键
 
@@ -702,6 +709,23 @@ static void refreshPrefs(void) {
     expandIdx = (ei == none) ? legacy : ei;
     /* 2.2.50: 录屏素材 */
     recOn = pBool(@"recOn", NO);
+    diRecMiniOn = pBool(@"diRecMiniOn", NO);
+    diRecTrailingOn = pBool(@"diRecTrailingOn", NO);
+    diRecMiniFolder = pString(@"diRecMiniFolder");
+    diRecTrailingFolder = pString(@"diRecTrailingFolder");
+    diRecMiniFPS = MAX(1, MIN(120, pDouble(@"diRecMiniFPS", 60)));
+    diRecTrailingFPS = MAX(1, MIN(120, pDouble(@"diRecTrailingFPS", 60)));
+    diRecMiniScale = MAX(0.5, MIN(2, pDouble(@"diRecMiniScale", 100) / 100.0));
+    diRecTrailingScale = MAX(0.5, MIN(2, pDouble(@"diRecTrailingScale", 100) / 100.0));
+    diRecMiniX = pDouble(@"diRecMiniX", 0); diRecMiniY = pDouble(@"diRecMiniY", 0);
+    diRecTrailingX = pDouble(@"diRecTrailingX", 0); diRecTrailingY = pDouble(@"diRecTrailingY", 0);
+    diRecMiniRotate = pBool(@"diRecMiniRotate", NO);
+    diRecTrailingRotate = pBool(@"diRecTrailingRotate", NO);
+    diRecMiniReverse = pBool(@"diRecMiniReverse", NO);
+    diRecTrailingReverse = pBool(@"diRecTrailingReverse", NO);
+    diRecMiniSpeed = pDouble(@"diRecMiniSpeed", 5);
+    diRecTrailingSpeed = pDouble(@"diRecTrailingSpeed", 5);
+
     recIdx = pInt(@"recIndex", 0);
     /* 2.2.54: 录屏素材大小 0~200 映射 0.5~2.0, 默认 100 = 1.0 铺满 */
     recScale = pDouble(@"recScale", 100.0) / 100.0;
@@ -5762,6 +5786,80 @@ static void diPreloadIslandVideos(void) {
     }
 }
 
+@interface DIRecordingFrameView : UIView
+@property(nonatomic,strong) UIImageView *imageView;
+@property(nonatomic,strong) CADisplayLink *link;
+@property(nonatomic,assign) NSInteger side, frameIndex;
+@property(nonatomic,assign) CFTimeInterval previousTime, rotationTime;
+@property(nonatomic,assign) double accumulator, rotation;
+- (void)diStep:(CADisplayLink *)link;
+@end
+@implementation DIRecordingFrameView
+- (instancetype)initWithFrame:(CGRect)frame {
+    if ((self = [super initWithFrame:frame])) {
+        self.userInteractionEnabled = NO; self.backgroundColor = UIColor.clearColor;
+        self.imageView = [UIImageView new]; self.imageView.contentMode = UIViewContentModeScaleAspectFit;
+        [self addSubview:self.imageView];
+        self.link = [CADisplayLink displayLinkWithTarget:self selector:@selector(diStep:)];
+        self.link.preferredFramesPerSecond = 60;
+        [self.link addToRunLoop:NSRunLoop.mainRunLoop forMode:NSRunLoopCommonModes];
+        self.link.paused = YES;
+    }
+    return self;
+}
+- (void)dealloc { [self.link invalidate]; }
+- (void)diStep:(CADisplayLink *)link {
+    UIView *host = self.superview;
+    if (!host || !host.window || !enabled || !diIsScreenRecording() ||
+        host != diRecIslandHost() || !(self.side ? diRecTrailingOn : diRecMiniOn)) {
+        self.hidden = YES; link.paused = YES; return;
+    }
+    NSArray<NSString *> *frames = framePathsFor(self.side ? diRecTrailingFolder : diRecMiniFolder);
+    if (!frames.count) { self.hidden = YES; link.paused = YES; return; }
+    BOOL right = self.side == 1;
+    UIView *accessory = nil;
+    CGRect slot = diRecSlotRect(host, right, &accessory);
+    if (slot.size.width <= 1 || slot.size.height <= 1) { self.hidden = YES; return; }
+    self.hidden = NO; self.frame = slot;
+    CFTimeInterval dt = self.previousTime > 0 ? MIN(0.3, MAX(0, link.timestamp - self.previousTime)) : 0;
+    self.previousTime = link.timestamp;
+    self.accumulator += dt * (right ? diRecTrailingFPS : diRecMiniFPS);
+    if (self.accumulator >= 1) {
+        NSInteger advance = (NSInteger)self.accumulator;
+        self.accumulator -= advance;
+        self.frameIndex = (self.frameIndex + advance) % (NSInteger)frames.count;
+    }
+    UIImage *im = frameImage(frames[self.frameIndex % (NSInteger)frames.count]);
+    if (im && self.imageView.image != im) self.imageView.image = im;
+    double scale = right ? diRecTrailingScale : diRecMiniScale;
+    double ox = right ? diRecTrailingX : diRecMiniX, oy = right ? diRecTrailingY : diRecMiniY;
+    CGFloat w = slot.size.width * scale, h = slot.size.height * scale;
+    self.imageView.bounds = CGRectMake(0, 0, w, h);
+    self.imageView.center = CGPointMake(slot.size.width * 0.5 + ox, slot.size.height * 0.5 + oy);
+    BOOL rotate = right ? diRecTrailingRotate : diRecMiniRotate;
+    double speed = right ? diRecTrailingSpeed : diRecMiniSpeed;
+    if (rotate) {
+        self.rotation += dt * speed * (right ? (diRecTrailingReverse ? -1 : 1) : (diRecMiniReverse ? -1 : 1)) * M_PI / 180.;
+        self.imageView.transform = CGAffineTransformMakeRotation(self.rotation);
+    } else self.imageView.transform = CGAffineTransformIdentity;
+}
+@end
+static char kDiRecFrameLeft, kDiRecFrameRight;
+static void diSyncRecordingFrames(UIWindow *win, UIView *host) {
+    for (NSInteger i = 0; i < 2; i++) {
+        char *key = i ? &kDiRecFrameRight : &kDiRecFrameLeft;
+        DIRecordingFrameView *v = objc_getAssociatedObject(win, key);
+        BOOL want = enabled && diIsScreenRecording() && (i ? diRecTrailingOn : diRecMiniOn)
+            && host && host.window == win;
+        if (!want) { if (v) { v.hidden = YES; v.link.paused = YES; v.previousTime = 0; } continue; }
+        if (!v) {
+            v = [[DIRecordingFrameView alloc] initWithFrame:CGRectZero]; v.side = i;
+            objc_setAssociatedObject(win, key, v, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        }
+        if (v.superview != host) { [v removeFromSuperview]; [host addSubview:v]; }
+        v.link.paused = NO;
+    }
+}
 static void updateSingleVideo(UIWindow *win) {
     if (!win) return;
     diRefreshContour();
@@ -5780,6 +5878,7 @@ static void updateSingleVideo(UIWindow *win) {
             objc_setAssociatedObject(win, &kWinVideoRec, recV, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
         }
         UIView *recHost = enabled ? diRecIslandHost() : nil;
+        diSyncRecordingFrames(win, recHost);
         if (recHost && recHost.window == win) {
             if (recV.superview != recHost) {
                 [recV removeFromSuperview];
