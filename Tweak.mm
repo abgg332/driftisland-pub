@@ -9355,6 +9355,41 @@ static UIView *diCCBackgroundOf(id vc) {
    结论: 系统磨砂层滚动时切到更厚更亮的配方, 经 backdrop 渲染通道盖在壁纸之上。
    壁纸静态时本就完全遮住磨砂层 → 直接把背景磨砂层透明化, 静态视觉零变化,
    白底根源拔掉; 收起/关开关时还原 alpha, 不污染系统其它场景。 */
+/* 2.8.50: 只压制手势容器里有可验证浅色填充的独立背景层。
+   不碰 SBBarSwipeAffordanceView 本体、对应 UIView 的 layer 或响应链。 */
+static NSMapTable<CALayer *, NSNumber *> *gCCLightLayers;
+static void diCCRestoreAffordanceLayers(void) {
+    for (CALayer *l in gCCLightLayers) {
+        NSNumber *old = [gCCLightLayers objectForKey:l];
+        if (old) l.opacity = old.floatValue;
+    }
+    [gCCLightLayers removeAllObjects];
+}
+static void diCCTameAffordanceLayers(void) {
+    if (!wpOn || !gCCVisible || !gCCSurface || gCCSurface.isHidden || !gCCSurface.window) return;
+    UIView *parent = gCCSurface.superview;
+    if (!parent) return;
+    UIView *host = parent.superview;
+    if (![NSStringFromClass(host.class) isEqualToString:@"SBBarSwipeAffordanceView"] ||
+        host.window != gCCSurface.window) return;
+    if (!gCCLightLayers) gCCLightLayers = [NSMapTable weakToStrongObjectsMapTable];
+    for (CALayer *l in [host.layer.sublayers copy]) {
+        if (l == parent.layer || l.delegate != nil || l.isHidden || l.opacity < 0.05) continue;
+        if (l.bounds.size.width < host.bounds.size.width * 0.85 ||
+            l.bounds.size.height < host.bounds.size.height * 0.4) continue;
+        CGColorRef color = l.backgroundColor;
+        if (!color) continue; /* 未确定颜色的渲染层不能盲目透明化 */
+        UIColor *ui = [UIColor colorWithCGColor:color];
+        CGFloat white = 0, alpha = 0;
+        if (![ui getWhite:&white alpha:&alpha] || white < 0.70 || alpha < 0.8) continue;
+        if (![gCCLightLayers objectForKey:l]) {
+            [gCCLightLayers setObject:@(l.opacity) forKey:l];
+            RLog(@"[控制中心] 手势容器浅色背景层命中 %@ %@ white=%.2f (保留手势视图)",
+                 NSStringFromClass(l.class), NSStringFromCGRect(l.frame), white);
+        }
+        l.opacity = 0.0;
+    }
+}
 static UIView *gCCHiddenMaterial;   /* 被我们透明化的背景磨砂层(收起时还原) */
 static void diCCHideBackdropMaterial(void) {
     if (!wpOn || !gCCVisible || !gCCSurface) return;
@@ -9541,7 +9576,7 @@ static void diCCReleasePlayer(void) {
 
 /* 素材路径变了 / 开关变了 / 显隐变了 → 重建或释放播放器 */
 static void diCCReloadSurface(void) {
-    if (!wpOn) { diCCReleasePlayer(); diCCLoopInvalidate(); if (gCCSurface) gCCSurface.hidden = YES; diCCRestoreBackdropMaterial(); return; }
+    if (!wpOn) { diCCReleasePlayer(); diCCLoopInvalidate(); if (gCCSurface) gCCSurface.hidden = YES; diCCRestoreBackdropMaterial(); diCCRestoreAffordanceLayers(); return; }
 
     /* 2.7.32: 单素材模式; 开了循环播放就轮播目录下全部素材 */
     NSString *path = nil;
@@ -10226,6 +10261,7 @@ static void diCCAttachTo(id vc, UIView *background) {
     gCCSurface.frame = background.frame;
     diCCReloadSurface();
     diCCHideBackdropMaterial();   /* 2.8.48: 挂载即透明化背景磨砂层(拔白底根源) */
+    diCCTameAffordanceLayers();
     if (ccLongPressOn) diCCInstallPressGesture(vc, background);
 }
 
@@ -10234,6 +10270,7 @@ static void diCCLayoutSurface(id vc) {
     if (!bg || !gCCSurface) return;
     /* 2.8.48: 每次布局都重申一次(系统可能重建磨砂层实例) */
     diCCHideBackdropMaterial();
+    diCCTameAffordanceLayers();
     /* 2.8.44: 背景容器自身也可能被系统设白(盖住壁纸), 一并清掉 */
     if (bg.superview) {
         UIColor *cb = bg.superview.backgroundColor;
@@ -10260,6 +10297,7 @@ static void diCCSetVisible(BOOL visible) {
     gCCVisible = visible;
     if (visible) sCCDeepDumpN = 0;   /* 2.8.47: 每次展开重新计数, 深 dump 打前 2 次滚动 */
     else diCCRestoreBackdropMaterial();   /* 2.8.48: 收起时还原系统磨砂层 */
+    if (!visible) diCCRestoreAffordanceLayers();
     diCCReloadSurface();
     /* 收起时把中央素材面板一并撤掉(纯 removeFromSuperview, 不碰响应链) */
     if (!visible) [DICCPickerPanel hideAll];
@@ -10552,6 +10590,7 @@ static void diCCTameScrollBackdrop(UIView *sv) {
         }
         /* 2.8.48: 滚动时重申透明化(系统重建磨砂层/改配方都在这拍压住) */
         diCCHideBackdropMaterial();
+        diCCTameAffordanceLayers();
         /* scrollview 自身 */
         UIColor *sb = sv.backgroundColor;
         if (sb && ![sb isEqual:UIColor.clearColor]) {
