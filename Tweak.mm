@@ -10144,6 +10144,14 @@ static void diCCAttachTo(id vc, UIView *background) {
 static void diCCLayoutSurface(id vc) {
     UIView *bg = diCCBackgroundOf(vc);
     if (!bg || !gCCSurface) return;
+    /* 2.8.44: 背景容器自身也可能被系统设白(盖住壁纸), 一并清掉 */
+    if (bg.superview) {
+        UIColor *cb = bg.superview.backgroundColor;
+        if (cb && ![cb isEqual:UIColor.clearColor]) {
+            bg.superview.backgroundColor = nil;
+            DLog(@"[控制中心] 清除背景容器色底 %@ bg=%@", NSStringFromClass(bg.superview.class), cb);
+        }
+    }
     gCCSurface.frame = bg.frame;
     [CATransaction begin];
     [CATransaction setDisableActions:YES];
@@ -10266,24 +10274,50 @@ static void diCCInstallOverlayHook(void) {
    (它们不是全屏, 且保持半透明反而更贴合系统观感)。 */
 static void (*diOrigScrollLayout)(id, SEL);
 
+/* 2.8.44: 312 日志证明白底不是 scrollview 的直接子层(压制日志 0 条, 白底依旧)。
+   扩大范围: ① scrollview 自身 backgroundColor 也可能被系统设白;
+   ② 递归两层, 对**任意**大面积(≥0.9 宽 × ≥0.5 高)层:
+      MTMaterialView 类 → alpha 清 0(磨砂层, 只透明化不破坏);
+      其余 UIView → backgroundColor 非 clear 就清空(纯色底才这么处理,
+      带 _UIBackdropEffectView 的复合层不碰, 只打日志留证)。
+   每个处理动作都打日志, 下一轮日志直接能看出白底真身是什么类。 */
+static void diCCTameOne(UIView *v, CGSize ws, int depth) {
+    if (!v || depth > 2) return;
+    CGSize bs = v.bounds.size;
+    BOOL big = (bs.width >= ws.width * 0.9 && bs.height >= ws.height * 0.5);
+    if (big) {
+        NSString *cn = NSStringFromClass(v.class);
+        if ([v isKindOfClass:NSClassFromString(@"MTMaterialView")]) {
+            if (v.alpha != 0.0) {
+                v.alpha = 0.0;
+                DLog(@"[控制中心] 压制磨砂底 %@ (%.0fx%.0f) depth=%d", cn, bs.width, bs.height, depth);
+            }
+        } else if (![cn containsString:@"BackdropEffect"]) {
+            UIColor *bg = v.backgroundColor;
+            if (bg && ![bg isEqual:UIColor.clearColor]) {
+                v.backgroundColor = nil;
+                DLog(@"[控制中心] 清除色底 %@ (%.0fx%.0f) bg=%@ depth=%d", cn, bs.width, bs.height, bg, depth);
+            }
+        } else {
+            DLog(@"[控制中心][诊断] 大面积复合底 %@ (%.0fx%.0f) alpha=%.2f bg=%@ depth=%d 未处理",
+                 cn, bs.width, bs.height, v.alpha, v.backgroundColor, depth);
+        }
+    }
+    for (UIView *c in v.subviews) diCCTameOne(c, ws, depth + 1);
+}
+
 static void diCCTameScrollBackdrop(UIView *sv) {
     if (!wpOn || !gCCSurface || !sv) return;
     CGSize ws = sv.bounds.size;
     if (ws.width < 10) return;
-    Class mt = NSClassFromString(@"MTMaterialView");
     @try {
-        for (UIView *c in sv.subviews) {
-            if (![c isKindOfClass:mt]) continue;
-            CGSize bs = c.bounds.size;
-            BOOL full = (bs.width >= ws.width * 0.9 && bs.height >= ws.height * 0.5);
-            if (!full) continue;
-            BOOL changed = NO;
-            if (c.alpha != 0.0) { c.alpha = 0.0; changed = YES; }
-            if (c.backgroundColor != nil && ![c.backgroundColor isEqual:UIColor.clearColor]) {
-                c.backgroundColor = nil; changed = YES;
-            }
-            if (changed) DLog(@"[控制中心] 已压制滚动区磨砂底 %@ (%.0fx%.0f)", NSStringFromClass(c.class), bs.width, bs.height);
+        /* scrollview 自身 */
+        UIColor *sb = sv.backgroundColor;
+        if (sb && ![sb isEqual:UIColor.clearColor]) {
+            sv.backgroundColor = nil;
+            DLog(@"[控制中心] 清除滚动区自身色底 %@ bg=%@", NSStringFromClass(sv.class), sb);
         }
+        for (UIView *c in sv.subviews) diCCTameOne(c, ws, 0);
     } @catch (__unused NSException *e) {}
 }
 
