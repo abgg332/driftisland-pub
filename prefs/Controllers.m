@@ -18,7 +18,7 @@
 
 static NSString *const kDomain = @"com.abgg332.driftisland";
 /* 2.6.25: 设置页底部显示的版本号 */
-static NSString *const DI_VERSION_STR = @"2.8.60";
+static NSString *const DI_VERSION_STR = @"2.8.61";
 /* 2.6.10: 专辑光晕遮罩 —— 与 Tweak 侧 DIAlbumMask.h 保持一致 */
 static NSString *const kDIAlbumMaskKey = @"diAlbumMaskAsset";
 static NSString *const kDIMaskRoot = @"/var/mobile/灵动岛/遮罩素材";
@@ -1829,7 +1829,6 @@ static void diWriteColors(NSArray<NSString *> *colors) {
 
         NSArray *files = @[
             [kMaterialDir stringByAppendingPathComponent:@"driftisland.log"],
-            [kMaterialDir stringByAppendingPathComponent:@"driftisland-cc-diagnostic.log"],
             [kMaterialDir stringByAppendingPathComponent:@"driftisland-island-tree.log"],
             @"/var/mobile/灵动岛/driftisland_crash.log",
         ];

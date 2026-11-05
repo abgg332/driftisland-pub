@@ -106,19 +106,6 @@ static void RLog(NSString *fmt, ...) {
     NSFileHandle *h = [NSFileHandle fileHandleForWritingAtPath:path];
     if (!h) [out writeToFile:path atomically:YES encoding:NSUTF8StringEncoding error:NULL];
     else { [h seekToEndOfFile]; [h writeData:[out dataUsingEncoding:NSUTF8StringEncoding]]; [h closeFile]; }
-    if ([line hasPrefix:@"[控制中心诊断]"] || [line hasPrefix:@"[控制中心]"]) {
-        NSString *ccPath = [kMaterialDir stringByAppendingPathComponent:@"driftisland-cc-diagnostic.log"];
-        NSData *data = [out dataUsingEncoding:NSUTF8StringEncoding];
-        NSDictionary *attr = [[NSFileManager defaultManager] attributesOfItemAtPath:ccPath error:NULL];
-        if ([attr[NSFileSize] unsignedLongLongValue] > 1024 * 1024)
-            [data writeToFile:ccPath atomically:YES];
-        else if (![[NSFileManager defaultManager] fileExistsAtPath:ccPath])
-            [data writeToFile:ccPath atomically:YES];
-        else {
-            NSFileHandle *outHandle = [NSFileHandle fileHandleForWritingAtPath:ccPath];
-            [outHandle seekToEndOfFile]; [outHandle writeData:data]; [outHandle closeFile];
-        }
-    }
 }
 #define DI_STEP(fmt, ...) RLog(fmt, ##__VA_ARGS__)
 
@@ -562,12 +549,30 @@ static CGRect diRecSlotRect(UIView *island, BOOL onRight, UIView **outAcc) {
         for (UIView *s in v.subviews) [stack addObject:s];
     }
     [accs sortUsingComparator:^NSComparisonResult(UIView *a, UIView *b) {
-        return a.frame.origin.x < b.frame.origin.x ? NSOrderedAscending : NSOrderedDescending;
+        CGRect ra = [a.superview convertRect:a.frame toView:island];
+        CGRect rb = [b.superview convertRect:b.frame toView:island];
+        if (ra.origin.x < rb.origin.x) return NSOrderedAscending;
+        if (ra.origin.x > rb.origin.x) return NSOrderedDescending;
+        return NSOrderedSame;
     }];
     UIView *target = nil;
-    if (accs.count > 1) target = onRight ? accs.lastObject : accs.firstObject;
-    else if (accs.count == 1) target = onRight ? nil : accs.firstObject;  // 单个 accessory 视为左侧圆点
+    if (onRight) {
+        /* 零宽门户常停在左槽坐标；必须有独立右槽才显示右侧素材。 */
+        for (UIView *v in accs) {
+            CGRect r = [v.superview convertRect:v.frame toView:island];
+            if (r.size.width >= 8 && CGRectGetMidX(r) > island.bounds.size.width * 0.55)
+                target = v;
+        }
+    } else {
+        for (UIView *v in accs) {
+            CGRect r = [v.superview convertRect:v.frame toView:island];
+            if (r.size.width >= 8 && CGRectGetMidX(r) < island.bounds.size.width * 0.55) {
+                target = v; break;
+            }
+        }
+    }
     if (outAcc) *outAcc = target;
+    if (onRight && !target) return CGRectZero; /* 不拿左槽推断虚构右槽 */
 
     CGSize bs = island.bounds.size;
     /* 实测回退几何(2.2.45 dump): 左点 accessory = {8.67, 8.67, 22, 22} */
@@ -584,7 +589,7 @@ static CGRect diRecSlotRect(UIView *island, BOOL onRight, UIView **outAcc) {
         }
     }
     return onRight
-        ? CGRectMake(rightX, accY, MAX(bs.width - rightX, bs.width * 0.2), accH)
+        ? CGRectMake(rightX, accY, MAX(target.bounds.size.width, bs.width * 0.2), accH)
         : CGRectMake(accLX, accY, accW, accH);
 }
 
@@ -3209,6 +3214,7 @@ static UIImage *diInvertMaskImage(UIImage *m);
    探针(DIMaskView)本身**不画任何东西**: 它只是挂在岛容器里的一根天线,
    负责每帧找到专辑那层并把 mask 挂上去。 */
 @interface DIMaskView : UIView
+- (void)diTeardown;
 @property (nonatomic, strong) CADisplayLink *link;
 @property (nonatomic, assign) NSInteger miss;
 @property (nonatomic, copy) NSString *loadedPath;
@@ -6204,6 +6210,7 @@ static void updateSingleVideo(UIWindow *win) {
     BOOL maskHost = musicHost && matRoot.bounds.size.width <= 240.0
         && matRoot.bounds.size.height <= 62.0;
     if (!maskHost) {
+        if (maskV.superview && maskV.superview.bounds.size.height >= 120.0) [maskV diTeardown];
         /* 只隐藏、不 removeFromSuperview —— 拆了 superview 后探针会在下一帧
            判定"宿主没了"而整体 teardown, 把小岛那份缓存(封面/方块/尺寸)一起清掉,
            缩回小岛就得重新扫描两帧, 又会出现一次"方形 → 遮罩"。hidden 的视图
@@ -10456,26 +10463,6 @@ static void diCCAttachTo(id vc, UIView *background) {
 static void diCCLayoutSurface(id vc) {
     UIView *bg = diCCBackgroundOf(vc);
     if (!bg || !gCCSurface) return;
-    if (gCCVisible) {
-        static CFAbsoluteTime last;
-        CFAbsoluteTime now = CFAbsoluteTimeGetCurrent();
-        if (now - last > 2.0) {
-            last = now;
-            UIView *parent = bg.superview;
-            NSMutableString *siblings = [NSMutableString string];
-            for (UIView *v in parent.subviews) {
-                if (siblings.length > 700) break;
-                [siblings appendFormat:@" %@:%@ a%.2f op%d hidden%d%@;", NSStringFromClass(v.class),
-                    NSStringFromCGRect(v.frame), v.alpha, (int)v.opaque, (int)v.hidden,
-                    v == gCCSurface ? @"[壁纸]" : @""];
-            }
-            RLog(@"[控制中心诊断] 布局 bg=%@ surface.hidden=%d 层=%lu/%lu 内容层=%lu 兄弟:%@",
-                NSStringFromCGRect(bg.frame), (int)gCCSurface.hidden,
-                (unsigned long)[parent.subviews indexOfObject:gCCSurface],
-                (unsigned long)parent.subviews.count,
-                (unsigned long)gCCSurface.layer.sublayers.count, siblings);
-        }
-    }
     /* 与 ccvideobg 一致：只更新自己的 surface，不透明化/修改系统视图。 */
     gCCSurface.frame = bg.frame;
     if (gCCVisible && !wpLoopOn) diCCReloadSurface(); /* 外观切换时比较素材路径 */
@@ -10490,9 +10477,6 @@ static void diCCLayoutSurface(id vc) {
 static int sCCDeepDumpN = 0;   /* 2.8.47: 每次展开前 2 次滚动打深 dump, 防爆日志 */
 static void diCCSetVisible(BOOL visible) {
     gCCVisible = visible;
-    RLog(@"[控制中心诊断] 显隐=%d surface=%@ window=%@ 当前素材=%@",
-         (int)visible, gCCSurface ? NSStringFromCGRect(gCCSurface.frame) : @"无",
-         gCCSurface.window ? NSStringFromClass(gCCSurface.window.class) : @"无", gCCPath.lastPathComponent ?: @"无");
     if (visible) sCCDeepDumpN = 0;   /* 2.8.47: 每次展开重新计数, 深 dump 打前 2 次滚动 */
     else diCCRestoreBackdropMaterial();   /* 2.8.48: 收起时还原系统磨砂层 */
     if (!visible) { diCCRestoreAffordanceLayers(); }
@@ -10534,7 +10518,6 @@ static void diCCHookedCCWillLayout(id self, SEL _cmd) {
 static id diCCHookedCCBeginPres(id self, SEL _cmd, BOOL animated, BOOL interactive) {
     id r = nil;
     if (diOrigCCBeginPres) r = ((id (*)(id, SEL, BOOL, BOOL))diOrigCCBeginPres)(self, _cmd, animated, interactive);
-    RLog(@"[控制中心] beginPresentation animated=%d interactive=%d", (int)animated, (int)interactive);
     @try {
         diCCAttachTo(self, diCCBackgroundOf(self));
         diCCSetVisible(YES);
@@ -10545,7 +10528,7 @@ static id diCCHookedCCBeginPres(id self, SEL _cmd, BOOL animated, BOOL interacti
 /* 参考插件真正使用的展示/收起通知；签名均为 void、无额外参数。 */
 static void diCCHookedCCWillPresent(id self, SEL _cmd) {
     if (diOrigCCWillPresent) ((void (*)(id, SEL))diOrigCCWillPresent)(self, _cmd);
-    @try { RLog(@"[控制中心诊断] _willPresentView 类=%@ bg=%d", NSStringFromClass([self class]), (int)(diCCBackgroundOf(self) != nil)); diCCAttachTo(self, diCCBackgroundOf(self)); diCCSetVisible(YES); }
+    @try { diCCAttachTo(self, diCCBackgroundOf(self)); diCCSetVisible(YES); }
     @catch (__unused NSException *e) {}
 }
 static void diCCHookedCCWillDismiss(id self, SEL _cmd) {
@@ -10556,7 +10539,6 @@ static void diCCHookedCCWillDismiss(id self, SEL _cmd) {
 /* 2.8.59: 仅交互式 beginDismissal 不预先藏背景；交互可能取消。
    非交互保留原行为。viewDidDisappear 作为真正离场时的清理入口。 */
 static id diCCHookedCCBeginDis(id self, SEL _cmd, BOOL animated, BOOL interactive) {
-    RLog(@"[控制中心] beginDismissal animated=%d interactive=%d", (int)animated, (int)interactive);
     if (!interactive) { @try { diCCSetVisible(NO); } @catch (__unused NSException *e) {} }
     if (diOrigCCBeginDis) return ((id (*)(id, SEL, BOOL, BOOL))diOrigCCBeginDis)(self, _cmd, animated, interactive);
     return nil;
@@ -10566,7 +10548,6 @@ static void diCCHookedCCDidDisappear(id self, SEL _cmd, BOOL animated) {
     if (diOrigCCDidDisappear) ((void (*)(id, SEL, BOOL))diOrigCCDidDisappear)(self, _cmd, animated);
     @try {
         UIViewController *vc = (UIViewController *)self;
-        RLog(@"[控制中心] viewDidDisappear window=%@", vc.view.window ? NSStringFromClass(vc.view.window.class) : @"无");
         if (!vc.view.window) diCCSetVisible(NO);
     } @catch (__unused NSException *e) {}
 }
