@@ -32,7 +32,8 @@ static NSArray *diSortedStrs(NSArray *arr) {
 }
 
 static BOOL logEnabled; // 日志开关
-static BOOL gLocked = NO; // 锁屏状态: 锁屏期间所有岛视频/帧率动画全停(锁屏界面组件也是岛视图, 不停会一直亮屏)
+static BOOL gLocked = NO; // 锁屏状态(仅作语义参考, 不再当"停渲染"开关 —— 2.8.49 起锁屏亮屏也显示素材)
+static BOOL gScreenOff = NO; // 2.8.49: 熄屏状态 —— 息屏才全停(hasBlankedScreen 息屏/亮屏都发, 翻转即得)
 /* ===== 2.8.12: 歌词岛已回归(2.8.4/2.8.5 曾下架) —— "音乐岛识别"判据保留,
    遮罩/视频层还要用它排除充电/人脸等系统岛 ===== */
 static BOOL gFramesDirty;    // 素材文件夹变更标志: 立即重扫
@@ -180,6 +181,8 @@ static void diCCInstallOverlayHook(void);   /* 2.8.41: 前置声明(prefsChanged
 static void diCCInstallLayoutHook(void);    /* 2.8.42: 前置声明(overlay 失败退回旧路径) */
 static void diCCInstallScrollHook(void);    /* 2.8.43: 前置声明(overlay 装好后压制滚动区白底) */
 static void diCCTameScrollBackdrop(UIView *sv);   /* 2.8.46: 前置声明(layout 时也跑压制) */
+static void diCCTameAncestors(UIView *start);     /* 2.8.49: 前置声明(挂载/布局即压制祖先链) */
+static void diCCRestoreAncestors(void);           /* 2.8.49: 前置声明(收起/关开关时还原) */
 static NSString *wpLightAsset;         /* 2.7.32: 壁纸改成**单素材**, 这是唯一生效的键 */
 static NSString *wpDarkAsset;          /* 旧"深色"键, 只在新键为空时兜底, UI 已移除 */
 static BOOL wpFollowDark = YES;        /* 旧"跟随深色", 不再参与控制中心判定 */
@@ -1124,7 +1127,9 @@ static BOOL diIsVolumeIsland(UIView *host) {
         }
         if (!CATransform3DEqualToTransform(self.layer.transform, t)) self.layer.transform = t;
     }
-    BOOL hostVisible = enabled && !gLocked && !host.isHidden && host.alpha > 0.05 && host.bounds.size.width > 2;
+    /* 2.8.49: 用户要求"注销后锁屏上通知岛/电话岛也直接有素材, 不用放歌触发;
+       息屏才全部停止" —— 亮屏(!gScreenOff)即视为在场, 不再看锁不锁 */
+    BOOL hostVisible = enabled && !gScreenOff && !host.isHidden && host.alpha > 0.05 && host.bounds.size.width > 2;
     /* 僵尸岛防御: 音量岛等临时岛关闭后宿主属性可能仍"可见"但已不在渲染树(presentationLayer 为空),
        我们挂的视频层会冻结在最后一帧卡在屏幕上(音量回落不消失的根因) → 强制隐藏 */
     if (!host.layer.presentationLayer && host.superview) {
@@ -1224,9 +1229,9 @@ static BOOL diIsVolumeIsland(UIView *host) {
        (不依赖 mrQueryOK: 部分系统版本 MediaRemote 回调不可用, 靠音频层兜底) */
     if (want && !self.expandedLayer && hideNoMusic) {
         BOOL mediaActive = (diFindAudioLayer(host) != nil) || (mrQueryOK && musicPlaying);
-        /* 2.8.48: 用户要求"解锁即加载, 不需要放歌触发" —— 已解锁即视为有素材活动;
-           锁屏/息屏仍全停(gLocked=YES 时这里依旧隐藏), 功耗策略不变。 */
-        if (!mediaActive && !gLocked) mediaActive = YES;
+        /* 2.8.49: 亮屏(!gScreenOff)即视为有素材活动 —— 解锁/锁屏亮屏都直接显示,
+           不需要放歌触发; 熄屏依旧全停, 功耗策略不变。 */
+        if (!mediaActive && !gScreenOff) mediaActive = YES;
         if (!mediaActive) want = nil;
     }
     if (mine && want) {
@@ -5679,13 +5684,13 @@ static void diRefreshContour(void) {
     }
 }
 
-/* 2.8.48: 解锁即预载两层素材 —— 用户反馈"注销后通知岛/展开岛没素材, 要放一次
-   歌曲才有"。根因: 视频层要等岛出现才 loadVideo(建播放器+剥音轨+首帧解码
-   有耗时), 展开层更是只挂音乐岛。现在解锁/启动后就把小岛+展开两层素材预加载
-   好(播放器/循环建好、暂停待命), 岛一出现直接挂上即播, 不需要放歌触发。
-   锁屏期间不预载(gLocked=YES 直接返回), 功耗策略不变。 */
+/* 2.8.49: 亮屏即预载两层素材 —— 2.8.48 只在不锁屏时预载, 但用户实际场景是
+   注销(respring)后直接停在锁屏上看通知岛, 全程没有"解锁"事件 → 预载从未跑过。
+   现在改为只看熄屏: 屏幕亮着(不管锁不锁)就预载, 熄屏不预载。
+   根因: 视频层要等岛出现才 loadVideo(建播放器+剥音轨+首帧解码有耗时), 展开层更是
+   只挂音乐岛。预加载好(播放器/循环建好、暂停待命), 岛一出现直接挂上即播。 */
 static void diPreloadIslandVideos(void) {
-    if (!enabled || gLocked) return;
+    if (!enabled || gScreenOff) return;
     for (UIScene *s in UIApplication.sharedApplication.connectedScenes) {
         if (![s isKindOfClass:[UIWindowScene class]]) continue;
         for (UIWindow *w in ((UIWindowScene *)s).windows) {
@@ -9541,7 +9546,7 @@ static void diCCReleasePlayer(void) {
 
 /* 素材路径变了 / 开关变了 / 显隐变了 → 重建或释放播放器 */
 static void diCCReloadSurface(void) {
-    if (!wpOn) { diCCReleasePlayer(); diCCLoopInvalidate(); if (gCCSurface) gCCSurface.hidden = YES; diCCRestoreBackdropMaterial(); return; }
+    if (!wpOn) { diCCReleasePlayer(); diCCLoopInvalidate(); if (gCCSurface) gCCSurface.hidden = YES; diCCRestoreBackdropMaterial(); diCCRestoreAncestors(); return; }
 
     /* 2.7.32: 单素材模式; 开了循环播放就轮播目录下全部素材 */
     NSString *path = nil;
@@ -10243,6 +10248,8 @@ static void diCCLayoutSurface(id vc) {
         }
     }
     gCCSurface.frame = bg.frame;
+    /* 2.8.49: 挂载/布局即压制祖先链(SBBarSwipeAffordanceView 全屏不透明层), 不等滚动 */
+    diCCTameAncestors(bg.superview ?: bg);
     /* 2.8.46: layout 时也跑一次滚动区压制(不依赖滚动事件) */
     for (UIView *sub in bg.superview.subviews)
         if ([NSStringFromClass(sub.class) containsString:@"CCUIScrollView"])
@@ -10256,10 +10263,11 @@ static void diCCLayoutSurface(id vc) {
 }
 
 static int sCCDeepDumpN = 0;   /* 2.8.47: 每次展开前 2 次滚动打深 dump, 防爆日志 */
+
 static void diCCSetVisible(BOOL visible) {
     gCCVisible = visible;
     if (visible) sCCDeepDumpN = 0;   /* 2.8.47: 每次展开重新计数, 深 dump 打前 2 次滚动 */
-    else diCCRestoreBackdropMaterial();   /* 2.8.48: 收起时还原系统磨砂层 */
+    else { diCCRestoreBackdropMaterial(); diCCRestoreAncestors(); }   /* 2.8.48/2.8.49: 收起时还原系统磨砂层+祖先层 */
     diCCReloadSurface();
     /* 收起时把中央素材面板一并撤掉(纯 removeFromSuperview, 不碰响应链) */
     if (!visible) [DICCPickerPanel hideAll];
@@ -10507,6 +10515,57 @@ static void diCCDeepDump(UIView *sv) {
     } @catch (__unused NSException *e) {}
 }
 
+/* 2.8.49: 祖先层压制 —— 317 深 dump 实锤: 壁纸父层之上还压着
+   SBBarSwipeAffordanceView, 它的 layer 上挂着两个 430x932 的全屏不透明层
+   (op=1.00 o=1), 滚动时系统重绘这层 → 白底盖住壁纸。
+   以前只压制壁纸的兄弟层, 祖先链(到窗口前)完全没管。
+   只动 ≥0.9 宽 × ≥0.4 高的大层 + 材质层; 原值记账, 收起时还原, 不污染系统。 */
+static NSMapTable<id, NSNumber *> *gCCTamedViews;   /* 原 alpha 记账 */
+static NSMapTable<id, NSNumber *> *gCCTamedLayers;  /* 原 opacity 记账 */
+
+static void diCCTameAncestors(UIView *start) {
+    if (!start) return;
+    if (!gCCTamedViews) { gCCTamedViews = [NSMapTable weakToStrongObjectsMapTable]; gCCTamedLayers = [NSMapTable weakToStrongObjectsMapTable]; }
+    Class mt = NSClassFromString(@"MTMaterialView");
+    for (UIView *p = start.superview; p && ![p isKindOfClass:[UIWindow class]]; p = p.superview) {
+        @try {
+            CGSize ps = p.bounds.size;
+            if (ps.width < 10) continue;
+            /* 祖先视图本身是磨砂层 → 透明化 */
+            if ([p isKindOfClass:mt] && p.alpha != 0.0) {
+                if (![gCCTamedViews objectForKey:p]) {
+                    [gCCTamedViews setObject:@(p.alpha) forKey:p];
+                    p.alpha = 0.0;
+                    RLog(@"[控制中心] 压制祖先磨砂视图 %@ (%.0fx%.0f)", NSStringFromClass(p.class), ps.width, ps.height);
+                }
+            }
+            /* 祖先 layer 上的大面积不透明层/材质层 → 透明化 */
+            for (CALayer *l in [p.layer.sublayers copy]) {
+                if (l.isHidden || l.opacity < 0.05) continue;
+                BOOL big = (l.frame.size.width >= ps.width * 0.9 && l.frame.size.height >= ps.height * 0.4);
+                if (!big) continue;
+                NSString *cn = NSStringFromClass(l.class);
+                BOOL material = ([cn containsString:@"Material"] || [cn containsString:@"Backdrop"]);
+                if (l.opaque || material) {
+                    if ([gCCTamedLayers objectForKey:l]) continue;
+                    CGFloat orig = l.opacity;
+                    [gCCTamedLayers setObject:@(orig) forKey:l];
+                    l.opacity = 0.0;
+                    RLog(@"[控制中心] 压制祖先层 %@ %@ op=%.2f o=%d", cn, NSStringFromCGRect(l.frame), orig, (int)l.opaque);
+                }
+            }
+        } @catch (__unused NSException *e) {}
+    }
+}
+
+/* 2.8.49: 收起/关开关时还原祖先层原值 */
+static void diCCRestoreAncestors(void) {
+    for (UIView *v in gCCTamedViews) { @try { v.alpha = ((NSNumber *)[gCCTamedViews objectForKey:v]).floatValue; } @catch (__unused NSException *e) {} }
+    [gCCTamedViews removeAllObjects];
+    for (CALayer *l in gCCTamedLayers) { @try { l.opacity = ((NSNumber *)[gCCTamedLayers objectForKey:l]).floatValue; } @catch (__unused NSException *e) {} }
+    [gCCTamedLayers removeAllObjects];
+}
+
 /* 2.8.47: 全面压制 —— 除了 scrollview 子树, 再管三处:
    ① collectionView 的 backgroundView(不在 subviews, 前几版全漏)
    ② 壁纸层父层里的纯 CALayer(系统直接挂 layer, 不对应 UIView)
@@ -10524,6 +10583,8 @@ static void diCCTameScrollBackdrop(UIView *sv) {
             if (idx == NSNotFound) idx = 0;
             [sv.superview insertSubview:gCCSurface atIndex:idx];
         }
+        /* 2.8.49: 祖先链压制(壁纸父层之上的 SBBarSwipeAffordanceView 全屏不透明层) */
+        diCCTameAncestors(sv.superview ?: sv);
         /* 2.8.47③: 层序纠偏 —— 任何兄弟磨砂层排在壁纸前面, 立刻把壁纸提到它上面
            (2.8.48: 磨砂层已直接透明化, 这里兜底; 遍历用 copy 防枚举中 mutation) */
         UIView *parent = gCCSurface.superview;
@@ -10785,16 +10846,20 @@ extern NSHashTable *gBarPills;
 static void applyLockState(BOOL locked) {
     if (locked == gLocked) return;
     gLocked = locked;
-    if (locked) {
-        /* 2.3.1/2.3.2: 锁屏不做任何 setActive —— 只暂停我们自己的播放器。
-           会话类别保持 Ambient+MixWithOthers 不动, 让系统音频路由完全不受扰动。 */
-        pauseAllUnderWindows(); // 立即停掉所有 displayLink/播放器: 锁屏零渲染零解码
-        if (gTickTimer && !gTickSuspended) { dispatch_suspend(gTickTimer); gTickSuspended = YES; } // 挂起 0.5s 轮询: 锁屏期间零唤醒
-    } else {
-        if (gTickTimer && gTickSuspended) { dispatch_resume(gTickTimer); gTickSuspended = NO; } // 恢复轮询, 内部 wakeLayer 自愈各层
-        setupAudioSession(); // 2.3.2: 解锁后重申一次类别(dispatch_once 幂等, 只为兜住系统被其他组件改写的极端情况)
+    /* 2.8.49: "停渲染"的开关从锁屏改为熄屏 —— 用户要求锁屏亮屏上通知岛/电话岛/
+       展开岛也直接显示素材(不用放歌触发), 只有熄屏才全部停止降功耗。 */
+    if (gScreenOff) {
+        /* 熄屏中: 不管锁没锁, 一律全停 */
+        pauseAllUnderWindows();
+        if (gTickTimer && !gTickSuspended) { dispatch_suspend(gTickTimer); gTickSuspended = YES; }
+        DLog(@"锁屏状态: 已锁定(熄屏中) → 全部暂停");
+        return;
     }
-    DLog(@"锁屏状态: %@", locked ? @"已锁定 → 全部暂停" : @"已解锁 → 恢复");
+    if (gTickTimer && gTickSuspended) { dispatch_resume(gTickTimer); gTickSuspended = NO; } // 恢复轮询, 内部 wakeLayer 自愈各层
+    setupAudioSession(); // 2.3.2: 解锁后重申一次类别(dispatch_once 幂等, 只为兜住系统被其他组件改写的极端情况)
+    DLog(@"锁屏状态: %@(亮屏) → 恢复", locked ? @"已锁定" : @"已解锁");
+    /* 2.8.49: 锁屏亮屏也预载 —— 注销后停在锁屏也能直接看到通知岛素材 */
+    diPreloadIslandVideos();
     /* 2.5.18: 锁屏/解锁都会重建锁屏那套视图, 横条 pill 可能被换新实例。
        这里主动把已登记的横条重涂一遍, 并立即挂上全局滑动监听。 */
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.35 * NSEC_PER_SEC)),
@@ -10834,6 +10899,28 @@ static void lockStateChanged(CFNotificationCenterRef, void *, CFStringRef, const
             if (inst && [inst respondsToSelector:gs]) locked = (((long(*)(id, SEL))objc_msgSend)(inst, gs) != 0);
         }
         applyLockState(locked);
+    });
+}
+
+/* 2.8.49: 熄屏/亮屏 —— com.apple.springboard.hasBlankedScreen 两个方向都会发
+   (息屏发一次, 亮屏也发一次), 自己维护标志翻转即可, 不需要 notify_get_state。
+   熄屏 → 立即停掉所有 displayLink/播放器 + 挂起轮询(零渲染零解码零唤醒);
+   亮屏 → 恢复轮询, 内部 wakeLayer 自愈各层, 并补一次预载(息屏期间可能漏掉)。 */
+static void screenBlankedChanged(CFNotificationCenterRef, void *, CFStringRef, const void *, CFDictionaryRef) {
+    dispatch_async(dispatch_get_main_queue(), ^{
+        gScreenOff = !gScreenOff;
+        if (gScreenOff) {
+            pauseAllUnderWindows();
+            if (gTickTimer && !gTickSuspended) { dispatch_suspend(gTickTimer); gTickSuspended = YES; }
+            DLog(@"屏幕状态: 已熄屏 → 全部暂停");
+        } else {
+            if (gTickTimer && gTickSuspended) { dispatch_resume(gTickTimer); gTickSuspended = NO; }
+            DLog(@"屏幕状态: 已亮屏 → 恢复");
+            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.35 * NSEC_PER_SEC)),
+                           dispatch_get_main_queue(), ^{
+                @autoreleasepool { refreshAll(); installKnownHosts(); diPreloadIslandVideos(); }
+            });
+        }
     });
 }
 
@@ -12052,6 +12139,10 @@ __attribute__((constructor)) static void init(void) {
                 CFNotificationSuspensionBehaviorDeliverImmediately);
             CFNotificationCenterAddObserver(CFNotificationCenterGetDarwinNotifyCenter(), NULL,
                 lockStateChanged, CFSTR("com.apple.springboard.lockstate"), NULL,
+                CFNotificationSuspensionBehaviorDeliverImmediately);
+            /* 2.8.49: 熄屏/亮屏(两个方向都发这条, 回调里翻转标志) —— 息屏才全停 */
+            CFNotificationCenterAddObserver(CFNotificationCenterGetDarwinNotifyCenter(), NULL,
+                screenBlankedChanged, CFSTR("com.apple.springboard.hasBlankedScreen"), NULL,
                 CFNotificationSuspensionBehaviorDeliverImmediately);
             // 音量键监听: AVSystemController 音量通知走进程内 NSNotificationCenter(SpringBoard 内有效)。
             // 注意: addObserverForName:usingBlock: 返回的观察者 token 必须持有, 否则立即释放、通知永远收不到(2.2.3 根因)
