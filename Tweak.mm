@@ -10166,8 +10166,10 @@ static void diCCLayoutSurface(id vc) {
     [CATransaction commit];
 }
 
+static int sCCDeepDumpN = 0;   /* 2.8.47: 每次展开前 2 次滚动打深 dump, 防爆日志 */
 static void diCCSetVisible(BOOL visible) {
     gCCVisible = visible;
+    if (visible) sCCDeepDumpN = 0;   /* 2.8.47: 每次展开重新计数, 深 dump 打前 2 次滚动 */
     diCCReloadSurface();
     /* 收起时把中央素材面板一并撤掉(纯 removeFromSuperview, 不碰响应链) */
     if (!visible) [DICCPickerPanel hideAll];
@@ -10327,10 +10329,75 @@ static BOOL diCCTameOne(UIView *v, CGSize ws, int depth) {
     return found;
 }
 
-/* 2.8.45: 313 日志证明 layoutSubviews 在滚动时根本不触发(UIScrollView 滚 contentOffset
-   不重排), 所以压制一次都没跑。补 hook setContentOffset: —— MSHookMessageEx 挂到
-   CCUIScrollView 子类上只影响它的实例, 不波及其他 scrollview。
-   另外无发现时打诊断 + dump 子树 + 确认壁纸层还在不在(防止 surface 被挤走)。 */
+/* 2.8.47: 深 dump —— 白底真身前四版都没猜中(2.8.46 清了 opaque 仍白), 不再猜了。
+   滚动时把「壁纸层的父层完整层序 + 每层属性 + 纯 CALayer + backgroundView」
+   全打出来, 白底是谁直接现形。每次展开只打 2 次, 防爆日志。 */
+static void diCCDeepDump(UIView *sv) {
+    @try {
+        UIView *parent = sv.superview;
+        RLog(@"[控制中心][深dump] scrollview=%@ %@ 父类=%@ 父节点=%lu",
+             NSStringFromClass(sv.class), NSStringFromCGRect(sv.bounds),
+             NSStringFromClass(parent.class), (unsigned long)parent.subviews.count);
+        /* 1) 父层完整层序: 白底若在壁纸之上, 这里能看到它是哪一层 */
+        if (parent) {
+            for (NSUInteger i = 0; i < parent.subviews.count; i++) {
+                UIView *v = parent.subviews[i];
+                RLog(@"[深dump] 父层[%lu] %@%@ %@ a%.2f op=%d bg=%@%@",
+                     (unsigned long)i, NSStringFromClass(v.class), v.isHidden ? @"[H]" : @"",
+                     NSStringFromCGRect(v.bounds), v.alpha, (int)v.isOpaque,
+                     v.backgroundColor, v == gCCSurface ? @" ←壁纸层" : @"");
+            }
+            /* 2) 父层 layer 上的纯 CALayer(不对应 UIView, 子视图遍历看不到) */
+            for (NSUInteger i = 0; i < parent.layer.sublayers.count; i++) {
+                CALayer *l = parent.layer.sublayers[i];
+                BOOL pure = (l.delegate == nil);
+                RLog(@"[深dump] 父层Layer[%lu] %@ %@ op=%.2f o=%d bg=%@%@",
+                     (unsigned long)i, NSStringFromClass(l.class), NSStringFromCGRect(l.frame),
+                     l.opacity, (int)l.opaque, l.backgroundColor, pure ? @" [纯层]" : @"");
+            }
+        }
+        /* 3) scrollview 自身 layer 子层 */
+        for (NSUInteger i = 0; i < sv.layer.sublayers.count; i++) {
+            CALayer *l = sv.layer.sublayers[i];
+            RLog(@"[深dump] 滚动Layer[%lu] %@ %@ op=%.2f o=%d bg=%@",
+                 (unsigned long)i, NSStringFromClass(l.class), NSStringFromCGRect(l.frame),
+                 l.opacity, (int)l.opaque, l.backgroundColor);
+        }
+        /* 4) collectionView 的 backgroundView(不在 subviews 里, 专查) */
+        if ([sv isKindOfClass:[UICollectionView class]]) {
+            UIView *bv = ((UICollectionView *)sv).backgroundView;
+            if (bv) RLog(@"[深dump] collectionView backgroundView=%@ %@ a%.2f op=%d bg=%@",
+                         NSStringFromClass(bv.class), NSStringFromCGRect(bv.bounds), bv.alpha,
+                         (int)bv.isOpaque, bv.backgroundColor);
+        }
+        /* 5) 滚动区子树递归(深度≤5, ≤60 个), 大面积层全标出 */
+        NSMutableArray<NSArray *> *stk = [NSMutableArray array];
+        [stk addObject:@[sv, @0]];
+        NSUInteger n = 0;
+        while (stk.count && n < 60) {
+            NSArray *top = stk.firstObject; [stk removeObjectAtIndex:0];
+            UIView *v = top[0]; int dep = [top[1] intValue];
+            if (dep > 0) {
+                n++;
+                BOOL big = (v.bounds.size.width >= sv.bounds.size.width * 0.85);
+                if (big || dep <= 2) {
+                    RLog(@"[深dump] 树[%lu] %@%@%@ %@ a%.2f op=%d bg=%@",
+                         (unsigned long)n, dep <= 1 ? @"" : [@"  " stringByPaddingToLength:dep * 2 withString:@" " startingAtIndex:0],
+                         NSStringFromClass(v.class), v.isHidden ? @"[H]" : @"",
+                         big ? @"[大]" : @"", NSStringFromCGRect(v.bounds), v.alpha,
+                         (int)v.isOpaque, v.backgroundColor);
+                }
+            }
+            if (dep >= 5) continue;
+            for (UIView *c in v.subviews) [stk addObject:@[c, @(dep + 1)]];
+        }
+    } @catch (__unused NSException *e) {}
+}
+
+/* 2.8.47: 全面压制 —— 除了 scrollview 子树, 再管三处:
+   ① collectionView 的 backgroundView(不在 subviews, 前几版全漏)
+   ② 壁纸层父层里的纯 CALayer(系统直接挂 layer, 不对应 UIView)
+   ③ 层序: 壁纸层必须在所有兄弟 MTMaterialView 之上(系统滚动时会把磨砂层提到前面) */
 static void diCCTameScrollBackdrop(UIView *sv) {
     if (!wpOn || !gCCSurface || !sv) return;
     CGSize ws = sv.bounds.size;
@@ -10344,14 +10411,56 @@ static void diCCTameScrollBackdrop(UIView *sv) {
             if (idx == NSNotFound) idx = 0;
             [sv.superview insertSubview:gCCSurface atIndex:idx];
         }
+        /* 2.8.47③: 层序纠偏 —— 任何兄弟磨砂层排在壁纸前面, 立刻把壁纸提到它上面 */
+        UIView *parent = gCCSurface.superview;
+        if (parent) {
+            Class mt = NSClassFromString(@"MTMaterialView");
+            for (UIView *v in parent.subviews) {
+                if (v == gCCSurface) continue;
+                if (![v isKindOfClass:mt]) continue;
+                if ([parent.subviews indexOfObject:v] > [parent.subviews indexOfObject:gCCSurface]) {
+                    RLog(@"[控制中心] 层序纠偏: %@ 盖住壁纸层, 重新置顶", NSStringFromClass(v.class));
+                    [parent insertSubview:gCCSurface aboveSubview:v];
+                }
+            }
+            /* 2.8.47②: 父层上的纯 CALayer(系统直接挂, 大面积且不透明 → 透明化) */
+            for (CALayer *l in [parent.layer.sublayers copy]) {
+                if (l == gCCSurface.layer) continue;
+                if (l.delegate != nil) continue;               /* 有主的层归视图逻辑管 */
+                if (l.isHidden || l.opacity < 0.05) continue;
+                BOOL big = (l.frame.size.width >= parent.bounds.size.width * 0.85 &&
+                            l.frame.size.height >= parent.bounds.size.height * 0.4);
+                if (big) {
+                    l.opacity = 0.0;
+                    RLog(@"[控制中心] 压制父层纯层 %@ %@", NSStringFromClass(l.class), NSStringFromCGRect(l.frame));
+                }
+            }
+        }
         /* scrollview 自身 */
         UIColor *sb = sv.backgroundColor;
         if (sb && ![sb isEqual:UIColor.clearColor]) {
             sv.backgroundColor = nil;
             DLog(@"[控制中心] 清除滚动区自身色底 %@ bg=%@", NSStringFromClass(sv.class), sb);
         }
+        /* 2.8.47①: collectionView backgroundView(白底经典藏身处) */
+        if ([sv isKindOfClass:[UICollectionView class]]) {
+            UIView *bv = ((UICollectionView *)sv).backgroundView;
+            if (bv) {
+                BOOL big = (bv.bounds.size.width >= ws.width * 0.85);
+                BOOL changed = NO;
+                if (big && [bv isKindOfClass:NSClassFromString(@"MTMaterialView")] && bv.alpha != 0.0) {
+                    bv.alpha = 0.0; changed = YES;
+                }
+                UIColor *bbg = bv.backgroundColor;
+                if (big && bbg && ![bbg isEqual:UIColor.clearColor]) { bv.backgroundColor = nil; changed = YES; }
+                if (big && bv.isOpaque) { bv.opaque = NO; changed = YES; }
+                if (changed) RLog(@"[控制中心] 压制 backgroundView %@ (%.0fx%.0f)", NSStringFromClass(bv.class), bv.bounds.size.width, bv.bounds.size.height);
+            }
+        }
         BOOL found = NO;
         for (UIView *c in sv.subviews) found |= diCCTameOne(c, ws, 0);
+        /* 2.8.47: 深 dump(每次展开前 2 次滚动), 白底真身直接现形 */
+        if (sCCDeepDumpN < 2) { sCCDeepDumpN++; diCCDeepDump(sv); }
         /* 诊断: 没发现任何大面积层时, dump 前 6 个子视图找真身 */
         if (!found) {
             static CFAbsoluteTime tDiag;
