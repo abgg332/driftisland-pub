@@ -178,6 +178,7 @@ static BOOL wpOn = NO;                 /* 启用壁纸 */
 static BOOL gCCOverlayHooked;          /* 2.7.27: overlay 路径已成立 → MTMaterialView 旧路径让位 */
 static void diCCInstallOverlayHook(void);   /* 2.8.41: 前置声明(prefsChanged/启动时补装) */
 static void diCCInstallLayoutHook(void);    /* 2.8.42: 前置声明(overlay 失败退回旧路径) */
+static void diCCInstallScrollHook(void);    /* 2.8.43: 前置声明(overlay 装好后压制滚动区白底) */
 static NSString *wpLightAsset;         /* 2.7.32: 壁纸改成**单素材**, 这是唯一生效的键 */
 static NSString *wpDarkAsset;          /* 旧"深色"键, 只在新键为空时兜底, UI 已移除 */
 static BOOL wpFollowDark = YES;        /* 旧"跟随深色", 不再参与控制中心判定 */
@@ -10251,6 +10252,57 @@ static void diCCInstallOverlayHook(void) {
         }
         gCCOverlayHooked = YES;
         RLog(@"[控制中心] overlay hook 已就位(移植 ccvideobg: 兄弟层 + 展开/收起精确时机)");
+        /* 2.8.43: 顺手装 CCUIScrollView hook —— 交互时系统把滚动区磨砂底置白, 会盖住壁纸(311 视频) */
+        diCCInstallScrollHook();
+    });
+}
+
+/* ===== 2.8.43: 压制 CCUIScrollView 内部的全屏磨砂底 =====
+   311 视频实锤: 静态时壁纸整屏可见, 一交互(滚动/刷新), 上半部分(网络组+音乐大卡,
+   即 CCUIScrollView 区域)被系统置成灰白, 盖住壁纸。scrollview 内部有一张全屏
+   MTMaterialView 当滚动区背景, 交互时系统重设它(alpha/底色) → 白底。
+   对策: hook CCUIScrollView 的 layoutSubviews, 每次布局都把内部全屏磨砂层
+   alpha 清 0、底色清空, 让壁纸透出来。模块按钮自己的小磨砂卡不受影响
+   (它们不是全屏, 且保持半透明反而更贴合系统观感)。 */
+static void (*diOrigScrollLayout)(id, SEL);
+
+static void diCCTameScrollBackdrop(UIView *sv) {
+    if (!wpOn || !gCCSurface || !sv) return;
+    CGSize ws = sv.bounds.size;
+    if (ws.width < 10) return;
+    Class mt = NSClassFromString(@"MTMaterialView");
+    @try {
+        for (UIView *c in sv.subviews) {
+            if (![c isKindOfClass:mt]) continue;
+            CGSize bs = c.bounds.size;
+            BOOL full = (bs.width >= ws.width * 0.9 && bs.height >= ws.height * 0.5);
+            if (!full) continue;
+            BOOL changed = NO;
+            if (c.alpha != 0.0) { c.alpha = 0.0; changed = YES; }
+            if (c.backgroundColor != nil && ![c.backgroundColor isEqual:UIColor.clearColor]) {
+                c.backgroundColor = nil; changed = YES;
+            }
+            if (changed) DLog(@"[控制中心] 已压制滚动区磨砂底 %@ (%.0fx%.0f)", NSStringFromClass(c.class), bs.width, bs.height);
+        }
+    } @catch (__unused NSException *e) {}
+}
+
+static void diCCHookedCCScrollLayout(id self, SEL _cmd) {
+    if (diOrigScrollLayout) diOrigScrollLayout(self, _cmd);
+    @try { diCCTameScrollBackdrop((UIView *)self); }
+    @catch (__unused NSException *e) {}
+}
+
+static void diCCInstallScrollHook(void) {
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        Class c = NSClassFromString(@"CCUIScrollView");
+        if (!c) { RLog(@"[控制中心] 找不到 CCUIScrollView, 滚动区白底压制跳过"); return; }
+        SEL lay = NSSelectorFromString(@"layoutSubviews");
+        if (![c instancesRespondToSelector:lay]) { RLog(@"[控制中心] CCUIScrollView 无 layoutSubviews, 白底压制跳过"); return; }
+        diOrigScrollLayout = (void (*)(id, SEL))di_MethodImp(c, lay);
+        MSHookMessageEx(c, lay, (IMP)diCCHookedCCScrollLayout, (IMP *)&diOrigScrollLayout);
+        RLog(@"[控制中心] CCUIScrollView hook 已就位(滚动区磨砂底压制, 修交互白底)");
     });
 }
 
