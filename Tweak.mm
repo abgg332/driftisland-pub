@@ -2978,9 +2978,6 @@ static UIImage *diBuiltinMaskImage(void);
 static double diMaskCoverageOf(UIImage *m);
 static UIImage *diInvertMaskImage(UIImage *m);
 
-/* 展开音乐岛期间，禁止旧小岛探针在其仍存活的宿主上重绘。 */
-static char kDIExpandedMusicMaskSuppressed;
-
 /* ===== 2.7.24 遮罩探针 =====
 
    上一版(2.6.39~2.7.23)在专辑位置盖一块不透明玻璃, 里面放自己截的画面图,
@@ -3000,8 +2997,6 @@ static char kDIExpandedMusicMaskSuppressed;
    探针(DIMaskView)本身**不画任何东西**: 它只是挂在岛容器里的一根天线,
    负责每帧找到专辑那层并把 mask 挂上去。 */
 @interface DIMaskView : UIView
-- (void)diTeardown;
-- (void)diRestorePainted;
 @property (nonatomic, strong) CADisplayLink *link;
 @property (nonatomic, assign) NSInteger miss;
 @property (nonatomic, copy) NSString *loadedPath;
@@ -3621,12 +3616,6 @@ static BOOL diApplyMaskToCover(UIView *cover, UIImage *shape) {
     @try {
         UIView *host = self.superview;
         if (!host || host.window == nil) { [self diTeardown]; if (++_miss > 20) _link.paused = YES; return; }
-        if ([objc_getAssociatedObject(host.window, &kDIExpandedMusicMaskSuppressed) boolValue]) {
-            if (self.glassOn || !self.hidden || self.targets.count || self.hiddenViews.count) [self diTeardown];
-            self.hidden = YES;
-            _link.paused = YES;
-            return;
-        }
 
         /* 2.8.39: 遮罩锁死状态(308 反馈: "切歌变回方形然后才遮罩; 展开岛/切换歌曲
            不要影响, 一直显示遮罩")。播放中 → 记 lastPlayT; 玻璃在 + 30s 内播放过
@@ -5920,21 +5909,9 @@ static void updateSingleVideo(UIWindow *win) {
        2.8.22: 探针跟着 matRoot(音乐岛)走, 与"视频挂最新岛"彻底解耦。 */
     /* 2.8.57: 展开态封面实际在跨进程 CALayerHost 内；当前探针只认
        26x22 accessory，会额外叠一张小专辑。未找到真实大专辑前不挂展开探针。 */
-    /* 不按 maskV.superview==matRoot 判定清理：系统展开时常换新宿主，
-       老小岛的 DIMaskView 仍挂在同一窗口的旧宿主上，原条件因此漏清。 */
-    BOOL expandedMusic = matRoot && matRoot.bounds.size.width >= 280.0 &&
-        matRoot.bounds.size.height >= 120.0 && matRoot.bounds.size.height <= 300.0;
-    objc_setAssociatedObject(win, &kDIExpandedMusicMaskSuppressed,
-        expandedMusic ? @YES : nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-    BOOL maskHost = musicHost && !expandedMusic && matRoot.bounds.size.width <= 240.0
+    BOOL maskHost = musicHost && matRoot.bounds.size.width <= 240.0
         && matRoot.bounds.size.height <= 62.0;
     if (!maskHost) {
-        if (expandedMusic && maskV.superview && maskV.superview.window == win) {
-            maskV.hidden = YES;
-            [maskV diTeardown];
-            [maskV removeFromSuperview];
-            maskV.link.paused = YES;
-        }
         /* 只隐藏、不 removeFromSuperview —— 拆了 superview 后探针会在下一帧
            判定"宿主没了"而整体 teardown, 把小岛那份缓存(封面/方块/尺寸)一起清掉,
            缩回小岛就得重新扫描两帧, 又会出现一次"方形 → 遮罩"。hidden 的视图
