@@ -3173,6 +3173,7 @@ static UIImage *diInvertMaskImage(UIImage *m);
    负责每帧找到专辑那层并把 mask 挂上去。 */
 @interface DIMaskView : UIView
 - (void)diTeardown;
+- (void)diRestorePainted;
 @property (nonatomic, strong) CADisplayLink *link;
 @property (nonatomic, assign) NSInteger miss;
 @property (nonatomic, copy) NSString *loadedPath;
@@ -6093,7 +6094,13 @@ static void updateSingleVideo(UIWindow *win) {
     BOOL maskHost = musicHost && matRoot.bounds.size.width <= 240.0
         && matRoot.bounds.size.height <= 62.0;
     if (!maskHost) {
-        if (maskV.superview && maskV.superview.bounds.size.height >= 120.0) [maskV diTeardown];
+        /* 展开时只摘下附着在已识别音乐岛上的小遮罩，保留其他岛原样。 */
+        if (matRoot && matRoot.bounds.size.height >= 120.0 && maskV.superview == matRoot) {
+            maskV.hidden = YES;
+            [maskV diRestorePainted];
+            [maskV removeFromSuperview];
+            maskV.link.paused = YES;
+        }
         /* 只隐藏、不 removeFromSuperview —— 拆了 superview 后探针会在下一帧
            判定"宿主没了"而整体 teardown, 把小岛那份缓存(封面/方块/尺寸)一起清掉,
            缩回小岛就得重新扫描两帧, 又会出现一次"方形 → 遮罩"。hidden 的视图
@@ -9892,6 +9899,7 @@ static char kCCPressViewKey;
 
 @interface DICCPressTarget : NSObject <UIGestureRecognizerDelegate>
 @property (nonatomic, weak) UIViewController *owner;
+@property (nonatomic, assign) BOOL diPickerDark;
 @end
 
 /* ===== 2.7.33: 面板素材缩略图(跟设置页素材列表同款) =====
@@ -10250,14 +10258,15 @@ shouldRecognizeSimultaneouslyWithGestureRecognizer:(UIGestureRecognizer *)o {
     } @catch (NSException *e) { DLog(@"[控制中心] 长按弹窗异常: %@", e.reason); }
 }
 
-/* 2.7.32: 不再判深浅 —— 一个素材通吃, 列表就是目录下全部素材 */
+/* 按当前控制中心外观选择对应素材，面板打开后固定本次写入的键。 */
 - (void)showPicker {
-    NSString *curPath = diWallpaperResolveAny(wpLightAsset);
-    NSArray<NSString *> *paths = diWallpaperPathsAll();
+    self.diPickerDark = diCCDarkAppearance();
+    NSString *curPath = diWallpaperResolveAny(self.diPickerDark ? wpDarkAsset : wpLightAsset);
+    NSArray<NSString *> *paths = diWallpaperPathsFor(self.diPickerDark);
     UIWindow *w = gCCSurface.window ?: self.owner.view.window;
     if (!w) return;
     __weak DICCPressTarget *ws = self;
-    [DICCPickerPanel showInWindow:w dark:YES paths:paths cur:curPath
+    [DICCPickerPanel showInWindow:w dark:self.diPickerDark paths:paths cur:curPath
         onChoose:^(NSString *full) {
             DICCPressTarget *ss = ws;
             if (ss) [ss chooseFull:full];
@@ -10266,9 +10275,10 @@ shouldRecognizeSimultaneouslyWithGestureRecognizer:(UIGestureRecognizer *)o {
 
 - (void)chooseFull:(NSString *)full {
     NSString *rel = full ? diWallpaperRelAny(full) : @"__none__";
-    CFPreferencesSetAppValue((__bridge CFStringRef)@"wpLightAsset", (__bridge CFPropertyListRef)rel,
+    NSString *key = self.diPickerDark ? @"wpDarkAsset" : @"wpLightAsset";
+    CFPreferencesSetAppValue((__bridge CFStringRef)key, (__bridge CFPropertyListRef)rel,
                              (__bridge CFStringRef)kDomain);
-    wpLightAsset = rel;
+    if (self.diPickerDark) wpDarkAsset = rel; else wpLightAsset = rel;
     /* 选了固定素材(或点"关闭背景") → 自动关掉"循环播放",
        否则选了也马上被轮播顶掉 / 关了背景还继续轮播, 看着像没反应 */
     if (wpLoopOn) {
