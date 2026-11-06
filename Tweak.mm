@@ -11930,6 +11930,132 @@ static void diHookHomeGrabber(void) {
 static void diHookHomeBarGrabberRetry(void) { diHookHomeGrabber(); }
 
 
+// MRUActivityArtworkView is the actual artwork owner in MediaRemoteUI.
+// No artwork replacement, no BlurMask, and no generic CALayerHost clipping.
+@interface DIActivityMaskState : NSObject
+@property(nonatomic,strong) UIImageView *mask;
+@property(nonatomic,strong) UIView *originalMask;
+@property(nonatomic,weak) UIView *shadow;
+@property(nonatomic,assign) BOOL originalShadowHidden;
+@end
+@implementation DIActivityMaskState @end
+static char kDIActivityMaskState;
+static NSHashTable<UIView *> *gDIActivityArtworks;
+static UIImage *gDIActivityShape;
+static BOOL gDIActivityEnabled;
+static IMP gDIActivityOrigLayout, gDIActivityOrigMove, gDIActivityOrigVisibility;
+static void diActivityApply(UIView *artwork) {
+    if (!NSThread.isMainThread || ![artwork isKindOfClass:UIView.class]) return;
+    DIActivityMaskState *state = objc_getAssociatedObject(artwork, &kDIActivityMaskState);
+    BOOL want = gDIActivityEnabled && gDIActivityShape && artwork.window &&
+        artwork.bounds.size.width > 5 && artwork.bounds.size.height > 5;
+    if (!want) {
+        if (state) {
+            if (artwork.maskView == state.mask) artwork.maskView = state.originalMask;
+            if (state.shadow) state.shadow.hidden = state.originalShadowHidden;
+            objc_setAssociatedObject(artwork, &kDIActivityMaskState, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        }
+        return;
+    }
+    if (!state) {
+        state = [DIActivityMaskState new];
+        state.originalMask = artwork.maskView;
+        state.mask = [UIImageView new];
+        state.mask.userInteractionEnabled = NO;
+        state.mask.contentMode = UIViewContentModeScaleToFill;
+        SEL shadowSel = NSSelectorFromString(@"artworkShadowView");
+        if ([artwork respondsToSelector:shadowSel]) {
+            id shadow = ((id (*)(id, SEL))objc_msgSend)(artwork, shadowSel);
+            if ([shadow isKindOfClass:UIView.class]) {
+                state.shadow = shadow;
+                state.originalShadowHidden = [(UIView *)shadow isHidden];
+            }
+        }
+        objc_setAssociatedObject(artwork, &kDIActivityMaskState, state, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        DLog(@"[真实专辑遮罩] MRUActivityArtworkView 已接管 %@（无额外封面/模糊层）", NSStringFromCGRect(artwork.bounds));
+    }
+    // Another tweak can change this mask; preserve its latest value for restoration.
+    if (artwork.maskView != state.mask) state.originalMask = artwork.maskView;
+    if (state.mask.image != gDIActivityShape) state.mask.image = gDIActivityShape;
+    if (!CGRectEqualToRect(state.mask.frame, artwork.bounds)) state.mask.frame = artwork.bounds;
+    if (artwork.maskView != state.mask) artwork.maskView = state.mask;
+    state.shadow.hidden = YES;
+}
+static void diActivityReload(void) {
+    gDIActivityEnabled = pBool(@"enabled", NO) && pBool(@"maskOn", NO);
+    logEnabled = pBool(@"logging", NO);
+    gMaskGen++;
+    NSString *path = gDIActivityEnabled ? diMaskCurrentPathV2() : nil;
+    gDIActivityShape = path ? diMaskAlphaCached(path) : nil;
+    for (UIView *view in gDIActivityArtworks.allObjects) diActivityApply(view);
+}
+static void diActivityNotify(CFNotificationCenterRef c, void *o, CFStringRef n, const void *obj, CFDictionaryRef info) {
+    dispatch_async(dispatch_get_main_queue(), ^{ diActivityReload(); });
+}
+static void diActivityRegister(UIView *view) {
+    if (!gDIActivityArtworks) gDIActivityArtworks = [NSHashTable weakObjectsHashTable];
+    [gDIActivityArtworks addObject:view];
+    diActivityApply(view);
+}
+static void diActivityLayout(id self, SEL cmd) {
+    if (gDIActivityOrigLayout) ((void (*)(id, SEL))gDIActivityOrigLayout)(self, cmd);
+    @try { diActivityRegister((UIView *)self); } @catch (NSException *e) { DLog(@"[真实专辑遮罩] 布局异常 %@", e.reason); }
+}
+static void diActivityMove(id self, SEL cmd) {
+    if (gDIActivityOrigMove) ((void (*)(id, SEL))gDIActivityOrigMove)(self, cmd);
+    @try { diActivityRegister((UIView *)self); } @catch (NSException *e) { DLog(@"[真实专辑遮罩] 挂载异常 %@", e.reason); }
+}
+static void diActivityVisibility(id self, SEL cmd) {
+    if (gDIActivityOrigVisibility) ((void (*)(id, SEL))gDIActivityOrigVisibility)(self, cmd);
+    @try { diActivityRegister((UIView *)self); } @catch (NSException *e) { DLog(@"[真实专辑遮罩] 显隐异常 %@", e.reason); }
+}
+static BOOL diActivityVoidMethod(Class cls, SEL sel) {
+    Method method = class_getInstanceMethod(cls, sel);
+    if (!method || method_getNumberOfArguments(method) != 2) return NO;
+    char *type = method_copyReturnType(method);
+    BOOL valid = type && !strcmp(type, "v"); free(type); return valid;
+}
+static void diActivityInstall(void) {
+    static BOOL installed;
+    if (installed) return;
+    Class cls = NSClassFromString(@"MRUActivityArtworkView");
+    if (!cls || ![cls isSubclassOfClass:UIView.class]) return;
+    SEL layout = @selector(layoutSubviews);
+    if (!diActivityVoidMethod(cls, layout)) return;
+    MSHookMessageEx(cls, layout, (IMP)diActivityLayout, &gDIActivityOrigLayout);
+    SEL move = @selector(didMoveToSuperview);
+    if (diActivityVoidMethod(cls, move)) MSHookMessageEx(cls, move, (IMP)diActivityMove, &gDIActivityOrigMove);
+    SEL visibility = NSSelectorFromString(@"updateVisibility");
+    if (diActivityVoidMethod(cls, visibility)) MSHookMessageEx(cls, visibility, (IMP)diActivityVisibility, &gDIActivityOrigVisibility);
+    installed = YES;
+    RLog(@"[真实专辑遮罩] 已安装 MediaRemoteUI / MRUActivityArtworkView.maskView");
+    // Register existing artwork views if the framework was already displaying them.
+    for (UIScene *scene in UIApplication.sharedApplication.connectedScenes) {
+        if (![scene isKindOfClass:UIWindowScene.class]) continue;
+        for (UIWindow *window in ((UIWindowScene *)scene).windows) {
+            NSMutableArray<UIView *> *stack = [NSMutableArray arrayWithObject:window];
+            for (NSUInteger count = 0; stack.count && count < 1500; count++) {
+                UIView *view = stack.lastObject; [stack removeLastObject];
+                if ([view isKindOfClass:cls]) diActivityRegister(view);
+                for (UIView *child in view.subviews) [stack addObject:child];
+            }
+        }
+    }
+}
+static void diActivityStart(void) {
+    dispatch_async(dispatch_get_main_queue(), ^{
+        diActivityReload(); diActivityInstall();
+        for (NSString *notification in @[kNotifyStr, @"com.abgg332.driftisland/prefsChanged"]) {
+            CFNotificationCenterAddObserver(CFNotificationCenterGetDarwinNotifyCenter(), NULL,
+                diActivityNotify, (__bridge CFStringRef)notification, NULL, CFNotificationSuspensionBehaviorDeliverImmediately);
+        }
+        for (int seconds : {1, 3, 8, 20, 60}) {
+            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)seconds * NSEC_PER_SEC),
+                dispatch_get_main_queue(), ^{ diActivityInstall(); });
+        }
+    });
+}
+
 /* 2.8.5: 取进程名(版本日志用)。bundleIdentifier 为空时退回进程名。 */
 static NSString *diProcName(void) {
     static NSString *n;
@@ -11961,6 +12087,13 @@ __attribute__((constructor)) static void init(void) {
         if (!diVer.length) diVer = [[NSBundle mainBundle] infoDictionary][@"CFBundleShortVersionString"];
         if (!diVer.length) diVer = @"?";
         RLog(@"===== 漂流岛 v%@ 已加载 (%@) 编译于 %s %s =====", diVer, diProcName(), __DATE__, __TIME__);
+        // MediaRemoteUI gets only the real-artwork mask component, never SB initialization.
+        NSString *process = NSProcessInfo.processInfo.processName;
+        NSString *bundle = NSBundle.mainBundle.bundleIdentifier.lowercaseString;
+        if ([bundle isEqualToString:@"com.apple.mediaremoteui"] || [process isEqualToString:@"MediaRemoteUI"]) {
+            diActivityStart();
+            return;
+        }
         refreshPrefs();
         /* 2.8.5: 来电视频已整体删除, 非 SpringBoard 进程直接退出 */
         NSString *bid = NSBundle.mainBundle.bundleIdentifier.lowercaseString;
