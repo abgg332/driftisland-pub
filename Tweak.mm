@@ -2457,7 +2457,6 @@ __attribute__((unused)) static BOOL diMiniMusicActive(UIView *host) {
     syncNativeSpectrum(host); // 无条件每帧同步音频掩码(即使帧率素材关闭/没放歌): 岛重新展开或层重建时波形立即被藏
     /* 帧率图只在播放音乐的展开岛显示(实测展开音乐岛约407x202); 其他一切形态全部禁用:
        锁屏大卡(高700+)/录屏岛/通话岛/小岛(高36)/视频展开岛(无音频层) 一律不显示 */
-    /* 2.8.72: 恢复帧率素材动画(2.8.71 误删) —— 右上角粉圆环是用户自己的右侧帧率素材, 必须保留 */
     BOOL expand = host.bounds.size.height > 100 && host.bounds.size.height < 300
                && host.bounds.size.width > 250 && host.bounds.size.width < 500;
     NSArray<NSString *> *frames = framePaths();
@@ -2978,6 +2977,9 @@ static NSString *diMaskAscii(UIImage *m);
 static UIImage *diBuiltinMaskImage(void);
 static double diMaskCoverageOf(UIImage *m);
 static UIImage *diInvertMaskImage(UIImage *m);
+
+/* 展开音乐岛期间，禁止旧小岛探针在其仍存活的宿主上重绘。 */
+static char kDIExpandedMusicMaskSuppressed;
 
 /* ===== 2.7.24 遮罩探针 =====
 
@@ -3619,6 +3621,12 @@ static BOOL diApplyMaskToCover(UIView *cover, UIImage *shape) {
     @try {
         UIView *host = self.superview;
         if (!host || host.window == nil) { [self diTeardown]; if (++_miss > 20) _link.paused = YES; return; }
+        if ([objc_getAssociatedObject(host.window, &kDIExpandedMusicMaskSuppressed) boolValue]) {
+            if (self.glassOn || !self.hidden || self.targets.count || self.hiddenViews.count) [self diTeardown];
+            self.hidden = YES;
+            _link.paused = YES;
+            return;
+        }
 
         /* 2.8.39: 遮罩锁死状态(308 反馈: "切歌变回方形然后才遮罩; 展开岛/切换歌曲
            不要影响, 一直显示遮罩")。播放中 → 记 lastPlayT; 玻璃在 + 30s 内播放过
@@ -3734,15 +3742,12 @@ static BOOL diApplyMaskToCover(UIView *cover, UIImage *shape) {
             if ((fabs(bs.width - sLastW) > 6 || fabs(bs.height - sLastH) > 6)
                 && CFAbsoluteTimeGetCurrent() - sSzT > 1.0) {
                 sSzT = CFAbsoluteTimeGetCurrent(); sLastW = bs.width; sLastH = bs.height;
-                DLog(@"遮罩宿主尺寸: %.0fx%.0f → %@ (小岛=%d 展开=%d[不挂] 开关=%d)",
+                DLog(@"遮罩宿主尺寸: %.0fx%.0f → %@ (小岛=%d 展开=%d 开关=%d)",
                      bs.width, bs.height,
-                     isMini ? @"参与" : @"跳过", isMini, isExpand, maskOn);
+                     (isMini || isExpand) ? @"参与" : @"跳过", isMini, isExpand, maskOn);
             }
         }
-        /* 2.8.70: 用户要求去掉展开岛左侧的圆圈蒙版 —— isExpand 不再参与挂载,
-           gate 只认小岛。展开岛走下面 shapeOnly 分支: 收玻璃 + 还原系统封面,
-           但保留封面/方块缓存, 缩回小岛第一帧直接按缓存画回, 不闪方。 */
-        BOOL gate = enabled && maskOn && !gRecordingActive && isMini;
+        BOOL gate = enabled && maskOn && !gRecordingActive && (isMini || isExpand);
         /* 尺寸还在变(展开/收起动画途中) → 不新挂玻璃; 已挂着的由上面 growing /
            下面的离开窗口逻辑收拾, 过渡期间保留(2.8.18: 不再"先方后遮罩")。
            等待期间把探针拨回 30fps —— 稳定态会被降到 8fps, 不拨回来
@@ -3774,15 +3779,15 @@ static BOOL diApplyMaskToCover(UIView *cover, UIImage *shape) {
                  但**保留封面/方块缓存**, 这样缩回小岛的第一帧就能直接按缓存画,
                  中间不会再有"系统方形专辑"露出来;
                ②根本不是音乐岛(暂停 / 通知岛): 才整体 teardown, 探针该歇就歇。
-               2.8.70: isExpand 也走①(收玻璃留缓存) —— 展开岛不再挂蒙版;
                2.8.39: 锁死(播放中/30s 内播放过 + 玻璃在)时①也不收 ——
-                 但**展开态例外**: 展开岛明确不显示蒙版(2.8.70), lockMask 让位。 */
+               "切换歌曲、展开岛都不要影响, 一直显示遮罩"(308)。 */
             BOOL shapeOnly = (enabled && maskOn && !gRecordingActive
-                              && !isMini
+                              && !isMini && !isExpand
                               && (self.glassOn || self.cacheCoverV != nil));
             if (shapeOnly) {
-                /* 2.8.70: 展开态强制收玻璃(覆盖锁死); 其他大岛(充电/来电)仍受锁死保护 */
-                if (lockMask && !isExpand) return;
+                /* 锁死: 保持玻璃等待(展开态由 isExpand 分支接管, 充电/来电大岛
+                   不锁死 —— 它们不是播放中的音乐岛, lockMask 不会为 YES)。 */
+                if (lockMask) return;
                 if (self.glassOn || !self.hidden) {
                     [self diRestorePainted];
                     self.glassOn = NO;
@@ -5580,46 +5585,6 @@ static void diPreloadIslandVideos(void) {
     }
 }
 
-/* ===== 2.8.73: 展开岛图层探针(纯只读, 不改任何显示) =====
-   323 反馈: "光斑还在"。现在把展开音乐岛这一棵视图/图层树整棵打到日志里:
-   类名 + frame + alpha + hidden + 是否有 contents + 是否带滤镜。
-   目的只有一个 —— 看清封面左下那个柔光斑到底是谁画的(视频画面/我们自己的层/系统层)。
-   只有展开态(宽≥250 高≥120)才打, 每次展开最多 4 次、间隔 ≥2s, 绝不每帧刷。 */
-static void diDumpLayerTree(CALayer *l, int depth, int *budget) {
-    if (!l || depth > 7 || *budget <= 0) return;
-    (*budget)--;
-    NSMutableString *pad = [NSMutableString string];
-    for (int i = 0; i < depth; i++) [pad appendString:@"· "];
-    NSString *csize = @"-";
-    CFTypeRef c = (__bridge CFTypeRef)l.contents;
-    if (c) {
-        CFTypeID tid = CFGetTypeID(c);
-        if (tid == CGImageGetTypeID()) {
-            CGImageRef img = (CGImageRef)c;
-            csize = NSStringFromCGSize(CGSizeMake(CGImageGetWidth(img), CGImageGetHeight(img)));
-        }
-        else csize = NSStringFromClass([(__bridge id)c class]);
-    }
-    DLog(@"[层树]%@%@ %@ a=%.2f h=%d fil=%d cont=%@ sub=%lu",
-         pad, NSStringFromClass(l.class), NSStringFromCGRect(l.frame),
-         l.opacity, l.hidden ? 1 : 0, (int)l.filters.count, csize,
-         (unsigned long)l.sublayers.count);
-    for (CALayer *s in [l.sublayers copy]) diDumpLayerTree(s, depth + 1, budget);
-}
-
-static void diDumpViewTree(UIView *v, int depth, int *budget) {
-    if (!v || depth > 5 || *budget <= 0) return;
-    (*budget)--;
-    NSMutableString *pad = [NSMutableString string];
-    for (int i = 0; i < depth; i++) [pad appendString:@"· "];
-    DLog(@"[视图树]%@%@ %@ a=%.2f h=%d n=%lu 层=%@",
-         pad, NSStringFromClass(v.class), NSStringFromCGRect(v.frame),
-         v.alpha, v.hidden ? 1 : 0, (unsigned long)v.subviews.count,
-         NSStringFromClass(v.layer.class));
-    if (!v.subviews.count) { diDumpLayerTree(v.layer, depth + 1, budget); return; }
-    for (UIView *s in [v.subviews copy]) diDumpViewTree(s, depth + 1, budget);
-}
-
 static void updateSingleVideo(UIWindow *win) {
     if (!win) return;
     diRefreshContour();
@@ -5738,26 +5703,6 @@ static void updateSingleVideo(UIWindow *win) {
         sVideoRoot = bestRoot; sVideoT = 0;
     }
     sStickyRoot = bestRoot;
-    /* 2.8.73: 展开音乐岛图层探针(只读)。展开态才打, 冷却 2s, 每次展开最多 4 次 */
-    {
-        static CFAbsoluteTime sDumpT = 0; static int sDumpN = 0;
-        if (matRoot && matRoot.bounds.size.width >= 250.0 && matRoot.bounds.size.height >= 120.0
-            && sDumpN < 4 && CFAbsoluteTimeGetCurrent() - sDumpT > 2.0) {
-            sDumpT = CFAbsoluteTimeGetCurrent(); sDumpN++;
-            DLog(@"===== 展开岛探针 #%d 宿主=%@ %@ 父=%@ =====", sDumpN,
-                 NSStringFromClass(matRoot.class), NSStringFromCGRect(matRoot.bounds),
-                 NSStringFromClass(matRoot.superview.class));
-            int budget = 260;
-            diDumpViewTree(matRoot, 0, &budget);
-            /* 兄弟层也看一眼: 光斑可能挂在岛容器上而不是素材宿主里 */
-            if (matRoot.superview) {
-                int b2 = 120;
-                DLog(@"[父层树] 起 ===== ");
-                diDumpViewTree(matRoot.superview, 0, &b2);
-            }
-        }
-        if (!matRoot || matRoot.bounds.size.height < 120.0) sDumpN = 0; /* 缩回小岛后重置 */
-    }
     if (!bestRoot && !matRoot) {
         for (DIVideoView *v in diLayers(smallV, expandV)) {
             if (v && !v.hidden) { v.hidden = YES; if (v.player.timeControlStatus != AVPlayerTimeControlStatusPaused) [v.player pause]; }
@@ -5975,11 +5920,16 @@ static void updateSingleVideo(UIWindow *win) {
        2.8.22: 探针跟着 matRoot(音乐岛)走, 与"视频挂最新岛"彻底解耦。 */
     /* 2.8.57: 展开态封面实际在跨进程 CALayerHost 内；当前探针只认
        26x22 accessory，会额外叠一张小专辑。未找到真实大专辑前不挂展开探针。 */
-    BOOL maskHost = musicHost && matRoot.bounds.size.width <= 240.0
+    /* 不按 maskV.superview==matRoot 判定清理：系统展开时常换新宿主，
+       老小岛的 DIMaskView 仍挂在同一窗口的旧宿主上，原条件因此漏清。 */
+    BOOL expandedMusic = matRoot && matRoot.bounds.size.width >= 280.0 &&
+        matRoot.bounds.size.height >= 120.0 && matRoot.bounds.size.height <= 300.0;
+    objc_setAssociatedObject(win, &kDIExpandedMusicMaskSuppressed,
+        expandedMusic ? @YES : nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    BOOL maskHost = musicHost && !expandedMusic && matRoot.bounds.size.width <= 240.0
         && matRoot.bounds.size.height <= 62.0;
     if (!maskHost) {
-        /* 展开时只摘下附着在已识别音乐岛上的小遮罩，保留其他岛原样。 */
-        if (matRoot && matRoot.bounds.size.height >= 120.0 && maskV.superview == matRoot) {
+        if (expandedMusic && maskV.superview && maskV.superview.window == win) {
             maskV.hidden = YES;
             [maskV diTeardown];
             [maskV removeFromSuperview];
