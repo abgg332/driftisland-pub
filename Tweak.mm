@@ -187,7 +187,6 @@ static BOOL wpMuted = YES;             /* 视频静音(旧键, 保留兼容) */
 static NSString *diWallpaperResolveAny(NSString *rel);   /* 2.7.32 前向声明(实现在壁纸章节) */
 static BOOL ccSoundOn = NO;            /* 2.7.28: 控制中心视频出声(ambient 混入, 不打断音乐) */
 static BOOL ccLongPressOn = YES;       /* 2.7.28: 控制中心空白处长按换素材 */
-static BOOL islandDumpOn = NO;         /* 2.7.29: 岛全量图层调试日志(抓所有视图树+层树+封面候选) */
 /* 2.7.1: 去掉"填充位置"参数 —— 素材一律铺满整个控制中心背景 */
 static int smallEdgeStyle = 0;         /* 2.2.67: 流光风格 0~5, 见 DIEdgeStyle */
 /* 2.2.6: 岛上通知样式 —— 文字颜色自定义 + 通知岛不使用视频背景 */
@@ -741,9 +740,6 @@ static void refreshPrefs(void) {
     wpLoopOn = pBool(@"wpLoopOn", NO);
     wpBlur = (NSInteger)pInt(@"wpBlur", 0);
     if (wpBlur < 0) wpBlur = 0; if (wpBlur > 100) wpBlur = 100;
-    /* 2.8.56: 默认关闭；打开时采集岛窗口的视图/图层及封面候选。 */
-    islandDumpOn = pBool(@"islandDumpOn", NO);
-    if (islandDumpOn) logEnabled = YES; /* 调试开关独立生效，无需另开日志总闸 */
     /* 2.6.3: 遮罩(贴合左侧专辑) */
     maskOn = pBool(@"maskOn", NO);
     maskRotateOn = pBool(@"maskRotateOn", NO);
@@ -2901,177 +2897,6 @@ static UIImageView *diFindAlbumCoverView(UIView *host, CGRect *outFrame) {
     if (bestScore < 100.0) { if (outFrame) *outFrame = CGRectZero; return nil; }
     if (best && outFrame) *outFrame = bestRect;
     return best;
-}
-
-/* ===== 2.7.29: 岛全量图层调试日志 =====
-
-   用户原话: "加入一个日志加入岛的调试日志(里面可以抓取岛的所有图层, 所有树,
-   是所有岛上的所有东西图层, 然后可以直接分析每个图层)。"
-
-   所以这一版不猜、不挑, 直接从**灵动岛窗口根**往下整棵树全打出来, 分三段:
-     ① UIView 树  —— 每个视图的 类名/坐标/alpha/hidden/交互/tag/层类名/子视图数
-     ② CALayer 树 —— 每个层的 类名/换算到窗口的坐标/opacity/掩码/contents 类型与尺寸
-                     (跨进程层 Portal / Host / CAPackage / Replicant 会打标记,
-                      这些正是 UIView 树里根本看不到的东西)
-     ③ 专辑封面候选 —— 把所有候选按分数排个序, 直接看出"为什么选中了这一块"
-   开关: 设置 → 岛图层调试日志。默认关, 打开后每 4 秒最多抓一次, 总共最多 12 次,
-   免得把日志撑爆。 */
-
-static CFAbsoluteTime gDiDumpLast[3] = {0};
-static int gDiDumpCount[3] = {0};
-static BOOL gDiDumpWasOn = NO;
-
-/* contents 到底是什么: CGImage / UIImage / 其它 CF 类型, 尺寸一并打出 */
-static NSString *diContentsDesc(CALayer *l) {
-    id c = l.contents;
-    if (!c) return @"无";
-    if ([c isKindOfClass:[UIImage class]]) {
-        UIImage *im = (UIImage *)c;
-        return [NSString stringWithFormat:@"UIImage %.0fx%.0f", im.size.width, im.size.height];
-    }
-    CFTypeID t = CFGetTypeID((__bridge CFTypeRef)c);
-    if (t == CGImageGetTypeID()) {
-        CGImageRef cg = (__bridge CGImageRef)c;
-        return [NSString stringWithFormat:@"CGImage %dx%d", (int)CGImageGetWidth(cg), (int)CGImageGetHeight(cg)];
-    }
-    CFStringRef tn = CFCopyTypeIDDescription(t);
-    NSString *type = tn ? (__bridge_transfer NSString *)tn : @"?";
-    return type;
-}
-
-static NSString *diLayerFlag(NSString *cn) {
-    if ([cn containsString:@"Portal"]) return @" «跨进程门户";
-    if ([cn containsString:@"Host"]) return @" «跨进程宿主";
-    if ([cn containsString:@"CAPackage"] || [cn containsString:@"Replicant"]) return @" «CA动画包";
-    if ([cn containsString:@"AVPlayer"]) return @" «视频层";
-    if ([cn containsString:@"Backdrop"]) return @" «毛玻璃";
-    return @"";
-}
-
-static void diDumpLayerInto(CALayer *l, int depth, CALayer *rootL, NSMutableString *out, int *cnt) {
-    if (!l || depth > 24 || *cnt > 1200) return;
-    (*cnt)++;
-    NSMutableString *ind = [NSMutableString string];
-    for (int i = 0; i < depth; i++) [ind appendString:@"  "];
-    CGRect f = l.frame;
-    @try { if (l.superlayer && l.superlayer != rootL) f = [l.superlayer convertRect:f toLayer:rootL]; }
-    @catch (__unused NSException *e) {}
-    NSString *cn = NSStringFromClass(l.class);
-    [out appendFormat:@"%@L%-2d %@%@ {{%.1f,%.1f},{%.1f,%.1f}} 透明=%.2f 隐藏=%d 不透明=%d 掩码=%@ 子层=%lu 内容=%@%@\n",
-        ind, depth, cn, diLayerFlag(cn),
-        f.origin.x, f.origin.y, f.size.width, f.size.height,
-        l.opacity, l.isHidden, l.opaque,
-        l.mask ? (l.mask.name.length ? [@"有:" stringByAppendingString:l.mask.name] : @"有") : @"无",
-        (unsigned long)(l.sublayers ?: @[]).count,
-        diContentsDesc(l),
-        l.name.length ? [@" 名字=" stringByAppendingString:l.name] : @""];
-    for (CALayer *s in l.sublayers) diDumpLayerInto(s, depth + 1, rootL, out, cnt);
-}
-
-static void diDumpViewInto(UIView *v, int depth, UIView *root, NSMutableString *out, int *cnt) {
-    if (!v || depth > 24 || *cnt > 1200) return;
-    (*cnt)++;
-    NSMutableString *ind = [NSMutableString string];
-    for (int i = 0; i < depth; i++) [ind appendString:@"  "];
-    CGRect f = v.frame;
-    @try { f = [v convertRect:v.bounds toView:root]; } @catch (__unused NSException *e) {}
-    NSString *cn = NSStringFromClass(v.class);
-    [out appendFormat:@"%@V%-2d %@ {{%.1f,%.1f},{%.1f,%.1f}} 透明=%.2f 隐藏=%d 可交互=%d 标签=%ld 子视图=%lu 层=%@\n",
-        ind, depth, cn,
-        f.origin.x, f.origin.y, f.size.width, f.size.height,
-        v.alpha, v.isHidden, v.userInteractionEnabled, (long)v.tag,
-        (unsigned long)v.subviews.count, NSStringFromClass(v.layer.class)];
-    for (UIView *c in v.subviews) diDumpViewInto(c, depth + 1, root, out, cnt);
-}
-
-/* 打分用的: 与 diFindAlbumCoverView 同一套标准, 只是这里要把分数打出来给人看 */
-static CGFloat diAlbumScoreOf(UIView *v, CGRect r, CGSize hs, BOOL *outCA) {
-    NSString *cn = NSStringFromClass(v.class);
-    BOOL isCA = [cn containsString:@"BSUICAPackage"] || [cn containsString:@"CAPackage"]
-             || [cn containsString:@"CAAnimation"];
-    if (outCA) *outCA = isCA;
-    CGFloat side = MIN(r.size.width, r.size.height);
-    CGFloat sq = 1.0 - MIN(1.0, fabs(r.size.width - r.size.height) / MAX(r.size.width, r.size.height));
-    CGFloat ratio = side / MAX(1.0, hs.height);
-    CGFloat fit = 1.0 - MIN(1.0, fabs(1.0 - ratio));
-    if (isCA) return 100.0 + sq * 40.0 + fit * 30.0 + side * 0.5;
-    if (sq > 0.65 && ratio > 0.5 && ratio < 1.8) return 20.0 + sq * 10.0 + fit * 10.0;
-    return -1;
-}
-
-static void diDumpIslandFull(UIView *root, NSString *why) {
-    if (!islandDumpOn || !root) return;
-    int kind = [why containsString:@"录屏"] ? 2 : ([why containsString:@"展开"] ? 1 : 0);
-    CFAbsoluteTime now = CFAbsoluteTimeGetCurrent();
-    if (!gDiDumpWasOn) { memset(gDiDumpLast, 0, sizeof(gDiDumpLast)); memset(gDiDumpCount, 0, sizeof(gDiDumpCount)); gDiDumpWasOn = YES; }
-    if (now - gDiDumpLast[kind] < 4.0 || gDiDumpCount[kind] >= 3) return;
-    gDiDumpLast[kind] = now;
-    gDiDumpCount[kind]++;
-
-    /* 从**岛窗口根**开始, 这样能看到窗口里所有元素/门户/容器, 而不只是宿主那一块 */
-    UIView *top = root;
-    @try { if (root.window) top = root.window; } @catch (__unused NSException *e) {}
-
-    NSMutableString *s = [NSMutableString string];
-    [s appendFormat:@"===== 岛全量图层 dump #%d (%@) =====\n", gDiDumpCount[kind], why];
-    [s appendFormat:@"宿主: %@ frame=%@ bounds=%@\n", NSStringFromClass(root.class),
-        NSStringFromCGRect(root.frame), NSStringFromCGRect(root.bounds)];
-    [s appendFormat:@"抓取根: %@ frame=%@\n", NSStringFromClass(top.class), NSStringFromCGRect(top.frame)];
-
-    int n1 = 0;
-    [s appendString:@"--- ① UIView 树(坐标已换算到抓取根) ---\n"];
-    diDumpViewInto(top, 0, top, s, &n1);
-
-    int n2 = 0;
-    [s appendString:@"--- ② CALayer 树(含跨进程层/CA包, 坐标已换算到抓取根) ---\n"];
-    diDumpLayerInto(top.layer, 0, top.layer, s, &n2);
-
-    /* ③ 专辑封面候选: 在宿主里按同一套标准打分排序 */
-    [s appendString:@"--- ③ 专辑封面候选(分数越高越像) ---\n"];
-    CGSize hs = root.bounds.size;
-    NSMutableArray<NSDictionary *> *cand = [NSMutableArray array];
-    NSMutableArray<UIView *> *stack = [NSMutableArray arrayWithObject:root];
-    int g = 0;
-    while (stack.count && g++ < 400) {
-        UIView *v = stack.firstObject; [stack removeObjectAtIndex:0];
-        for (UIView *c in v.subviews) [stack addObject:c];
-        if (v == root) continue;
-        CGRect r = CGRectZero;
-        @try { r = [v convertRect:v.bounds toView:root]; } @catch (__unused NSException *e) { continue; }
-        if (r.size.width < 6 || r.size.height < 6) continue;
-        BOOL isCA = NO;
-        CGFloat sc = diAlbumScoreOf(v, r, hs, &isCA);
-        if (sc < 0) continue;
-        [cand addObject:@{@"sc": @(sc), @"cn": NSStringFromClass(v.class),
-                          @"r": NSStringFromCGRect(r), @"ca": @(isCA),
-                          @"a": @(v.alpha), @"h": @(v.isHidden)}];
-    }
-    [cand sortUsingComparator:^NSComparisonResult(NSDictionary *a, NSDictionary *b) {
-        return [b[@"sc"] compare:a[@"sc"]];
-    }];
-    int shown = 0;
-    for (NSDictionary *d in cand) {
-        if (shown++ >= 10) break;
-        [s appendFormat:@"  分数=%6.1f %@%@ %@ 透明=%.2f 隐藏=%d\n",
-            [d[@"sc"] doubleValue], d[@"cn"], [d[@"ca"] boolValue] ? @" «CA包" : @"",
-            d[@"r"], [d[@"a"] doubleValue], [d[@"h"] boolValue]];
-    }
-    if (!cand.count) [s appendString:@"  (宿主里没有任何像封面的候选 —— 说明岛此刻不是音乐岛, 或内容还在跨进程门户里)\n"];
-    [s appendFormat:@"===== dump #%d 结束(视图 %d 个 / 层 %d 个) =====\n", gDiDumpCount[kind], n1, n2];
-    /* 完整树独立存放：主日志只写索引，避免 512KB 轮转覆盖前一类岛。 */
-    NSString *dumpPath = [kMaterialDir stringByAppendingPathComponent:@"driftisland-island-tree.log"];
-    NSString *entry = [NSString stringWithFormat:@"[%@] %@\n", [NSDate date], s];
-    NSData *data = [entry dataUsingEncoding:NSUTF8StringEncoding];
-    NSFileManager *fm = [NSFileManager defaultManager];
-    NSDictionary *attr = [fm attributesOfItemAtPath:dumpPath error:NULL];
-    if ([attr[NSFileSize] unsignedLongLongValue] > 2 * 1024 * 1024)
-        [data writeToFile:dumpPath atomically:YES];
-    else {
-        if (![fm fileExistsAtPath:dumpPath]) [data writeToFile:dumpPath atomically:YES];
-        else { NSFileHandle *handle = [NSFileHandle fileHandleForWritingAtPath:dumpPath];
-               [handle seekToEndOfFile]; [handle writeData:data]; [handle closeFile]; }
-    }
-    DLog(@"[岛图层调试] %@ #%d 已存 %@ (视图%d 层%d)", why, gDiDumpCount[kind], dumpPath, n1, n2);
 }
 
 /* 在小岛宿主里找"大内容层"(CALayerHost, 面积 > 宿主 30%), 返回它换算到宿主坐标的 frame */
@@ -5820,7 +5645,6 @@ static void updateSingleVideo(UIWindow *win) {
        近方形, 猜尺寸会误伤)。它有自己的录屏素材层(函数开头单独挂), 放歌时录屏中
        它后出现会按"最新岛"把背景视频抢走, 音乐/充电岛反而变裸岛。 */
     UIView *recHost = enabled ? diRecIslandHost() : nil;
-    if (islandDumpOn && recHost && recHost.window == win) diDumpIslandFull(recHost, @"录屏岛");
     UIView *musicRoot = nil, *stickyAlive = nil, *bigRoot = nil, *newestRoot = nil;
     CGFloat bestA = 0; CFAbsoluteTime newestT = 0;
     for (UIView *h in hostTable) {
@@ -5947,10 +5771,6 @@ static void updateSingleVideo(UIWindow *win) {
     }
     /* 2.7.29: 岛全量图层调试日志(开关打开才抓, 内部限频 4s/最多 12 次)。
        收缩态也要抓 —— 专辑遮罩只在小岛生效, 不知道收缩态长什么样就没法排查。 */
-    if (islandDumpOn && matRoot)
-        diDumpIslandFull(matRoot, matRoot.bounds.size.height >= 120 ? @"音乐展开岛" : @"音乐小岛");
-    if (bestRoot != matRoot)
-        diDumpIslandFull(bestRoot, bestRoot.bounds.size.height >= 120 ? @"展开态" : @"收缩态");
     // 频谱帧率动画层: 序列帧播放, 盖在展开岛右上角(跨进程频谱上方), 加在最顶层
     // 开关关/无帧素材: 隐藏本层 → 露出系统频谱(关闭=显示原生频谱)
     DIAnimView *animV = objc_getAssociatedObject(win, &kWinVideoSpec);
@@ -6097,7 +5917,7 @@ static void updateSingleVideo(UIWindow *win) {
         /* 展开时只摘下附着在已识别音乐岛上的小遮罩，保留其他岛原样。 */
         if (matRoot && matRoot.bounds.size.height >= 120.0 && maskV.superview == matRoot) {
             maskV.hidden = YES;
-            [maskV diRestorePainted];
+            [maskV diTeardown];
             [maskV removeFromSuperview];
             maskV.link.paused = YES;
         }
@@ -10243,8 +10063,7 @@ shouldRecognizeSimultaneouslyWithGestureRecognizer:(UIGestureRecognizer *)o {
 
 /* 诊断: 只在"岛/控制中心调试日志"打开时打, 默认静默, 免得刷屏 */
 - (void)note:(UIView *)hit why:(NSString *)why ok:(BOOL)ok {
-    if (!islandDumpOn) return;
-    DLog(@"[控制中心] 长按判定: 命中=%@ 依据=%@ → %@", NSStringFromClass(hit.class), why, ok ? @"放行" : @"拒绝");
+    (void)hit; (void)why; (void)ok;
 }
 
 - (void)onPress:(UILongPressGestureRecognizer *)g {
