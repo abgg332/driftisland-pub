@@ -593,21 +593,37 @@ static CGRect diRecSlotRect(UIView *island, BOOL onRight, UIView **outAcc) {
         : CGRectMake(accLX, accY, accW, accH);
 }
 
-/* 倒计时可能尚未开始捕获，不能用 isCaptured 拦右槽。
-   只识别有独立非零宽左右 accessory 的岛；不从零宽门户补造右槽。 */
+/* 右侧 321 在宽胶囊右端 37pt accessory；不属于录屏后 37pt 方岛。
+   仅在开始录屏前捕捉真实位置，持续录屏期间沿用同一宿主和位置。 */
+static __weak UIView *gDiCountdownHost;
+static CGRect gDiCountdownRect;
+static __weak UIView *gDiCountdownAccessory;
 static UIView *diRecCountdownHost(void) {
+    if (gDiCountdownHost && gDiCountdownHost.window &&
+        (diIsScreenRecording() || gDiCountdownAccessory)) return gDiCountdownHost;
     if (!hostTable || diIsScreenRecording()) return nil;
-    for (UIView *host in hostTable) {
-        if (!host || !host.window || host.hidden || host.alpha < 0.05) continue;
-        NSString *cn = NSStringFromClass(host.class);
-        if (![cn isEqualToString:@"SAUIElementView"]) continue;
-        CGSize bs = host.bounds.size;
-        if (bs.width < 35 || bs.width > 240 || bs.height < 25 || bs.height > 65) continue;
-        UIView *left = nil, *right = nil;
-        CGRect lr = diRecSlotRect(host, NO, &left);
-        CGRect rr = diRecSlotRect(host, YES, &right);
-        if (left && right && left != right && lr.size.width >= 8 && rr.size.width >= 8 &&
-            CGRectGetMinX(rr) >= CGRectGetMaxX(lr) - 2.0) return host;
+    for (UIView *h in hostTable) {
+        if (!h || !h.window || h.hidden || ![NSStringFromClass(h.class) isEqualToString:@"SAUIElementView"]) continue;
+        CGSize bs = h.bounds.size;
+        if (bs.width < 110 || bs.width > 210 || bs.height < 30 || bs.height > 53) continue;
+        UIView *right = nil; CGRect rr = CGRectZero;
+        NSMutableArray<UIView *> *stack = [NSMutableArray arrayWithObject:h];
+        for (NSUInteger n=0; stack.count && n<90; n++) {
+            UIView *v=stack.firstObject; [stack removeObjectAtIndex:0];
+            if ([NSStringFromClass(v.class) isEqualToString:@"_SAUIProvidedViewContainerView"]) {
+                CGRect r=[v.superview convertRect:v.frame toView:h];
+                if (r.size.width >= 28 && r.size.width <= 48 && r.size.height >= 27 &&
+                    CGRectGetMidX(r) > bs.width * 0.58 && CGRectGetMaxX(r) <= bs.width + 8 && !v.hidden) {
+                    right=v; rr=r;
+                }
+                continue;
+            }
+            for (UIView *child in v.subviews) [stack addObject:child];
+        }
+        if (!right) continue;
+        gDiCountdownHost=h; gDiCountdownRect=rr; gDiCountdownAccessory=right;
+        DLog(@"录屏岛: 捕捉右侧倒计时宿主 %@ 槽=%@", NSStringFromCGRect(h.bounds),NSStringFromCGRect(rr));
+        return h;
     }
     return nil;
 }
@@ -1117,7 +1133,8 @@ static BOOL diIsVolumeIsland(UIView *host) {
         }
         UIView *acc = nil;
         CGRect slot = (onRec ? diRecSlotRect(island, NO, &acc) : CGRectZero);
-        BOOL show = enabled && recOn && diIsScreenRecording() && onRec && slot.size.width > 2;
+        BOOL show = enabled && recOn && !(diRecMiniOn && framePathsFor(diRecMiniFolder).count > 0)
+                 && diIsScreenRecording() && onRec && slot.size.width > 2;
 
         /* 原生圆点层: 显示素材时隐藏, 隐藏素材时恢复(与 2.2.40 同款做法) */
         static char kRecHiddenLayer;
@@ -5835,7 +5852,7 @@ static void diPreloadIslandVideos(void) {
 - (void)dealloc { [self.link invalidate]; }
 - (void)diStep:(CADisplayLink *)link {
     UIView *host = self.superview;
-    BOOL correctHost = self.side ? (!diIsScreenRecording() && host == diRecCountdownHost())
+    BOOL correctHost = self.side ? (host && host == gDiCountdownHost && (diRecCountdownHost() == host || diIsScreenRecording()))
                                  : (diIsScreenRecording() && host == diRecIslandHost());
     if (!host || !host.window || !enabled || !correctHost ||
         !(self.side ? diRecTrailingOn : diRecMiniOn)) {
@@ -5845,7 +5862,7 @@ static void diPreloadIslandVideos(void) {
     if (!frames.count) { self.hidden = YES; link.paused = YES; return; }
     BOOL right = self.side == 1;
     UIView *accessory = nil;
-    CGRect slot = diRecSlotRect(host, right, &accessory);
+    CGRect slot = right ? gDiCountdownRect : diRecSlotRect(host, NO, &accessory);
     if (slot.size.width <= 1 || slot.size.height <= 1) { self.hidden = YES; return; }
     self.hidden = NO; self.frame = slot;
     CFTimeInterval dt = self.previousTime > 0 ? MIN(0.3, MAX(0, link.timestamp - self.previousTime)) : 0;
@@ -5871,22 +5888,56 @@ static void diPreloadIslandVideos(void) {
     } else self.imageView.transform = CGAffineTransformIdentity;
 }
 @end
+static __weak UIView *gDiRecHiddenLeft, *gDiRecHiddenRight;
+static NSNumber *gDiRecLeftAlpha, *gDiRecRightAlpha;
+static void diRecRestoreNative(void) {
+    if (gDiRecHiddenLeft && gDiRecLeftAlpha) gDiRecHiddenLeft.alpha=gDiRecLeftAlpha.doubleValue;
+    if (gDiRecHiddenRight && gDiRecRightAlpha) gDiRecHiddenRight.alpha=gDiRecRightAlpha.doubleValue;
+    gDiRecHiddenLeft=nil; gDiRecHiddenRight=nil; gDiRecLeftAlpha=nil; gDiRecRightAlpha=nil;
+}
 static char kDiRecFrameLeft, kDiRecFrameRight;
 static void diSyncRecordingFrames(UIWindow *win, UIView *host) {
     UIView *countdown = diRecCountdownHost();
+    if (!diIsScreenRecording() && !countdown) {
+        diRecRestoreNative(); gDiCountdownHost=nil; gDiCountdownAccessory=nil; gDiCountdownRect=CGRectZero;
+    }
     for (NSInteger i = 0; i < 2; i++) {
         char *key = i ? &kDiRecFrameRight : &kDiRecFrameLeft;
         DIRecordingFrameView *v = objc_getAssociatedObject(win, key);
         UIView *slotHost = i ? countdown : host;
         BOOL want = enabled && (i ? diRecTrailingOn : diRecMiniOn) &&
-            (i ? !diIsScreenRecording() : diIsScreenRecording()) &&
+            framePathsFor(i ? diRecTrailingFolder : diRecMiniFolder).count > 0 &&
+            (i ? (countdown != nil && (diIsScreenRecording() || gDiCountdownAccessory != nil)) : diIsScreenRecording()) &&
             slotHost && slotHost.window == win;
-        if (!want) { if (v) { v.hidden = YES; v.link.paused = YES; v.previousTime = 0; } continue; }
+        if (!want) {
+            if (v) { v.hidden = YES; v.link.paused = YES; v.previousTime = 0; }
+            if (i && gDiRecHiddenRight && gDiRecRightAlpha) {
+                gDiRecHiddenRight.alpha=gDiRecRightAlpha.doubleValue; gDiRecHiddenRight=nil; gDiRecRightAlpha=nil;
+            }
+            if (!i && gDiRecHiddenLeft && gDiRecLeftAlpha) {
+                gDiRecHiddenLeft.alpha=gDiRecLeftAlpha.doubleValue; gDiRecHiddenLeft=nil; gDiRecLeftAlpha=nil;
+            }
+            continue;
+        }
         if (!v) {
             v = [[DIRecordingFrameView alloc] initWithFrame:CGRectZero]; v.side = i;
             objc_setAssociatedObject(win, key, v, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
         }
         if (v.superview != slotHost) { [v removeFromSuperview]; [slotHost addSubview:v]; }
+        UIView *native = nil;
+        if (i) native = gDiCountdownAccessory;
+        else { UIView *acc=nil; diRecSlotRect(slotHost, NO, &acc); native=acc; }
+        if (native && native != v && native.window == win) {
+            if (i && gDiRecHiddenRight != native) {
+                if (gDiRecHiddenRight && gDiRecRightAlpha) gDiRecHiddenRight.alpha=gDiRecRightAlpha.doubleValue;
+                gDiRecHiddenRight=native; gDiRecRightAlpha=@(native.alpha);
+            } else if (!i && gDiRecHiddenLeft != native) {
+                if (gDiRecHiddenLeft && gDiRecLeftAlpha) gDiRecHiddenLeft.alpha=gDiRecLeftAlpha.doubleValue;
+                gDiRecHiddenLeft=native; gDiRecLeftAlpha=@(native.alpha);
+            }
+            native.alpha=0;
+        }
+        [slotHost bringSubviewToFront:v];
         v.link.paused = NO;
     }
 }
@@ -5910,6 +5961,7 @@ static void updateSingleVideo(UIWindow *win) {
         UIView *recHost = enabled ? diRecIslandHost() : nil;
         diSyncRecordingFrames(win, recHost);
         if (recHost && recHost.window == win) {
+            if (diRecMiniOn && framePathsFor(diRecMiniFolder).count > 0) { recV.hidden=YES; recV.syncLink.paused=YES; }
             if (recV.superview != recHost) {
                 [recV removeFromSuperview];
                 /* 2.2.56: 垫到指示岛最底层(用户反馈之前在最上面, 会盖住其他素材)。
@@ -5926,7 +5978,7 @@ static void updateSingleVideo(UIWindow *win) {
             }
             /* 每轮重申保持在最底(系统重排可能把它提上来) */
             if (recHost.subviews.firstObject != recV) [recHost sendSubviewToBack:recV];
-            recV.syncLink.paused = NO;
+            if (!diRecMiniOn || !framePathsFor(diRecMiniFolder).count) recV.syncLink.paused = NO;
         } else if (recV.superview) {
             [recV removeFromSuperview];
             recV.hidden = YES;
