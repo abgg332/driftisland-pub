@@ -593,6 +593,25 @@ static CGRect diRecSlotRect(UIView *island, BOOL onRight, UIView **outAcc) {
         : CGRectMake(accLX, accY, accW, accH);
 }
 
+/* 倒计时可能尚未开始捕获，不能用 isCaptured 拦右槽。
+   只识别有独立非零宽左右 accessory 的岛；不从零宽门户补造右槽。 */
+static UIView *diRecCountdownHost(void) {
+    if (!hostTable || diIsScreenRecording()) return nil;
+    for (UIView *host in hostTable) {
+        if (!host || !host.window || host.hidden || host.alpha < 0.05) continue;
+        NSString *cn = NSStringFromClass(host.class);
+        if (![cn isEqualToString:@"SAUIElementView"]) continue;
+        CGSize bs = host.bounds.size;
+        if (bs.width < 35 || bs.width > 240 || bs.height < 25 || bs.height > 65) continue;
+        UIView *left = nil, *right = nil;
+        CGRect lr = diRecSlotRect(host, NO, &left);
+        CGRect rr = diRecSlotRect(host, YES, &right);
+        if (left && right && left != right && lr.size.width >= 8 && rr.size.width >= 8 &&
+            CGRectGetMinX(rr) >= CGRectGetMaxX(lr) - 2.0) return host;
+    }
+    return nil;
+}
+
 /* 录屏圆圈素材路径(录屏指示器圆圈的背景视频, 独立于小岛素材) */
 static NSString *recVideoPath(void) {
     if (!recOn) return nil;
@@ -5816,8 +5835,10 @@ static void diPreloadIslandVideos(void) {
 - (void)dealloc { [self.link invalidate]; }
 - (void)diStep:(CADisplayLink *)link {
     UIView *host = self.superview;
-    if (!host || !host.window || !enabled || !diIsScreenRecording() ||
-        host != diRecIslandHost() || !(self.side ? diRecTrailingOn : diRecMiniOn)) {
+    BOOL correctHost = self.side ? (!diIsScreenRecording() && host == diRecCountdownHost())
+                                 : (diIsScreenRecording() && host == diRecIslandHost());
+    if (!host || !host.window || !enabled || !correctHost ||
+        !(self.side ? diRecTrailingOn : diRecMiniOn)) {
         self.hidden = YES; link.paused = YES; return;
     }
     NSArray<NSString *> *frames = framePathsFor(self.side ? diRecTrailingFolder : diRecMiniFolder);
@@ -5852,17 +5873,20 @@ static void diPreloadIslandVideos(void) {
 @end
 static char kDiRecFrameLeft, kDiRecFrameRight;
 static void diSyncRecordingFrames(UIWindow *win, UIView *host) {
+    UIView *countdown = diRecCountdownHost();
     for (NSInteger i = 0; i < 2; i++) {
         char *key = i ? &kDiRecFrameRight : &kDiRecFrameLeft;
         DIRecordingFrameView *v = objc_getAssociatedObject(win, key);
-        BOOL want = enabled && diIsScreenRecording() && (i ? diRecTrailingOn : diRecMiniOn)
-            && host && host.window == win;
+        UIView *slotHost = i ? countdown : host;
+        BOOL want = enabled && (i ? diRecTrailingOn : diRecMiniOn) &&
+            (i ? !diIsScreenRecording() : diIsScreenRecording()) &&
+            slotHost && slotHost.window == win;
         if (!want) { if (v) { v.hidden = YES; v.link.paused = YES; v.previousTime = 0; } continue; }
         if (!v) {
             v = [[DIRecordingFrameView alloc] initWithFrame:CGRectZero]; v.side = i;
             objc_setAssociatedObject(win, key, v, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
         }
-        if (v.superview != host) { [v removeFromSuperview]; [host addSubview:v]; }
+        if (v.superview != slotHost) { [v removeFromSuperview]; [slotHost addSubview:v]; }
         v.link.paused = NO;
     }
 }
