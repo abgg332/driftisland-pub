@@ -18,7 +18,7 @@
 
 static NSString *const kDomain = @"com.abgg332.driftisland";
 /* 2.6.25: 设置页底部显示的版本号 */
-static NSString *const DI_VERSION_STR = @"2.8.68";
+static NSString *const DI_VERSION_STR = @"2.8.69";
 /* 2.6.10: 专辑光晕遮罩 —— 与 Tweak 侧 DIAlbumMask.h 保持一致 */
 static NSString *const kDIAlbumMaskKey = @"diAlbumMaskAsset";
 static NSString *const kDIMaskRoot = @"/var/mobile/灵动岛/遮罩素材";
@@ -1440,6 +1440,7 @@ static void diWriteColors(NSArray<NSString *> *colors) {
         DI_ADD([self buttonSpec:@"跳转素材目录" action:@selector(openMaterialDir)]);
         DI_ADD([self buttonSpec:@"跳转帧率目录" action:@selector(openFrameDir)]);
 
+        DI_ADD([self groupSpec:nil footer:nil]);
         DI_ADD([self switchSpec:@"日志开关" key:@"logging" def:@NO]);
 
         /* ---- 2.6.28: 版本号单独一组, 放在整页最底部(与日志分开) ---- */
