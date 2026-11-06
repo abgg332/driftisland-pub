@@ -2457,8 +2457,10 @@ __attribute__((unused)) static BOOL diMiniMusicActive(UIView *host) {
     syncNativeSpectrum(host); // 无条件每帧同步音频掩码(即使帧率素材关闭/没放歌): 岛重新展开或层重建时波形立即被藏
     /* 帧率图只在播放音乐的展开岛显示(实测展开音乐岛约407x202); 其他一切形态全部禁用:
        锁屏大卡(高700+)/录屏岛/通话岛/小岛(高36)/视频展开岛(无音频层) 一律不显示 */
-    BOOL expand = host.bounds.size.height > 100 && host.bounds.size.height < 300
-               && host.bounds.size.width > 250 && host.bounds.size.width < 500;
+    /* 2.8.71: 用户要求删除展开岛右上角的圆圈动画 —— 该帧率素材动画层永久禁用
+       (烘焙区域 294,18 89x67 正是截图右上角粉圆环)。原生波形的隐藏由音频开关
+       (syncNativeSpectrum)独立负责, 关掉本动画不影响波形隐藏/其他功能。 */
+    BOOL expand = NO;
     NSArray<NSString *> *frames = framePaths();
     CALayer *audioL = expand ? diFindAudioLayer(host) : nil; // 原生音频动态层: 在=音乐岛
     CALayer *apl = audioL ? (audioL.presentationLayer ?: audioL) : nil; // 必须真实可见: 隐藏/透明/过小都视为非音乐岛
