@@ -3733,12 +3733,15 @@ static BOOL diApplyMaskToCover(UIView *cover, UIImage *shape) {
             if ((fabs(bs.width - sLastW) > 6 || fabs(bs.height - sLastH) > 6)
                 && CFAbsoluteTimeGetCurrent() - sSzT > 1.0) {
                 sSzT = CFAbsoluteTimeGetCurrent(); sLastW = bs.width; sLastH = bs.height;
-                DLog(@"遮罩宿主尺寸: %.0fx%.0f → %@ (小岛=%d 展开=%d 开关=%d)",
+                DLog(@"遮罩宿主尺寸: %.0fx%.0f → %@ (小岛=%d 展开=%d[不挂] 开关=%d)",
                      bs.width, bs.height,
-                     (isMini || isExpand) ? @"参与" : @"跳过", isMini, isExpand, maskOn);
+                     isMini ? @"参与" : @"跳过", isMini, isExpand, maskOn);
             }
         }
-        BOOL gate = enabled && maskOn && !gRecordingActive && (isMini || isExpand);
+        /* 2.8.70: 用户要求去掉展开岛左侧的圆圈蒙版 —— isExpand 不再参与挂载,
+           gate 只认小岛。展开岛走下面 shapeOnly 分支: 收玻璃 + 还原系统封面,
+           但保留封面/方块缓存, 缩回小岛第一帧直接按缓存画回, 不闪方。 */
+        BOOL gate = enabled && maskOn && !gRecordingActive && isMini;
         /* 尺寸还在变(展开/收起动画途中) → 不新挂玻璃; 已挂着的由上面 growing /
            下面的离开窗口逻辑收拾, 过渡期间保留(2.8.18: 不再"先方后遮罩")。
            等待期间把探针拨回 30fps —— 稳定态会被降到 8fps, 不拨回来
@@ -3770,15 +3773,15 @@ static BOOL diApplyMaskToCover(UIView *cover, UIImage *shape) {
                  但**保留封面/方块缓存**, 这样缩回小岛的第一帧就能直接按缓存画,
                  中间不会再有"系统方形专辑"露出来;
                ②根本不是音乐岛(暂停 / 通知岛): 才整体 teardown, 探针该歇就歇。
+               2.8.70: isExpand 也走①(收玻璃留缓存) —— 展开岛不再挂蒙版;
                2.8.39: 锁死(播放中/30s 内播放过 + 玻璃在)时①也不收 ——
-               "切换歌曲、展开岛都不要影响, 一直显示遮罩"(308)。 */
+                 但**展开态例外**: 展开岛明确不显示蒙版(2.8.70), lockMask 让位。 */
             BOOL shapeOnly = (enabled && maskOn && !gRecordingActive
-                              && !isMini && !isExpand
+                              && !isMini
                               && (self.glassOn || self.cacheCoverV != nil));
             if (shapeOnly) {
-                /* 锁死: 保持玻璃等待(展开态由 isExpand 分支接管, 充电/来电大岛
-                   不锁死 —— 它们不是播放中的音乐岛, lockMask 不会为 YES)。 */
-                if (lockMask) return;
+                /* 2.8.70: 展开态强制收玻璃(覆盖锁死); 其他大岛(充电/来电)仍受锁死保护 */
+                if (lockMask && !isExpand) return;
                 if (self.glassOn || !self.hidden) {
                     [self diRestorePainted];
                     self.glassOn = NO;
