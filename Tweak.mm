@@ -5580,6 +5580,46 @@ static void diPreloadIslandVideos(void) {
     }
 }
 
+/* ===== 2.8.73: 展开岛图层探针(纯只读, 不改任何显示) =====
+   323 反馈: "光斑还在"。现在把展开音乐岛这一棵视图/图层树整棵打到日志里:
+   类名 + frame + alpha + hidden + 是否有 contents + 是否带滤镜。
+   目的只有一个 —— 看清封面左下那个柔光斑到底是谁画的(视频画面/我们自己的层/系统层)。
+   只有展开态(宽≥250 高≥120)才打, 每次展开最多 4 次、间隔 ≥2s, 绝不每帧刷。 */
+static void diDumpLayerTree(CALayer *l, int depth, int *budget) {
+    if (!l || depth > 7 || *budget <= 0) return;
+    (*budget)--;
+    NSMutableString *pad = [NSMutableString string];
+    for (int i = 0; i < depth; i++) [pad appendString:@"· "];
+    NSString *csize = @"-";
+    CFTypeRef c = (__bridge CFTypeRef)l.contents;
+    if (c) {
+        CFTypeID tid = CFGetTypeID(c);
+        if (tid == CGImageGetTypeID()) {
+            CGImageRef img = (CGImageRef)c;
+            csize = NSStringFromCGSize(CGSizeMake(CGImageGetWidth(img), CGImageGetHeight(img)));
+        }
+        else csize = NSStringFromClass([(__bridge id)c class]);
+    }
+    DLog(@"[层树]%@%@ %@ a=%.2f h=%d fil=%d cont=%@ sub=%lu",
+         pad, NSStringFromClass(l.class), NSStringFromCGRect(l.frame),
+         l.opacity, l.hidden ? 1 : 0, (int)l.filters.count, csize,
+         (unsigned long)l.sublayers.count);
+    for (CALayer *s in [l.sublayers copy]) diDumpLayerTree(s, depth + 1, budget);
+}
+
+static void diDumpViewTree(UIView *v, int depth, int *budget) {
+    if (!v || depth > 5 || *budget <= 0) return;
+    (*budget)--;
+    NSMutableString *pad = [NSMutableString string];
+    for (int i = 0; i < depth; i++) [pad appendString:@"· "];
+    DLog(@"[视图树]%@%@ %@ a=%.2f h=%d n=%lu 层=%@",
+         pad, NSStringFromClass(v.class), NSStringFromCGRect(v.frame),
+         v.alpha, v.hidden ? 1 : 0, (unsigned long)v.subviews.count,
+         NSStringFromClass(v.layer.class));
+    if (!v.subviews.count) { diDumpLayerTree(v.layer, depth + 1, budget); return; }
+    for (UIView *s in [v.subviews copy]) diDumpViewTree(s, depth + 1, budget);
+}
+
 static void updateSingleVideo(UIWindow *win) {
     if (!win) return;
     diRefreshContour();
@@ -5698,6 +5738,26 @@ static void updateSingleVideo(UIWindow *win) {
         sVideoRoot = bestRoot; sVideoT = 0;
     }
     sStickyRoot = bestRoot;
+    /* 2.8.73: 展开音乐岛图层探针(只读)。展开态才打, 冷却 2s, 每次展开最多 4 次 */
+    {
+        static CFAbsoluteTime sDumpT = 0; static int sDumpN = 0;
+        if (matRoot && matRoot.bounds.size.width >= 250.0 && matRoot.bounds.size.height >= 120.0
+            && sDumpN < 4 && CFAbsoluteTimeGetCurrent() - sDumpT > 2.0) {
+            sDumpT = CFAbsoluteTimeGetCurrent(); sDumpN++;
+            DLog(@"===== 展开岛探针 #%d 宿主=%@ %@ 父=%@ =====", sDumpN,
+                 NSStringFromClass(matRoot.class), NSStringFromCGRect(matRoot.bounds),
+                 NSStringFromClass(matRoot.superview.class));
+            int budget = 260;
+            diDumpViewTree(matRoot, 0, &budget);
+            /* 兄弟层也看一眼: 光斑可能挂在岛容器上而不是素材宿主里 */
+            if (matRoot.superview) {
+                int b2 = 120;
+                DLog(@"[父层树] 起 ===== ");
+                diDumpViewTree(matRoot.superview, 0, &b2);
+            }
+        }
+        if (!matRoot || matRoot.bounds.size.height < 120.0) sDumpN = 0; /* 缩回小岛后重置 */
+    }
     if (!bestRoot && !matRoot) {
         for (DIVideoView *v in diLayers(smallV, expandV)) {
             if (v && !v.hidden) { v.hidden = YES; if (v.player.timeControlStatus != AVPlayerTimeControlStatusPaused) [v.player pause]; }
