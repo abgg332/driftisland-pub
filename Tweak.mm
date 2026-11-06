@@ -6093,7 +6093,8 @@ static void updateSingleVideo(UIWindow *win) {
     BOOL maskHost = musicHost && matRoot.bounds.size.width <= 240.0
         && matRoot.bounds.size.height <= 62.0;
     if (!maskHost) {
-        if (maskV.superview && maskV.superview.bounds.size.height >= 120.0) [maskV diTeardown];
+        /* 展开态不拥有真实大专辑画面；把小岛自绘玻璃完全撤下并还原其隐藏的视图。 */
+        if (maskV.superview && (maskV.glassOn || !maskV.hidden)) [maskV diTeardown];
         /* 只隐藏、不 removeFromSuperview —— 拆了 superview 后探针会在下一帧
            判定"宿主没了"而整体 teardown, 把小岛那份缓存(封面/方块/尺寸)一起清掉,
            缩回小岛就得重新扫描两帧, 又会出现一次"方形 → 遮罩"。hidden 的视图
@@ -10252,12 +10253,14 @@ shouldRecognizeSimultaneouslyWithGestureRecognizer:(UIGestureRecognizer *)o {
 
 /* 2.7.32: 不再判深浅 —— 一个素材通吃, 列表就是目录下全部素材 */
 - (void)showPicker {
-    NSString *curPath = diWallpaperResolveAny(wpLightAsset);
-    NSArray<NSString *> *paths = diWallpaperPathsAll();
+    BOOL dark = diCCDarkAppearance();
+    objc_setAssociatedObject(self, @selector(showPicker), @(dark), OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    NSString *curPath = diWallpaperResolveAny(dark ? wpDarkAsset : wpLightAsset);
+    NSArray<NSString *> *paths = diWallpaperPathsFor(dark);
     UIWindow *w = gCCSurface.window ?: self.owner.view.window;
     if (!w) return;
     __weak DICCPressTarget *ws = self;
-    [DICCPickerPanel showInWindow:w dark:YES paths:paths cur:curPath
+    [DICCPickerPanel showInWindow:w dark:dark paths:paths cur:curPath
         onChoose:^(NSString *full) {
             DICCPressTarget *ss = ws;
             if (ss) [ss chooseFull:full];
@@ -10266,9 +10269,11 @@ shouldRecognizeSimultaneouslyWithGestureRecognizer:(UIGestureRecognizer *)o {
 
 - (void)chooseFull:(NSString *)full {
     NSString *rel = full ? diWallpaperRelAny(full) : @"__none__";
-    CFPreferencesSetAppValue((__bridge CFStringRef)@"wpLightAsset", (__bridge CFPropertyListRef)rel,
+    BOOL dark = [objc_getAssociatedObject(self, @selector(showPicker)) boolValue];
+    NSString *key = dark ? @"wpDarkAsset" : @"wpLightAsset";
+    CFPreferencesSetAppValue((__bridge CFStringRef)key, (__bridge CFPropertyListRef)rel,
                              (__bridge CFStringRef)kDomain);
-    wpLightAsset = rel;
+    if (dark) wpDarkAsset = rel; else wpLightAsset = rel;
     /* 选了固定素材(或点"关闭背景") → 自动关掉"循环播放",
        否则选了也马上被轮播顶掉 / 关了背景还继续轮播, 看着像没反应 */
     if (wpLoopOn) {
@@ -12196,6 +12201,18 @@ __attribute__((constructor)) static void init(void) {
             dispatch_source_set_timer(gTickTimer, DISPATCH_TIME_NOW, 0.5 * NSEC_PER_SEC, 0.1 * NSEC_PER_SEC);
             dispatch_source_set_event_handler(gTickTimer, ^{ visibilityTick(); });
             dispatch_resume(gTickTimer);
+            /* 注销后通常停在锁屏；系统可能没有再发一次 lockstate 通知。
+               首次主动查询锁态，先锁则暂停，解锁回调才预载；未知时保守视为锁定。 */
+            Class lockClass = NSClassFromString(@"SBLockStateController");
+            SEL sharedSel = NSSelectorFromString(@"sharedInstance");
+            SEL stateSel = NSSelectorFromString(@"currentState");
+            BOOL initialLocked = YES;
+            if (lockClass && [lockClass respondsToSelector:sharedSel]) {
+                id controller = ((id (*)(id, SEL))objc_msgSend)(lockClass, sharedSel);
+                if (controller && [controller respondsToSelector:stateSel])
+                    initialLocked = (((long (*)(id, SEL))objc_msgSend)(controller, stateSel) != 0);
+            }
+            applyLockState(initialLocked);
             /* 2.5.0: 底栏横条 0.3s 重申(系统重建横条后 0.3s 内恢复自定义) */
             {
                 dispatch_source_t hb = dispatch_source_create(DISPATCH_SOURCE_TYPE_TIMER, 0, 0, dispatch_get_main_queue());
