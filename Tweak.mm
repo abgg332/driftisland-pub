@@ -11932,11 +11932,21 @@ static void diHookHomeBarGrabberRetry(void) { diHookHomeGrabber(); }
 
 // MRUActivityArtworkView is the actual artwork owner in MediaRemoteUI.
 // No artwork replacement, no BlurMask, and no generic CALayerHost clipping.
+// 2.8.77: 按 N95 4.4 逆向证据修正三处 ——
+//   1) 生效闸门不再依赖 artwork.window (远程场景下 window 可能为空, N95 不看它);
+//   2) 增加 N95 同款上下文校验: _viewControllerForAncestor 必须精确落在
+//      MRUActivityNowPlayingViewController —— 只处理展开岛音乐活动头像,
+//      充电/人脸等其它岛一律不碰;
+//   3) 应用时对 self 和 artworkImageView 设 clipsToBounds=NO (N95 同款,
+//      防止系统裁剪把 mask 形状切掉); 原值存 state, 停用时恢复。
 @interface DIActivityMaskState : NSObject
 @property(nonatomic,strong) UIImageView *mask;
 @property(nonatomic,strong) UIView *originalMask;
 @property(nonatomic,weak) UIView *shadow;
 @property(nonatomic,assign) BOOL originalShadowHidden;
+@property(nonatomic,weak) UIView *imageView;              // 2.8.77 artworkImageView 原值保存
+@property(nonatomic,assign) BOOL originalImageClips;
+@property(nonatomic,assign) BOOL originalSelfClips;
 @end
 @implementation DIActivityMaskState @end
 static char kDIActivityMaskState;
@@ -11944,15 +11954,35 @@ static NSHashTable<UIView *> *gDIActivityArtworks;
 static UIImage *gDIActivityShape;
 static BOOL gDIActivityEnabled;
 static IMP gDIActivityOrigLayout, gDIActivityOrigMove, gDIActivityOrigVisibility;
+/* 2.8.77: N95 同款上下文校验 —— 祖先 VC 必须是 MRUActivityNowPlayingViewController。
+   所有私有访问器都先做 respondsToSelector/类存在性检查, 取不到就返回 NO
+   (与 N95 一致: 严格匹配, 时序靠 layout/didMove 反复重入解决)。 */
+static UIViewController *diActivityAncestorVC(UIView *view) {
+    SEL vcSel = NSSelectorFromString(@"_viewControllerForAncestor");
+    if (!vcSel || ![view respondsToSelector:vcSel]) return nil;
+    @try {
+        return ((UIViewController *(*)(id, SEL))objc_msgSend)(view, vcSel);
+    } @catch (__unused NSException *e) { return nil; }
+}
+static BOOL diActivityInNowPlaying(UIView *view) {
+    Class target = NSClassFromString(@"MRUActivityNowPlayingViewController");
+    if (!target) return NO;
+    UIViewController *vc = diActivityAncestorVC(view);
+    return vc && [vc isKindOfClass:target];
+}
 static void diActivityApply(UIView *artwork) {
     if (!NSThread.isMainThread || ![artwork isKindOfClass:UIView.class]) return;
     DIActivityMaskState *state = objc_getAssociatedObject(artwork, &kDIActivityMaskState);
-    BOOL want = gDIActivityEnabled && gDIActivityShape && artwork.window &&
-        artwork.bounds.size.width > 5 && artwork.bounds.size.height > 5;
+    BOOL want = gDIActivityEnabled && gDIActivityShape &&
+        artwork.bounds.size.width > 5 && artwork.bounds.size.height > 5 &&
+        diActivityInNowPlaying(artwork);   // 2.8.77: 不再看 artwork.window, 改查祖先 VC
     if (!want) {
         if (state) {
             if (artwork.maskView == state.mask) artwork.maskView = state.originalMask;
             if (state.shadow) state.shadow.hidden = state.originalShadowHidden;
+            /* 2.8.77: 停用时恢复 clipsToBounds 原值 */
+            artwork.clipsToBounds = state.originalSelfClips;
+            if (state.imageView) state.imageView.clipsToBounds = state.originalImageClips;
             objc_setAssociatedObject(artwork, &kDIActivityMaskState, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
         }
         return;
@@ -11971,8 +12001,23 @@ static void diActivityApply(UIView *artwork) {
                 state.originalShadowHidden = [(UIView *)shadow isHidden];
             }
         }
+        /* 2.8.77: N95 同款 —— self 与 artworkImageView 都 clipsToBounds=NO,
+           否则形状会被系统视图自身的裁剪切掉; 原值记下, 停用时恢复。 */
+        state.originalSelfClips = artwork.clipsToBounds;
+        artwork.clipsToBounds = NO;
+        SEL imgSel = NSSelectorFromString(@"artworkImageView");
+        if ([artwork respondsToSelector:imgSel]) {
+            id img = ((id (*)(id, SEL))objc_msgSend)(artwork, imgSel);
+            if ([img isKindOfClass:UIView.class]) {
+                state.imageView = img;
+                state.originalImageClips = [(UIView *)img clipsToBounds];
+                [(UIView *)img setClipsToBounds:NO];
+            }
+        }
         objc_setAssociatedObject(artwork, &kDIActivityMaskState, state, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-        DLog(@"[真实专辑遮罩] MRUActivityArtworkView 已接管 %@（无额外封面/模糊层）", NSStringFromCGRect(artwork.bounds));
+        UIViewController *avc = diActivityAncestorVC(artwork);
+        DLog(@"[真实专辑遮罩] MRUActivityArtworkView 已接管 %@ 祖先=%@（无额外封面/模糊层）",
+             NSStringFromCGRect(artwork.bounds), avc ? NSStringFromClass(avc.class) : @"(无)");
     }
     // Another tweak can change this mask; preserve its latest value for restoration.
     if (artwork.maskView != state.mask) state.originalMask = artwork.maskView;
