@@ -4544,6 +4544,47 @@ static NSString *diMaskCurrentPathV2(void) {
     return [kMaskDir stringByAppendingPathComponent:list.firstObject];
 }
 
+/* ===== 2.8.78: 给 MediaRemoteUI 进程的素材通道 =====
+   MediaRemoteUI 是独立沙盒进程, 直接读 /var/mobile/灵动岛 很可能被沙盒拒绝
+   (325 日志: 该进程 0 条记录 + 展开态遮罩从不生效, 两个症状同时指向跨进程不可达)。
+   SpringBoard 这边把**选中的原始 png 字节**导出到三条通道, MediaRemoteUI 侧
+   按同样顺序回读, 哪条通用哪条:
+     ① /var/mobile/Library/Caches/com.abgg332.driftisland/mask.png
+     ② 偏好域 com.abgg332.driftisland.mrumask 的 diMruMaskB64 (base64, 小于 512KB 才写)
+     ③ 偏好域同上的 diMruActive —— 开关状态, 防止该进程读不到主偏好域时开关恒为关 */
+static NSString *diMruCacheDir(void) {
+    return @"/var/mobile/Library/Caches/com.abgg332.driftisland";
+}
+static void diExportMaskForMRU(void) {
+    @autoreleasepool {
+        NSString *path = diMaskCurrentPathV2();
+        NSData *raw = path ? [NSData dataWithContentsOfFile:path] : nil;
+        if (raw.length > 512 * 1024) raw = nil;   /* 太大的不塞偏好, 只走文件通道 */
+        NSFileManager *fm = [NSFileManager defaultManager];
+        NSError *err = nil;
+        [fm createDirectoryAtPath:diMruCacheDir() withIntermediateDirectories:YES
+                        attributes:@{NSFilePosixPermissions: @0777} error:&err];
+        NSString *out = [diMruCacheDir() stringByAppendingPathComponent:@"mask.png"];
+        BOOL fileOK = NO;
+        if (raw) {
+            fileOK = [raw writeToFile:out atomically:YES];
+            if (fileOK) [fm setAttributes:@{NSFilePosixPermissions: @0644} ofItemAtPath:out error:NULL];
+        } else {
+            [fm removeItemAtPath:out error:NULL];
+        }
+        CFStringRef dom = CFSTR("com.abgg332.driftisland.mrumask");
+        CFPreferencesAppSynchronize(dom);
+        NSString *b64 = raw ? [raw base64EncodedStringWithOptions:0] : nil;
+        CFPreferencesSetAppValue(CFSTR("diMruMaskB64"), (__bridge CFStringRef)b64, dom);
+        BOOL active = pBool(@"enabled", NO) && pBool(@"maskOn", NO);
+        CFPreferencesSetAppValue(CFSTR("diMruActive"), active ? CFSTR("1") : CFSTR("0"), dom);
+        CFPreferencesAppSynchronize(dom);
+        RLog(@"[遮罩导出] → MediaRemoteUI: 素材=%@ 文件=%@ 偏好=%lu字节 开关=%d 错误=%@",
+             path.lastPathComponent ?: @"(无)", fileOK ? @"OK" : @"FAIL",
+             (unsigned long)b64.length, active, err.localizedDescription ?: @"无");
+    }
+}
+
 /* 通过 MediaRemote 拿当前专辑封面 —— 裁图失败时的兜底, 保证"一定有一张专辑图" */
 __attribute__((unused)) static UIImage *diNowPlayingArtworkV2(void) {
     static UIImage *cImg = nil;
@@ -10790,6 +10831,8 @@ static void lockStateChanged(CFNotificationCenterRef, void *, CFStringRef, const
 static void prefsChanged(CFNotificationCenterRef, void *, CFStringRef, const void *, CFDictionaryRef) {
     gFramesDirty = YES; // 偏好变更(可能换了素材文件夹): 立即重扫
     gMaskGen++;         // 2.6.12: 让遮罩重新读图(设置页刚换了素材)
+    /* 2.8.78: 换素材/改开关后立即把新素材导出给 MediaRemoteUI(展开岛真实专辑用) */
+    dispatch_async(dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{ diExportMaskForMRU(); });
             dispatch_async(dispatch_get_main_queue(), ^{
                 NSInteger oldBlur = wpBlur; BOOL oldLoop = wpLoopOn;
                 refreshAll(); installKnownHosts();
@@ -11953,7 +11996,93 @@ static char kDIActivityMaskState;
 static NSHashTable<UIView *> *gDIActivityArtworks;
 static UIImage *gDIActivityShape;
 static BOOL gDIActivityEnabled;
-static IMP gDIActivityOrigLayout, gDIActivityOrigMove, gDIActivityOrigVisibility;
+static IMP gDIActivityOrigLayout, gDIActivityOrigMove, gDIActivityOrigVisibility, gDIActivityOrigInit;
+
+/* ===== 2.8.78: MediaRemoteUI 进程自证通道 =====
+   该进程是独立沙盒: 日志写 /var/mobile/灵动岛 可能失败, 读素材也可能被拒。
+   于是给它三条出口, 只要有一条通, SpringBoard 侧就能看到它到底走到哪一步:
+     ① 文件: 灵动岛目录 → Library/Caches/com.abgg332.driftisland → tmp 依次试探可写路径;
+     ② Darwin 通知: 固定名字打点, SpringBoard 收到写进同一份日志(325 日志里
+        该进程 0 条记录, 用这条就能区分"没注入"和"注入但写不了日志")。 */
+static NSString *gDiMruLogPath;
+static void diMruFileLog(NSString *line) {
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        NSFileManager *fm = [NSFileManager defaultManager];
+        NSArray<NSString *> *cands = @[
+            [kMaterialDir stringByAppendingPathComponent:@"driftisland.log"],
+            [diMruCacheDir() stringByAppendingPathComponent:@"mru.log"],
+            [NSTemporaryDirectory() stringByAppendingPathComponent:@"driftisland-mru.log"]];
+        for (NSString *p in cands) {
+            [fm createDirectoryAtPath:[p stringByDeletingLastPathComponent]
+                withIntermediateDirectories:YES attributes:@{NSFilePosixPermissions: @0777} error:NULL];
+            BOOL ok = [fm fileExistsAtPath:p] ? [fm isWritableFileAtPath:p]
+                : [fm createFileAtPath:p contents:[NSData data] attributes:@{NSFilePosixPermissions: @0666}];
+            if (ok) { gDiMruLogPath = p; break; }
+        }
+    });
+    if (!gDiMruLogPath) return;
+    NSDateFormatter *df = [NSDateFormatter new];
+    df.dateFormat = @"yyyy-MM-dd HH:mm:ss";
+    NSString *out = [NSString stringWithFormat:@"[%@] [MRU] %@\n", [df stringFromDate:[NSDate date]], line];
+    NSFileHandle *h = [NSFileHandle fileHandleForWritingAtPath:gDiMruLogPath];
+    if (!h) { [out writeToFile:gDiMruLogPath atomically:YES encoding:NSUTF8StringEncoding error:NULL]; return; }
+    [h seekToEndOfFile]; [h writeData:[out dataUsingEncoding:NSUTF8StringEncoding]]; [h closeFile];
+}
+static void diMruReport(NSString *tag, NSString *detail) {
+    /* 同 tag 3 秒内只报一次 —— 这些函数在每帧布局里被调用, 不能刷屏 */
+    static NSMutableDictionary<NSString *, NSNumber *> *lastT;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{ lastT = [NSMutableDictionary dictionary]; });
+    CFAbsoluteTime now = CFAbsoluteTimeGetCurrent();
+    NSNumber *prev = lastT[tag];
+    if (prev && now - prev.doubleValue < 3.0) return;
+    lastT[tag] = @(now);
+    NSString *name = [@"com.abgg332.driftisland.mru." stringByAppendingString:tag];
+    CFNotificationCenterPostNotification(CFNotificationCenterGetDarwinNotifyCenter(),
+        (__bridge CFStringRef)name, NULL, NULL, true);
+    diMruFileLog(detail.length ? [NSString stringWithFormat:@"%@ %@", tag, detail] : tag);
+}
+/* 开关三态: 主偏好域读不到(mrumask 出口才有值)时用 SpringBoard 导出的 diMruActive */
+static BOOL diMruPrefOn(void) {
+    CFStringRef dom = (__bridge CFStringRef)kDomain;
+    CFPreferencesAppSynchronize(dom);
+    Boolean eValid = false, mValid = false;
+    Boolean e = CFPreferencesGetAppBooleanValue(CFSTR("enabled"), dom, &eValid);
+    Boolean m = CFPreferencesGetAppBooleanValue(CFSTR("maskOn"), dom, &mValid);
+    if (eValid && mValid) return e && m;
+    CFStringRef dom2 = CFSTR("com.abgg332.driftisland.mrumask");
+    CFPreferencesAppSynchronize(dom2);
+    Boolean aValid = false;
+    Boolean a = CFPreferencesGetAppBooleanValue(CFSTR("diMruActive"), dom2, &aValid);
+    if (aValid) { diMruFileLog(@"主偏好域不可读, 走 diMruActive"); return a; }
+    return e && m;
+}
+/* 素材三通道: 直接读素材目录 → Caches 导出图 → 偏好 base64 */
+static UIImage *diActivityLoadShape(void) {
+    NSString *path = diMaskCurrentPathV2();
+    if (path) {
+        UIImage *img = diMaskAlphaCached(path);
+        if (img) { diMruReport(@"shape.material", path.lastPathComponent); return img; }
+        diMruFileLog([NSString stringWithFormat:@"素材读失败: %@", path]);
+    }
+    NSString *cache = [diMruCacheDir() stringByAppendingPathComponent:@"mask.png"];
+    UIImage *img = diMaskAlphaCached(cache);
+    if (img) { diMruReport(@"shape.cache", cache); return img; }
+    CFStringRef dom = CFSTR("com.abgg332.driftisland.mrumask");
+    CFPreferencesAppSynchronize(dom);
+    id v = CFBridgingRelease(CFPreferencesCopyAppValue(CFSTR("diMruMaskB64"), dom));
+    if ([v isKindOfClass:NSString.class] && [v length]) {
+        NSData *data = [[NSData alloc] initWithBase64EncodedString:v options:0];
+        UIImage *raw = data.length ? [UIImage imageWithData:data] : nil;
+        if (raw) {
+            UIImage *shape = diShapeFromLuma(raw);
+            if (shape) { diMruReport(@"shape.prefs", nil); return shape; }
+        }
+    }
+    diMruReport(@"shape.none", nil);
+    return nil;
+}
 /* 2.8.77: N95 同款上下文校验 —— 祖先 VC 必须是 MRUActivityNowPlayingViewController。
    所有私有访问器都先做 respondsToSelector/类存在性检查, 取不到就返回 NO
    (与 N95 一致: 严格匹配, 时序靠 layout/didMove 反复重入解决)。 */
@@ -11973,9 +12102,19 @@ static BOOL diActivityInNowPlaying(UIView *view) {
 static void diActivityApply(UIView *artwork) {
     if (!NSThread.isMainThread || ![artwork isKindOfClass:UIView.class]) return;
     DIActivityMaskState *state = objc_getAssociatedObject(artwork, &kDIActivityMaskState);
-    BOOL want = gDIActivityEnabled && gDIActivityShape &&
-        artwork.bounds.size.width > 5 && artwork.bounds.size.height > 5 &&
-        diActivityInNowPlaying(artwork);   // 2.8.77: 不再看 artwork.window, 改查祖先 VC
+    BOOL sized = artwork.bounds.size.width > 5 && artwork.bounds.size.height > 5;
+    /* 2.8.78: 判定过程必须可观测 —— 否则"没遮上"到底是没注入、没素材、还是
+       上下文校验挡掉, 全靠猜(325 日志已经吃过这个亏)。 */
+    BOOL ctx = NO;
+    if (gDIActivityEnabled && gDIActivityShape && sized) {
+        ctx = diActivityInNowPlaying(artwork);
+        if (!ctx) {
+            UIViewController *vc = diActivityAncestorVC(artwork);
+            diMruReport(@"ctxreject", [NSString stringWithFormat:@"%@ 祖先=%@",
+                NSStringFromCGRect(artwork.bounds), vc ? NSStringFromClass(vc.class) : @"(无VC)"]);
+        }
+    }
+    BOOL want = gDIActivityEnabled && gDIActivityShape && sized && ctx;
     if (!want) {
         if (state) {
             if (artwork.maskView == state.mask) artwork.maskView = state.originalMask;
@@ -12018,6 +12157,8 @@ static void diActivityApply(UIView *artwork) {
         UIViewController *avc = diActivityAncestorVC(artwork);
         DLog(@"[真实专辑遮罩] MRUActivityArtworkView 已接管 %@ 祖先=%@（无额外封面/模糊层）",
              NSStringFromCGRect(artwork.bounds), avc ? NSStringFromClass(avc.class) : @"(无)");
+        diMruReport(@"hit", [NSString stringWithFormat:@"%@ 祖先=%@",
+            NSStringFromCGRect(artwork.bounds), avc ? NSStringFromClass(avc.class) : @"(无)"]);
     }
     // Another tweak can change this mask; preserve its latest value for restoration.
     if (artwork.maskView != state.mask) state.originalMask = artwork.maskView;
@@ -12025,17 +12166,25 @@ static void diActivityApply(UIView *artwork) {
     if (!CGRectEqualToRect(state.mask.frame, artwork.bounds)) state.mask.frame = artwork.bounds;
     if (artwork.maskView != state.mask) artwork.maskView = state.mask;
     state.shadow.hidden = YES;
+    diMruReport(@"apply", NSStringFromCGRect(artwork.bounds));
 }
 static void diActivityReload(void) {
-    gDIActivityEnabled = pBool(@"enabled", NO) && pBool(@"maskOn", NO);
+    gDIActivityEnabled = diMruPrefOn();
     logEnabled = pBool(@"logging", NO);
     gMaskGen++;
-    NSString *path = gDIActivityEnabled ? diMaskCurrentPathV2() : nil;
-    gDIActivityShape = path ? diMaskAlphaCached(path) : nil;
+    gDIActivityShape = gDIActivityEnabled ? diActivityLoadShape() : nil;
+    diMruReport(@"reload", [NSString stringWithFormat:@"开关=%d 形状=%@",
+        gDIActivityEnabled, gDIActivityShape ? [NSString stringWithFormat:@"%.0fx%.0f",
+        gDIActivityShape.size.width, gDIActivityShape.size.height] : @"(无)"]);
     for (UIView *view in gDIActivityArtworks.allObjects) diActivityApply(view);
 }
 static void diActivityNotify(CFNotificationCenterRef c, void *o, CFStringRef n, const void *obj, CFDictionaryRef info) {
-    dispatch_async(dispatch_get_main_queue(), ^{ diActivityReload(); });
+    dispatch_async(dispatch_get_main_queue(), ^{
+        diActivityReload();
+        /* 2.8.78: SpringBoard 的素材导出是异步的, 通知到达时可能还没写完 —— 1.5s 后补一次 */
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.5 * NSEC_PER_SEC)),
+                       dispatch_get_main_queue(), ^{ diActivityReload(); });
+    });
 }
 static void diActivityRegister(UIView *view) {
     if (!gDIActivityArtworks) gDIActivityArtworks = [NSHashTable weakObjectsHashTable];
@@ -12054,26 +12203,50 @@ static void diActivityVisibility(id self, SEL cmd) {
     if (gDIActivityOrigVisibility) ((void (*)(id, SEL))gDIActivityOrigVisibility)(self, cmd);
     @try { diActivityRegister((UIView *)self); } @catch (NSException *e) { DLog(@"[真实专辑遮罩] 显隐异常 %@", e.reason); }
 }
+/* 2.8.78: N95 也 hook 了 init(0x14608), 展开时新建的实例在 didMove 之前就能挂上,
+   少一次"方形先露出"的窗口。原 init 必须先调用完再挂 mask。 */
+static id diActivityInit(id self, SEL cmd) {
+    id result = gDIActivityOrigInit ? ((id (*)(id, SEL))gDIActivityOrigInit)(self, cmd) : nil;
+    @try { diActivityApply((UIView *)self); } @catch (__unused NSException *e) {}
+    return result;
+}
 static BOOL diActivityVoidMethod(Class cls, SEL sel) {
     Method method = class_getInstanceMethod(cls, sel);
     if (!method || method_getNumberOfArguments(method) != 2) return NO;
     char *type = method_copyReturnType(method);
     BOOL valid = type && !strcmp(type, "v"); free(type); return valid;
 }
+static BOOL diActivityObjectMethod(Class cls, SEL sel) {
+    Method method = class_getInstanceMethod(cls, sel);
+    if (!method || method_getNumberOfArguments(method) != 2) return NO;
+    char *type = method_copyReturnType(method);
+    BOOL valid = type && !strcmp(type, "@"); free(type); return valid;
+}
 static void diActivityInstall(void) {
     static BOOL installed;
     if (installed) return;
     Class cls = NSClassFromString(@"MRUActivityArtworkView");
-    if (!cls || ![cls isSubclassOfClass:UIView.class]) return;
+    if (!cls || ![cls isSubclassOfClass:UIView.class]) {
+        diMruReport(@"noclass", @"MRUActivityArtworkView 不存在");
+        return;
+    }
     SEL layout = @selector(layoutSubviews);
-    if (!diActivityVoidMethod(cls, layout)) return;
+    if (!diActivityVoidMethod(cls, layout)) {
+        diMruReport(@"nohook", @"layoutSubviews 签名不匹配");
+        return;
+    }
     MSHookMessageEx(cls, layout, (IMP)diActivityLayout, &gDIActivityOrigLayout);
     SEL move = @selector(didMoveToSuperview);
     if (diActivityVoidMethod(cls, move)) MSHookMessageEx(cls, move, (IMP)diActivityMove, &gDIActivityOrigMove);
     SEL visibility = NSSelectorFromString(@"updateVisibility");
     if (diActivityVoidMethod(cls, visibility)) MSHookMessageEx(cls, visibility, (IMP)diActivityVisibility, &gDIActivityOrigVisibility);
+    SEL initSel = @selector(init);
+    if (diActivityObjectMethod(cls, initSel)) MSHookMessageEx(cls, initSel, (IMP)diActivityInit, &gDIActivityOrigInit);
     installed = YES;
     RLog(@"[真实专辑遮罩] 已安装 MediaRemoteUI / MRUActivityArtworkView.maskView");
+    diMruReport(@"install", [NSString stringWithFormat:@"类=%@ 上下文类=%@ init=%@",
+        NSStringFromClass(cls), NSClassFromString(@"MRUActivityNowPlayingViewController") ? @"有" : @"无",
+        gDIActivityOrigInit ? @"已挂" : @"未挂"]);
     // Register existing artwork views if the framework was already displaying them.
     for (UIScene *scene in UIApplication.sharedApplication.connectedScenes) {
         if (![scene isKindOfClass:UIWindowScene.class]) continue;
@@ -12096,7 +12269,9 @@ static void diActivityStart(void) {
         }
         for (int seconds : {1, 3, 8, 20, 60}) {
             dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)seconds * NSEC_PER_SEC),
-                dispatch_get_main_queue(), ^{ diActivityInstall(); });
+                /* 2.8.78: 同时重读素材 —— MediaRemoteUI 启动往往早于 SpringBoard 导出素材,
+                   只 install 不 reload 会一直拿着空形状("没遮上"的另一种成因)。 */
+                dispatch_get_main_queue(), ^{ diActivityReload(); diActivityInstall(); });
         }
     });
 }
@@ -12115,6 +12290,29 @@ static NSString *diProcName(void) {
         if (!n) n = @"?";
     });
     return n;
+}
+
+/* 2.8.78: MediaRemoteUI 侧打点的接收端 —— 达林通知不支持前缀匹配, 固定名字逐个注册。
+   325 日志里 MediaRemoteUI 一条记录都没有, 有了这组回传就能区分:
+   有 install → 注入成功; 有 install 没 apply → 卡在素材/上下文; 什么都没有 → 没注入。 */
+static void diMruPing(CFNotificationCenterRef c, void *o, CFStringRef name, const void *obj, CFDictionaryRef info) {
+    NSString *n = (__bridge NSString *)name;
+    NSString *prefix = @"com.abgg332.driftisland.mru.";
+    NSString *tag = [n hasPrefix:prefix] ? [n substringFromIndex:prefix.length] : n;
+    RLog(@"[MRU回传] %@", tag);
+}
+static void diMruObserve(void) {
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        NSArray<NSString *> *tags = @[@"install", @"noclass", @"nohook", @"reload",
+            @"shape.material", @"shape.cache", @"shape.prefs", @"shape.none",
+            @"ctxreject", @"hit", @"apply"];
+        for (NSString *t in tags) {
+            CFNotificationCenterAddObserver(CFNotificationCenterGetDarwinNotifyCenter(), NULL, diMruPing,
+                (__bridge CFStringRef)[@"com.abgg332.driftisland.mru." stringByAppendingString:t], NULL,
+                CFNotificationSuspensionBehaviorDeliverImmediately);
+        }
+    });
 }
 
 __attribute__((constructor)) static void init(void) {
@@ -12149,6 +12347,9 @@ __attribute__((constructor)) static void init(void) {
         logHandle = os_log_create("com.abgg332.driftisland", "runtime");
         DLog(@"===== 漂流岛 tweak 加载 (SpringBoard) 版本 %@ =====", \
          [NSBundle.mainBundle.infoDictionary[@"CFBundleShortVersionString"] description] ?: @"?");
+        /* 2.8.78: 接收 MediaRemoteUI 的打点 + 把遮罩素材导出给那个进程 */
+        diMruObserve();
+        dispatch_async(dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{ diExportMaskForMRU(); });
         /* 2.7.15: 组名 hook **必须在主队列 block 之外、且在最前面** 装 ——
            2.7.14 把它放在 dispatch_async 里, 前面还排了 refreshAll/installKnownHosts/
            两个 ticker/5 个通知监听。只要前面任何一步抛异常, hook 就永远装不上,
