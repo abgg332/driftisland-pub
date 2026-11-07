@@ -3737,6 +3737,27 @@ static BOOL diApplyMaskToCover(UIView *cover, UIImage *shape) {
             }
         }
         BOOL gate = enabled && maskOn && !gRecordingActive && (isMini || isExpand);
+        /* ===== 2.8.84: 展开态彻底交给 MediaRemoteUI，SpringBoard 侧全部退出 =====
+           331 反馈: 头像下方多出一个心形模糊光斑（用户圈出来的"多出来的蒙版"）。
+           根因: 展开后宿主尺寸判定仍停在"小岛"（全部日志里从来没有 展开=1），
+           于是这里继续按小岛路径干活；一旦 MediaRemote 取图瞬间为空，就会走下面
+           的"系统层 mask 兜底"：diMaskTargetsFor 把封面**父容器**（展开态是更大的
+           一块，里面是模糊背景）裁成心形 —— 那块背景就按遮罩形状露出来。
+           展开岛的头像遮罩已由 MRU 内的自绘玻璃负责，这里必须彻底退出：
+           宿主一旦超过小岛尺寸（高>70 或宽>240），摘 mask + 拆玻璃 + 隐藏探针，
+           缩回小岛后再由正常流程重画。 */
+        if (bs.height > 70.0 || bs.width > 240.0) {
+            if (!self.hidden || _glassOn || _targets.count) {
+                static CFAbsoluteTime sBigT;
+                if (CFAbsoluteTimeGetCurrent() - sBigT > 3.0) {
+                    sBigT = CFAbsoluteTimeGetCurrent();
+                    DLog(@"遮罩退出: 宿主 %.0fx%.0f 超出小岛, 展开态由 MRU 负责(不挂系统蒙版)",
+                         bs.width, bs.height);
+                }
+            }
+            [self diTeardown];
+            return;
+        }
         /* 尺寸还在变(展开/收起动画途中) → 不新挂玻璃; 已挂着的由上面 growing /
            下面的离开窗口逻辑收拾, 过渡期间保留(2.8.18: 不再"先方后遮罩")。
            等待期间把探针拨回 30fps —— 稳定态会被降到 8fps, 不拨回来
