@@ -18,7 +18,7 @@
 
 static NSString *const kDomain = @"com.abgg332.driftisland";
 /* 2.6.25: 设置页底部显示的版本号 */
-static NSString *const DI_VERSION_STR = @"2.8.94";
+static NSString *const DI_VERSION_STR = @"2.8.95";
 /* 2.6.10: 专辑光晕遮罩 —— 与 Tweak 侧 DIAlbumMask.h 保持一致 */
 static NSString *const kDIAlbumMaskKey = @"diAlbumMaskAsset";
 static NSString *const kDIMaskRoot = @"/var/mobile/灵动岛/遮罩素材";
@@ -756,7 +756,11 @@ static Class diStepSliderClass(void) {
 @interface DICCSettings : DIMiniBaseController @end
 /* 2.8.87: 展开定义 —— 遮罩素材下面的二级页(位置/大小/颜色) */
 @interface DIExpandDefinePage : DIMiniBaseController @end
+/* 2.8.95: 录屏岛页 —— 录屏指示岛左右两格各贴一层帧率序列 */
+@interface DIRecIslandPage : DIMiniBaseController @end
 @interface DIFrameFoldersMask : DIFrameFolders @end /* 2.6.3: 遮罩素材选择(键 maskAnimFolder) */
+@interface DIFrameFoldersRecL : DIFrameFolders @end /* 2.8.95: 录屏岛左侧帧率素材 */
+@interface DIFrameFoldersRecR : DIFrameFolders @end /* 2.8.95: 录屏岛右侧帧率素材 */
 @interface DIFrameFoldersMini : DIFrameFolders @end  /* 左侧(mini)帧率素材选择(键 smallAnimFolder) */
 @interface DIFrameFoldersAudio : DIFrameFolders @end /* 右侧音频素材(键 miniAudioFolder) */
 @interface DIPrefsController (ZoneLinkFwd)
@@ -1431,6 +1435,8 @@ static void diWriteColors(NSArray<NSString *> *colors) {
         /* 2.8.88: 展开定义 —— 按用户要求做成独立入口, 就放在「专辑遮罩」下面;
            页内上面是帧率, 下面是展开岛的歌词/歌名位置与大小 */
         DI_ADD([self linkSpec:@"歌词位置" detail:[DIExpandDefinePage class]]);
+        /* 2.8.95: 录屏岛入口 —— 左右两格各自的帧率图层 + 隐藏原生图层 */
+        DI_ADD([self linkSpec:@"录屏岛" detail:[DIRecIslandPage class]]);
         /* 2.8.41: 控制中心入口回归 */
         DI_ADD([self linkSpec:@"控制中心" detail:[DICCSettings class]]);
 
@@ -5084,6 +5090,12 @@ static void diOpenHomeBarPickWindow(void) {
 @implementation DIFrameFoldersAudio
 - (NSString *)prefKey { return @"miniAudioFolder"; }
 @end
+@implementation DIFrameFoldersRecL
+- (NSString *)prefKey { return @"recLeftAnimFolder"; }
+@end
+@implementation DIFrameFoldersRecR
+- (NSString *)prefKey { return @"recRightAnimFolder"; }
+@end
 @implementation DIFrameFoldersMask
 - (NSString *)prefKey { return @"maskAnimFolder"; }
 - (NSString *)rootDir { return kMaskDir; }  /* 2.6.4: 遮罩素材独立目录 */
@@ -5181,6 +5193,57 @@ static void diOpenHomeBarPickWindow(void) {
     [specs addObject:[self numSlider:@"文字大小" key:@"expandTextScale" def:100 mn:50 mx:200]];
     /* 2.8.93: 隐藏投送 —— 右下角那颗 AirPlay/输出按钮 */
     [specs addObject:[self switchSpec:@"隐藏投送" key:@"hideRouteOn" def:@NO]];
+    return specs;
+}
+@end
+
+/* ===== 2.8.95: 录屏岛 =====
+   录屏时系统会出现一颗 ~39×39 的方形指示岛, 里面两格: 左=录屏圆点, 右=倒计时 321。
+   这里给两格各配一层帧率序列(与「专辑遮罩」页左右帧率同一套素材目录), 并各配一个
+   "隐藏原生图层"开关 —— 打开后原生圆点/倒计时让位, 只留自己的素材。 */
+@implementation DIRecIslandPage
+
+- (id)readRecLeftName:(PSSpecifier *)sp {
+    NSString *v = readPrefString(@"recLeftAnimFolder");
+    return v.length ? v : @"默认(全部帧)";
+}
+- (id)readRecRightName:(PSSpecifier *)sp {
+    NSString *v = readPrefString(@"recRightAnimFolder");
+    return v.length ? v : @"默认(全部帧)";
+}
+
+- (NSArray *)buildSpecifiers {
+    NSMutableArray *specs = [NSMutableArray array];
+
+    /* ---- 左侧: 录屏圆点那一格 ---- */
+    [specs addObject:[self groupSpec:@"左侧图层(录屏圆点)"
+        footer:@"显示逻辑: 系统录屏中、且这里「启用帧率」打开时才出现。\n"
+               @"显示图层: 序列帧盖在原生录屏圆点这一格上(实测 22×22 那格)。\n"
+               @"用处效果: 把左格换成自己的动图; 打开「隐藏录屏圆点」原生圆点让位, 只剩你的素材; 两个开关都关就完全原生。"]];
+    [specs addObject:[self switchSpec:@"启用帧率" key:@"recLeftOn" def:@NO]];
+    [specs addObject:[self numSlider:@"帧率速度" key:@"recLeftFPS" def:50 mn:10 mx:200]];
+    [specs addObject:[self numSlider:@"素材大小" key:@"recLeftScale" def:0 mn:-20 mx:20]];
+    [specs addObject:[self numSlider:@"左右偏移" key:@"recLeftOffsetX" def:0 mn:-20 mx:20]];
+    [specs addObject:[self numSlider:@"上下偏移" key:@"recLeftOffsetY" def:0 mn:-20 mx:20]];
+    PSSpecifier *nameL = [PSSpecifier preferenceSpecifierNamed:@"素材名称" target:self
+        set:NULL get:@selector(readRecLeftName:) detail:[DIFrameFoldersRecL class] cell:PSLinkCell edit:nil];
+    [specs addObject:nameL];
+    [specs addObject:[self switchSpec:@"隐藏录屏圆点" key:@"recHideDot" def:@NO]];
+
+    /* ---- 右侧: 倒计时那一格 ---- */
+    [specs addObject:[self groupSpec:@"右侧图层(倒计时 321)"
+        footer:@"显示逻辑: 系统录屏中、且这里「启用帧率」打开时才出现。\n"
+               @"显示图层: 序列帧盖在原生倒计时这一格上(圆点右边那一格)。\n"
+               @"用处效果: 把右格换成自己的动图; 打开「隐藏倒计时」原生数字让位, 只剩你的素材; 两个开关都关就完全原生。"]];
+    [specs addObject:[self switchSpec:@"启用帧率" key:@"recRightOn" def:@NO]];
+    [specs addObject:[self numSlider:@"帧率速度" key:@"recRightFPS" def:50 mn:10 mx:200]];
+    [specs addObject:[self numSlider:@"素材大小" key:@"recRightScale" def:0 mn:-20 mx:20]];
+    [specs addObject:[self numSlider:@"左右偏移" key:@"recRightOffsetX" def:0 mn:-20 mx:20]];
+    [specs addObject:[self numSlider:@"上下偏移" key:@"recRightOffsetY" def:0 mn:-20 mx:20]];
+    PSSpecifier *nameR = [PSSpecifier preferenceSpecifierNamed:@"素材名称" target:self
+        set:NULL get:@selector(readRecRightName:) detail:[DIFrameFoldersRecR class] cell:PSLinkCell edit:nil];
+    [specs addObject:nameR];
+    [specs addObject:[self switchSpec:@"隐藏倒计时" key:@"recHideCount" def:@NO]];
     return specs;
 }
 @end

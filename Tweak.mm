@@ -63,7 +63,7 @@ static double expandTextY = DI_EXP_TEXT_BASE_Y;   // 上下偏移(pt, 下为正,
 static double expandTextScale = 100.0; // 文字大小(%, 100=原样)
 /* 2.8.86: 构建戳 —— 之前横幅打的是 SpringBoard 自己的 CFBundleShortVersionString(恒 1.0),
    日志里根本看不出装的是哪一版。所有诊断行都带这个戳, 下轮日志一眼定位。 */
-#define DI_BUILD_VER @"2.8.94"
+#define DI_BUILD_VER @"2.8.95"
 static BOOL gRecordingActive = NO; // 保留: 岛素材总闸条件
 static NSString *diElementId(UIView *host);
 static BOOL diMiniMusicActive(UIView *host); // 2.6.3: 前置(遮罩层使用)
@@ -371,6 +371,16 @@ static NSInteger smallIdx, expandIdx;
 static BOOL recOn;              /* 2.2.50: 录屏素材开关(录屏时替换小岛背景) */
 static NSInteger recIdx;        /* 2.2.50: 录屏素材序号 */
 static double recScale = 1.0;   /* 2.2.54: 录屏素材大小(绕自身中心缩放, 1.0 = 铺满矩形) */
+/* ===== 2.8.95: 录屏岛左右图层(帧率序列) =====
+   录屏指示岛是 ~39×39 的方形岛, 里面两个 accessory: 左=录屏圆点, 右=倒计时 321。
+   左右各贴一层序列帧, 每层独立开关/帧率/大小/偏移/素材文件夹, 另有
+   "隐藏原生图层"开关(把底下那颗原生 accessory 藏掉, 只留自己的素材)。 */
+static BOOL recLeftOn = NO, recRightOn = NO;
+static BOOL recHideDot = NO, recHideCount = NO;
+static double recLeftFPS = 50, recLeftScale = 0, recLeftOX = 0, recLeftOY = 0;
+static double recRightFPS = 50, recRightScale = 0, recRightOX = 0, recRightOY = 0;
+static NSString *recLeftFolder, *recRightFolder;
+static BOOL gRecVideoLeftShowing = NO;   /* 旧的"录屏视频素材"是否正占着左侧格 */
 /* 频谱帧率动画参数 */
 static double animFPS = 50, animScale = 1, animOffsetX, animOffsetY;
 static NSString *animFolder; // 选中的素材文件夹名(帧率素材目录下的子文件夹)
@@ -583,6 +593,24 @@ static CGRect diRecSlotRect(UIView *island, BOOL onRight, UIView **outAcc) {
         : CGRectMake(accLX, accY, accW, accH);
 }
 
+/* 2.8.95: 原生 accessory 的统一隐藏入口 —— 两处都会要求"藏左侧那颗圆点":
+   ① 旧的「录屏显示素材」(视频) 占位时; ② 新页面的「隐藏录屏圆点」开关。
+   两边任一为真就藏, 都撤掉才恢复, 恢复的是它自己原来的 hidden 值
+   (有的系统状态本来就把 accessory 藏着, 不能一律置 NO)。 */
+static char kDIRecAccOrigHidden;
+static void diRecAccHidden(CALayer *l, BOOL want) {
+    if (!l) return;
+    id orig = objc_getAssociatedObject(l, &kDIRecAccOrigHidden);
+    if (want) {
+        if (!orig) objc_setAssociatedObject(l, &kDIRecAccOrigHidden, @(l.isHidden),
+                                            OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        if (!l.hidden) l.hidden = YES;
+    } else if (orig) {
+        l.hidden = [orig boolValue];
+        objc_setAssociatedObject(l, &kDIRecAccOrigHidden, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    }
+}
+
 /* 录屏圆圈素材路径(录屏指示器圆圈的背景视频, 独立于小岛素材) */
 static NSString *recVideoPath(void) {
     if (!recOn) return nil;
@@ -709,6 +737,29 @@ static void refreshPrefs(void) {
     recScale = pDouble(@"recScale", 100.0) / 100.0;
     if (recScale < 0.5) recScale = 0.5;
     if (recScale > 2.0) recScale = 2.0;
+    /* 2.8.95: 录屏岛左右帧率图层 */
+    recLeftOn  = pBool(@"recLeftOn", NO);
+    recRightOn = pBool(@"recRightOn", NO);
+    recHideDot   = pBool(@"recHideDot", NO);
+    recHideCount = pBool(@"recHideCount", NO);
+    recLeftFolder  = pString(@"recLeftAnimFolder");
+    recRightFolder = pString(@"recRightAnimFolder");
+    recLeftFPS = pDouble(@"recLeftFPS", 50);
+    if (recLeftFPS < 10) recLeftFPS = 10; if (recLeftFPS > 200) recLeftFPS = 200;
+    recRightFPS = pDouble(@"recRightFPS", 50);
+    if (recRightFPS < 10) recRightFPS = 10; if (recRightFPS > 200) recRightFPS = 200;
+    recLeftScale = pDouble(@"recLeftScale", 0);
+    if (recLeftScale < -20) recLeftScale = -20; if (recLeftScale > 20) recLeftScale = 20;
+    recRightScale = pDouble(@"recRightScale", 0);
+    if (recRightScale < -20) recRightScale = -20; if (recRightScale > 20) recRightScale = 20;
+    recLeftOX = pDouble(@"recLeftOffsetX", 0);
+    if (recLeftOX < -20) recLeftOX = -20; if (recLeftOX > 20) recLeftOX = 20;
+    recLeftOY = pDouble(@"recLeftOffsetY", 0);
+    if (recLeftOY < -20) recLeftOY = -20; if (recLeftOY > 20) recLeftOY = 20;
+    recRightOX = pDouble(@"recRightOffsetX", 0);
+    if (recRightOX < -20) recRightOX = -20; if (recRightOX > 20) recRightOX = 20;
+    recRightOY = pDouble(@"recRightOffsetY", 0);
+    if (recRightOY < -20) recRightOY = -20; if (recRightOY > 20) recRightOY = 20;
 
     /* 2.2.59: 小岛边框流光 —— 复用"小岛素材"那一个选择,
        所以素材路径直接用 materialPathFor(NO); 路径变了要重载视频。 */
@@ -857,6 +908,7 @@ static void refreshPrefs(void) {
 @end
 
 static char kWinVideoSmall, kWinVideoExpand, kWinVideoRec, kWinVideoSpec;
+static char kWinAnimRecL, kWinAnimRecR;   /* 2.8.95: 录屏岛左右帧率图层 */
 
 /* ===== 音频会话: 2.3.2 定稿(2.3.1 删错了一次, 这里写清楚为什么必须保留) =====
 
@@ -1083,16 +1135,12 @@ static BOOL diIsVolumeIsland(UIView *host) {
         CGRect slot = (onRec ? diRecSlotRect(island, NO, &acc) : CGRectZero);
         BOOL show = enabled && recOn && diIsScreenRecording() && onRec && slot.size.width > 2;
 
-        /* 原生圆点层: 显示素材时隐藏, 隐藏素材时恢复(与 2.2.40 同款做法) */
-        static char kRecHiddenLayer;
-        CALayer *prevHidden = objc_getAssociatedObject(self, &kRecHiddenLayer);
-        if (show && acc && acc.layer && !acc.layer.isHidden) {
-            acc.layer.hidden = YES;
-            objc_setAssociatedObject(self, &kRecHiddenLayer, acc.layer, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-        } else if (!show && prevHidden) {
-            prevHidden.hidden = NO;
-            objc_setAssociatedObject(self, &kRecHiddenLayer, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-        }
+        /* 原生圆点层: 显示素材时隐藏, 隐藏素材时恢复(与 2.2.40 同款做法)
+           2.8.95: 改走 diRecAccHidden —— 还要跟「隐藏录屏圆点」开关合并,
+           否则两个开关互相把对方的隐藏状态冲掉。 */
+        gRecVideoLeftShowing = show;
+        BOOL hideDotNow = recHideDot && enabled && diIsScreenRecording();
+        if (acc && acc.layer) diRecAccHidden(acc.layer, show || hideDotNow);
 
         if (show) {
             /* 2.2.55: 素材大小改为"直接算 frame", 不再用 layer.transform。
@@ -2256,12 +2304,18 @@ static BOOL diIsCCBackgroundView(UIView *v) {
 @property (nonatomic, assign) double lastOx;
 @property (nonatomic, assign) double lastOy;
 @property (nonatomic, assign) BOOL miniMode;      // 2.7.26: 小岛模式(歌词岛左右帧率)
+@property (nonatomic, assign) BOOL recMode;       // 2.8.95: 录屏岛模式(左/右 accessory 帧率图层)
 @property (nonatomic, assign) NSInteger side;     // miniMode 下 0=专辑位(左) 1=音频位(右)
 /* 2.8.22 功耗: 动态帧率记账 —— 岛静止 1 秒链接 60→30fps(序列帧推进由累加器
    保证速度不变), 几何一动立即回 60fps。 */
 @property (nonatomic, assign) CGFloat dynW;
 @property (nonatomic, assign) CGFloat dynH;
 @property (nonatomic, assign) NSInteger dynIdle;
+/* 2.8.95: 录屏岛槽位缓存 —— stepRec 每帧都要这两个值, 不缓存的话 60fps 下
+   每帧遍历一次 300 节点的指示岛子树, 光这一次图层就能把小岛录屏录到掉帧。 */
+@property (nonatomic, assign) CGRect recSlot;
+@property (nonatomic, weak)   UIView *recAcc;
+@property (nonatomic, assign) CFTimeInterval recSlotT;
 @end
 
 /* 定位原生音频层: 音乐岛的跨进程内容通过 CALayerHost 渲染(高约488, 只在音乐岛出现, 其他岛没有)。
@@ -2468,6 +2522,100 @@ __attribute__((unused)) static BOOL diMiniMusicActive(UIView *host) {
     } @catch (NSException *e) { DLog(@"stepMini 异常(已忽略): %@", e); }
 }
 
+/* 2.8.95: 录屏岛左右图层 —— 序列帧贴在录屏指示岛的两个 accessory 上。
+   几何直接取 diRecSlotRect 给的实测矩形(左=录屏圆点格, 右=倒计时格), 不自己按
+   比例算, 与旧的「录屏显示素材」同一套定位, 所以位置一定对得上。 */
+- (void)stepRec {
+    @try {
+    UIView *island = self.superview;
+    if (!island || island.window == nil) {
+        if (!self.hidden) self.hidden = YES;
+        if (_iv.image) _iv.image = nil;
+        if (++_miss > 15) _link.paused = YES;
+        return;
+    }
+    BOOL right = (self.side == 1);
+    BOOL sideOn = right ? recRightOn : recLeftOn;
+    BOOL hideNative = right ? recHideCount : recHideDot;
+    BOOL recNow = diIsScreenRecording();
+    BOOL need = enabled && !gLocked && recNow && (sideOn || hideNative);
+    if (!need) {
+        /* 关掉就完全放手: 原生图层恢复, 自己藏起来, 链接挂起(平时零开销) */
+        if (self.recAcc && self.recAcc.layer)
+            diRecAccHidden(self.recAcc.layer, right ? NO : gRecVideoLeftShowing);
+        if (!self.hidden) self.hidden = YES;
+        if (_iv.image) _iv.image = nil;
+        _link.paused = YES;
+        return;
+    }
+    /* 槽位缓存: 0.5s 或 accessory 换了才重新量 */
+    CFAbsoluteTime nowT = CFAbsoluteTimeGetCurrent();
+    if (!self.recAcc || !self.recAcc.window || nowT - self.recSlotT > 0.5) {
+        UIView *acc = nil;
+        self.recSlot = diRecSlotRect(island, right, &acc);
+        self.recAcc = acc;
+        self.recSlotT = nowT;
+    }
+    UIView *acc = self.recAcc;
+    CGRect slot = self.recSlot;
+    /* 原生图层: 右侧只归「隐藏倒计时」管; 左侧还要让位给旧的「录屏显示素材」 */
+    if (acc && acc.layer) {
+        if (right) diRecAccHidden(acc.layer, hideNative);
+        else diRecAccHidden(acc.layer, hideNative || gRecVideoLeftShowing);
+    }
+    NSArray<NSString *> *frames = framePathsFor(right ? recRightFolder : recLeftFolder);
+    if (!sideOn || !frames.count || slot.size.width < 2) {
+        if (!self.hidden) self.hidden = YES;
+        if (_iv.image) _iv.image = nil;
+        if (++_miss > 15) _link.paused = YES;
+        return;
+    }
+    _miss = 0;
+    if (!CGRectEqualToRect(self.frame, slot)) self.frame = slot;
+    if (self.hidden) self.hidden = NO;
+    if (!self.clipsToBounds) self.clipsToBounds = YES;
+    CGFloat cr = slot.size.height * 0.5;
+    if (fabs(self.layer.cornerRadius - cr) > 0.5) self.layer.cornerRadius = cr;
+
+    CFTimeInterval now = self.link.timestamp;
+    if (!_lastTS) _lastTS = now;
+    double dt = now - _lastTS;
+    _lastTS = now;
+    if (dt > 0.5) dt = 0.5;
+    double useFPS   = right ? recRightFPS : recLeftFPS;
+    double useScale = right ? recRightScale : recLeftScale;
+    double useOx    = right ? recRightOX : recLeftOX;
+    double useOy    = right ? recRightOY : recLeftOY;
+    _advAcc += dt * useFPS;
+    while (_advAcc >= 1.0) { _advAcc -= 1.0; _idx = (_idx + 1) % (NSInteger)frames.count; }
+    UIImage *img = frameImage(frames[_idx]);
+    if (img && _iv.image != img) _iv.image = img;
+
+    CGFloat unit = slot.size.height > 6 ? slot.size.height : 22.0;
+    CGFloat k = 1.0 + (CGFloat)useScale * 0.06;
+    if (k < 0.1) k = 0.1;
+    CGFloat dx = (CGFloat)useOx * unit * 0.04;
+    CGFloat dy = (CGFloat)useOy * unit * 0.04;
+    CGSize want = CGSizeMake(slot.size.width * k, slot.size.height * k);
+    CGPoint ctr = CGPointMake(slot.size.width * 0.5 + dx, slot.size.height * 0.5 + dy);
+    if (fabs(_iv.bounds.size.width - want.width) > 0.5 || fabs(_iv.bounds.size.height - want.height) > 0.5)
+        _iv.bounds = CGRectMake(0, 0, want.width, want.height);
+    if (fabs(_iv.center.x - ctr.x) > 0.3 || fabs(_iv.center.y - ctr.y) > 0.3) _iv.center = ctr;
+
+    static BOOL loggedRecL, loggedRecR;
+    if (right && !loggedRecR) {
+        loggedRecR = YES;
+        DLog(@"录屏岛右侧图层: %lu 帧 (目录 %@) 格=%.0fx%.0f", (unsigned long)frames.count,
+             recRightFolder ?: @"默认第一个文件夹", slot.size.width, slot.size.height);
+    }
+    if (!right && !loggedRecL) {
+        loggedRecL = YES;
+        DLog(@"录屏岛左侧图层: %lu 帧 (目录 %@) 格=%.0fx%.0f", (unsigned long)frames.count,
+             recLeftFolder ?: @"默认第一个文件夹", slot.size.width, slot.size.height);
+    }
+    } @catch (NSException *e) { DLog(@"stepRec 异常(已忽略): %@", e); }
+}
+
 - (void)step {
     /* 2.8.22 功耗: 动态帧率 —— 宿主几何不动约 1 秒, 链接 60→30fps;
        序列帧推进用累加器(dt×fps), 视觉速度不变; 几何一动立即回 60fps。 */
@@ -2481,6 +2629,7 @@ __attribute__((unused)) static BOOL diMiniMusicActive(UIView *host) {
         }
     }
     if (self.miniMode) { [self stepMini]; return; }   /* 2.7.26: 小岛左右两层走独立分支 */
+    if (self.recMode) { [self stepRec]; return; }     /* 2.8.95: 录屏岛左右两层走独立分支 */
     UIView *host = self.superview;
     if (!host || host.window == nil) { self.hidden = YES; if (++_miss > 15) _link.paused = YES; return; }
     syncNativeSpectrum(host); // 无条件每帧同步音频掩码(即使帧率素材关闭/没放歌): 岛重新展开或层重建时波形立即被藏
@@ -5914,9 +6063,40 @@ static void updateSingleVideo(UIWindow *win) {
             /* 每轮重申保持在最底(系统重排可能把它提上来) */
             if (recHost.subviews.firstObject != recV) [recHost sendSubviewToBack:recV];
             recV.syncLink.paused = NO;
+
+            /* 2.8.95: 录屏岛左右帧率图层 —— 挂在同一个指示岛上, 各自贴自己那格 */
+            for (NSInteger side = 0; side < 2; side++) {
+                char *key = (side == 0) ? &kWinAnimRecL : &kWinAnimRecR;
+                DIAnimView *av = objc_getAssociatedObject(win, key);
+                if (!av) {
+                    av = [[DIAnimView alloc] initWithFrame:CGRectZero];
+                    av.recMode = YES;
+                    av.side = side;
+                    av.hidden = YES;
+                    objc_setAssociatedObject(win, key, av, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+                }
+                if (av.superview != recHost) {
+                    [av removeFromSuperview];
+                    [recHost addSubview:av];
+                }
+                [recHost bringSubviewToFront:av];   /* 素材要盖在原生图层之上 */
+                av.link.paused = NO;
+            }
         } else if (recV.superview) {
             [recV removeFromSuperview];
             recV.hidden = YES;
+        }
+        /* 岛没了/关闭总开关: 两层帧率一起撤 */
+        if (!recHost || recHost.window != win) {
+            for (NSInteger side = 0; side < 2; side++) {
+                char *key = (side == 0) ? &kWinAnimRecL : &kWinAnimRecR;
+                DIAnimView *av = objc_getAssociatedObject(win, key);
+                if (av.superview) [av removeFromSuperview];
+                if (!av.hidden) av.hidden = YES;
+                av.link.paused = YES;
+                if (av.iv.image) av.iv.image = nil;
+            }
+            gRecVideoLeftShowing = NO;
         }
     }
 
