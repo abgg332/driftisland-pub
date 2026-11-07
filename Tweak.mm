@@ -4555,6 +4555,44 @@ static NSString *diMaskCurrentPathV2(void) {
 static NSString *diMruCacheDir(void) {
     return @"/var/mobile/Library/Caches/com.abgg332.driftisland";
 }
+/* ===== 2.8.82: 唯一 100% 可用的跨进程通道 —— MRU 自己的容器 =====
+   328 日志把前三条通道全部判死: shape.none 说明 MediaRemoteUI 读不到
+   /var/mobile/Library/Caches(沙盒) 也读不到我们的偏好域(偏好被重定向到它自己的容器),
+   于是素材永远拿不到, 遮罩从 2.8.77 起就没真正挂上过。
+   沙盒进程**一定能读的只有它自己的容器**: 所以由 SpringBoard 把素材和旋转参数
+   写进 <MRU容器>/Library/Caches/com.abgg332.driftisland/, MRU 侧从
+   NSCachesDirectory 读同一个目录 —— 同一路径, 两边都合法。 */
+static NSString *diMruOwnContainer(void) {
+    static NSString *path; static BOOL tried;
+    if (tried) return path;
+    tried = YES;
+    @try {
+        Class proxyCls = NSClassFromString(@"LSApplicationProxy");
+        if ([proxyCls respondsToSelector:@selector(applicationProxyForIdentifier:)]) {
+            id proxy = ((id (*)(id, SEL, id))objc_msgSend)(proxyCls, @selector(applicationProxyForIdentifier:),
+                                                          @"com.apple.MediaRemoteUI");
+            SEL urlSel = NSSelectorFromString(@"dataContainerURL");
+            if (proxy && [proxy respondsToSelector:urlSel]) {
+                NSURL *url = ((NSURL *(*)(id, SEL))objc_msgSend)(proxy, urlSel);
+                if (url.path.length) path = url.path;
+            }
+        }
+    } @catch (__unused NSException *e) {}
+    if (!path.length) {
+        NSString *root = @"/var/mobile/Containers/Data/Application";
+        for (NSString *uuid in [[NSFileManager defaultManager] contentsOfDirectoryAtPath:root error:NULL]) {
+            NSString *dir = [root stringByAppendingPathComponent:uuid];
+            NSDictionary *meta = [NSDictionary dictionaryWithContentsOfFile:
+                [dir stringByAppendingPathComponent:@".com.apple.mobile_container_manager.metadata.plist"]];
+            if ([meta[@"MCMMetadataIdentifier"] isEqual:@"com.apple.MediaRemoteUI"]) { path = dir; break; }
+        }
+    }
+    return path;
+}
+static NSString *diMruSharedDir(void) {
+    NSString *c = diMruOwnContainer();
+    return c.length ? [c stringByAppendingPathComponent:@"Library/Caches/com.abgg332.driftisland"] : nil;
+}
 static void diExportMaskForMRU(void) {
     @autoreleasepool {
         NSString *path = diMaskCurrentPathV2();
@@ -4579,9 +4617,28 @@ static void diExportMaskForMRU(void) {
         BOOL active = pBool(@"enabled", NO) && pBool(@"maskOn", NO);
         CFPreferencesSetAppValue(CFSTR("diMruActive"), active ? CFSTR("1") : CFSTR("0"), dom);
         CFPreferencesAppSynchronize(dom);
-        RLog(@"[遮罩导出] → MediaRemoteUI: 素材=%@ 文件=%@ 偏好=%lu字节 开关=%d 错误=%@",
+        /* 2.8.82: 真正能被 MRU 读到的那一份 —— 它自己的容器 */
+        NSString *own = diMruSharedDir();
+        BOOL ownOK = NO;
+        if (own.length) {
+            [fm createDirectoryAtPath:own withIntermediateDirectories:YES
+                            attributes:@{NSFilePosixPermissions: @0777} error:NULL];
+            NSString *mine = [own stringByAppendingPathComponent:@"mask.png"];
+            if (raw) {
+                ownOK = [raw writeToFile:mine atomically:YES];
+                if (ownOK) [fm setAttributes:@{NSFilePosixPermissions: @0644} ofItemAtPath:mine error:NULL];
+            } else {
+                [fm removeItemAtPath:mine error:NULL];
+            }
+            NSDictionary *params = @{@"rot": @(maskRotateOn), @"rev": @(maskRotateReverse),
+                                     @"speed": @(maskRotateSpeed), @"active": @(active),
+                                     @"mask": path.lastPathComponent ?: @""};
+            [params writeToFile:[own stringByAppendingPathComponent:@"params.plist"] atomically:YES];
+        }
+        RLog(@"[遮罩导出] → MediaRemoteUI: 素材=%@ 文件=%@ 偏好=%lu字节 开关=%d 容器=%@ 容器写入=%@ 错误=%@",
              path.lastPathComponent ?: @"(无)", fileOK ? @"OK" : @"FAIL",
-             (unsigned long)b64.length, active, err.localizedDescription ?: @"无");
+             (unsigned long)b64.length, active, own.length ? own : @"(找不到MRU容器)",
+             ownOK ? @"OK" : @"FAIL", err.localizedDescription ?: @"无");
     }
 }
 
@@ -10836,6 +10893,8 @@ static void prefsChanged(CFNotificationCenterRef, void *, CFStringRef, const voi
             dispatch_async(dispatch_get_main_queue(), ^{
                 NSInteger oldBlur = wpBlur; BOOL oldLoop = wpLoopOn;
                 refreshAll(); installKnownHosts();
+                /* 2.8.82: refreshAll 之后必须再导一次 —— 上面那次拿到的旋转参数还是上一轮的 */
+                dispatch_async(dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{ diExportMaskForMRU(); });
                 /* 2.8.41: 控制中心恢复 —— 开关打开时补装 overlay hook(dispatch_once 保证幂等) */
                 if (wpOn) diCCInstallOverlayHook();
                 /* 2.7.32: 控制中心开关(循环播放 / 背景模糊 / 启用 / 声音)改了 → 立刻生效。
@@ -11990,6 +12049,22 @@ static void diHookHomeBarGrabberRetry(void) { diHookHomeGrabber(); }
 @property(nonatomic,weak) UIView *imageView;              // 2.8.77 artworkImageView 原值保存
 @property(nonatomic,assign) BOOL originalImageClips;
 @property(nonatomic,assign) BOOL originalSelfClips;
+/* ===== 2.8.82: 自绘玻璃(与小岛同一套观感) =====
+   328 反馈: "改到图层了, 变小了, 我要跟小岛一样用同样的遮罩跟旋转"。
+   用 maskView 直接裁系统那张专辑有两个死结:
+     ① 系统专辑图是**按原比例居中绘制**的, 用 artworkFrame 当遮罩区域就等于把
+        形状缩到那个小矩形里 → 看起来"专辑变小了";
+     ② 系统专辑层不跟着我们的角度转 → 只有形状转、图不转。
+   所以改成小岛 2.8.13 的做法: 把专辑图取出来自己画一层(图+遮罩同一视图),
+   转的是这整张玻璃; 系统那张层只负责藏起来。 */
+@property(nonatomic,strong) UIView *glass;
+@property(nonatomic,strong) UIImageView *glassImage;
+@property(nonatomic,strong) UIImageView *glassMask;
+@property(nonatomic,weak) CALayer *systemLayer;
+@property(nonatomic,assign) BOOL systemLayerHidden;
+@property(nonatomic,strong) UIImage *lastArt;
+@property(nonatomic,assign) CGFloat spinSpeed;
+@property(nonatomic,assign) BOOL spinRev;
 @end
 @implementation DIActivityMaskState @end
 static char kDIActivityMaskState;
@@ -12007,14 +12082,48 @@ static IMP gDIActivityOrigLayout, gDIActivityOrigMove, gDIActivityOrigVisibility
      ② Darwin 通知: 固定名字打点, SpringBoard 收到写进同一份日志(325 日志里
         该进程 0 条记录, 用这条就能区分"没注入"和"注入但写不了日志")。 */
 static NSString *gDiMruLogPath;
+/* 2.8.82: MRU 自己的缓存目录(= SpringBoard 写入的同一个路径), 读素材/参数/写日志都在这 */
+static NSString *diMruSelfDir(void) {
+    static NSString *d;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        NSString *c = NSSearchPathForDirectoriesInDomains(NSCachesDirectory, NSUserDomainMask, YES).firstObject;
+        if (c.length) d = [c stringByAppendingPathComponent:@"com.abgg332.driftisland"];
+    });
+    return d;
+}
+/* 2.8.82: 旋转参数 —— 与小岛同一份设置(SpringBoard 每次导出时写好) */
+static void diMruRotParams(BOOL *on, BOOL *rev, double *speed) {
+    static BOOL cOn; static BOOL cRev; static double cSpeed = 45.0;
+    static CFAbsoluteTime last; static NSString *lastSig;
+    CFAbsoluteTime now = CFAbsoluteTimeGetCurrent();
+    if (last == 0 || now - last > 1.0) {
+        last = now;
+        NSString *p = [diMruSelfDir() stringByAppendingPathComponent:@"params.plist"];
+        NSDictionary *attr = [[NSFileManager defaultManager] attributesOfItemAtPath:p error:NULL];
+        NSString *sig = [NSString stringWithFormat:@"%@_%@", attr[NSFileModificationDate], attr[NSFileSize]];
+        if (![sig isEqual:lastSig]) {
+            lastSig = sig;
+            NSDictionary *d = [NSDictionary dictionaryWithContentsOfFile:p];
+            if ([d isKindOfClass:NSDictionary.class]) {
+                cOn = [d[@"rot"] boolValue];
+                cRev = [d[@"rev"] boolValue];
+                double s = [d[@"speed"] doubleValue];
+                cSpeed = (s > 1.0) ? MIN(s, 720.0) : 45.0;
+            }
+        }
+    }
+    *on = cOn; *rev = cRev; *speed = cSpeed;
+}
 static void diMruFileLog(NSString *line) {
     static dispatch_once_t once;
     dispatch_once(&once, ^{
         NSFileManager *fm = [NSFileManager defaultManager];
-        NSArray<NSString *> *cands = @[
-            [kMaterialDir stringByAppendingPathComponent:@"driftisland.log"],
-            [diMruCacheDir() stringByAppendingPathComponent:@"mru.log"],
-            [NSTemporaryDirectory() stringByAppendingPathComponent:@"driftisland-mru.log"]];
+        NSMutableArray<NSString *> *cands = [NSMutableArray array];
+        if (diMruSelfDir().length) [cands addObject:[diMruSelfDir() stringByAppendingPathComponent:@"mru.log"]];
+        [cands addObject:[kMaterialDir stringByAppendingPathComponent:@"driftisland.log"]];
+        [cands addObject:[diMruCacheDir() stringByAppendingPathComponent:@"mru.log"]];
+        [cands addObject:[NSTemporaryDirectory() stringByAppendingPathComponent:@"driftisland-mru.log"]];
         for (NSString *p in cands) {
             [fm createDirectoryAtPath:[p stringByDeletingLastPathComponent]
                 withIntermediateDirectories:YES attributes:@{NSFilePosixPermissions: @0777} error:NULL];
@@ -12133,6 +12242,8 @@ static BOOL diMruPrefOn(void) {
 /* 素材多通道: 素材目录 → Caches 导出图(含 /var/jb 前缀) → 偏好 base64 */
 static UIImage *diActivityLoadShape(void) {
     NSMutableArray<NSString *> *cands = [NSMutableArray array];
+    /* 2.8.82: 第一优先 —— 自己容器里的那份(SpringBoard 直接写进来, 沙盒允许) */
+    if (diMruSelfDir().length) [cands addObject:[diMruSelfDir() stringByAppendingPathComponent:@"mask.png"]];
     NSString *path = diMaskCurrentPathV2();
     if (path) [cands addObject:path];
     [cands addObject:[diMruCacheDir() stringByAppendingPathComponent:@"mask.png"]];
@@ -12175,54 +12286,72 @@ static BOOL diActivityInNowPlaying(UIView *view) {
     UIViewController *vc = diActivityAncestorVC(view);
     return vc && [vc isKindOfClass:target];
 }
+/* 2.8.82: 取这张专辑视图正在显示的图 —— 优先 artworkImage, 再退 layer.contents */
+static UIImage *diActivityArtworkImage(UIView *view) {
+    SEL sel = NSSelectorFromString(@"artworkImage");
+    if ([view respondsToSelector:sel]) {
+        @try {
+            id v = ((id (*)(id, SEL))objc_msgSend)(view, sel);
+            if ([v isKindOfClass:UIImage.class]) return (UIImage *)v;
+        } @catch (__unused NSException *e) {}
+    }
+    SEL lsel = NSSelectorFromString(@"artworkLayer");
+    if ([view respondsToSelector:lsel]) {
+        @try {
+            id l = ((id (*)(id, SEL))objc_msgSend)(view, lsel);
+            if ([l isKindOfClass:CALayer.class]) {
+                id c = ((CALayer *)l).contents;
+                if (c && CFGetTypeID((__bridge CFTypeRef)c) == CGImageGetTypeID())
+                    return [UIImage imageWithCGImage:(__bridge CGImageRef)c];
+            }
+        } @catch (__unused NSException *e) {}
+    }
+    return nil;
+}
+static void diActivityTeardown(UIView *artwork, DIActivityMaskState *state) {
+    if (!state) return;
+    [state.glass.layer removeAllAnimations];
+    state.glassImage.maskView = nil;
+    [state.glass removeFromSuperview];
+    state.glass = nil; state.glassImage = nil; state.glassMask = nil;
+    if (state.systemLayer) state.systemLayer.hidden = state.systemLayerHidden;
+    state.systemLayer = nil;
+    if (state.shadow) state.shadow.hidden = state.originalShadowHidden;
+    if (artwork.maskView == state.mask) artwork.maskView = state.originalMask;
+    objc_setAssociatedObject(artwork, &kDIActivityMaskState, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+}
+/* 2.8.82: 自绘玻璃 —— 图 + 同一张遮罩 + 同速旋转, 系统那张层只藏起来。
+   这是小岛 2.8.13 起一直在用、已验证有效的那套观感, 这里在 MediaRemoteUI 内复刻。 */
 static void diActivityApply(UIView *artwork) {
     if (!NSThread.isMainThread || ![artwork isKindOfClass:UIView.class]) return;
     DIActivityMaskState *state = objc_getAssociatedObject(artwork, &kDIActivityMaskState);
-    BOOL sized = artwork.bounds.size.width > 5 && artwork.bounds.size.height > 5;
+    BOOL sized = artwork.bounds.size.width > 20 && artwork.bounds.size.height > 20;
     /* 2.8.78: 判定过程必须可观测 —— 否则"没遮上"到底是没注入、没素材、还是
-       上下文校验挡掉, 全靠猜(325 日志已经吃过这个亏)。 */
+       上下文校验挡掉, 全靠猜(325 日志已经吃过这个亏)。
+       2.8.79: 上下文校验保留退让档(类不存在时放行并把真实祖先打出来)。 */
     BOOL ctx = NO;
     if (gDIActivityEnabled && gDIActivityShape && sized) {
-        /* 2.8.79: 上下文校验加"退让档" —— 2.8.77/78 是硬校验(类名必须存在且精确匹配),
-           一旦这版系统把 MRUActivityNowPlayingViewController 改名/换命名空间,
-           校验就恒为 NO, 表现正是"从不生效、日志里也没有任何接管记录"。
-           现在: 目标类存在 → 走 N95 精确匹配; 目标类不存在 → 退让放行, 但把真实祖先类名打出来。 */
         BOOL strictExists = (NSClassFromString(@"MRUActivityNowPlayingViewController") != nil);
         if (strictExists) {
             ctx = diActivityInNowPlaying(artwork);
-            if (!ctx) {
-                UIViewController *vc = diActivityAncestorVC(artwork);
-                diMruReport(@"ctxreject", [NSString stringWithFormat:@"%@ 祖先=%@",
-                    NSStringFromCGRect(artwork.bounds), vc ? NSStringFromClass(vc.class) : @"(无VC)"]);
-                diMruPostPayload(@"ctxreject", [NSString stringWithFormat:@"%@_%@",
-                    vc ? NSStringFromClass(vc.class) : @"noVC", NSStringFromCGRect(artwork.bounds)]);
-            }
         } else {
             UIViewController *vc = diActivityAncestorVC(artwork);
             NSString *cn = vc ? NSStringFromClass(vc.class) : @"";
             ctx = (cn.length == 0) || [cn containsString:@"NowPlaying"] || [cn containsString:@"Activity"];
-            diMruReport(@"ctxrelaxed", [NSString stringWithFormat:@"%@ 祖先=%@ 放行=%d",
-                NSStringFromCGRect(artwork.bounds), cn.length ? cn : @"(无VC)", ctx]);
         }
     }
     BOOL want = gDIActivityEnabled && gDIActivityShape && sized && ctx;
-    if (!want) {
-        if (state) {
-            if (artwork.maskView == state.mask) artwork.maskView = state.originalMask;
-            if (state.shadow) state.shadow.hidden = state.originalShadowHidden;
-            /* 2.8.77: 停用时恢复 clipsToBounds 原值 */
-            artwork.clipsToBounds = state.originalSelfClips;
-            if (state.imageView) state.imageView.clipsToBounds = state.originalImageClips;
-            objc_setAssociatedObject(artwork, &kDIActivityMaskState, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-        }
-        return;
+    UIImage *art = (want || state) ? diActivityArtworkImage(artwork) : nil;
+    if (want && !art && !state.lastArt) {
+        diMruReport(@"noart", [NSString stringWithFormat:@"%@ %@",
+            NSStringFromClass(artwork.class), NSStringFromCGRect(artwork.bounds)]);
+        diMruPostPayload(@"noart", NSStringFromClass(artwork.class));
+        want = NO;
     }
+    if (!want) { diActivityTeardown(artwork, state); return; }
+
     if (!state) {
         state = [DIActivityMaskState new];
-        state.originalMask = artwork.maskView;
-        state.mask = [UIImageView new];
-        state.mask.userInteractionEnabled = NO;
-        state.mask.contentMode = UIViewContentModeScaleToFill;
         SEL shadowSel = NSSelectorFromString(@"artworkShadowView");
         if ([artwork respondsToSelector:shadowSel]) {
             id shadow = ((id (*)(id, SEL))objc_msgSend)(artwork, shadowSel);
@@ -12231,37 +12360,84 @@ static void diActivityApply(UIView *artwork) {
                 state.originalShadowHidden = [(UIView *)shadow isHidden];
             }
         }
-        /* 2.8.77: N95 同款 —— self 与 artworkImageView 都 clipsToBounds=NO,
-           否则形状会被系统视图自身的裁剪切掉; 原值记下, 停用时恢复。 */
-        state.originalSelfClips = artwork.clipsToBounds;
-        artwork.clipsToBounds = NO;
-        SEL imgSel = NSSelectorFromString(@"artworkImageView");
-        if ([artwork respondsToSelector:imgSel]) {
-            id img = ((id (*)(id, SEL))objc_msgSend)(artwork, imgSel);
-            if ([img isKindOfClass:UIView.class]) {
-                state.imageView = img;
-                state.originalImageClips = [(UIView *)img clipsToBounds];
-                [(UIView *)img setClipsToBounds:NO];
-            }
-        }
         objc_setAssociatedObject(artwork, &kDIActivityMaskState, state, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
         UIViewController *avc = diActivityAncestorVC(artwork);
-        DLog(@"[真实专辑遮罩] MRUActivityArtworkView 已接管 %@ 祖先=%@（无额外封面/模糊层）",
-             NSStringFromCGRect(artwork.bounds), avc ? NSStringFromClass(avc.class) : @"(无)");
-        diMruReport(@"hit", [NSString stringWithFormat:@"%@ 祖先=%@",
-            NSStringFromCGRect(artwork.bounds), avc ? NSStringFromClass(avc.class) : @"(无)"]);
-        diMruPostPayload(@"hit", [NSString stringWithFormat:@"%@_%@", avc ? NSStringFromClass(avc.class) : @"noVC",
+        DLog(@"[真实专辑遮罩] 已接管 %@ %@ 祖先=%@",
+             NSStringFromClass(artwork.class), NSStringFromCGRect(artwork.bounds),
+             avc ? NSStringFromClass(avc.class) : @"(无)");
+        diMruReport(@"hit", [NSString stringWithFormat:@"%@ %@ 祖先=%@",
+            NSStringFromClass(artwork.class), NSStringFromCGRect(artwork.bounds),
+            avc ? NSStringFromClass(avc.class) : @"(无)"]);
+        diMruPostPayload(@"hit", [NSString stringWithFormat:@"%@_%@", NSStringFromClass(artwork.class),
             NSStringFromCGRect(artwork.bounds)]);
+        diMruFileLog([NSString stringWithFormat:@"hit %@ %@ 祖先=%@",
+            NSStringFromClass(artwork.class), NSStringFromCGRect(artwork.bounds),
+            avc ? NSStringFromClass(avc.class) : @"(无)"]);
         gDIActivityHit++;
     }
-    // Another tweak can change this mask; preserve its latest value for restoration.
-    if (artwork.maskView != state.mask) state.originalMask = artwork.maskView;
-    if (state.mask.image != gDIActivityShape) state.mask.image = gDIActivityShape;
-    CGRect maskRect = diActivityMaskRect(artwork);
-    if (!CGRectEqualToRect(state.mask.frame, maskRect)) state.mask.frame = maskRect;
-    if (artwork.maskView != state.mask) artwork.maskView = state.mask;
-    state.shadow.hidden = YES;
-    diMruReport(@"apply", NSStringFromCGRect(artwork.bounds));
+    if (!state.glass) {
+        /* 尺寸就是这张专辑视图自己的 bounds(不是 artworkFrame) —— 形状铺满整个头像,
+           不会再出现"变小"的观感 */
+        UIView *glass = [UIView new];
+        glass.userInteractionEnabled = NO;
+        glass.backgroundColor = UIColor.clearColor;
+        glass.clipsToBounds = YES;
+        glass.layer.allowsEdgeAntialiasing = YES;
+        UIImageView *img = [UIImageView new];
+        img.userInteractionEnabled = NO;
+        img.contentMode = UIViewContentModeScaleAspectFill;
+        img.clipsToBounds = YES;
+        UIImageView *shape = [UIImageView new];
+        shape.userInteractionEnabled = NO;
+        shape.contentMode = UIViewContentModeScaleToFill;
+        img.maskView = shape;               /* 遮罩挂在图上: 转玻璃时图与形状一起转 */
+        [glass addSubview:img];
+        state.glass = glass; state.glassImage = img; state.glassMask = shape;
+        SEL lsel = NSSelectorFromString(@"artworkLayer");
+        if ([artwork respondsToSelector:lsel]) {
+            @try {
+                id l = ((id (*)(id, SEL))objc_msgSend)(artwork, lsel);
+                if ([l isKindOfClass:CALayer.class]) {
+                    state.systemLayer = (CALayer *)l;
+                    state.systemLayerHidden = ((CALayer *)l).hidden;
+                }
+            } @catch (__unused NSException *e) {}
+        }
+        [artwork addSubview:glass];
+        diMruFileLog([NSString stringWithFormat:@"glass 创建 bounds=%@ 系统层=%@",
+            NSStringFromCGRect(artwork.bounds), state.systemLayer ? @"已找到" : @"无"]);
+    }
+    CGRect box = artwork.bounds;
+    if (!CGRectEqualToRect(state.glass.frame, box)) state.glass.frame = box;
+    if (!CGRectEqualToRect(state.glassImage.frame, state.glass.bounds)) state.glassImage.frame = state.glass.bounds;
+    if (!CGRectEqualToRect(state.glassMask.frame, state.glassImage.bounds)) state.glassMask.frame = state.glassImage.bounds;
+    if (art && state.glassImage.image != art) { state.glassImage.image = art; state.lastArt = art; }
+    if (state.glassMask.image != gDIActivityShape) state.glassMask.image = gDIActivityShape;
+    if (artwork.subviews.lastObject != state.glass) [artwork bringSubviewToFront:state.glass];
+    if (state.systemLayer && !state.systemLayer.hidden) state.systemLayer.hidden = YES;
+    if (state.shadow && !state.shadow.hidden) state.shadow.hidden = YES;
+
+    BOOL rotOn = NO, rev = NO; double speed = 45.0;
+    diMruRotParams(&rotOn, &rev, &speed);
+    if (!rotOn) {
+        if ([state.glass.layer animationForKey:@"di.spin"]) [state.glass.layer removeAnimationForKey:@"di.spin"];
+        state.spinSpeed = 0;
+    } else if (state.spinSpeed != speed || state.spinRev != rev
+               || ![state.glass.layer animationForKey:@"di.spin"]) {
+        [state.glass.layer removeAnimationForKey:@"di.spin"];
+        CABasicAnimation *a = [CABasicAnimation animationWithKeyPath:@"transform.rotation.z"];
+        a.fromValue = @(rev ? 6.283185307179586 : 0.0);
+        a.toValue   = @(rev ? 0.0 : 6.283185307179586);
+        a.duration = 360.0 / MAX(fabs(speed), 1.0);
+        a.repeatCount = HUGE_VALF;
+        a.removedOnCompletion = NO;
+        a.timingFunction = [CAMediaTimingFunction functionWithName:kCAMediaTimingFunctionLinear];
+        [state.glass.layer addAnimation:a forKey:@"di.spin"];
+        state.spinSpeed = speed; state.spinRev = rev;
+        diMruFileLog([NSString stringWithFormat:@"spin 开=%@ 速度=%.0f°/s 反转=%d", rotOn ? @"是" : @"否", speed, rev]);
+    }
+    diMruReport(@"apply", [NSString stringWithFormat:@"%@ 旋转=%@", NSStringFromCGRect(box),
+        rotOn ? [NSString stringWithFormat:@"%.0f°/s", speed] : @"关"]);
 }
 static void diActivityReload(void) {
     gDIActivityEnabled = diMruPrefOn();
@@ -12350,36 +12526,45 @@ static CGRect diActivityMaskRect(UIView *view) {
     }
     return view.bounds;
 }
+static IMP gDIActivityOrigSetImage;
+static void diActivitySetImage(id self, SEL cmd, id img) {
+    if (gDIActivityOrigSetImage) ((void (*)(id, SEL, id))gDIActivityOrigSetImage)(self, cmd, img);
+    @try { diActivityApply((UIView *)self); } @catch (__unused NSException *e) {}
+}
 static void diActivityInstall(void) {
     static BOOL installed;
     if (installed) return;
-    NSMutableString *hooked = [NSMutableString string];
-    int count = 0;
+    /* 2.8.82: 只 hook 一个类(按优先级取第一个存在的)。
+       之前把三个类都挂到同一组 IMP 变量上 —— MSHookMessageEx 会覆盖同一个
+       *result, 三个类同时存在时 orig 指向最后一个类, 转调就是错的/会递归。
+       现在主类 hook(顺带拿到 setArtworkImage: 实时换图), 其余类靠扫描器接管。 */
+    Class cls = nil; NSString *hitName = nil;
     for (NSString *name in diActivityClassNames()) {
-        Class cls = NSClassFromString(name);
-        if (!cls || ![cls isSubclassOfClass:UIView.class]) continue;
-        SEL layout = @selector(layoutSubviews);
-        if (!diActivityVoidMethod(cls, layout)) continue;
-        MSHookMessageEx(cls, layout, (IMP)diActivityLayout, &gDIActivityOrigLayout);
-        SEL move = @selector(didMoveToSuperview);
-        if (diActivityVoidMethod(cls, move)) MSHookMessageEx(cls, move, (IMP)diActivityMove, &gDIActivityOrigMove);
-        SEL visibility = NSSelectorFromString(@"updateVisibility");
-        if (diActivityVoidMethod(cls, visibility)) MSHookMessageEx(cls, visibility, (IMP)diActivityVisibility, &gDIActivityOrigVisibility);
-        SEL initSel = @selector(init);
-        if (diActivityObjectMethod(cls, initSel)) MSHookMessageEx(cls, initSel, (IMP)diActivityInit, &gDIActivityOrigInit);
-        count++;
-        [hooked appendFormat:@"%@ ", name];
+        Class c = NSClassFromString(name);
+        if ([c isSubclassOfClass:UIView.class] && diActivityVoidMethod(c, @selector(layoutSubviews))) { cls = c; hitName = name; break; }
     }
-    if (!count) {
+    if (!cls) {
         diMruReport(@"noclass", @"三个候选类都不存在");
         diMruPostPayload(@"install.end", @"hooked0");
+        diMruFileLog(@"install 失败: 三个候选类都不存在");
         return;
     }
+    MSHookMessageEx(cls, @selector(layoutSubviews), (IMP)diActivityLayout, &gDIActivityOrigLayout);
+    SEL move = @selector(didMoveToSuperview);
+    if (diActivityVoidMethod(cls, move)) MSHookMessageEx(cls, move, (IMP)diActivityMove, &gDIActivityOrigMove);
+    SEL visibility = NSSelectorFromString(@"updateVisibility");
+    if (diActivityVoidMethod(cls, visibility)) MSHookMessageEx(cls, visibility, (IMP)diActivityVisibility, &gDIActivityOrigVisibility);
+    SEL initSel = @selector(init);
+    if (diActivityObjectMethod(cls, initSel)) MSHookMessageEx(cls, initSel, (IMP)diActivityInit, &gDIActivityOrigInit);
+    SEL setImg = NSSelectorFromString(@"setArtworkImage:");
+    if (class_getInstanceMethod(cls, setImg)) MSHookMessageEx(cls, setImg, (IMP)diActivitySetImage, &gDIActivityOrigSetImage);
     installed = YES;
-    RLog(@"[真实专辑遮罩] 已安装 MediaRemoteUI hook: %@", hooked);
-    diMruReport(@"install", hooked);
-    diMruPostPayload(@"install.end", [NSString stringWithFormat:@"hooked%d_%@", count,
-        [hooked stringByReplacingOccurrencesOfString:@" " withString:@"+"]]);
+    RLog(@"[真实专辑遮罩] 已安装 MediaRemoteUI hook: %@ (换图hook=%@)", hitName,
+         gDIActivityOrigSetImage ? @"有" : @"无");
+    diMruReport(@"install", hitName);
+    diMruFileLog([NSString stringWithFormat:@"install %@ layout=%d move=%d vis=%d init=%d setImage=%d",
+        hitName, gDIActivityOrigLayout != NULL, gDIActivityOrigMove != NULL,
+        gDIActivityOrigVisibility != NULL, gDIActivityOrigInit != NULL, gDIActivityOrigSetImage != NULL]);
     // Register existing artwork views if the framework was already displaying them.
     for (UIScene *scene in UIApplication.sharedApplication.connectedScenes) {
         if (![scene isKindOfClass:UIWindowScene.class]) continue;
@@ -12533,6 +12718,40 @@ static void diMruObserve(void) {
     });
 }
 
+/* ===== 2.8.82: MRU 进程日志回读 =====
+   MediaRemoteUI 是沙盒进程: 写不进我们的日志, 也读不到我们的文件; 但它能写**自己的容器**,
+   SpringBoard 能读它的容器。于是它把日志写到 <自己Caches>/com.abgg332.driftisland/mru.log,
+   这里按偏移量把新增行搬进主日志 —— 从此诊断不靠"通知名里塞载荷"这种不可靠通道。 */
+static void diMruTailTick(void) {
+    static unsigned long long offset;
+    NSString *p = [diMruSharedDir() stringByAppendingPathComponent:@"mru.log"];
+    if (!p.length) return;
+    NSDictionary *attr = [[NSFileManager defaultManager] attributesOfItemAtPath:p error:NULL];
+    unsigned long long size = [attr[NSFileSize] unsignedLongLongValue];
+    if (!size) return;
+    if (size < offset) offset = 0;
+    if (size == offset) return;
+    NSFileHandle *h = [NSFileHandle fileHandleForReadingAtPath:p];
+    if (!h) return;
+    @try {
+        [h seekToFileOffset:offset];
+        NSData *d = [h readDataToEndOfFile];
+        offset += d.length;
+        NSString *text = [[NSString alloc] initWithData:d encoding:NSUTF8StringEncoding];
+        for (NSString *line in [text componentsSeparatedByString:@"\n"])
+            if (line.length) RLog(@"[MRU] %@", line);
+    } @catch (__unused NSException *e) {} @finally { [h closeFile]; }
+}
+static void diMruTailInstall(void) {
+    static BOOL done;
+    if (done) return;
+    done = YES;
+    NSTimer *t = [NSTimer timerWithTimeInterval:2.0 repeats:YES block:^(NSTimer *timer) {
+        @try { diMruTailTick(); } @catch (__unused NSException *e) {}
+    }];
+    [NSRunLoop.mainRunLoop addTimer:t forMode:NSRunLoopCommonModes];
+    diMruTailTick();
+}
 __attribute__((constructor)) static void init(void) {
     @autoreleasepool {
         /* 2.7.15: 版本标记写死在这里, 不依赖 CFBundleShortVersionString ——
@@ -12569,6 +12788,7 @@ __attribute__((constructor)) static void init(void) {
          [NSBundle.mainBundle.infoDictionary[@"CFBundleShortVersionString"] description] ?: @"?");
         /* 2.8.78: 接收 MediaRemoteUI 的打点 + 把遮罩素材导出给那个进程 */
         diMruObserve();
+        diMruTailInstall();
         dispatch_async(dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{ diExportMaskForMRU(); });
         /* 2.7.15: 组名 hook **必须在主队列 block 之外、且在最前面** 装 ——
            2.7.14 把它放在 dispatch_async 里, 前面还排了 refreshAll/installKnownHosts/
