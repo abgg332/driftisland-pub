@@ -11995,7 +11995,7 @@ static void diHookHomeBarGrabberRetry(void) { diHookHomeGrabber(); }
 static char kDIActivityMaskState;
 static NSHashTable<UIView *> *gDIActivityArtworks;
 static UIImage *gDIActivityShape;
-static Class gDIActivityClass;   /* 2.8.80: 扫描器认类用 */
+static CGRect diActivityMaskRect(UIView *view);   /* 2.8.81 前置声明 */
 static BOOL gDIActivityEnabled;
 static int gDIActivityHit;   /* 2.8.79: 成功接管次数, 0 说明整条链路没走到 */
 static IMP gDIActivityOrigLayout, gDIActivityOrigMove, gDIActivityOrigVisibility, gDIActivityOrigInit;
@@ -12125,7 +12125,10 @@ static BOOL diMruPrefOn(void) {
         diMruFileLog([NSString stringWithFormat:@"主偏好域不可读, 走 diMruActive=%d", a]);
         return a;
     }
-    return e && m;
+    /* 2.8.81: 三条通道全读不到时按"开"处理 —— 用户在 SpringBoard 侧已经开了遮罩并导出了素材,
+       这里静默判成"关"就是 2.8.77~80 "什么都不发生" 的第二个成因。 */
+    diMruFileLog(@"开关三通道都不可读, 按开启处理");
+    return YES;
 }
 /* 素材多通道: 素材目录 → Caches 导出图(含 /var/jb 前缀) → 偏好 base64 */
 static UIImage *diActivityLoadShape(void) {
@@ -12254,7 +12257,8 @@ static void diActivityApply(UIView *artwork) {
     // Another tweak can change this mask; preserve its latest value for restoration.
     if (artwork.maskView != state.mask) state.originalMask = artwork.maskView;
     if (state.mask.image != gDIActivityShape) state.mask.image = gDIActivityShape;
-    if (!CGRectEqualToRect(state.mask.frame, artwork.bounds)) state.mask.frame = artwork.bounds;
+    CGRect maskRect = diActivityMaskRect(artwork);
+    if (!CGRectEqualToRect(state.mask.frame, maskRect)) state.mask.frame = maskRect;
     if (artwork.maskView != state.mask) artwork.maskView = state.mask;
     state.shadow.hidden = YES;
     diMruReport(@"apply", NSStringFromCGRect(artwork.bounds));
@@ -12313,44 +12317,77 @@ static BOOL diActivityObjectMethod(Class cls, SEL sel) {
     char *type = method_copyReturnType(method);
     BOOL valid = type && !strcmp(type, "@"); free(type); return valid;
 }
+/* 2.8.81: iOS 17/18 的展开岛专辑**不是** MRUActivityArtworkView。
+   依据 iOS 18.2 MediaControls 反编译(MRUActivityNowPlayingView.m):
+     展开岛根视图 = MRUActivityNowPlayingView, 它的 artworkViews 是
+     **两个 MRUFlippingArtworkView**(style=7, dimsWhenPaused=1),
+     专辑位图由 MRUFlippingArtworkLayer 绘制;
+   而 MRUActivityArtworkView 是 Live Activity 专用 —— 它在 init 里直接把
+   artworkImageView / placeholderBackground 从父视图移除, 换成 CCUICAPackageView,
+   在音乐展开岛里根本不会出现。
+   这就是 2.8.77~2.8.80 "注入了、有 reload、却一条接管记录都没有" 的真正原因:
+   hook 的目标类从 iOS 17 起就换人了(N95 只支持到 16.7.7, 所以它那套类名是对的)。 */
+static NSArray<NSString *> *diActivityClassNames(void) {
+    return @[@"MRUFlippingArtworkView", @"MRUActivityArtworkView", @"MRUArtworkView"];
+}
+static BOOL diActivityIsArtworkClass(UIView *view) {
+    for (NSString *name in diActivityClassNames()) {
+        Class c = NSClassFromString(name);
+        if (c && [view isKindOfClass:c]) return YES;
+    }
+    return NO;
+}
+/* 专辑图不一定铺满整个视图: MRUFlippingArtworkView 有 artworkFrame, 遮罩要对齐它 */
+static CGRect diActivityMaskRect(UIView *view) {
+    SEL sel = NSSelectorFromString(@"artworkFrame");
+    if ([view respondsToSelector:sel]) {
+        @try {
+            CGRect r = ((CGRect (*)(id, SEL))objc_msgSend)(view, sel);
+            if (r.size.width > 5 && r.size.height > 5
+                && r.size.width <= view.bounds.size.width + 1
+                && r.size.height <= view.bounds.size.height + 1) return r;
+        } @catch (__unused NSException *e) {}
+    }
+    return view.bounds;
+}
 static void diActivityInstall(void) {
     static BOOL installed;
     if (installed) return;
-    Class cls = NSClassFromString(@"MRUActivityArtworkView");
-    gDIActivityClass = cls;   /* 2.8.80: 扫描器认类用, 与 hook 成败无关 */
-    diMruPostPayload(@"install.begin", cls ? NSStringFromClass(cls) : @"nil");
-    if (!cls || ![cls isSubclassOfClass:UIView.class]) {
-        diMruReport(@"noclass", @"MRUActivityArtworkView 不存在");
+    NSMutableString *hooked = [NSMutableString string];
+    int count = 0;
+    for (NSString *name in diActivityClassNames()) {
+        Class cls = NSClassFromString(name);
+        if (!cls || ![cls isSubclassOfClass:UIView.class]) continue;
+        SEL layout = @selector(layoutSubviews);
+        if (!diActivityVoidMethod(cls, layout)) continue;
+        MSHookMessageEx(cls, layout, (IMP)diActivityLayout, &gDIActivityOrigLayout);
+        SEL move = @selector(didMoveToSuperview);
+        if (diActivityVoidMethod(cls, move)) MSHookMessageEx(cls, move, (IMP)diActivityMove, &gDIActivityOrigMove);
+        SEL visibility = NSSelectorFromString(@"updateVisibility");
+        if (diActivityVoidMethod(cls, visibility)) MSHookMessageEx(cls, visibility, (IMP)diActivityVisibility, &gDIActivityOrigVisibility);
+        SEL initSel = @selector(init);
+        if (diActivityObjectMethod(cls, initSel)) MSHookMessageEx(cls, initSel, (IMP)diActivityInit, &gDIActivityOrigInit);
+        count++;
+        [hooked appendFormat:@"%@ ", name];
+    }
+    if (!count) {
+        diMruReport(@"noclass", @"三个候选类都不存在");
+        diMruPostPayload(@"install.end", @"hooked0");
         return;
     }
-    SEL layout = @selector(layoutSubviews);
-    if (!diActivityVoidMethod(cls, layout)) {
-        diMruReport(@"nohook", @"layoutSubviews 签名不匹配");
-        return;
-    }
-    MSHookMessageEx(cls, layout, (IMP)diActivityLayout, &gDIActivityOrigLayout);
-    SEL move = @selector(didMoveToSuperview);
-    if (diActivityVoidMethod(cls, move)) MSHookMessageEx(cls, move, (IMP)diActivityMove, &gDIActivityOrigMove);
-    SEL visibility = NSSelectorFromString(@"updateVisibility");
-    if (diActivityVoidMethod(cls, visibility)) MSHookMessageEx(cls, visibility, (IMP)diActivityVisibility, &gDIActivityOrigVisibility);
-    SEL initSel = @selector(init);
-    if (diActivityObjectMethod(cls, initSel)) MSHookMessageEx(cls, initSel, (IMP)diActivityInit, &gDIActivityOrigInit);
     installed = YES;
-    RLog(@"[真实专辑遮罩] 已安装 MediaRemoteUI / MRUActivityArtworkView.maskView");
-    diMruPostPayload(@"install.end", [NSString stringWithFormat:@"layout%d_move%d_vis%d_init%d",
-        (int)(gDIActivityOrigLayout != NULL), (int)(gDIActivityOrigMove != NULL),
-        (int)(gDIActivityOrigVisibility != NULL), (int)(gDIActivityOrigInit != NULL)]);
-    diMruReport(@"install", [NSString stringWithFormat:@"类=%@ 上下文类=%@ init=%@",
-        NSStringFromClass(cls), NSClassFromString(@"MRUActivityNowPlayingViewController") ? @"有" : @"无",
-        gDIActivityOrigInit ? @"已挂" : @"未挂"]);
+    RLog(@"[真实专辑遮罩] 已安装 MediaRemoteUI hook: %@", hooked);
+    diMruReport(@"install", hooked);
+    diMruPostPayload(@"install.end", [NSString stringWithFormat:@"hooked%d_%@", count,
+        [hooked stringByReplacingOccurrencesOfString:@" " withString:@"+"]]);
     // Register existing artwork views if the framework was already displaying them.
     for (UIScene *scene in UIApplication.sharedApplication.connectedScenes) {
         if (![scene isKindOfClass:UIWindowScene.class]) continue;
         for (UIWindow *window in ((UIWindowScene *)scene).windows) {
             NSMutableArray<UIView *> *stack = [NSMutableArray arrayWithObject:window];
-            for (NSUInteger count = 0; stack.count && count < 1500; count++) {
+            for (NSUInteger n = 0; stack.count && n < 1500; n++) {
                 UIView *view = stack.lastObject; [stack removeLastObject];
-                if ([view isKindOfClass:cls]) diActivityRegister(view);
+                if (diActivityIsArtworkClass(view)) diActivityRegister(view);
                 for (UIView *child in view.subviews) [stack addObject:child];
             }
         }
@@ -12363,23 +12400,27 @@ static void diActivityInstall(void) {
    认到就直接挂 maskView。hook 装得上就更快, 装不上也照样裁。
    顺带把"扫到几个窗口/多少节点/命中几次"回传, 下一次日志能直接看到扫没扫到。 */
 static NSTimer *gDIActivityScanTimer;
-static void diActivityScanTree(UIView *root, NSUInteger *nodes) {
+static void diActivityScanTree(UIView *root, NSUInteger *nodes, NSUInteger *matched) {
     NSMutableArray<UIView *> *stack = [NSMutableArray arrayWithObject:root];
     NSUInteger budget = 2500;
     while (stack.count && budget--) {
         UIView *view = stack.lastObject; [stack removeLastObject];
         (*nodes)++;
-        NSString *cn = NSStringFromClass(view.class);
-        BOOL match = gDIActivityClass ? [view isKindOfClass:gDIActivityClass]
-            : ([cn containsString:@"ActivityArtwork"] || [cn containsString:@"Artwork"]);
+        BOOL match = diActivityIsArtworkClass(view);
+        if (!match) {
+            /* 三个候选类都不存在时的兜底: 按类名认(只认带 Artwork 的) */
+            NSString *cn = NSStringFromClass(view.class);
+            match = [cn containsString:@"Artwork"];
+        }
         if (match && view.bounds.size.width >= 30 && view.bounds.size.height >= 30) {
+            (*matched)++;
             diActivityRegister(view);   /* 里面会再走一遍上下文校验并挂 mask */
         }
         for (UIView *child in view.subviews) [stack addObject:child];
     }
 }
 static void diActivityScan(void) {
-    if (!gDIActivityEnabled || !gDIActivityShape) return;
+    /* 2.8.81: 心跳不再被开关/素材挡在前面 —— 之前"没遮上"和"根本没跑"在日志里长得一模一样 */
     NSMutableArray<UIWindow *> *wins = [NSMutableArray array];
     @try {
         UIApplication *app = UIApplication.sharedApplication;
@@ -12391,15 +12432,17 @@ static void diActivityScan(void) {
         [wins addObjectsFromArray:app.windows];
 #pragma clang diagnostic pop
     } @catch (__unused NSException *e) {}
-    NSUInteger nodes = 0;
-    for (UIWindow *w in wins) diActivityScanTree(w, &nodes);
-    /* 每 4 秒报一次扫描现场: 窗口数=0 或 节点数=0 就说明扫错了地方 */
+    NSUInteger nodes = 0, matched = 0;
+    if (gDIActivityShape) {
+        for (UIWindow *w in wins) diActivityScanTree(w, &nodes, &matched);
+    }
     static CFAbsoluteTime lastReport;
     CFAbsoluteTime now = CFAbsoluteTimeGetCurrent();
-    if (now - lastReport > 4.0) {
+    if (now - lastReport > 5.0) {
         lastReport = now;
-        diMruPostPayload(@"scan", [NSString stringWithFormat:@"win%lu_nodes%lu_hit%d",
-            (unsigned long)wins.count, (unsigned long)nodes, gDIActivityHit]);
+        diMruPostPayload(@"hb", [NSString stringWithFormat:@"on%d_shape%d_win%lu_nodes%lu_match%lu_hit%d",
+            gDIActivityEnabled, gDIActivityShape != nil, (unsigned long)wins.count,
+            (unsigned long)nodes, (unsigned long)matched, gDIActivityHit]);
     }
 }
 static void diActivityStartScanner(void) {
