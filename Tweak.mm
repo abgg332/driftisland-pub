@@ -58,7 +58,7 @@ static double expandTextY = 0.0;      // 上下偏移(pt, 下为正)
 static double expandTextScale = 100.0; // 文字大小(%, 100=原样)
 /* 2.8.86: 构建戳 —— 之前横幅打的是 SpringBoard 自己的 CFBundleShortVersionString(恒 1.0),
    日志里根本看不出装的是哪一版。所有诊断行都带这个戳, 下轮日志一眼定位。 */
-#define DI_BUILD_VER @"2.8.88"
+#define DI_BUILD_VER @"2.8.89"
 static BOOL gRecordingActive = NO; // 保留: 岛素材总闸条件
 static NSString *diElementId(UIView *host);
 static BOOL diMiniMusicActive(UIView *host); // 2.6.3: 前置(遮罩层使用)
@@ -12733,6 +12733,10 @@ static void diMruExpandTextParams(DIExpTextParams *p) {
 /* 2.8.87: 不再记录 center —— 位置改成"以系统布局的左上角为锚点"换算进 transform,
    这样每次布局都从系统原值重算, 不会越积越偏, 也不会因为头部宽度变了而整体漂移。 */
 static NSHashTable<UIView *> *gDIActivityTexts;
+/* 2.8.89: 展开岛文字的固定落点 —— 第一次稳定展开时记下, 之后不再随系统布局变 */
+static CGPoint gDIExpAnchor;
+static BOOL gDIExpAnchorValid;
+static CGSize gDIExpAnchorRoot;
 /* 时间戳(01:23 / -0:45)不是歌词, 不参与移动 */
 static BOOL diTextIsClock(NSString *t) {
     if (!t.length) return NO;
@@ -12853,46 +12857,73 @@ static void diActivityTextApply(UIView *root) {
         }
     }
     if (!targets.count) { diActivityTextRestore(); return; }
-    /* 2.8.86: 目标集合变了(逐标签 ↔ 头部容器)必须先把上一轮改过的全部还原,
-       否则旧目标会永久停在缩放态 —— 上一版 [gDIActivityTexts removeAllObjects]
-       只是忘了表, 变换还留在视图上。 */
-    BOOL sameSet = (gDIActivityTexts.count == targets.count);
-    if (sameSet) {
-        for (UIView *v in targets) if (![gDIActivityTexts containsObject:v]) { sameSet = NO; break; }
-    }
-    if (sameSet) [gDIActivityTexts removeAllObjects];
-    else diActivityTextRestore();
-    /* 2.8.87: 锚点 = 系统这次排好的**左上角**。
-       335 日志: 头部容器宽度 231/185/125 三种都在出现, 按"中心 + 偏移"算的话
-       宽度一变, 文字块就整体横移 —— 用户看到的"每次展开位置都不一样"。
-       现在: 先还原 transform 拿系统原始 frame, 再只写 transform:
-         scale 绕中心放大后左/上边会外扩 (s-1)*w/2, 用 tx/ty 抵消,
-       于是"左上角 = 系统位置 + (左移, 下移)"恒定不变。 */
-    CGFloat s = p.scale;
+    /* 2.8.89: 位置锁死 —— 不再拿"系统这次排在哪"当基准。
+       337 日志: 同一次展开里头部会有 231x66@107,22 / 201x57@105,-16 / 136x57@17,-52
+       好几份(展开副本、收起副本、动画快照), 每份 base 都不同; 按各自 base 摆,
+       用户每次展开看到的位置自然跟着变。现在:
+         · 只认"稳定展开态"(高度 >=50 且 y >=0), 收起/过渡副本保持系统原样;
+         · 第一次稳定展开时把整组中心记下来(anchor), 之后固定用它 + 设置偏移;
+         · 系统再重排、换歌、宽度变化, 都只围绕这个中心缩放, 落点不再动。 */
+    NSMutableArray<UIView *> *stable = [NSMutableArray array];
     NSMutableString *dump = [NSMutableString string];
+    CGRect unionRect = CGRectNull;
     for (UIView *v in targets) {
         if (!v.superview) continue;
-        v.transform = CGAffineTransformIdentity;
-        CGRect base = v.frame;                 /* 系统布局值, 不含我们的变换 */
-        CGFloat tx = p.x + (s - 1.0) * base.size.width * 0.5;
-        CGFloat ty = p.y + (s - 1.0) * base.size.height * 0.5;
-        v.transform = CGAffineTransformMake(s, 0, 0, s, tx, ty);
-        [gDIActivityTexts addObject:v];
+        v.transform = CGAffineTransformIdentity;          /* 先还原, 取系统布局值 */
+        CGRect base = v.frame;
+        if (base.size.height < 50.0 || base.origin.y < 0.0) {
+            [dump appendFormat:@"%@(跳过 %.0fx%.0f@%.0f,%.0f) ", NSStringFromClass(v.class),
+                base.size.width, base.size.height, base.origin.x, base.origin.y];
+            continue;
+        }
+        CGPoint c = [v.superview convertPoint:v.center toView:root];
+        CGRect r = CGRectMake(c.x - base.size.width * 0.5, c.y - base.size.height * 0.5,
+                              base.size.width, base.size.height);
+        unionRect = CGRectIsNull(unionRect) ? r : CGRectUnion(unionRect, r);
+        [stable addObject:v];
         [dump appendFormat:@"%@(%.0fx%.0f@%.0f,%.0f) ", NSStringFromClass(v.class),
             base.size.width, base.size.height, base.origin.x, base.origin.y];
     }
-    /* 2.8.88: 只摆位置/大小, 颜色一律保持系统原样(之前自动上色会"变回彩色") */
+    if (!stable.count) { diActivityTextRestore(); diActivityTextColorRestore(); return; }
+    /* 目标集合变了(逐标签 <-> 头部容器)先把上一轮改过的全部还原, 否则旧目标会停在缩放态 */
+    BOOL sameSet = (gDIActivityTexts.count == stable.count);
+    if (sameSet) {
+        for (UIView *v in stable) if (![gDIActivityTexts containsObject:v]) { sameSet = NO; break; }
+    }
+    if (sameSet) [gDIActivityTexts removeAllObjects];
+    else diActivityTextRestore();
+
+    CGPoint sysCenter = CGPointMake(CGRectGetMidX(unionRect), CGRectGetMidY(unionRect));
+    if (!gDIExpAnchorValid || fabs(root.bounds.size.width - gDIExpAnchorRoot.width) > 24.0) {
+        gDIExpAnchor = sysCenter;
+        gDIExpAnchorRoot = root.bounds.size;
+        gDIExpAnchorValid = YES;
+        diMruFileLog([NSString stringWithFormat:@"text 锁定落点 (%.0f,%.0f) root %.0fx%.0f",
+            sysCenter.x, sysCenter.y, root.bounds.size.width, root.bounds.size.height]);
+    }
+    CGPoint target = CGPointMake(gDIExpAnchor.x + p.x, gDIExpAnchor.y + p.y);
+    CGFloat s = p.scale;
+    for (UIView *v in stable) {
+        UIView *sv = v.superview;
+        CGPoint c0 = [sv convertPoint:v.center toView:root];
+        CGPoint nRoot = CGPointMake(target.x + (c0.x - sysCenter.x) * s,
+                                    target.y + (c0.y - sysCenter.y) * s);
+        v.transform = CGAffineTransformMakeScale(s, s);
+        v.center = [root convertPoint:nRoot toView:sv];
+        [gDIActivityTexts addObject:v];
+    }
+    /* 2.8.88: 只摆位置/大小, 颜色一律保持系统原样 */
     diActivityTextColorRestore();
     static NSString *lastDump; static CFAbsoluteTime lastLogT;
     NSString *sig = [NSString stringWithFormat:@"%.0f_%.0f_%.0f_%@", p.x, p.y, p.scale * 100, dump];
     if (![sig isEqualToString:lastDump] || CFAbsoluteTimeGetCurrent() - lastLogT > 15.0) {
         lastDump = [sig copy];
         lastLogT = CFAbsoluteTimeGetCurrent();
-        diMruFileLog([NSString stringWithFormat:@"text 移动 %lu 层(%@) 偏移(%.0f,%.0f) 缩放 %.0f%% [%@]",
-            (unsigned long)targets.count, header ? @"头部容器" : @"逐标签",
-            p.x, p.y, p.scale * 100, dump]);
+        diMruFileLog([NSString stringWithFormat:@"text 移动 %lu 层(%@) 偏移(%.0f,%.0f) 缩放 %.0f%% 落点(%.0f,%.0f) [%@]",
+            (unsigned long)stable.count, header ? @"头部容器" : @"逐标签",
+            p.x, p.y, p.scale * 100, target.x, target.y, dump]);
         diMruReport(@"text", [NSString stringWithFormat:@"n%lu_%.0f_%.0f_%.0f_%@",
-            (unsigned long)targets.count, p.x, p.y, p.scale * 100, header ? @"h" : @"l"]);
+            (unsigned long)stable.count, p.x, p.y, p.scale * 100, header ? @"h" : @"l"]);
     }
 }
 /* 2.8.85: 控制器每次布局后重新应用一次 —— 系统会重排标签, 只在定时器里改会被覆盖 */

@@ -18,7 +18,7 @@
 
 static NSString *const kDomain = @"com.abgg332.driftisland";
 /* 2.6.25: 设置页底部显示的版本号 */
-static NSString *const DI_VERSION_STR = @"2.8.88";
+static NSString *const DI_VERSION_STR = @"2.8.89";
 /* 2.6.10: 专辑光晕遮罩 —— 与 Tweak 侧 DIAlbumMask.h 保持一致 */
 static NSString *const kDIAlbumMaskKey = @"diAlbumMaskAsset";
 static NSString *const kDIMaskRoot = @"/var/mobile/灵动岛/遮罩素材";
@@ -1396,21 +1396,8 @@ static void diWriteColors(NSArray<NSString *> *colors) {
         DI_ADD([self switchSpec:@"展开显示素材" key:@"expandOn" def:@YES]);
         DI_ADD(expandMat);
 
-        /* ---- 帧率(行序不能变: row2~5 滑杆, row6 素材名) ---- */
-        DI_ADD([self groupSpec:@"帧率" footer:nil]);
-        DI_ADD([self switchSpec:@"音频开关" key:@"spectrumOn" def:@NO]);
-        DI_ADD([self switchSpec:@"帧率开关" key:@"materialOn" def:@YES]);
-        if ([[self readPreferenceValue:[self switchSpec:@"materialOn" key:@"materialOn" def:@YES]] boolValue]) {
-            DI_ADD([self numSlider:@"帧率速度" key:@"animFPS" def:50 mn:10 mx:200]);
-            DI_ADD([self numSlider:@"素材大小" key:@"animScaleAdj" def:0 mn:-20 mx:20]);
-            DI_ADD([self numSlider:@"左右偏移" key:@"animOffsetX3" def:0 mn:-50 mx:50]);
-            DI_ADD([self numSlider:@"上下偏移" key:@"animOffsetY3" def:0 mn:-50 mx:50]);
-            PSSpecifier *animSet = [PSSpecifier preferenceSpecifierNamed:@"素材名称" target:self
-                set:NULL get:@selector(readSpectrumName:)
-                detail:[DIFrameFolders class] cell:PSLinkCell edit:nil];
-            [animSet setProperty:[self frameStatusName] forKey:@"value"];
-            DI_ADD(animSet);
-        }
+        /* 2.8.89: 主页「帧率」组整体移除 —— 已并入「附加功能 → 展开定义」页的顶部,
+           两处一模一样的东西没必要重复显示。参数键一个字没改, 老设置照旧生效。 */
 
         /* ---- 录屏素材 ---- */
         DI_ADD([self groupSpec:@"录屏素材" footer:nil]);
