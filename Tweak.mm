@@ -12070,7 +12070,6 @@ static void diHookHomeBarGrabberRetry(void) { diHookHomeGrabber(); }
 static char kDIActivityMaskState;
 static NSHashTable<UIView *> *gDIActivityArtworks;
 static UIImage *gDIActivityShape;
-static CGRect diActivityMaskRect(UIView *view);   /* 2.8.81 前置声明 */
 static BOOL gDIActivityEnabled;
 static int gDIActivityHit;   /* 2.8.79: 成功接管次数, 0 说明整条链路没走到 */
 static IMP gDIActivityOrigLayout, gDIActivityOrigMove, gDIActivityOrigVisibility, gDIActivityOrigInit;
@@ -12512,19 +12511,6 @@ static BOOL diActivityIsArtworkClass(UIView *view) {
         if (c && [view isKindOfClass:c]) return YES;
     }
     return NO;
-}
-/* 专辑图不一定铺满整个视图: MRUFlippingArtworkView 有 artworkFrame, 遮罩要对齐它 */
-static CGRect diActivityMaskRect(UIView *view) {
-    SEL sel = NSSelectorFromString(@"artworkFrame");
-    if ([view respondsToSelector:sel]) {
-        @try {
-            CGRect r = ((CGRect (*)(id, SEL))objc_msgSend)(view, sel);
-            if (r.size.width > 5 && r.size.height > 5
-                && r.size.width <= view.bounds.size.width + 1
-                && r.size.height <= view.bounds.size.height + 1) return r;
-        } @catch (__unused NSException *e) {}
-    }
-    return view.bounds;
 }
 static IMP gDIActivityOrigSetImage;
 static void diActivitySetImage(id self, SEL cmd, id img) {
