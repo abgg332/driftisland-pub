@@ -48,6 +48,14 @@ static double maskRotateSpeed = 45.0; // 旋转角速度 °/秒
    岛显示不了那么大"。玻璃边长 = 能放下的最大边长 × 这个比例, 设置页可调 50~115。 */
 static double maskScale = 88.0;
 static NSString *maskAnimFolder;  // 遮罩素材文件夹(帧率素材下的子目录)
+/* ===== 2.8.85: 展开定义 —— 展开岛歌词/歌名的自定义位置与大小 =====
+   展开岛(407x202 的 Now Playing)整块由 MediaRemoteUI 远程渲染, SpringBoard 只能看到
+   一块门户, 拿不到里面的文字视图。所以参数由 SpringBoard 侧写进 MRU 容器的
+   params.plist, 由 MRU 进程内的文字调整器读取并应用(见 diActivityTextApply)。 */
+static BOOL expandTextOn = NO;        // 启用自定义(位置/大小)
+static double expandTextX = 0.0;      // 左右偏移(pt, 右为正)
+static double expandTextY = 0.0;      // 上下偏移(pt, 下为正)
+static double expandTextScale = 100.0; // 文字大小(%, 100=原样)
 static BOOL gRecordingActive = NO; // 保留: 岛素材总闸条件
 static NSString *diElementId(UIView *host);
 static BOOL diMiniMusicActive(UIView *host); // 2.6.3: 前置(遮罩层使用)
@@ -755,6 +763,14 @@ static void refreshPrefs(void) {
         maskScale = shown * 1.15;
     }
     maskAnimFolder = pString(@"maskAnimFolder");
+    /* 2.8.85: 展开定义(展开岛歌词/歌名的位置与大小) */
+    expandTextOn = pBool(@"expandTextOn", NO);
+    expandTextX = pDouble(@"expandTextX", 0.0);
+    expandTextY = pDouble(@"expandTextY", 0.0);
+    expandTextScale = pDouble(@"expandTextScale", 100.0);
+    if (expandTextX < -120) expandTextX = -120; if (expandTextX > 120) expandTextX = 120;
+    if (expandTextY < -120) expandTextY = -120; if (expandTextY > 120) expandTextY = 120;
+    if (expandTextScale < 50) expandTextScale = 50; if (expandTextScale > 200) expandTextScale = 200;
     /* 2.5.7: 隐藏横条 / 渐隐模式 / 手势保护 */
     homeBarHideOn = pBool(@"homeBarHideOn", NO);
     homeBarHideMode = pBool(@"homeBarHideFade", NO) ? @"fade" : @"full";   /* 2.5.11: 子开关 */
@@ -3209,6 +3225,38 @@ static void diStripMaskFromCover(UIView *cover) {
     [target removeAnimationForKey:@"mask"];
 }
 
+/* ===== 2.8.85: 残留遮罩兜底清扫 =====
+   遮罩是"挂上去就一直留在层上"的, 只要有一次挂到了错误的层(展开/收起动画的中间帧,
+   或者用户从 2.8.84 及更早版本升上来时留下的旧层), 它就会一直显示 —— 这正是
+   332 反馈"偶尔还是会显示"的来源。这里每 2~5 秒扫一遍窗口树, 把所有
+   DriftIslandAlbumMask 的层收掉:
+     · 遮罩关闭时 → 全摘;
+     · 遮罩开启时 → 只摘 >80pt 的大层(小岛头像那 22~26pt 的保留)。 */
+static void diSweepMasks(BOOL onlyLarge) {
+    NSMutableArray<UIWindow *> *wins = [NSMutableArray array];
+    @try {
+        for (UIScene *s in UIApplication.sharedApplication.connectedScenes)
+            if ([s isKindOfClass:UIWindowScene.class])
+                [wins addObjectsFromArray:((UIWindowScene *)s).windows];
+    } @catch (__unused NSException *e) {}
+    if (!wins.count) return;
+    NSMutableArray<UIView *> *stack = [NSMutableArray arrayWithArray:wins];
+    NSUInteger budget = 4000;
+    while (stack.count && budget--) {
+        UIView *v = stack.lastObject; [stack removeLastObject];
+        CALayer *m = v.layer.mask;
+        if (m && [m.name isEqualToString:kDIMaskLayerName]) {
+            CGSize sz = v.bounds.size;
+            if (!onlyLarge || MAX(sz.width, sz.height) > 80.0) {
+                diStripMaskFromCover(v);
+                RLog(@"[遮罩清扫] 摘除残留蒙版 %@ %.0fx%.0f (仅大层=%d)",
+                     NSStringFromClass(v.class), sz.width, sz.height, onlyLarge);
+            }
+        }
+        for (UIView *c in v.subviews) [stack addObject:c];
+    }
+}
+
 /* 2.7.26: 挂蒙版要挂哪些层。
 
    254 号日志铁证 ——
@@ -3222,6 +3270,14 @@ static void diStripMaskFromCover(UIView *cover) {
    父容器尺寸不能比封面大太多(大太多说明抓到的是整岛容器, 裁的范围就错了)。 */
 static NSArray<UIView *> *diMaskTargetsFor(UIView *cover) {
     if (!cover) return @[];
+    /* ===== 2.8.85: 绝对尺寸硬闸门 =====
+       332 反馈: 展开岛下方"偶尔还会显示"那块心形模糊底。根因与宿主形态判定无关 ——
+       只要某一帧 cover/parent 抓到了展开态的大背景(几百 pt), 它就会被裁成心形。
+       这里加一条和形态判定无关的死规则: 遮罩只挂在 ≤80pt 的小方块上,
+       超过 80pt 的视图(岛背景/模糊底/整块内容视图)一律不碰。
+       小岛专辑位 22~26pt、展开位 36~66pt 都在门内, 背景层全部在门外。 */
+    CGSize csz0 = cover.bounds.size;
+    if (MAX(csz0.width, csz0.height) > 80.0) return @[];
     NSMutableArray *out = [NSMutableArray array];
     UIView *pv = cover.superview;
     if (pv && pv.bounds.size.width > 6 && pv.bounds.size.height > 6) {
@@ -3240,7 +3296,9 @@ static NSArray<UIView *> *diMaskTargetsFor(UIView *cover) {
         CGFloat pw2 = pv.bounds.size.width, ph2 = pv.bounds.size.height;
         BOOL sizeOK = (pw2 <= cw * 2.5 && ph2 <= ch * 2.5);
         BOOL absOK  = (pw2 <= cw * 3.2 && ph2 <= ch * 3.2);
-        if (sizeOK || (ownContainer && absOK)) [out addObject:pv];
+        /* 2.8.85: 父层同样受 80pt 绝对上限约束 —— 心形底就是从这里漏出去的 */
+        BOOL smallOK = (MAX(pw2, ph2) <= 80.0);
+        if ((sizeOK || (ownContainer && absOK)) && smallOK) [out addObject:pv];
     }
     [out addObject:cover];
     return out;
@@ -3272,6 +3330,13 @@ static BOOL diApplyMaskToCover(UIView *cover, UIImage *shape) {
     if (!cover || !shape || !shape.CGImage) return NO;
     CALayer *target = cover.layer;
     if (!target) return NO;
+    /* 2.8.85: 最后一道闸 —— 超过 80pt 的层绝不挂遮罩; 已挂的立刻摘掉还原。
+       防止任何调用路径(旧缓存目标 / 展开动画中间帧)把背景裁成心形。 */
+    CGSize tsz = cover.bounds.size;
+    if (MAX(tsz.width, tsz.height) > 80.0) {
+        diStripMaskFromCover(cover);
+        return NO;
+    }
 
     /* 第一次挂之前把系统原来的 mask 存起来, 摘的时候原样还回去 */
     if (!objc_getAssociatedObject(cover, &kCoverOrigMaskKey) && target.mask &&
@@ -4653,7 +4718,10 @@ static void diExportMaskForMRU(void) {
             }
             NSDictionary *params = @{@"rot": @(maskRotateOn), @"rev": @(maskRotateReverse),
                                      @"speed": @(maskRotateSpeed), @"active": @(active),
-                                     @"mask": path.lastPathComponent ?: @""};
+                                     @"mask": path.lastPathComponent ?: @"",
+                                     /* 2.8.85: 展开定义 —— MRU 内的歌词/歌名位置与大小 */
+                                     @"etOn": @(expandTextOn), @"etX": @(expandTextX),
+                                     @"etY": @(expandTextY), @"etScale": @(expandTextScale)};
             [params writeToFile:[own stringByAppendingPathComponent:@"params.plist"] atomically:YES];
         }
         RLog(@"[遮罩导出] → MediaRemoteUI: 素材=%@ 文件=%@ 偏好=%lu字节 开关=%d 容器=%@ 容器写入=%@ 错误=%@",
@@ -10741,6 +10809,14 @@ static void visibilityTick(void) {
     refreshPrefs();
     static CFAbsoluteTime tMR; // CPU 优化: MediaRemote 查询 1秒一次(检测音乐停止够快)
     CFAbsoluteTime now = CFAbsoluteTimeGetCurrent();
+    /* 2.8.85: 残留遮罩清扫 —— 关着时全摘(2s), 开着时只摘大层(5s) */
+    {
+        static CFAbsoluteTime tSweep;
+        if (now - tSweep > ((enabled && maskOn) ? 5.0 : 2.0)) {
+            tSweep = now;
+            @try { diSweepMasks(enabled && maskOn); } @catch (__unused NSException *e) {}
+        }
+    }
     if (now - tMR > 1.0) { tMR = now; queryMusicPlaying(); }
     /* 音量轮询(2.2.5): 这台 16.2 上 AVSystemController 通知收不到(2.2.3/2.2.4 两次验证), 改为直接读系统音量。
        每 0.5s tick 读一次 outputVolume(纯属性读取, 不激活音频会话), 数值变化 = 按了音量键 → 开 6 秒拦截窗口 */
@@ -12533,6 +12609,179 @@ static void diActivityApply(UIView *artwork) {
     diMruReport(@"apply", [NSString stringWithFormat:@"%@ 旋转=%@", NSStringFromCGRect(box),
         rotOn ? [NSString stringWithFormat:@"%.0f°/s", speed] : @"关"]);
 }
+
+/* ===== 2.8.85: 展开定义 —— 展开岛的歌词/歌名位置与大小 =====
+   为什么在 MRU 进程做: 展开音乐岛(407x202)整块是 MediaRemoteUI 的远程视图,
+   SpringBoard 拿到的只有一块门户画面, 里面没有一个可操作的 UILabel。
+   参数走 SpringBoard 导出的 params.plist(etOn/etX/etY/etScale), 这里读到后
+   把控制器视图里的文字层统一做"整组缩放 + 平移":
+     · 以整组文字的并集中心为锚点缩放(字号一起变, 相对位置不变);
+     · 平移量就是设置页里的左右/上下偏移;
+     · 每层都记录原始 center/transform, 关掉开关立刻还原。 */
+typedef struct { BOOL on; CGFloat x, y, scale; } DIExpTextParams;
+static void diMruExpandTextParams(DIExpTextParams *p) {
+    static BOOL cOn; static CGFloat cX, cY, cScale = 100.0;
+    static CFAbsoluteTime last; static NSString *lastSig;
+    CFAbsoluteTime now = CFAbsoluteTimeGetCurrent();
+    if (last == 0 || now - last > 1.0) {
+        last = now;
+        NSString *path = [diMruSelfDir() stringByAppendingPathComponent:@"params.plist"];
+        NSDictionary *attr = [[NSFileManager defaultManager] attributesOfItemAtPath:path error:NULL];
+        NSString *sig = [NSString stringWithFormat:@"%@_%@", attr[NSFileModificationDate], attr[NSFileSize]];
+        if (![sig isEqual:lastSig]) {
+            lastSig = sig;
+            NSDictionary *d = [NSDictionary dictionaryWithContentsOfFile:path];
+            if ([d isKindOfClass:NSDictionary.class]) {
+                cOn = [d[@"etOn"] boolValue];
+                cX = [d[@"etX"] doubleValue];
+                cY = [d[@"etY"] doubleValue];
+                cScale = [d[@"etScale"] doubleValue];
+                if (cScale < 50) cScale = 50;
+                if (cScale > 200) cScale = 200;
+            }
+        }
+    }
+    p->on = cOn; p->x = cX; p->y = cY; p->scale = cScale / 100.0;
+}
+@interface DITextAnchor : NSObject
+@property (nonatomic) CGPoint center;              /* 原始中心(父视图坐标) */
+@property (nonatomic) CGAffineTransform transform; /* 原始 transform */
+@property (nonatomic, weak) UIView *superview;
+@end
+@implementation DITextAnchor @end
+static char kDITextAnchorKey;
+static NSHashTable<UIView *> *gDIActivityTexts;
+/* 时间戳(01:23 / -0:45)不是歌词, 不参与移动 */
+static BOOL diTextIsClock(NSString *t) {
+    if (!t.length) return NO;
+    static NSRegularExpression *re;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        re = [NSRegularExpression regularExpressionWithPattern:@"^\\s*-?\\d{1,2}:\\d{2}\\s*$"
+                                                       options:0 error:NULL];
+    });
+    return [re firstMatchInString:t options:0 range:NSMakeRange(0, t.length)] != nil;
+}
+static BOOL diTextHasLabelChild(UIView *v, int depth) {
+    if (depth < 0) return NO;
+    for (UIView *c in v.subviews) {
+        if ([c isKindOfClass:UILabel.class]) return YES;
+        if (diTextHasLabelChild(c, depth - 1)) return YES;
+    }
+    return NO;
+}
+static BOOL diTextIsCandidate(UIView *v, UIView *root) {
+    if (!v || v == root || v.hidden || v.alpha < 0.05 || !v.window) return NO;
+    CGSize s = v.bounds.size;
+    if (s.width < 16 || s.height < 8 || s.height > 60) return NO;
+    NSString *cn = NSStringFromClass(v.class);
+    BOOL isUILabel = [v isKindOfClass:UILabel.class];
+    BOOL nameLike = [cn containsString:@"Label"] || [cn containsString:@"Text"];
+    if (!isUILabel && !nameLike) return NO;
+    /* 自定义容器(标题+歌词的竖排栈)也收 —— 但必须真的装着文字, 否则可能误伤图标容器 */
+    if (!isUILabel && ![cn containsString:@"Label"] && !diTextHasLabelChild(v, 2)) return NO;
+    if (isUILabel && diTextIsClock(((UILabel *)v).text)) return NO;
+    return YES;
+}
+static void diActivityTextRestore(void) {
+    if (!gDIActivityTexts) return;
+    for (UIView *v in gDIActivityTexts.allObjects) {
+        DITextAnchor *a = objc_getAssociatedObject(v, &kDITextAnchorKey);
+        if (!a) continue;
+        v.transform = a.transform;
+        if (v.superview == a.superview) v.center = a.center;
+        objc_setAssociatedObject(v, &kDITextAnchorKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    }
+    [gDIActivityTexts removeAllObjects];
+}
+static void diActivityTextApply(UIView *root) {
+    if (!NSThread.isMainThread) return;
+    DIExpTextParams p; diMruExpandTextParams(&p);
+    if (!gDIActivityTexts) gDIActivityTexts = [NSHashTable weakObjectsHashTable];
+    if (!p.on || !root || !root.window
+        || root.bounds.size.width < 240 || root.bounds.size.height < 90) {
+        diActivityTextRestore();
+        return;
+    }
+    /* 收集文字层(最多 8 层/1200 节点, 展开岛层级很浅) */
+    NSMutableArray<UIView *> *cands = [NSMutableArray array];
+    NSMutableArray<UIView *> *stack = [NSMutableArray arrayWithObject:root];
+    NSUInteger budget = 1200;
+    while (stack.count && budget--) {
+        UIView *v = stack.lastObject; [stack removeLastObject];
+        if (v != root && diTextIsCandidate(v, root)) [cands addObject:v];
+        for (UIView *c in v.subviews) [stack addObject:c];
+    }
+    if (!cands.count) { diActivityTextRestore(); return; }
+    /* 祖先已经进候选的, 不再单独转(转父层就够, 避免重复缩放) */
+    NSMutableArray<UIView *> *targets = [NSMutableArray array];
+    for (UIView *v in cands) {
+        BOOL covered = NO;
+        for (UIView *a = v.superview; a && a != root; a = a.superview) {
+            if ([cands containsObject:a]) { covered = YES; break; }
+        }
+        if (!covered) [targets addObject:v];
+    }
+    if (!targets.count) { diActivityTextRestore(); return; }
+    /* 锚点 = 原始位置的并集中心(用记录值算, 重复调用不会漂移) */
+    CGRect u = CGRectNull;
+    for (UIView *v in targets) {
+        DITextAnchor *a = objc_getAssociatedObject(v, &kDITextAnchorKey);
+        UIView *sv = v.superview;
+        if (!sv) continue;
+        CGPoint c0 = a ? [sv convertPoint:a.center toView:root]
+                       : [sv convertPoint:v.center toView:root];
+        CGRect r = CGRectMake(c0.x - v.bounds.size.width * 0.5, c0.y - v.bounds.size.height * 0.5,
+                              v.bounds.size.width, v.bounds.size.height);
+        u = CGRectIsNull(u) ? r : CGRectUnion(u, r);
+    }
+    if (CGRectIsNull(u)) return;
+    CGPoint gc = CGPointMake(CGRectGetMidX(u), CGRectGetMidY(u));
+    CGFloat s = p.scale;
+    [gDIActivityTexts removeAllObjects];
+    NSMutableString *dump = [NSMutableString string];
+    for (UIView *v in targets) {
+        UIView *sv = v.superview;
+        if (!sv) continue;
+        DITextAnchor *a = objc_getAssociatedObject(v, &kDITextAnchorKey);
+        if (!a) {
+            a = [DITextAnchor new];
+            a.center = v.center;
+            a.transform = v.transform;
+            a.superview = sv;
+            objc_setAssociatedObject(v, &kDITextAnchorKey, a, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        }
+        CGPoint c0 = [sv convertPoint:a.center toView:root];
+        CGPoint nRoot = CGPointMake(gc.x + (c0.x - gc.x) * s + p.x,
+                                    gc.y + (c0.y - gc.y) * s + p.y);
+        CGPoint nCenter = [root convertPoint:nRoot toView:sv];
+        v.transform = CGAffineTransformMakeScale(s, s);
+        v.center = nCenter;
+        [gDIActivityTexts addObject:v];
+        [dump appendFormat:@"%@(%.0fx%.0f) ", NSStringFromClass(v.class),
+            v.bounds.size.width, v.bounds.size.height];
+    }
+    static NSString *lastDump;
+    if (![dump isEqualToString:lastDump]) {
+        lastDump = [dump copy];
+        diMruFileLog([NSString stringWithFormat:@"text 移动 %lu 层 偏移(%.0f,%.0f) 缩放 %.0f%% [%@]",
+            (unsigned long)targets.count, p.x, p.y, p.scale * 100, dump]);
+        diMruReport(@"text", [NSString stringWithFormat:@"n%lu_%.0f_%.0f_%.0f",
+            (unsigned long)targets.count, p.x, p.y, p.scale * 100]);
+    }
+}
+/* 2.8.85: 控制器每次布局后重新应用一次 —— 系统会重排标签, 只在定时器里改会被覆盖 */
+static IMP gDIActivityOrigTextLayout;
+static void diActivityTextLayout(id self, SEL cmd) {
+    if (gDIActivityOrigTextLayout) ((void (*)(id, SEL))gDIActivityOrigTextLayout)(self, cmd);
+    @try {
+        if ([self isKindOfClass:UIViewController.class]) {
+            UIViewController *vc = (UIViewController *)self;
+            if (vc.isViewLoaded) diActivityTextApply(vc.view);
+        }
+    } @catch (__unused NSException *e) {}
+}
+
 static void diActivityReload(void) {
     gDIActivityEnabled = diMruPrefOn();
     logEnabled = pBool(@"logging", NO);
@@ -12615,6 +12864,19 @@ static void diActivitySetImage(id self, SEL cmd, id img) {
 static void diActivityInstall(void) {
     static BOOL installed;
     if (installed) return;
+    /* 2.8.85: 展开定义 —— 文字 hook 独立安装(即使专辑类不在, 文字也要能摆)。
+       自己的静态标志防止重试时把 hook 套在自己身上。 */
+    static BOOL textHooked;
+    if (!textHooked) {
+        Class vcCls = NSClassFromString(@"MRUActivityNowPlayingViewController");
+        if (vcCls) {
+            SEL vcLayout = @selector(viewDidLayoutSubviews);
+            if (class_getInstanceMethod(vcCls, vcLayout)) {
+                MSHookMessageEx(vcCls, vcLayout, (IMP)diActivityTextLayout, &gDIActivityOrigTextLayout);
+                textHooked = YES;
+            }
+        }
+    }
     /* 2.8.82: 只 hook 一个类(按优先级取第一个存在的)。
        之前把三个类都挂到同一组 IMP 变量上 —— MSHookMessageEx 会覆盖同一个
        *result, 三个类同时存在时 orig 指向最后一个类, 转调就是错的/会递归。
@@ -12704,6 +12966,19 @@ static void diActivityScan(void) {
     }
     static CFAbsoluteTime lastReport;
     CFAbsoluteTime now = CFAbsoluteTimeGetCurrent();
+    /* 2.8.85: 展开定义兜底 —— layout hook 没装上/漏帧时, 每秒补一次 */
+    @try {
+        if (gDIActivityArtworks) {
+            for (UIView *art in gDIActivityArtworks.allObjects) {
+                UIViewController *vc = diActivityAncestorVC(art);
+                if (vc && vc.isViewLoaded
+                    && [NSStringFromClass(vc.class) containsString:@"NowPlaying"]) {
+                    diActivityTextApply(vc.view);
+                    break;
+                }
+            }
+        }
+    } @catch (__unused NSException *e) {}
     if (now - lastReport > 5.0) {
         lastReport = now;
         diMruPostPayload(@"hb", [NSString stringWithFormat:@"on%d_shape%d_win%lu_nodes%lu_match%lu_hit%d",
