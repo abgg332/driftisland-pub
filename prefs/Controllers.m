@@ -18,7 +18,7 @@
 
 static NSString *const kDomain = @"com.abgg332.driftisland";
 /* 2.6.25: 设置页底部显示的版本号 */
-static NSString *const DI_VERSION_STR = @"2.8.92";
+static NSString *const DI_VERSION_STR = @"2.8.93";
 /* 2.6.10: 专辑光晕遮罩 —— 与 Tweak 侧 DIAlbumMask.h 保持一致 */
 static NSString *const kDIAlbumMaskKey = @"diAlbumMaskAsset";
 static NSString *const kDIMaskRoot = @"/var/mobile/灵动岛/遮罩素材";
@@ -205,9 +205,25 @@ static void diOpenHomeBarPanelWindow(void);   /* 2.5.10 横条颜色面板 */
 static void diOpenHomeBarPickWindow(void);    /* 2.5.12 横条配色预设面板 */
 static void diCloseBarWindow(void);           /* 2.7.35: 前置声明(安全收掉横条颜色窗口) */
 static void diPushPanel(UIViewController *panel, NSString *title, UIWindow **legacyWin);  /* 2.8.36: 前置声明 */
-static void postReload(void) {
+/* 2.8.93: 通知合并(尾部去抖) —— 拖滑杆时每秒几十次写盘+通知, SpringBoard 那边
+   每条都跑一遍全量刷新, 主线程被堆满, 看门狗直接把 SpringBoard 干掉(表现为
+   "一拖左右就进安全模式")。这里 0.15s 内只放行第一条, 后续合并成"停下来再发一次",
+   保证松手后的最终值一定送达。 */
+static void diPostReloadRaw(void) {
     CFNotificationCenterPostNotification(CFNotificationCenterGetDarwinNotifyCenter(),
         (__bridge CFStringRef)kNotifyStr, NULL, NULL, YES);
+}
+static void postReload(void) {
+    static CFAbsoluteTime last; static BOOL queued;
+    if (!NSThread.isMainThread) { diPostReloadRaw(); return; }
+    CFAbsoluteTime now = CFAbsoluteTimeGetCurrent();
+    if (!queued && now - last >= 0.15) { last = now; diPostReloadRaw(); return; }
+    if (queued) return;
+    queued = YES;
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.16 * NSEC_PER_SEC)),
+                   dispatch_get_main_queue(), ^{
+        queued = NO; last = CFAbsoluteTimeGetCurrent(); diPostReloadRaw();
+    });
 }
 /* 2.2.11: 颜色变更通知(取色页/面板共用) —— Tweak 收到后 0.5s 内实时重绘, 主页刷新渐变条 */
 static void diColorChangedNotify(void) {
@@ -4510,9 +4526,10 @@ static void diOpenHomeBarPickWindow(void) {
     NSString *key = [spec propertyForKey:@"key"];
     if (!key.length) return;
     CFPreferencesSetAppValue((__bridge CFStringRef)key, (__bridge CFPropertyListRef)value, (__bridge CFStringRef)kDomain);
-    CFPreferencesAppSynchronize((__bridge CFStringRef)kDomain);
-    CFNotificationCenterPostNotification(CFNotificationCenterGetDarwinNotifyCenter(),
-        (__bridge CFStringRef)kNotifyStr, NULL, NULL, YES);
+    /* 2.8.93: 拖滑杆时这里每秒被调几十次 —— 以前每次都 synchronize + 直发通知,
+       写盘互锁 + SpringBoard 全量刷新叠在一起, 拖快就崩。SetAppValue 本身已经
+       递给 cfprefsd, 不需要每条都 fsync; 通知交给 postReload 合并。 */
+    postReload();
 }
 - (PSSpecifier *)groupSpec:(NSString *)header footer:(NSString *)footer {
     PSSpecifier *sp = [PSSpecifier preferenceSpecifierNamed:header target:nil
@@ -5162,6 +5179,8 @@ static void diOpenHomeBarPickWindow(void) {
     [specs addObject:[self numSlider:@"左右位置" key:@"expandTextX2" def:0 mn:-200 mx:200]];
     [specs addObject:[self numSlider:@"上下位置" key:@"expandTextY2" def:0 mn:-120 mx:120]];
     [specs addObject:[self numSlider:@"文字大小" key:@"expandTextScale" def:100 mn:50 mx:200]];
+    /* 2.8.93: 隐藏投送 —— 右下角那颗 AirPlay/输出按钮 */
+    [specs addObject:[self switchSpec:@"隐藏投送" key:@"hideRouteOn" def:@NO]];
     return specs;
 }
 @end

@@ -52,7 +52,8 @@ static NSString *maskAnimFolder;  // 遮罩素材文件夹(帧率素材下的子
    展开岛(407x202 的 Now Playing)整块由 MediaRemoteUI 远程渲染, SpringBoard 只能看到
    一块门户, 拿不到里面的文字视图。所以参数由 SpringBoard 侧写进 MRU 容器的
    params.plist, 由 MRU 进程内的文字调整器读取并应用(见 diActivityTextApply)。 */
-static BOOL expandTextOn = YES;       // 启用自定义(位置/大小)
+static BOOL expandTextOn = YES;       // 展开位置开关
+static BOOL hideRouteOn = NO;        /* 2.8.93: 隐藏投送(AirPlay)按钮 */
 /* 2.8.92: 基准落点 —— 用户自己调到满意的那一版就是 (120,45)。
    设置页的左右/上下现在是"相对这个基准"的增量, 滑杆默认 0 即这个位置, 左右 ±200。 */
 #define DI_EXP_TEXT_BASE_X 120.0
@@ -62,7 +63,7 @@ static double expandTextY = DI_EXP_TEXT_BASE_Y;   // 上下偏移(pt, 下为正,
 static double expandTextScale = 100.0; // 文字大小(%, 100=原样)
 /* 2.8.86: 构建戳 —— 之前横幅打的是 SpringBoard 自己的 CFBundleShortVersionString(恒 1.0),
    日志里根本看不出装的是哪一版。所有诊断行都带这个戳, 下轮日志一眼定位。 */
-#define DI_BUILD_VER @"2.8.92"
+#define DI_BUILD_VER @"2.8.93"
 static BOOL gRecordingActive = NO; // 保留: 岛素材总闸条件
 static NSString *diElementId(UIView *host);
 static BOOL diMiniMusicActive(UIView *host); // 2.6.3: 前置(遮罩层使用)
@@ -782,6 +783,7 @@ static void refreshPrefs(void) {
     if (expandTextY < DI_EXP_TEXT_BASE_Y - 120) expandTextY = DI_EXP_TEXT_BASE_Y - 120;
     if (expandTextY > DI_EXP_TEXT_BASE_Y + 120) expandTextY = DI_EXP_TEXT_BASE_Y + 120;
     if (expandTextScale < 50) expandTextScale = 50; if (expandTextScale > 200) expandTextScale = 200;
+    hideRouteOn = pBool(@"hideRouteOn", NO);      /* 2.8.93: 隐藏投送 */
     /* 2.5.7: 隐藏横条 / 渐隐模式 / 手势保护 */
     homeBarHideOn = pBool(@"homeBarHideOn", NO);
     homeBarHideMode = pBool(@"homeBarHideFade", NO) ? @"fade" : @"full";   /* 2.5.11: 子开关 */
@@ -4788,7 +4790,9 @@ static void diExportMaskForMRU(void) {
                                      @"mask": path.lastPathComponent ?: @"",
                                      /* 2.8.85: 展开定义 —— MRU 内的歌词/歌名位置与大小 */
                                      @"etOn": @(expandTextOn), @"etX": @(expandTextX),
-                                     @"etY": @(expandTextY), @"etScale": @(expandTextScale)};
+                                     @"etY": @(expandTextY), @"etScale": @(expandTextScale),
+                                     /* 2.8.93: 隐藏投送按钮 */
+                                     @"hideRoute": @(hideRouteOn)};
             [params writeToFile:[own stringByAppendingPathComponent:@"params.plist"] atomically:YES];
         }
         RLog(@"[遮罩导出] → MediaRemoteUI: 素材=%@ 文件=%@ 偏好=%lu字节 开关=%d 容器=%@ 容器写入=%@ 错误=%@",
@@ -4796,6 +4800,25 @@ static void diExportMaskForMRU(void) {
              (unsigned long)b64.length, active, own.length ? own : @"(找不到MRU容器)",
              ownOK ? @"OK" : @"FAIL", err.localizedDescription ?: @"无");
     }
+}
+
+/* 2.8.93: 导出合并 —— 拖滑杆时每秒几十次偏好变更, 每次都整包导一遍
+   (读图 + 写两个容器 + base64 塞进 CFPreferences), 几十个任务并发跑会把
+   cfprefsd 顶死, 主线程跟着卡 → 看门狗杀 SpringBoard(用户看到"一拖就进安全模式")。
+   现在改成串行队列 + 尾部去抖: 一轮拖动只在停下来 0.25s 后导一次。 */
+static NSInteger gDIMaskExportGen;
+static dispatch_queue_t diMaskExportQueue(void) {
+    static dispatch_queue_t q; static dispatch_once_t once;
+    dispatch_once(&once, ^{ q = dispatch_queue_create("com.abgg332.di.maskexport", DISPATCH_QUEUE_SERIAL); });
+    return q;
+}
+static void diExportMaskSoon(void) {
+    NSInteger gen = ++gDIMaskExportGen;
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.25 * NSEC_PER_SEC)),
+                   diMaskExportQueue(), ^{
+        if (gen != gDIMaskExportGen) return;   /* 后面还有更新的请求, 这次作废 */
+        diExportMaskForMRU();
+    });
 }
 
 /* 通过 MediaRemote 拿当前专辑封面 —— 裁图失败时的兜底, 保证"一定有一张专辑图" */
@@ -11053,25 +11076,23 @@ static void lockStateChanged(CFNotificationCenterRef, void *, CFStringRef, const
     });
 }
 
-static void prefsChanged(CFNotificationCenterRef, void *, CFStringRef, const void *, CFDictionaryRef) {
-    gFramesDirty = YES; // 偏好变更(可能换了素材文件夹): 立即重扫
-    gMaskGen++;         // 2.6.12: 让遮罩重新读图(设置页刚换了素材)
-    /* 2.8.78: 换素材/改开关后立即把新素材导出给 MediaRemoteUI(展开岛真实专辑用) */
-    dispatch_async(dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{ diExportMaskForMRU(); });
-            dispatch_async(dispatch_get_main_queue(), ^{
-                NSInteger oldBlur = wpBlur; BOOL oldLoop = wpLoopOn;
-                refreshAll(); installKnownHosts();
-                /* 2.8.82: refreshAll 之后必须再导一次 —— 上面那次拿到的旋转参数还是上一轮的 */
-                dispatch_async(dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{ diExportMaskForMRU(); });
-                /* 2.8.41: 控制中心恢复 —— 开关打开时补装 overlay hook(dispatch_once 保证幂等) */
-                if (wpOn) diCCInstallOverlayHook();
-                /* 2.7.32: 控制中心开关(循环播放 / 背景模糊 / 启用 / 声音)改了 → 立刻生效。
-                   模糊值变了必须强制重建, 否则会走"同路径"廉价出口, 图还是原来那张不糊的。 */
-                if (oldBlur != wpBlur || oldLoop != wpLoopOn) {
-                    gCCPath = nil;
-                    if (!oldLoop && wpLoopOn) gCCLoopIdx = 0;
-                }
-                diCCReloadSurface();
+static BOOL gDIPrefsRefreshPending;
+static void diPrefsRefreshNow(void) {
+    gDIPrefsRefreshPending = NO;
+    /* 2.8.93: 整段兜底 —— 以前这里任何一步抛异常都会把 SpringBoard 直接带走(安全模式) */
+    @try {
+        NSInteger oldBlur = wpBlur; BOOL oldLoop = wpLoopOn;
+        refreshAll(); installKnownHosts();
+        diExportMaskSoon();
+        /* 2.8.41: 控制中心恢复 —— 开关打开时补装 overlay hook(dispatch_once 保证幂等) */
+        if (wpOn) diCCInstallOverlayHook();
+        /* 2.7.32: 控制中心开关(循环播放 / 背景模糊 / 启用 / 声音)改了 → 立刻生效。
+           模糊值变了必须强制重建, 否则会走"同路径"廉价出口, 图还是原来那张不糊的。 */
+        if (oldBlur != wpBlur || oldLoop != wpLoopOn) {
+            gCCPath = nil;
+            if (!oldLoop && wpLoopOn) gCCLoopIdx = 0;
+        }
+        diCCReloadSurface();
         /* 2.2.10: 锁屏通知宽度变更后立即重排(不必等下次通知弹出) */
         if (lockWOn) {
             for (UIScene *s in UIApplication.sharedApplication.connectedScenes)
@@ -11079,10 +11100,23 @@ static void prefsChanged(CFNotificationCenterRef, void *, CFStringRef, const voi
                     for (UIWindow *w in ((UIWindowScene *)s).windows)
                         for (UIView *v in w.subviews) [v setNeedsLayout];
         }
-        /* 2.8.8: 发光开关/半径/颜色变更 → 立即重绘所有锁屏卡片(不必等 1 秒自愈;
-           关开关时也要走, 把已有的光晕清掉) */
+        /* 2.8.8: 发光开关/半径/颜色变更 → 立即重绘所有锁屏卡片 */
         diRestyleAllLockPlatters();
-    });
+    } @catch (NSException *e) {
+        RLog(@"偏好刷新异常(已吞): %@ — %@", e.name, e.reason);
+    }
+}
+static void prefsChanged(CFNotificationCenterRef, void *, CFStringRef, const void *, CFDictionaryRef) {
+    gFramesDirty = YES; // 偏好变更(可能换了素材文件夹): 立即重扫
+    gMaskGen++;         // 2.6.12: 让遮罩重新读图(设置页刚换了素材)
+    diExportMaskSoon();
+    /* 2.8.93: 一次拖动会连着来几十条通知, 以前每条都跑一遍全量刷新
+       (全窗口走树 + 重建壁纸/视频层 + 重绘所有锁屏卡片) → 主线程堆死 → 安全模式。
+       现在 0.18s 内只认一次, 停下来再刷; 开关/换素材的即时性不受影响。 */
+    if (gDIPrefsRefreshPending) return;
+    gDIPrefsRefreshPending = YES;
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.18 * NSEC_PER_SEC)),
+                   dispatch_get_main_queue(), ^{ diPrefsRefreshNow(); });
 }
 
 /* 2.2.11: 颜色变更(取色页/面板/预览按钮) 通知 —— 立即刷新色表并重绘岛上文字 */
@@ -12713,9 +12747,9 @@ static void diActivityApply(UIView *artwork) {
      · 以整组文字的并集中心为锚点缩放(字号一起变, 相对位置不变);
      · 平移量就是设置页里的左右/上下偏移;
      · 每层都记录原始 center/transform, 关掉开关立刻还原。 */
-typedef struct { BOOL on; CGFloat x, y, scale; } DIExpTextParams;
+typedef struct { BOOL on; CGFloat x, y, scale; BOOL hideRoute; } DIExpTextParams;
 static void diMruExpandTextParams(DIExpTextParams *p) {
-    static BOOL cOn; static CGFloat cX, cY, cScale = 100.0;
+    static BOOL cOn; static CGFloat cX, cY, cScale = 100.0; static BOOL cHide;
     static CFAbsoluteTime last; static NSString *lastSig;
     CFAbsoluteTime now = CFAbsoluteTimeGetCurrent();
     if (last == 0 || now - last > 1.0) {
@@ -12731,12 +12765,14 @@ static void diMruExpandTextParams(DIExpTextParams *p) {
                 cX = [d[@"etX"] doubleValue];
                 cY = [d[@"etY"] doubleValue];
                 cScale = [d[@"etScale"] doubleValue];
+                cHide = [d[@"hideRoute"] boolValue];
                 if (cScale < 50) cScale = 50;
                 if (cScale > 200) cScale = 200;
             }
         }
     }
     p->on = cOn; p->x = cX; p->y = cY; p->scale = cScale / 100.0;
+    p->hideRoute = cHide;
 }
 /* 2.8.87: 不再记录 center —— 位置改成"以系统布局的左上角为锚点"换算进 transform,
    这样每次布局都从系统原值重算, 不会越积越偏, 也不会因为头部宽度变了而整体漂移。 */
@@ -12825,6 +12861,99 @@ static void diActivityTextColorRestore(void) {
         objc_setAssociatedObject(lb, &kDIExpTextOrigKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
     }
     [gDIExpColored removeAllObjects];
+}
+/* ===== 2.8.93: 隐藏投送(AirPlay / 输出设备)按钮 =====
+   用户圈的是展开岛右下角那颗投送按钮。它和歌词一样活在 MediaRemoteUI 的远程内容里,
+   SpringBoard 侧只有一块门户画面, 拿不到按钮, 所以在 MRU 进程里做:
+   找到那颗按钮直接 hidden —— 它一透明, 底下自绘的视频/背景层就整块露出来,
+   视觉上等于给那一块单贴了一层。关掉开关按原状恢复(记着原来是不是已经隐藏过)。 */
+static NSHashTable<UIView *> *gDIRouteViews;
+static char kDIRouteOrigHidden;
+static BOOL diRouteNameHit(UIView *v) {
+    NSString *cn = NSStringFromClass(v.class).lowercaseString;
+    NSString *lab = v.accessibilityLabel.lowercaseString ?: @"";
+    BOOL nameYes = ([cn containsString:@"route"] || [cn containsString:@"airplay"]
+                    || [cn containsString:@"airtunes"] || [cn containsString:@"outputdevice"]
+                    || [lab containsString:@"airplay"] || [lab containsString:@"route"]
+                    || [lab containsString:@"投送"] || [lab containsString:@"输出"]);
+    if (!nameYes) return NO;
+    CGSize sz = v.bounds.size;
+    /* 只认"按钮大小"的 —— 免得把整行容器/标题一起藏了 */
+    if (sz.width > 0 && sz.height > 0 && (sz.width > 90 || sz.height > 90)) return NO;
+    return YES;
+}
+static void diActivityHideRoute(UIView *root) {
+    if (!NSThread.isMainThread || !root || !root.window) return;
+    DIExpTextParams p; diMruExpandTextParams(&p);
+    if (!gDIRouteViews) gDIRouteViews = [NSHashTable weakObjectsHashTable];
+    if (!p.hideRoute) {
+        if (gDIRouteViews.count) {
+            for (UIView *v in gDIRouteViews.allObjects) {
+                id o = objc_getAssociatedObject(v, &kDIRouteOrigHidden);
+                v.hidden = o ? [o boolValue] : NO;
+            }
+            [gDIRouteViews removeAllObjects];
+            diMruFileLog(@"route 恢复(开关=关)");
+        }
+        return;
+    }
+    /* 已经藏好了就别每帧重扫(展开动画里 layout 会连续触发) */
+    if (gDIRouteViews.count) {
+        BOOL alive = YES;
+        for (UIView *v in gDIRouteViews.allObjects) if (!v.window) { alive = NO; break; }
+        if (alive) return;
+        for (UIView *v in gDIRouteViews.allObjects) v.hidden = NO;
+        [gDIRouteViews removeAllObjects];
+    }
+    CGFloat W = root.bounds.size.width, H = root.bounds.size.height;
+    if (W < 200 || H < 90) return;      /* 小岛/展开动画前段不动 */
+    UIView *hit = nil;
+    NSMutableArray<UIView *> *stack = [NSMutableArray arrayWithObject:root];
+    NSUInteger budget = 1200;
+    NSMutableString *dump = [NSMutableString string];
+    while (stack.count && budget--) {
+        UIView *v = stack.lastObject; [stack removeLastObject];
+        if (v != root) {
+            CGPoint c = [v.superview convertPoint:v.center toView:root];
+            CGSize sz = v.bounds.size;
+            if (diRouteNameHit(v)) {
+                hit = v;
+                [dump appendFormat:@"名 %@(%.0fx%.0f@%.0f,%.0f) ", NSStringFromClass(v.class),
+                    sz.width, sz.height, c.x, c.y];
+                break;
+            }
+            /* 兜底: 右下角那颗 20~80pt 的按钮(实测投送在 78%~88% 宽度上, 下一首在 ~70%) */
+            if (!hit && c.x > W * 0.73 && c.y > H * 0.52
+                && sz.width >= 20 && sz.height >= 20 && sz.width <= 80 && sz.height <= 80
+                && ([v isKindOfClass:UIControl.class]
+                    || [NSStringFromClass(v.class) containsString:@"Button"])) {
+                hit = v;
+                [dump appendFormat:@"位 %@(%.0fx%.0f@%.0f,%.0f) ", NSStringFromClass(v.class),
+                    sz.width, sz.height, c.x, c.y];
+            }
+        }
+        for (UIView *c in v.subviews) [stack addObject:c];
+    }
+    static NSString *lastSig; static CFAbsoluteTime lastT;
+    CFAbsoluteTime now = CFAbsoluteTimeGetCurrent();
+    if (!hit) {
+        if (now - lastT > 10.0) {
+            lastT = now;
+            diMruFileLog([NSString stringWithFormat:@"route 未找到按钮 (root %.0fx%.0f)", W, H]);
+        }
+        return;
+    }
+    if (![gDIRouteViews containsObject:hit]) {
+        objc_setAssociatedObject(hit, &kDIRouteOrigHidden, @(hit.hidden), OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        [gDIRouteViews addObject:hit];
+    }
+    hit.hidden = YES;
+    NSString *sig = [NSString stringWithFormat:@"%p_%@", (__bridge void *)hit, dump];
+    if (![sig isEqualToString:lastSig]) {
+        lastSig = [sig copy];
+        diMruFileLog([NSString stringWithFormat:@"route 隐藏 %@ (root %.0fx%.0f) %@",
+            NSStringFromClass(hit.class), W, H, dump]);
+    }
 }
 static void diActivityTextApply(UIView *root) {
     if (!NSThread.isMainThread) return;
@@ -12984,7 +13113,10 @@ static void diActivityTextLayout(id self, SEL cmd) {
     @try {
         if ([self isKindOfClass:UIViewController.class]) {
             UIViewController *vc = (UIViewController *)self;
-            if (vc.isViewLoaded) diActivityTextApply(vc.view);
+            if (vc.isViewLoaded) {
+                diActivityHideRoute(vc.view);
+                diActivityTextApply(vc.view);
+            }
         }
     } @catch (__unused NSException *e) {}
 }
@@ -13198,6 +13330,7 @@ static void diActivityScan(void) {
                 UIViewController *vc = diActivityAncestorVC(art);
                 if (vc && vc.isViewLoaded
                     && [NSStringFromClass(vc.class) containsString:@"NowPlaying"]) {
+                    diActivityHideRoute(vc.view);
                     diActivityTextApply(vc.view);
                     break;
                 }
