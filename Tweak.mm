@@ -11995,6 +11995,7 @@ static void diHookHomeBarGrabberRetry(void) { diHookHomeGrabber(); }
 static char kDIActivityMaskState;
 static NSHashTable<UIView *> *gDIActivityArtworks;
 static UIImage *gDIActivityShape;
+static Class gDIActivityClass;   /* 2.8.80: 扫描器认类用 */
 static BOOL gDIActivityEnabled;
 static int gDIActivityHit;   /* 2.8.79: 成功接管次数, 0 说明整条链路没走到 */
 static IMP gDIActivityOrigLayout, gDIActivityOrigMove, gDIActivityOrigVisibility, gDIActivityOrigInit;
@@ -12316,6 +12317,8 @@ static void diActivityInstall(void) {
     static BOOL installed;
     if (installed) return;
     Class cls = NSClassFromString(@"MRUActivityArtworkView");
+    gDIActivityClass = cls;   /* 2.8.80: 扫描器认类用, 与 hook 成败无关 */
+    diMruPostPayload(@"install.begin", cls ? NSStringFromClass(cls) : @"nil");
     if (!cls || ![cls isSubclassOfClass:UIView.class]) {
         diMruReport(@"noclass", @"MRUActivityArtworkView 不存在");
         return;
@@ -12334,6 +12337,9 @@ static void diActivityInstall(void) {
     if (diActivityObjectMethod(cls, initSel)) MSHookMessageEx(cls, initSel, (IMP)diActivityInit, &gDIActivityOrigInit);
     installed = YES;
     RLog(@"[真实专辑遮罩] 已安装 MediaRemoteUI / MRUActivityArtworkView.maskView");
+    diMruPostPayload(@"install.end", [NSString stringWithFormat:@"layout%d_move%d_vis%d_init%d",
+        (int)(gDIActivityOrigLayout != NULL), (int)(gDIActivityOrigMove != NULL),
+        (int)(gDIActivityOrigVisibility != NULL), (int)(gDIActivityOrigInit != NULL)]);
     diMruReport(@"install", [NSString stringWithFormat:@"类=%@ 上下文类=%@ init=%@",
         NSStringFromClass(cls), NSClassFromString(@"MRUActivityNowPlayingViewController") ? @"有" : @"无",
         gDIActivityOrigInit ? @"已挂" : @"未挂"]);
@@ -12350,9 +12356,72 @@ static void diActivityInstall(void) {
         }
     }
 }
+/* ===== 2.8.80: 不依赖 hook 的兜底通道 =====
+   326 日志给出的结论: MediaRemoteUI **确实注入了**(收到了它发来的 reload 回传),
+   但既没有 install 回传、也没有任何 apply —— 卡在"装 hook"这一环, 而不是素材/开关。
+   于是补一条完全不依赖 hook 的路径: 定时扫本进程的窗口树, 按类名 + 尺寸认专辑视图,
+   认到就直接挂 maskView。hook 装得上就更快, 装不上也照样裁。
+   顺带把"扫到几个窗口/多少节点/命中几次"回传, 下一次日志能直接看到扫没扫到。 */
+static NSTimer *gDIActivityScanTimer;
+static void diActivityScanTree(UIView *root, NSUInteger *nodes) {
+    NSMutableArray<UIView *> *stack = [NSMutableArray arrayWithObject:root];
+    NSUInteger budget = 2500;
+    while (stack.count && budget--) {
+        UIView *view = stack.lastObject; [stack removeLastObject];
+        (*nodes)++;
+        NSString *cn = NSStringFromClass(view.class);
+        BOOL match = gDIActivityClass ? [view isKindOfClass:gDIActivityClass]
+            : ([cn containsString:@"ActivityArtwork"] || [cn containsString:@"Artwork"]);
+        if (match && view.bounds.size.width >= 30 && view.bounds.size.height >= 30) {
+            diActivityRegister(view);   /* 里面会再走一遍上下文校验并挂 mask */
+        }
+        for (UIView *child in view.subviews) [stack addObject:child];
+    }
+}
+static void diActivityScan(void) {
+    if (!gDIActivityEnabled || !gDIActivityShape) return;
+    NSMutableArray<UIWindow *> *wins = [NSMutableArray array];
+    @try {
+        UIApplication *app = UIApplication.sharedApplication;
+        for (UIScene *scene in app.connectedScenes) {
+            if ([scene isKindOfClass:UIWindowScene.class]) [wins addObjectsFromArray:((UIWindowScene *)scene).windows];
+        }
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wdeprecated-declarations"
+        [wins addObjectsFromArray:app.windows];
+#pragma clang diagnostic pop
+    } @catch (__unused NSException *e) {}
+    NSUInteger nodes = 0;
+    for (UIWindow *w in wins) diActivityScanTree(w, &nodes);
+    /* 每 4 秒报一次扫描现场: 窗口数=0 或 节点数=0 就说明扫错了地方 */
+    static CFAbsoluteTime lastReport;
+    CFAbsoluteTime now = CFAbsoluteTimeGetCurrent();
+    if (now - lastReport > 4.0) {
+        lastReport = now;
+        diMruPostPayload(@"scan", [NSString stringWithFormat:@"win%lu_nodes%lu_hit%d",
+            (unsigned long)wins.count, (unsigned long)nodes, gDIActivityHit]);
+    }
+}
+static void diActivityStartScanner(void) {
+    static BOOL started;
+    if (started) return;
+    started = YES;
+    gDIActivityScanTimer = [NSTimer timerWithTimeInterval:1.0 repeats:YES block:^(NSTimer *t) {
+        @try { diActivityScan(); } @catch (__unused NSException *e) {}
+    }];
+    [NSRunLoop.mainRunLoop addTimer:gDIActivityScanTimer forMode:NSRunLoopCommonModes];
+}
 static void diActivityStart(void) {
     dispatch_async(dispatch_get_main_queue(), ^{
-        diActivityReload(); diActivityInstall();
+        diMruPostPayload(@"start", @"enter");
+        @try { diActivityReload(); } @catch (__unused NSException *e) {
+            diMruPostPayload(@"err.reload", e.reason ?: e.name);
+        }
+        @try { diActivityInstall(); } @catch (__unused NSException *e) {
+            diMruPostPayload(@"err.install", e.reason ?: e.name);
+        }
+        diActivityStartScanner();
+        diMruPostPayload(@"start", [NSString stringWithFormat:@"done_hook%d", (int)(gDIActivityOrigLayout != NULL)]);
         for (NSString *notification in @[kNotifyStr, @"com.abgg332.driftisland/prefsChanged"]) {
             CFNotificationCenterAddObserver(CFNotificationCenterGetDarwinNotifyCenter(), NULL,
                 diActivityNotify, (__bridge CFStringRef)notification, NULL, CFNotificationSuspensionBehaviorDeliverImmediately);
@@ -12440,6 +12509,8 @@ __attribute__((constructor)) static void init(void) {
         NSString *process = NSProcessInfo.processInfo.processName;
         NSString *bundle = NSBundle.mainBundle.bundleIdentifier.lowercaseString;
         if ([bundle isEqualToString:@"com.apple.mediaremoteui"] || [process isEqualToString:@"MediaRemoteUI"]) {
+            /* 2.8.80: 进进程第一件事就回传 —— 之前的日志只能看到 reload, 无法确认构造器是否跑完 */
+            diMruPostPayload(@"boot", [NSString stringWithFormat:@"%@_%@", process ?: @"?", bundle ?: @"?"]);
             diActivityStart();
             return;
         }
