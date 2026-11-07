@@ -18,7 +18,7 @@
 
 static NSString *const kDomain = @"com.abgg332.driftisland";
 /* 2.6.25: 设置页底部显示的版本号 */
-static NSString *const DI_VERSION_STR = @"2.8.91";
+static NSString *const DI_VERSION_STR = @"2.8.92";
 /* 2.6.10: 专辑光晕遮罩 —— 与 Tweak 侧 DIAlbumMask.h 保持一致 */
 static NSString *const kDIAlbumMaskKey = @"diAlbumMaskAsset";
 static NSString *const kDIMaskRoot = @"/var/mobile/灵动岛/遮罩素材";
@@ -1414,7 +1414,7 @@ static void diWriteColors(NSArray<NSString *> *colors) {
         DI_ADD([self linkSpec:@"专辑遮罩" detail:[DILyricsIslandSettings class]]);
         /* 2.8.88: 展开定义 —— 按用户要求做成独立入口, 就放在「专辑遮罩」下面;
            页内上面是帧率, 下面是展开岛的歌词/歌名位置与大小 */
-        DI_ADD([self linkSpec:@"展开定义" detail:[DIExpandDefinePage class]]);
+        DI_ADD([self linkSpec:@"歌词位置" detail:[DIExpandDefinePage class]]);
         /* 2.8.41: 控制中心入口回归 */
         DI_ADD([self linkSpec:@"控制中心" detail:[DICCSettings class]]);
 
@@ -5112,7 +5112,7 @@ static void diOpenHomeBarPickWindow(void) {
         target:self set:NULL get:@selector(readAlbumMaskName:) detail:[DIMaskPicker class] cell:PSLinkCell edit:nil];
     [specs addObject:maskRow];
     /* 2.8.87: 展开定义 —— 按用户要求放在"遮罩素材"下面, 点进去是独立一页 */
-    [specs addObject:[self linkSpec:@"展开定义" detail:[DIExpandDefinePage class]]];
+    [specs addObject:[self linkSpec:@"歌词位置" detail:[DIExpandDefinePage class]]];
     /* 2.8.16: 遮罩尺寸可调 —— 用户反馈"加遮罩后专辑大了一点点, 边上被裁剪" */
     /* 2.8.41: 遮罩大小新刻度 —— 旧设定 115 为基准 100, 范围 50~150 */
     [specs addObject:[self numSlider:@"遮罩大小" key:@"diAlbumMaskScale2" def:100 mn:50 mx:150]];
@@ -5144,7 +5144,7 @@ static void diOpenHomeBarPickWindow(void) {
 - (NSArray *)buildSpecifiers {
     NSMutableArray *specs = [NSMutableArray array];
     /* ---- 上: 帧率 ---- */
-    [specs addObject:[self groupSpec:@"帧率" footer:@"与主页「帧率」组是同一套设置, 在哪边改都会同步。"]];
+    [specs addObject:[self groupSpec:@"帧率" footer:nil]];
     [specs addObject:[self switchSpec:@"音频开关" key:@"spectrumOn" def:@NO]];
     [specs addObject:[self switchSpec:@"帧率开关" key:@"materialOn" def:@YES]];
     [specs addObject:[self numSlider:@"帧率速度" key:@"animFPS" def:50 mn:10 mx:200]];
@@ -5154,11 +5154,13 @@ static void diOpenHomeBarPickWindow(void) {
     PSSpecifier *animSet = [PSSpecifier preferenceSpecifierNamed:@"素材名称" target:self
         set:NULL get:@selector(readFrameName:) detail:[DIFrameFolders class] cell:PSLinkCell edit:nil];
     [specs addObject:animSet];
-    /* ---- 下: 展开定义 ---- */
-    [specs addObject:[self groupSpec:@"展开定义" footer:@"只作用于展开后的音乐岛: 歌名/歌词整块按这里设的大小与位置摆放, 颜色保持系统原样。"]];
-    [specs addObject:[self switchSpec:@"启用自定义" key:@"expandTextOn" def:@YES]];
-    [specs addObject:[self numSlider:@"左右位置" key:@"expandTextX" def:0 mn:-120 mx:120]];
-    [specs addObject:[self numSlider:@"上下位置" key:@"expandTextY" def:0 mn:-120 mx:120]];
+    /* ---- 下: 歌词位置 ---- */
+    /* 2.8.92: 去掉说明文字; 左右/上下改成为"相对基准落点"的增量, 默认 0 就是
+       用户自己调好的那个位置(120,45), 左右范围放宽到 ±200 */
+    [specs addObject:[self groupSpec:@"歌词位置" footer:nil]];
+    [specs addObject:[self switchSpec:@"开启位置" key:@"expandTextOn" def:@YES]];
+    [specs addObject:[self numSlider:@"左右位置" key:@"expandTextX2" def:0 mn:-200 mx:200]];
+    [specs addObject:[self numSlider:@"上下位置" key:@"expandTextY2" def:0 mn:-120 mx:120]];
     [specs addObject:[self numSlider:@"文字大小" key:@"expandTextScale" def:100 mn:50 mx:200]];
     return specs;
 }

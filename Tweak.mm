@@ -53,12 +53,16 @@ static NSString *maskAnimFolder;  // 遮罩素材文件夹(帧率素材下的子
    一块门户, 拿不到里面的文字视图。所以参数由 SpringBoard 侧写进 MRU 容器的
    params.plist, 由 MRU 进程内的文字调整器读取并应用(见 diActivityTextApply)。 */
 static BOOL expandTextOn = YES;       // 启用自定义(位置/大小)
-static double expandTextX = 0.0;      // 左右偏移(pt, 右为正)
-static double expandTextY = 0.0;      // 上下偏移(pt, 下为正)
+/* 2.8.92: 基准落点 —— 用户自己调到满意的那一版就是 (120,45)。
+   设置页的左右/上下现在是"相对这个基准"的增量, 滑杆默认 0 即这个位置, 左右 ±200。 */
+#define DI_EXP_TEXT_BASE_X 120.0
+#define DI_EXP_TEXT_BASE_Y 45.0
+static double expandTextX = DI_EXP_TEXT_BASE_X;   // 左右偏移(pt, 右为正, 含基准)
+static double expandTextY = DI_EXP_TEXT_BASE_Y;   // 上下偏移(pt, 下为正, 含基准)
 static double expandTextScale = 100.0; // 文字大小(%, 100=原样)
 /* 2.8.86: 构建戳 —— 之前横幅打的是 SpringBoard 自己的 CFBundleShortVersionString(恒 1.0),
    日志里根本看不出装的是哪一版。所有诊断行都带这个戳, 下轮日志一眼定位。 */
-#define DI_BUILD_VER @"2.8.91"
+#define DI_BUILD_VER @"2.8.92"
 static BOOL gRecordingActive = NO; // 保留: 岛素材总闸条件
 static NSString *diElementId(UIView *host);
 static BOOL diMiniMusicActive(UIView *host); // 2.6.3: 前置(遮罩层使用)
@@ -768,11 +772,15 @@ static void refreshPrefs(void) {
     maskAnimFolder = pString(@"maskAnimFolder");
     /* 2.8.85: 展开定义(展开岛歌词/歌名的位置与大小) */
     expandTextOn = pBool(@"expandTextOn", YES);   /* 2.8.86: 默认开, 0/100% 时无任何视觉变化 */
-    expandTextX = pDouble(@"expandTextX", 0.0);
-    expandTextY = pDouble(@"expandTextY", 0.0);
+    /* 2.8.92: 键换成 X2/Y2(含义是相对基准的增量) —— 老键里存的是 120/45 绝对值,
+       直接沿用会变成 120+120; 新键缺省 0, 正好落在用户调好的那个位置。 */
+    expandTextX = DI_EXP_TEXT_BASE_X + pDouble(@"expandTextX2", 0.0);
+    expandTextY = DI_EXP_TEXT_BASE_Y + pDouble(@"expandTextY2", 0.0);
     expandTextScale = pDouble(@"expandTextScale", 100.0);
-    if (expandTextX < -120) expandTextX = -120; if (expandTextX > 120) expandTextX = 120;
-    if (expandTextY < -120) expandTextY = -120; if (expandTextY > 120) expandTextY = 120;
+    if (expandTextX < DI_EXP_TEXT_BASE_X - 200) expandTextX = DI_EXP_TEXT_BASE_X - 200;
+    if (expandTextX > DI_EXP_TEXT_BASE_X + 200) expandTextX = DI_EXP_TEXT_BASE_X + 200;
+    if (expandTextY < DI_EXP_TEXT_BASE_Y - 120) expandTextY = DI_EXP_TEXT_BASE_Y - 120;
+    if (expandTextY > DI_EXP_TEXT_BASE_Y + 120) expandTextY = DI_EXP_TEXT_BASE_Y + 120;
     if (expandTextScale < 50) expandTextScale = 50; if (expandTextScale > 200) expandTextScale = 200;
     /* 2.5.7: 隐藏横条 / 渐隐模式 / 手势保护 */
     homeBarHideOn = pBool(@"homeBarHideOn", NO);
