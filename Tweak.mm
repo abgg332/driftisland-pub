@@ -12062,6 +12062,19 @@ static void diHookHomeBarGrabberRetry(void) { diHookHomeGrabber(); }
 @property(nonatomic,strong) UIImageView *glassMask;
 @property(nonatomic,weak) CALayer *systemLayer;
 @property(nonatomic,assign) BOOL systemLayerHidden;
+/* ===== 2.8.83: 把系统那张专辑"彻底"藏掉 =====
+   329 反馈: "有旋转有遮罩了, 但是还有个底的遮罩显示, 重复了; 下面还有个蒙版, 多余的"。
+   日志实锤: `glass 创建 ... 系统层=无` —— MRUActivityArtworkView 没有 artworkLayer,
+   2.8.82 的隐藏完全没生效, 系统原图(圆角方块)就一直留在我们玻璃底下,
+   于是同一张头像被画了两遍。这里改成逐子视图隐藏 + 清系统 mask/圆角,
+   teardown 时按原值全部还原(不动功能, 只动显示)。 */
+@property(nonatomic,strong) NSMutableArray<UIView *> *hiddenViews;
+@property(nonatomic,strong) NSMutableArray<NSNumber *> *hiddenStates;
+@property(nonatomic,assign) BOOL maskSaved;
+@property(nonatomic,strong) UIView *savedMaskView;
+@property(nonatomic,strong) CALayer *savedLayerMask;
+@property(nonatomic,assign) BOOL savedClips;
+@property(nonatomic,assign) CGFloat savedCorner;
 @property(nonatomic,strong) UIImage *lastArt;
 @property(nonatomic,assign) CGFloat spinSpeed;
 @property(nonatomic,assign) BOOL spinRev;
@@ -12316,8 +12329,56 @@ static void diActivityTeardown(UIView *artwork, DIActivityMaskState *state) {
     if (state.systemLayer) state.systemLayer.hidden = state.systemLayerHidden;
     state.systemLayer = nil;
     if (state.shadow) state.shadow.hidden = state.originalShadowHidden;
+    /* 2.8.83: 按原值还原被我们藏起来的系统子视图 / mask / 圆角 */
+    for (NSUInteger i = 0; i < state.hiddenViews.count; i++) {
+        UIView *v = state.hiddenViews[i];
+        NSNumber *h = (i < state.hiddenStates.count) ? state.hiddenStates[i] : nil;
+        if (h) v.hidden = h.boolValue;
+    }
+    state.hiddenViews = nil; state.hiddenStates = nil;
+    if (state.maskSaved) {
+        artwork.maskView = state.savedMaskView;
+        artwork.layer.mask = state.savedLayerMask;
+        artwork.clipsToBounds = state.savedClips;
+        artwork.layer.cornerRadius = state.savedCorner;
+        state.maskSaved = NO;
+        state.savedMaskView = nil; state.savedLayerMask = nil;
+    }
     if (artwork.maskView == state.mask) artwork.maskView = state.originalMask;
     objc_setAssociatedObject(artwork, &kDIActivityMaskState, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+}
+/* 2.8.83: 藏掉系统那张专辑的一切可见载体。
+   顺序要点:
+     ① 子视图: 除了我们自己的 glass, 全部 hidden —— 系统原图 UIImageView/packageView
+        都属于这一类。日志里 `artworkLayer` 取不到, 只有这条路是可靠的;
+     ② maskView / layer.mask: 系统(或旧版残留)的形状蒙版全部摘掉,
+        它就是 329 反馈里"下面那个多余的蒙版";
+     ③ 圆角 + clipsToBounds: 系统给头像加了圆角裁剪, 不摘掉的话我们旋转的
+        玻璃在 45° 时会被这个方框切掉四个角, 看起来像"底下还有一层遮罩"。 */
+static void diActivityHideSystem(UIView *artwork, DIActivityMaskState *state) {
+    if (!state) return;
+    if (!state.hiddenViews) {
+        state.hiddenViews = [NSMutableArray array];
+        state.hiddenStates = [NSMutableArray array];
+    }
+    for (UIView *sub in artwork.subviews) {
+        if (sub == state.glass) continue;
+        if ([state.hiddenViews containsObject:sub]) continue;
+        [state.hiddenViews addObject:sub];
+        [state.hiddenStates addObject:@(sub.hidden)];
+        sub.hidden = YES;
+    }
+    if (!state.maskSaved) {
+        state.maskSaved = YES;
+        state.savedMaskView = artwork.maskView;
+        state.savedLayerMask = artwork.layer.mask;
+        state.savedClips = artwork.clipsToBounds;
+        state.savedCorner = artwork.layer.cornerRadius;
+    }
+    if (artwork.maskView) artwork.maskView = nil;
+    if (artwork.layer.mask) artwork.layer.mask = nil;
+    if (artwork.clipsToBounds) artwork.clipsToBounds = NO;
+    if (artwork.layer.cornerRadius != 0) artwork.layer.cornerRadius = 0;
 }
 /* 2.8.82: 自绘玻璃 —— 图 + 同一张遮罩 + 同速旋转, 系统那张层只藏起来。
    这是小岛 2.8.13 起一直在用、已验证有效的那套观感, 这里在 MediaRemoteUI 内复刻。 */
@@ -12413,6 +12474,19 @@ static void diActivityApply(UIView *artwork) {
     if (art && state.glassImage.image != art) { state.glassImage.image = art; state.lastArt = art; }
     if (state.glassMask.image != gDIActivityShape) state.glassMask.image = gDIActivityShape;
     if (artwork.subviews.lastObject != state.glass) [artwork bringSubviewToFront:state.glass];
+    /* 2.8.83: 彻底藏系统那张 —— 每次 apply 都做(系统会重建子视图), 只在新藏到东西时打日志 */
+    {
+        NSUInteger before = state.hiddenViews.count;
+        BOOL maskBefore = state.maskSaved;
+        UIView *sysMask = artwork.maskView;
+        diActivityHideSystem(artwork, state);
+        if (state.hiddenViews.count != before || (state.maskSaved && !maskBefore)) {
+            diMruFileLog([NSString stringWithFormat:@"hide 系统子视图=%lu mask=%@ clips=%d 圆角=%.1f",
+                (unsigned long)state.hiddenViews.count,
+                sysMask ? NSStringFromClass(sysMask.class) : @"无",
+                (int)state.savedClips, state.savedCorner]);
+        }
+    }
     if (state.systemLayer && !state.systemLayer.hidden) state.systemLayer.hidden = YES;
     if (state.shadow && !state.shadow.hidden) state.shadow.hidden = YES;
 
