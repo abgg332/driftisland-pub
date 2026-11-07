@@ -58,7 +58,7 @@ static double expandTextY = 0.0;      // 上下偏移(pt, 下为正)
 static double expandTextScale = 100.0; // 文字大小(%, 100=原样)
 /* 2.8.86: 构建戳 —— 之前横幅打的是 SpringBoard 自己的 CFBundleShortVersionString(恒 1.0),
    日志里根本看不出装的是哪一版。所有诊断行都带这个戳, 下轮日志一眼定位。 */
-#define DI_BUILD_VER @"2.8.90"
+#define DI_BUILD_VER @"2.8.91"
 static BOOL gRecordingActive = NO; // 保留: 岛素材总闸条件
 static NSString *diElementId(UIView *host);
 static BOOL diMiniMusicActive(UIView *host); // 2.6.3: 前置(遮罩层使用)
@@ -12779,11 +12779,15 @@ static BOOL diTextIsCandidate(UIView *v, UIView *root) {
     /* 2.8.86: 放宽到 12x6 ~ 90 高 —— 歌词常是 20~40 高的多行容器,
        上一版卡在 60, MRU 里稍微大一点的文字块整块被漏掉。 */
     if (s.width < 12 || s.height < 6 || s.height > 90) return NO;
-    if (s.width > root.bounds.size.width * 0.96) return NO;
     NSString *cn = NSStringFromClass(v.class);
+    /* 2.8.91: 头部容器整块可能比 root 还宽(338 日志里 root 185 / header 231),
+       以前这条"不能超过 root 96%"把它挡掉了, 于是整轮找不到头部, 一条 text 都不出。
+       头部容器例外放行, 其余仍限制, 避免把整块背景当成文字。 */
+    BOOL headerLike = [cn containsString:@"Header"];
+    if (!headerLike && s.width > root.bounds.size.width * 0.96) return NO;
     BOOL isUILabel = [v isKindOfClass:UILabel.class];
     BOOL nameLike = [cn containsString:@"Label"] || [cn containsString:@"Text"]
-                 || [cn containsString:@"Header"] || [cn containsString:@"Marquee"];
+                 || headerLike || [cn containsString:@"Marquee"];
     if (!isUILabel && !nameLike) return NO;
     /* 自定义容器(标题+歌词的竖排栈)也收 —— 但必须真的装着文字, 否则可能误伤图标容器 */
     if (!isUILabel && ![cn containsString:@"Label"] && !diTextHasLabelChild(v, 3)) return NO;
