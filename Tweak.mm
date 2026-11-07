@@ -12536,12 +12536,14 @@ static void diActivityHideSystem(UIView *artwork, DIActivityMaskState *state) {
 }
 /* 2.8.86: MRU 自己记的形态标志 —— 头像 66pt 即展开 */
 static BOOL gDIMruExpandedFlag;
+static CGSize gDIMruLastBox;
 /* 2.8.86: 把展开/小岛状态回传给 SpringBoard(见 diMruSaysExpanded)。
    判据 = 头像本身的边长: 小岛 22~26pt, 展开 66pt。用 MIN(宽,高)>=38
    避开两侧配件(45x22)和过渡帧。最多 0.8s 写一次, 内容没变不写。 */
 static void diMruWriteExpandState(BOOL expanded, CGSize box) {
     static BOOL lastE; static int lastW = -1, lastH = -1; static CFAbsoluteTime lastT;
     gDIMruExpandedFlag = expanded;   /* 文字调整也用它判形态, 比 root 尺寸可靠 */
+    if (box.width > 0) gDIMruLastBox = box;
     int w = (int)lround(box.width), h = (int)lround(box.height);
     CFAbsoluteTime now = CFAbsoluteTimeGetCurrent();
     if (now - lastT < 0.8 && expanded == lastE && w == lastW && h == lastH) return;
@@ -13125,7 +13127,8 @@ static void diActivityScan(void) {
     {
         BOOL anyLive = NO;
         for (UIView *a in gDIActivityArtworks.allObjects) if (a.window) { anyLive = YES; break; }
-        if (!anyLive) diMruWriteExpandState(NO, CGSizeZero);
+        if (anyLive) diMruWriteExpandState(gDIMruExpandedFlag, gDIMruLastBox);  /* 心跳续期 */
+        else diMruWriteExpandState(NO, CGSizeZero);
     }
     if (now - lastReport > 5.0) {
         lastReport = now;
