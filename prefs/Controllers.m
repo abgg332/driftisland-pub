@@ -18,7 +18,7 @@
 
 static NSString *const kDomain = @"com.abgg332.driftisland";
 /* 2.6.25: 设置页底部显示的版本号 */
-static NSString *const DI_VERSION_STR = @"2.8.86";
+static NSString *const DI_VERSION_STR = @"2.8.87";
 /* 2.6.10: 专辑光晕遮罩 —— 与 Tweak 侧 DIAlbumMask.h 保持一致 */
 static NSString *const kDIAlbumMaskKey = @"diAlbumMaskAsset";
 static NSString *const kDIMaskRoot = @"/var/mobile/灵动岛/遮罩素材";
@@ -726,6 +726,7 @@ static Class diStepSliderClass(void) {
 - (PSSpecifier *)numSlider:(NSString *)label key:(NSString *)key def:(int)def mn:(int)mn mx:(int)mx;
 - (id)readPreferenceValue:(PSSpecifier *)spec;
 - (PSSpecifier *)buttonSpec:(NSString *)name action:(SEL)sel;
+- (PSSpecifier *)linkSpec:(NSString *)name detail:(Class)cls;
 @end
 /* 2.6.28: 锁屏设置页 —— 完全照歌词岛的做法(DIMiniBaseController + linkSpec),
    这是唯一一个从来没闪退过的二级页形态 */
@@ -737,6 +738,8 @@ static Class diStepSliderClass(void) {
 @interface DILyricsIslandSettings : DIMiniBaseController @end
 /* 2.8.41: 控制中心页回归(单素材=浅色键 wpLightAsset, 无深浅色分组) */
 @interface DICCSettings : DIMiniBaseController @end
+/* 2.8.87: 展开定义 —— 遮罩素材下面的二级页(位置/大小/颜色) */
+@interface DIExpandDefinePage : DIMiniBaseController @end
 @interface DIFrameFoldersMask : DIFrameFolders @end /* 2.6.3: 遮罩素材选择(键 maskAnimFolder) */
 @interface DIFrameFoldersMini : DIFrameFolders @end  /* 左侧(mini)帧率素材选择(键 smallAnimFolder) */
 @interface DIFrameFoldersAudio : DIFrameFolders @end /* 右侧音频素材(键 miniAudioFolder) */
@@ -4542,6 +4545,11 @@ static void diOpenHomeBarPickWindow(void) {
     [sp setButtonAction:sel];
     return sp;
 }
+/* 2.8.87: 二级页入口(展开定义) —— 与主页那几个入口同一形态 */
+- (PSSpecifier *)linkSpec:(NSString *)name detail:(Class)cls {
+    return [PSSpecifier preferenceSpecifierNamed:name target:self
+        set:NULL get:NULL detail:cls cell:PSLinkCell edit:nil];
+}
 - (PSSpecifier *)numSlider:(NSString *)label key:(NSString *)key def:(int)def mn:(int)mn mx:(int)mx {
     double v = [self numValueD:key def:def];
     if (v < mn) v = mn; if (v > mx) v = mx;
@@ -5113,20 +5121,14 @@ static void diOpenHomeBarPickWindow(void) {
     PSSpecifier *maskRow = [PSSpecifier preferenceSpecifierNamed:@"遮罩素材"
         target:self set:NULL get:@selector(readAlbumMaskName:) detail:[DIMaskPicker class] cell:PSLinkCell edit:nil];
     [specs addObject:maskRow];
+    /* 2.8.87: 展开定义 —— 按用户要求放在"遮罩素材"下面, 点进去是独立一页 */
+    [specs addObject:[self linkSpec:@"展开定义" detail:[DIExpandDefinePage class]]];
     /* 2.8.16: 遮罩尺寸可调 —— 用户反馈"加遮罩后专辑大了一点点, 边上被裁剪" */
     /* 2.8.41: 遮罩大小新刻度 —— 旧设定 115 为基准 100, 范围 50~150 */
     [specs addObject:[self numSlider:@"遮罩大小" key:@"diAlbumMaskScale2" def:100 mn:50 mx:150]];
     [specs addObject:[self switchSpec:@"启动旋转" key:@"maskRotateOn" def:@NO]];
     [specs addObject:[self switchSpec:@"反向旋转" key:@"maskRotateReverse" def:@NO]];
     [specs addObject:[self numSlider:@"旋转速度" key:@"maskRotateSpeed" def:45 mn:0 mx:360]];
-    /* ===== 2.8.85: 展开定义 —— 展开岛歌词/歌名的位置与大小 =====
-       展开岛的专辑遮罩在 MediaRemoteUI 里自绘, 文字层也在那个进程;
-       这组参数由 SpringBoard 导出到 MRU 容器, 那边读到后整组平移/缩放。 */
-    [specs addObject:[self groupSpec:@"展开定义" footer:nil]];
-    [specs addObject:[self switchSpec:@"启用自定义" key:@"expandTextOn" def:@YES]];
-    [specs addObject:[self numSlider:@"左右位置" key:@"expandTextX" def:0 mn:-120 mx:120]];
-    [specs addObject:[self numSlider:@"上下位置" key:@"expandTextY" def:0 mn:-120 mx:120]];
-    [specs addObject:[self numSlider:@"文字大小" key:@"expandTextScale" def:100 mn:50 mx:200]];
     return specs;
 }
 @end
@@ -5138,6 +5140,20 @@ static void diOpenHomeBarPickWindow(void) {
     NSString *cur = readPrefString([sp propertyForKey:@"nameKey"] ?: @"wpLightAsset");
     if (!cur.length || [cur isEqualToString:@"__none__"]) return @"未选择";
     return [cur.lastPathComponent.stringByDeletingPathExtension copy];
+}
+@end
+
+/* 2.8.87: 展开定义页 —— 展开岛(长按展开)的歌名/歌词 位置、大小、颜色 */
+@implementation DIExpandDefinePage
+- (NSArray *)buildSpecifiers {
+    NSMutableArray *specs = [NSMutableArray array];
+    [specs addObject:[self groupSpec:@"展开定义" footer:@"只作用于展开后的音乐岛: 歌名/歌词整块移动与缩放; 颜色直接沿用「文字颜色」页里给小岛配的色表与流光。"]];
+    [specs addObject:[self switchSpec:@"启用自定义" key:@"expandTextOn" def:@YES]];
+    [specs addObject:[self numSlider:@"左右位置" key:@"expandTextX" def:0 mn:-120 mx:120]];
+    [specs addObject:[self numSlider:@"上下位置" key:@"expandTextY" def:0 mn:-120 mx:120]];
+    [specs addObject:[self numSlider:@"文字大小" key:@"expandTextScale" def:100 mn:50 mx:200]];
+    [specs addObject:[self switchSpec:@"文字颜色(跟随小岛)" key:@"expandTextColorOn" def:@YES]];
+    return specs;
 }
 @end
 
