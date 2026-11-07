@@ -63,7 +63,7 @@ static double expandTextY = DI_EXP_TEXT_BASE_Y;   // 上下偏移(pt, 下为正,
 static double expandTextScale = 100.0; // 文字大小(%, 100=原样)
 /* 2.8.86: 构建戳 —— 之前横幅打的是 SpringBoard 自己的 CFBundleShortVersionString(恒 1.0),
    日志里根本看不出装的是哪一版。所有诊断行都带这个戳, 下轮日志一眼定位。 */
-#define DI_BUILD_VER @"2.8.93"
+#define DI_BUILD_VER @"2.8.94"
 static BOOL gRecordingActive = NO; // 保留: 岛素材总闸条件
 static NSString *diElementId(UIView *host);
 static BOOL diMiniMusicActive(UIView *host); // 2.6.3: 前置(遮罩层使用)
@@ -4958,7 +4958,7 @@ static void syncNativeSpectrum(UIView *bestRoot) {
        所以展开瞬间的波形照样当场消失, 稳定后零开销。 */
     {
         static CFAbsoluteTime sT; static CGFloat sW, sH; static NSInteger sSeenState = -1;
-        NSInteger cur = (spectrumOn ? 1 : 0) | (enabled ? 2 : 0);
+        NSInteger cur = (spectrumOn ? 1 : 0) | (enabled ? 2 : 0) | (hideRouteOn ? 4 : 0);
         BOOL sizeJump = (fabs(bs.width - sW) > 8.0 || fabs(bs.height - sH) > 8.0);
         BOOL stateJump = (sSeenState != cur);
         if (!gSpecForceNext && !sizeJump && !stateJump && CFAbsoluteTimeGetCurrent() - sT < 0.25) return;
@@ -5046,47 +5046,71 @@ static void syncNativeSpectrum(UIView *bestRoot) {
         }
     }
 
-    /* ② 远程门户层: 掩码挖洞(波形像素在远程内容里, 只能挖) */
+    /* ② 远程门户层: 掩码挖洞
+       2.8.94: 从"只挖波形一个洞"改成"洞表" —— 波形一个洞、投送按钮再一个洞,
+       一次 mask 全画完; 两个开关各自独立, 都关就整块摘掉, 完全回原生。
+       投送按钮的像素同样在远程内容里(本地树里只有门户), 所以只能挖, 挖掉就露出
+       我们自己的视频/专辑背景, 视觉上等于给那一块单独贴了一层。 */
     CALayer *audioL = diFindAudioLayer(bestRoot);
     if (!audioL) return;
-    if (!spectrumOn || !enabled || !expandedish) {
+    NSMutableArray<NSValue *> *holes = [NSMutableArray array];
+    BOOL wantSpec = (spectrumOn && enabled && expandedish);
+    BOOL wantRoute = (hideRouteOn && enabled && expandedish);
+    BOOL specExact = NO;
+    if (wantSpec) {
+        /* 波形洞: 三种布局, 精确优先(2.8.15 重写)
+           (a) 画布里有波形门户层 → 洞精确挖在它身上;
+           (b) 系统默认展开岛(门户只有 60~80pt 高) → 右侧垂直居中;
+           (c) 都不命中 → 按实测 347x156 基准等比缩放的兜底公式。 */
+        CALayer *wav = diFindWaveformPortalIn(audioL);
+        CGRect hole = CGRectZero;
+        if (wav) {
+            CGRect wr = [audioL convertRect:wav.frame fromLayer:wav.superlayer];
+            hole = CGRectInset(wr, -3.0, -3.0);   /* 外扩 3pt 盖住抗锯齿边缘 */
+            specExact = YES;
+        } else if (audioL.bounds.size.height <= 100) {
+            CGFloat pw = audioL.bounds.size.width, ph = audioL.bounds.size.height;
+            CGFloat hw = MIN(34.0, pw * 0.16), hh = MIN(34.0, ph * 0.5);
+            hole = CGRectMake(pw - hw - 6.0, (ph - hh) * 0.5, hw, hh);
+        } else {
+            CGFloat k = bs.width / 347.0;
+            if (k < 0.62) k = 0.62;
+            if (k > 1.0) k = 1.0;
+            hole = CGRectMake(bs.width - 69.0 * k, 26.0 * k, 54.0 * k, 50.0 * k);
+        }
+        [holes addObject:[NSValue valueWithCGRect:hole]];
+    }
+    if (wantRoute) {
+        /* 投送洞: 照抄波形那套公式, 搬到右下角 —— 341 日志实测展开岛里那颗
+           MRUTransportButton 中心在 (365,131)/401x167 ≈ 91% 宽、78% 高,
+           所以洞取 54k 见方、右边留 15k、底边留 26k。矮岛(系统默认展开岛 330x72
+           这种)没有底栏, 退化成"右侧垂直居中", 跟波形 (b) 一致。 */
+        CGFloat k = bs.width / 347.0;
+        if (k < 0.62) k = 0.62;
+        if (k > 1.0) k = 1.0;
+        CGFloat hw = 54.0 * k, hh = 54.0 * k;
+        CGRect hole = (bs.height >= 120.0)
+            ? CGRectMake(bs.width - 69.0 * k, bs.height - 80.0 * k, hw, hh)
+            : CGRectMake(MIN(audioL.bounds.size.width, bs.width) - hw - 6.0,
+                         (bs.height - hh) * 0.5, hw, hh);
+        [holes addObject:[NSValue valueWithCGRect:hole]];
+    }
+    if (!holes.count) {
         if (audioL.mask) {
             audioL.mask = nil;
             objc_setAssociatedObject(audioL, &kDiMaskOn, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
             objc_setAssociatedObject(audioL, &kDiMaskW, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-            DLog(@"音频开关关: 移除波形掩码");
+            DLog(@"波形/投送掩码: 两个开关都关, 移除掩码");
         }
         return;
     }
-    /* 洞: 三种布局, 精确优先(2.8.15 重写)
-       老公式按岛宽等比缩放(基准 347x156), 实测盖不严 —— 285 反馈
-       "展开岛的音频你没有隐藏" 实锤: 富展开的波形门户在画布 (355,90),
-       洞却挖在 y 26~76; 系统默认展开岛(330x72)更是连 audioL 都找不到。
-       (a) 画布里有波形门户层 → 洞精确挖在它身上(换算到 audioL 坐标);
-       (b) 系统默认展开岛: 门户只有 60~80pt 高, 波形右侧垂直居中 → 按门户
-           自己的 bounds 在右侧居中挖(285 视频: 右侧圆形红色波形动画);
-       (c) 都不命中 → 老公式兜底。 */
-    CALayer *wav = diFindWaveformPortalIn(audioL);
-    CGRect hole = CGRectZero;
-    if (wav) {
-        CGRect wr = [audioL convertRect:wav.frame fromLayer:wav.superlayer];
-        hole = CGRectInset(wr, -3.0, -3.0);   /* 外扩 3pt 盖住抗锯齿边缘 */
-    } else if (audioL.bounds.size.height <= 100) {
-        CGFloat pw = audioL.bounds.size.width, ph = audioL.bounds.size.height;
-        CGFloat hw = MIN(34.0, pw * 0.16), hh = MIN(34.0, ph * 0.5);
-        hole = CGRectMake(pw - hw - 6.0, (ph - hh) * 0.5, hw, hh);
-    } else {
-        /* 老公式兜底: 以实测展开态 347x156 为基准按岛宽等比缩放;
-           k 下限 0.62 防早期岛太小时挖到别的内容 */
-        CGFloat k = bs.width / 347.0;
-        if (k < 0.62) k = 0.62;
-        if (k > 1.0) k = 1.0;
-        hole = CGRectMake(bs.width - 69.0 * k, 26.0 * k, 54.0 * k, 50.0 * k);
-    }
-    /* 尺寸/门户形态没变就不动(岛动画中每帧都重画 path 会很贵) */
+    /* 尺寸/门户形态/洞表没变就不动(岛动画中每帧都重画 path 会很贵) */
     BOOL applied = [objc_getAssociatedObject(audioL, &kDiMaskOn) isEqual:@YES];
-    NSString *holeKey = [NSString stringWithFormat:@"%.0fx%.0f/%.0fx%.0f/%d",
-                         bs.width, bs.height, audioL.bounds.size.width, audioL.bounds.size.height, wav != nil];
+    NSMutableString *holeKey = [NSMutableString stringWithFormat:@"%.0fx%.0f/%.0fx%.0f/%d%d",
+                                bs.width, bs.height,
+                                audioL.bounds.size.width, audioL.bounds.size.height,
+                                wantSpec, wantRoute];
+    for (NSValue *hv in holes) [holeKey appendFormat:@"|%@", NSStringFromCGRect(hv.CGRectValue)];
     NSString *lastKey = objc_getAssociatedObject(audioL, &kDiMaskW);
     if (applied && [lastKey isEqualToString:holeKey]) return;
     CAShapeLayer *m = (CAShapeLayer *)audioL.mask;
@@ -5097,15 +5121,18 @@ static void syncNativeSpectrum(UIView *bestRoot) {
     }
     m.frame = CGRectMake(0, 0, audioL.bounds.size.width, audioL.bounds.size.height);
     UIBezierPath *p = [UIBezierPath bezierPathWithRect:m.frame];
-    UIBezierPath *h = [UIBezierPath bezierPathWithRoundedRect:hole cornerRadius:8.0];
-    [p appendPath:h];
+    for (NSValue *hv in holes)
+        [p appendPath:[UIBezierPath bezierPathWithRoundedRect:hv.CGRectValue cornerRadius:8.0]];
     m.fillRule = kCAFillRuleEvenOdd; /* 洞里露出岛自己的内容, 洞外保留音乐门户 */
     m.path = p.CGPath;
     objc_setAssociatedObject(audioL, &kDiMaskW, holeKey, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-    if (!applied || ![lastKey isEqualToString:holeKey])
-        DLog(@"音频开关开: 挖洞隐藏波形 %@ (岛 %.0fx%.0f 门户 %.0fx%.0f 精确=%d)",
-             NSStringFromCGRect(hole), bs.width, bs.height,
-             audioL.bounds.size.width, audioL.bounds.size.height, wav != nil);
+    {
+        NSMutableString *desc = [NSMutableString string];
+        for (NSValue *hv in holes) [desc appendFormat:@"%@ ", NSStringFromCGRect(hv.CGRectValue)];
+        DLog(@"掩码挖洞: %@(岛 %.0fx%.0f 门户 %.0fx%.0f 波形=%d精确%d 投送=%d)",
+             desc, bs.width, bs.height, audioL.bounds.size.width, audioL.bounds.size.height,
+             wantSpec, specExact, wantRoute);
+    }
 }
 
 #pragma mark - 宿主挂载
@@ -12869,7 +12896,17 @@ static void diActivityTextColorRestore(void) {
    视觉上等于给那一块单贴了一层。关掉开关按原状恢复(记着原来是不是已经隐藏过)。 */
 static NSHashTable<UIView *> *gDIRouteViews;
 static char kDIRouteOrigHidden;
+/* 341 日志: 名字先命中了 MPRouteLabel(36x13 的"设备名"小字), 把真正要藏的
+   MRUTransportButton(44x44@365,131) 顶掉了 —— 结果那颗按钮还在。
+   现在只认"按钮类"视图(UIControl / 类名带 Button / 带手势), 标签一律不算。 */
+static BOOL diRouteIsButtonish(UIView *v) {
+    if ([v isKindOfClass:UIControl.class]) return YES;
+    if ([NSStringFromClass(v.class).lowercaseString containsString:@"button"]) return YES;
+    if (v.gestureRecognizers.count > 0) return YES;
+    return NO;
+}
 static BOOL diRouteNameHit(UIView *v) {
+    if (!diRouteIsButtonish(v)) return NO;
     NSString *cn = NSStringFromClass(v.class).lowercaseString;
     NSString *lab = v.accessibilityLabel.lowercaseString ?: @"";
     BOOL nameYes = ([cn containsString:@"route"] || [cn containsString:@"airplay"]
@@ -12925,8 +12962,7 @@ static void diActivityHideRoute(UIView *root) {
             /* 兜底: 右下角那颗 20~80pt 的按钮(实测投送在 78%~88% 宽度上, 下一首在 ~70%) */
             if (!hit && c.x > W * 0.73 && c.y > H * 0.52
                 && sz.width >= 20 && sz.height >= 20 && sz.width <= 80 && sz.height <= 80
-                && ([v isKindOfClass:UIControl.class]
-                    || [NSStringFromClass(v.class) containsString:@"Button"])) {
+                && diRouteIsButtonish(v)) {
                 hit = v;
                 [dump appendFormat:@"位 %@(%.0fx%.0f@%.0f,%.0f) ", NSStringFromClass(v.class),
                     sz.width, sz.height, c.x, c.y];
