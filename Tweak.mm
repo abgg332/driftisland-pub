@@ -11996,6 +11996,7 @@ static char kDIActivityMaskState;
 static NSHashTable<UIView *> *gDIActivityArtworks;
 static UIImage *gDIActivityShape;
 static BOOL gDIActivityEnabled;
+static int gDIActivityHit;   /* 2.8.79: 成功接管次数, 0 说明整条链路没走到 */
 static IMP gDIActivityOrigLayout, gDIActivityOrigMove, gDIActivityOrigVisibility, gDIActivityOrigInit;
 
 /* ===== 2.8.78: MediaRemoteUI 进程自证通道 =====
@@ -12043,7 +12044,64 @@ static void diMruReport(NSString *tag, NSString *detail) {
         (__bridge CFStringRef)name, NULL, NULL, true);
     diMruFileLog(detail.length ? [NSString stringWithFormat:@"%@ %@", tag, detail] : tag);
 }
-/* 开关三态: 主偏好域读不到(mrumask 出口才有值)时用 SpringBoard 导出的 diMruActive */
+/* 2.8.79: MediaRemoteUI 是沙盒进程, CFPreferences 读不到时不报错、只静默返回默认值
+   (开关就被当成"关", 于是永不遮罩)。N95 在同一位置是**直接读 plist 文件**并带 /var/jb
+   兼容分支, 这里照抄这个思路, 作为第二条通道。 */
+static BOOL diMruReadFilePref(NSString *key, BOOL *out) {
+    static NSArray<NSString *> *paths;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        paths = @[@"/var/mobile/Library/Preferences/com.abgg332.driftisland.plist",
+                  @"/var/jb/var/mobile/Library/Preferences/com.abgg332.driftisland.plist"];
+    });
+    for (NSString *p in paths) {
+        NSDictionary *d = [NSDictionary dictionaryWithContentsOfFile:p];
+        id v = d[key];
+        if (!v) continue;
+        *out = [v respondsToSelector:@selector(boolValue)] ? [v boolValue]
+             : ([v isEqual:@"1"] || [v isEqual:@"true"] || [v isEqual:@"YES"]);
+        return YES;
+    }
+    return NO;
+}
+/* 2.8.79: 带载荷的回传 —— 达林通知名本身可以带字符串, 把"祖先类名/类枚举结果"
+   塞进通知名, SpringBoard 侧用 NULL 名观察者收(不需要该进程写得进日志)。
+   名字只用 [A-Za-z0-9._-], 超长截断, 避免非法字符。 */
+static void diMruPostPayload(NSString *tag, NSString *payload) {
+    NSString *safe = payload.length ? payload : @"-";
+    if (safe.length > 240) safe = [safe substringToIndex:240];
+    NSCharacterSet *bad = [[NSCharacterSet characterSetWithCharactersInString:
+        @"abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789._-"] invertedSet];
+    safe = [[safe componentsSeparatedByCharactersInSet:bad] componentsJoinedByString:@"_"];
+    NSString *name = [NSString stringWithFormat:@"com.abgg332.driftisland.mru.%@.%@", tag, safe];
+    CFNotificationCenterPostNotification(CFNotificationCenterGetDarwinNotifyCenter(),
+        (__bridge CFStringRef)name, NULL, NULL, true);
+}
+/* 2.8.79: 一次都没接管成功时, 把本进程里名字带 Artwork/NowPlaying/Activity 的类回传 ——
+   下一轮就不用猜"是不是类名错了", 直接拿到这版系统的真实类名。 */
+static void diMruDumpClasses(void) {
+    int n = objc_getClassList(NULL, 0);
+    if (n <= 0) return;
+    Class *buf = (Class *)malloc(sizeof(Class) * n);
+    n = objc_getClassList(buf, n);
+    NSMutableArray<NSString *> *hits = [NSMutableArray array];
+    for (int i = 0; i < n; i++) {
+        NSString *cn = NSStringFromClass(buf[i]);
+        if ([cn containsString:@"Artwork"] || [cn containsString:@"NowPlaying"] || [cn containsString:@"Activity"]) {
+            [hits addObject:cn];
+            if (hits.count >= 40) break;
+        }
+    }
+    free(buf);
+    if (!hits.count) { diMruPostPayload(@"classes.none", @"-"); return; }
+    /* 分批, 每批 6 个, 名字别超过上限 */
+    for (NSUInteger i = 0, part = 0; i < hits.count; i += 6, part++) {
+        NSArray *slice = [hits subarrayWithRange:NSMakeRange(i, MIN((NSUInteger)6, hits.count - i))];
+        diMruPostPayload([NSString stringWithFormat:@"classes%lu", (unsigned long)part],
+                         [slice componentsJoinedByString:@","]);
+    }
+}
+/* 开关三态: 主偏好域 → 主偏好 plist 文件 → SpringBoard 导出的 diMruActive */
 static BOOL diMruPrefOn(void) {
     CFStringRef dom = (__bridge CFStringRef)kDomain;
     CFPreferencesAppSynchronize(dom);
@@ -12051,24 +12109,38 @@ static BOOL diMruPrefOn(void) {
     Boolean e = CFPreferencesGetAppBooleanValue(CFSTR("enabled"), dom, &eValid);
     Boolean m = CFPreferencesGetAppBooleanValue(CFSTR("maskOn"), dom, &mValid);
     if (eValid && mValid) return e && m;
+    BOOL fe = NO, fm = NO;
+    BOOL hasE = diMruReadFilePref(@"enabled", &fe);
+    BOOL hasM = diMruReadFilePref(@"maskOn", &fm);
+    if (hasE && hasM) {
+        diMruFileLog([NSString stringWithFormat:@"CFPreferences 不可读, 改读 plist 文件: enabled=%d maskOn=%d", fe, fm]);
+        return fe && fm;
+    }
     CFStringRef dom2 = CFSTR("com.abgg332.driftisland.mrumask");
     CFPreferencesAppSynchronize(dom2);
-    Boolean aValid = false;
-    Boolean a = CFPreferencesGetAppBooleanValue(CFSTR("diMruActive"), dom2, &aValid);
-    if (aValid) { diMruFileLog(@"主偏好域不可读, 走 diMruActive"); return a; }
+    id v = CFBridgingRelease(CFPreferencesCopyAppValue(CFSTR("diMruActive"), dom2));
+    if (v) {
+        BOOL a = [v respondsToSelector:@selector(boolValue)] ? [v boolValue] : NO;
+        diMruFileLog([NSString stringWithFormat:@"主偏好域不可读, 走 diMruActive=%d", a]);
+        return a;
+    }
     return e && m;
 }
-/* 素材三通道: 直接读素材目录 → Caches 导出图 → 偏好 base64 */
+/* 素材多通道: 素材目录 → Caches 导出图(含 /var/jb 前缀) → 偏好 base64 */
 static UIImage *diActivityLoadShape(void) {
+    NSMutableArray<NSString *> *cands = [NSMutableArray array];
     NSString *path = diMaskCurrentPathV2();
-    if (path) {
-        UIImage *img = diMaskAlphaCached(path);
-        if (img) { diMruReport(@"shape.material", path.lastPathComponent); return img; }
-        diMruFileLog([NSString stringWithFormat:@"素材读失败: %@", path]);
+    if (path) [cands addObject:path];
+    [cands addObject:[diMruCacheDir() stringByAppendingPathComponent:@"mask.png"]];
+    [cands addObject:@"/var/jb/var/mobile/Library/Caches/com.abgg332.driftisland/mask.png"];
+    for (NSString *p in cands) {
+        UIImage *img = diMaskAlphaCached(p);
+        if (img) {
+            diMruReport([p isEqualToString:path ?: @""] ? @"shape.material" : @"shape.cache", p);
+            return img;
+        }
     }
-    NSString *cache = [diMruCacheDir() stringByAppendingPathComponent:@"mask.png"];
-    UIImage *img = diMaskAlphaCached(cache);
-    if (img) { diMruReport(@"shape.cache", cache); return img; }
+    diMruFileLog([NSString stringWithFormat:@"素材各通道均不可读: %@", [cands componentsJoinedByString:@" | "]]);
     CFStringRef dom = CFSTR("com.abgg332.driftisland.mrumask");
     CFPreferencesAppSynchronize(dom);
     id v = CFBridgingRelease(CFPreferencesCopyAppValue(CFSTR("diMruMaskB64"), dom));
@@ -12107,11 +12179,26 @@ static void diActivityApply(UIView *artwork) {
        上下文校验挡掉, 全靠猜(325 日志已经吃过这个亏)。 */
     BOOL ctx = NO;
     if (gDIActivityEnabled && gDIActivityShape && sized) {
-        ctx = diActivityInNowPlaying(artwork);
-        if (!ctx) {
+        /* 2.8.79: 上下文校验加"退让档" —— 2.8.77/78 是硬校验(类名必须存在且精确匹配),
+           一旦这版系统把 MRUActivityNowPlayingViewController 改名/换命名空间,
+           校验就恒为 NO, 表现正是"从不生效、日志里也没有任何接管记录"。
+           现在: 目标类存在 → 走 N95 精确匹配; 目标类不存在 → 退让放行, 但把真实祖先类名打出来。 */
+        BOOL strictExists = (NSClassFromString(@"MRUActivityNowPlayingViewController") != nil);
+        if (strictExists) {
+            ctx = diActivityInNowPlaying(artwork);
+            if (!ctx) {
+                UIViewController *vc = diActivityAncestorVC(artwork);
+                diMruReport(@"ctxreject", [NSString stringWithFormat:@"%@ 祖先=%@",
+                    NSStringFromCGRect(artwork.bounds), vc ? NSStringFromClass(vc.class) : @"(无VC)"]);
+                diMruPostPayload(@"ctxreject", [NSString stringWithFormat:@"%@_%@",
+                    vc ? NSStringFromClass(vc.class) : @"noVC", NSStringFromCGRect(artwork.bounds)]);
+            }
+        } else {
             UIViewController *vc = diActivityAncestorVC(artwork);
-            diMruReport(@"ctxreject", [NSString stringWithFormat:@"%@ 祖先=%@",
-                NSStringFromCGRect(artwork.bounds), vc ? NSStringFromClass(vc.class) : @"(无VC)"]);
+            NSString *cn = vc ? NSStringFromClass(vc.class) : @"";
+            ctx = (cn.length == 0) || [cn containsString:@"NowPlaying"] || [cn containsString:@"Activity"];
+            diMruReport(@"ctxrelaxed", [NSString stringWithFormat:@"%@ 祖先=%@ 放行=%d",
+                NSStringFromCGRect(artwork.bounds), cn.length ? cn : @"(无VC)", ctx]);
         }
     }
     BOOL want = gDIActivityEnabled && gDIActivityShape && sized && ctx;
@@ -12159,6 +12246,9 @@ static void diActivityApply(UIView *artwork) {
              NSStringFromCGRect(artwork.bounds), avc ? NSStringFromClass(avc.class) : @"(无)");
         diMruReport(@"hit", [NSString stringWithFormat:@"%@ 祖先=%@",
             NSStringFromCGRect(artwork.bounds), avc ? NSStringFromClass(avc.class) : @"(无)"]);
+        diMruPostPayload(@"hit", [NSString stringWithFormat:@"%@_%@", avc ? NSStringFromClass(avc.class) : @"noVC",
+            NSStringFromCGRect(artwork.bounds)]);
+        gDIActivityHit++;
     }
     // Another tweak can change this mask; preserve its latest value for restoration.
     if (artwork.maskView != state.mask) state.originalMask = artwork.maskView;
@@ -12267,11 +12357,17 @@ static void diActivityStart(void) {
             CFNotificationCenterAddObserver(CFNotificationCenterGetDarwinNotifyCenter(), NULL,
                 diActivityNotify, (__bridge CFStringRef)notification, NULL, CFNotificationSuspensionBehaviorDeliverImmediately);
         }
-        for (int seconds : {1, 3, 8, 20, 60}) {
+        /* 2.8.79: 拉长重试窗口 —— 目标类可能直到"第一次展开音乐岛"才被 dyld 载入,
+           原 60 秒窗口在"锁屏放着音乐很久才展开"的场景会漏装。 */
+        for (int seconds : {1, 3, 8, 20, 60, 120, 240, 480}) {
             dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)seconds * NSEC_PER_SEC),
                 /* 2.8.78: 同时重读素材 —— MediaRemoteUI 启动往往早于 SpringBoard 导出素材,
                    只 install 不 reload 会一直拿着空形状("没遮上"的另一种成因)。 */
-                dispatch_get_main_queue(), ^{ diActivityReload(); diActivityInstall(); });
+                dispatch_get_main_queue(), ^{
+                    diActivityReload(); diActivityInstall();
+                    /* 2.8.79: 一直没接管成功, 就把本进程真实类名回传(两次机会, 类可能晚加载) */
+                    if ((seconds == 20 || seconds == 120) && gDIActivityHit == 0) diMruDumpClasses();
+                });
         }
     });
 }
@@ -12301,12 +12397,22 @@ static void diMruPing(CFNotificationCenterRef c, void *o, CFStringRef name, cons
     NSString *tag = [n hasPrefix:prefix] ? [n substringFromIndex:prefix.length] : n;
     RLog(@"[MRU回传] %@", tag);
 }
+/* 2.8.79: 带载荷的回传(名字 = 前缀 + tag + "." + 载荷) */
+static void diMruAny(CFNotificationCenterRef c, void *o, CFStringRef name, const void *obj, CFDictionaryRef info) {
+    NSString *n = (__bridge NSString *)(name ?: CFSTR(""));
+    NSString *prefix = @"com.abgg332.driftisland.mru.";
+    if (![n hasPrefix:prefix]) return;
+    RLog(@"[MRU回传·载荷] %@", [n substringFromIndex:prefix.length]);
+}
 static void diMruObserve(void) {
     static dispatch_once_t once;
     dispatch_once(&once, ^{
+        /* 2.8.79: 载荷通道 —— 名字里带祖先类名/类枚举, 用 NULL 名观察者全收, 只认本插件前缀 */
+        CFNotificationCenterAddObserver(CFNotificationCenterGetDarwinNotifyCenter(), NULL, diMruAny,
+            NULL, NULL, CFNotificationSuspensionBehaviorDeliverImmediately);
         NSArray<NSString *> *tags = @[@"install", @"noclass", @"nohook", @"reload",
             @"shape.material", @"shape.cache", @"shape.prefs", @"shape.none",
-            @"ctxreject", @"hit", @"apply"];
+            @"ctxreject", @"ctxrelaxed", @"hit", @"apply"];
         for (NSString *t in tags) {
             CFNotificationCenterAddObserver(CFNotificationCenterGetDarwinNotifyCenter(), NULL, diMruPing,
                 (__bridge CFStringRef)[@"com.abgg332.driftisland.mru." stringByAppendingString:t], NULL,
