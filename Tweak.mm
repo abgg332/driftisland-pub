@@ -58,7 +58,7 @@ static double expandTextY = 0.0;      // 上下偏移(pt, 下为正)
 static double expandTextScale = 100.0; // 文字大小(%, 100=原样)
 /* 2.8.86: 构建戳 —— 之前横幅打的是 SpringBoard 自己的 CFBundleShortVersionString(恒 1.0),
    日志里根本看不出装的是哪一版。所有诊断行都带这个戳, 下轮日志一眼定位。 */
-#define DI_BUILD_VER @"2.8.89"
+#define DI_BUILD_VER @"2.8.90"
 static BOOL gRecordingActive = NO; // 保留: 岛素材总闸条件
 static NSString *diElementId(UIView *host);
 static BOOL diMiniMusicActive(UIView *host); // 2.6.3: 前置(遮罩层使用)
@@ -12733,10 +12733,27 @@ static void diMruExpandTextParams(DIExpTextParams *p) {
 /* 2.8.87: 不再记录 center —— 位置改成"以系统布局的左上角为锚点"换算进 transform,
    这样每次布局都从系统原值重算, 不会越积越偏, 也不会因为头部宽度变了而整体漂移。 */
 static NSHashTable<UIView *> *gDIActivityTexts;
-/* 2.8.89: 展开岛文字的固定落点 —— 第一次稳定展开时记下, 之后不再随系统布局变 */
+/* 2.8.89: 展开岛文字的固定落点 —— 第一次稳定展开时记下, 之后不再随系统布局变
+   2.8.90: 落点落盘到 MRU 自己的容器 —— 软注销会重启这个进程, 只存内存的话
+   重启后 anchor 丢失, 又按系统布局重记一次, 用户看到的就是"回原样"。 */
 static CGPoint gDIExpAnchor;
 static BOOL gDIExpAnchorValid;
 static CGSize gDIExpAnchorRoot;
+static NSString *diTextAnchorPath(void) {
+    NSString *d = diMruSelfDir();
+    return d.length ? [d stringByAppendingPathComponent:@"text_anchor.plist"] : nil;
+}
+static void diTextAnchorLoadOnce(void) {
+    static BOOL tried;
+    if (tried || gDIExpAnchorValid) return;
+    tried = YES;
+    NSString *p = diTextAnchorPath();
+    NSDictionary *d = p ? [NSDictionary dictionaryWithContentsOfFile:p] : nil;
+    if ([d isKindOfClass:NSDictionary.class]) {
+        gDIExpAnchor = CGPointMake([d[@"x"] doubleValue], [d[@"y"] doubleValue]);
+        gDIExpAnchorValid = YES;
+    }
+}
 /* 时间戳(01:23 / -0:45)不是歌词, 不参与移动 */
 static BOOL diTextIsClock(NSString *t) {
     if (!t.length) return NO;
@@ -12800,15 +12817,18 @@ static void diActivityTextColorRestore(void) {
 static void diActivityTextApply(UIView *root) {
     if (!NSThread.isMainThread) return;
     DIExpTextParams p; diMruExpandTextParams(&p);
+    diTextAnchorLoadOnce();
     if (!gDIActivityTexts) gDIActivityTexts = [NSHashTable weakObjectsHashTable];
     /* 2.8.86: 每条分支都留痕 —— 上一版"没反应"和"根本没装"在日志里长得一模一样,
        333 日志里连一条 text 都没有, 根本没法判断卡在哪。 */
     static CFAbsoluteTime sSkipT; static NSString *sSkipWhy;
     NSString *why = nil;
+    /* 2.8.90: 不再用"MRU 头像 <38pt"当硬闸门 —— 展开/收起动画里它会在 23/66 之间抖,
+       一旦这一帧判成小岛就把刚摆好的文字还原, 于是"每次展开都回原样"。
+       现在改成先看视图树里到底有没有展开态的头部容器(见下面的 header 判断)。 */
     if (!p.on) why = @"开关=关(params.plist etOn=0)";
     else if (!root || !root.window) why = @"root 不在窗口上";
-    else if (!gDIMruExpandedFlag) why = @"小岛态(MRU 头像 <38pt)";
-    else if (root.bounds.size.width < 200) why = [NSString stringWithFormat:@"root 太窄 %.0f",
+    else if (root.bounds.size.width < 120) why = [NSString stringWithFormat:@"root 太窄 %.0f",
                root.bounds.size.width];
     if (why) {
         diActivityTextRestore();
@@ -12867,11 +12887,15 @@ static void diActivityTextApply(UIView *root) {
     NSMutableArray<UIView *> *stable = [NSMutableArray array];
     NSMutableString *dump = [NSMutableString string];
     CGRect unionRect = CGRectNull;
+    CGRect unionPos = CGRectNull;      /* 只算 y>=0 的那份, 用来记首次落点(更接近真正展开的位置) */
     for (UIView *v in targets) {
         if (!v.superview) continue;
         v.transform = CGAffineTransformIdentity;          /* 先还原, 取系统布局值 */
         CGRect base = v.frame;
-        if (base.size.height < 50.0 || base.origin.y < 0.0) {
+        /* 2.8.90: 只按"是不是展开态的头部"筛(宽>=100, 高>=45), 不再看 y>=0。
+           337/338 里同一个头部会有 y=-16 / -52 的副本, 那其实是同一块文字的另一份
+           快照; 以前把它们排除, 结果屏幕上显示的恰好是那份, 于是"怎么设都没动"。 */
+        if (base.size.height < 45.0 || base.size.width < 100.0) {
             [dump appendFormat:@"%@(跳过 %.0fx%.0f@%.0f,%.0f) ", NSStringFromClass(v.class),
                 base.size.width, base.size.height, base.origin.x, base.origin.y];
             continue;
@@ -12880,11 +12904,17 @@ static void diActivityTextApply(UIView *root) {
         CGRect r = CGRectMake(c.x - base.size.width * 0.5, c.y - base.size.height * 0.5,
                               base.size.width, base.size.height);
         unionRect = CGRectIsNull(unionRect) ? r : CGRectUnion(unionRect, r);
+        if (base.origin.y >= 0.0) unionPos = CGRectIsNull(unionPos) ? r : CGRectUnion(unionPos, r);
         [stable addObject:v];
         [dump appendFormat:@"%@(%.0fx%.0f@%.0f,%.0f) ", NSStringFromClass(v.class),
             base.size.width, base.size.height, base.origin.x, base.origin.y];
     }
-    if (!stable.count) { diActivityTextRestore(); diActivityTextColorRestore(); return; }
+    if (!stable.count) {
+        /* 没有展开态头部: 真·小岛(或还在动画前段), 还原成原生, 不做任何摆位 */
+        diActivityTextRestore();
+        diActivityTextColorRestore();
+        return;
+    }
     /* 目标集合变了(逐标签 <-> 头部容器)先把上一轮改过的全部还原, 否则旧目标会停在缩放态 */
     BOOL sameSet = (gDIActivityTexts.count == stable.count);
     if (sameSet) {
@@ -12894,12 +12924,21 @@ static void diActivityTextApply(UIView *root) {
     else diActivityTextRestore();
 
     CGPoint sysCenter = CGPointMake(CGRectGetMidX(unionRect), CGRectGetMidY(unionRect));
-    if (!gDIExpAnchorValid || fabs(root.bounds.size.width - gDIExpAnchorRoot.width) > 24.0) {
-        gDIExpAnchor = sysCenter;
+    CGRect anchorRect = CGRectIsNull(unionPos) ? unionRect : unionPos;
+    CGPoint anchorCenter = CGPointMake(CGRectGetMidX(anchorRect), CGRectGetMidY(anchorRect));
+    if (!gDIExpAnchorValid) {
+        /* 只在"从来没有落点"时记一次(正常只在首次安装/首次开启时), 之后永远用同一个,
+           不再因为 root 宽度变化而重记 —— 那正是布局一变位置就跳的原因。 */
+        gDIExpAnchor = anchorCenter;
         gDIExpAnchorRoot = root.bounds.size;
         gDIExpAnchorValid = YES;
-        diMruFileLog([NSString stringWithFormat:@"text 锁定落点 (%.0f,%.0f) root %.0fx%.0f",
-            sysCenter.x, sysCenter.y, root.bounds.size.width, root.bounds.size.height]);
+        NSString *ap = diTextAnchorPath();
+        if (ap) {
+            [@{@"x": @(anchorCenter.x), @"y": @(anchorCenter.y)} writeToFile:ap atomically:YES];
+        }
+        diMruFileLog([NSString stringWithFormat:@"text 锁定落点 (%.0f,%.0f) root %.0fx%.0f 落盘=%@",
+            anchorCenter.x, anchorCenter.y, root.bounds.size.width, root.bounds.size.height,
+            ap ? @"OK" : @"无路径"]);
     }
     CGPoint target = CGPointMake(gDIExpAnchor.x + p.x, gDIExpAnchor.y + p.y);
     CGFloat s = p.scale;
