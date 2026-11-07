@@ -52,10 +52,13 @@ static NSString *maskAnimFolder;  // 遮罩素材文件夹(帧率素材下的子
    展开岛(407x202 的 Now Playing)整块由 MediaRemoteUI 远程渲染, SpringBoard 只能看到
    一块门户, 拿不到里面的文字视图。所以参数由 SpringBoard 侧写进 MRU 容器的
    params.plist, 由 MRU 进程内的文字调整器读取并应用(见 diActivityTextApply)。 */
-static BOOL expandTextOn = NO;        // 启用自定义(位置/大小)
+static BOOL expandTextOn = YES;       // 启用自定义(位置/大小)
 static double expandTextX = 0.0;      // 左右偏移(pt, 右为正)
 static double expandTextY = 0.0;      // 上下偏移(pt, 下为正)
 static double expandTextScale = 100.0; // 文字大小(%, 100=原样)
+/* 2.8.86: 构建戳 —— 之前横幅打的是 SpringBoard 自己的 CFBundleShortVersionString(恒 1.0),
+   日志里根本看不出装的是哪一版。所有诊断行都带这个戳, 下轮日志一眼定位。 */
+#define DI_BUILD_VER @"2.8.86"
 static BOOL gRecordingActive = NO; // 保留: 岛素材总闸条件
 static NSString *diElementId(UIView *host);
 static BOOL diMiniMusicActive(UIView *host); // 2.6.3: 前置(遮罩层使用)
@@ -764,7 +767,7 @@ static void refreshPrefs(void) {
     }
     maskAnimFolder = pString(@"maskAnimFolder");
     /* 2.8.85: 展开定义(展开岛歌词/歌名的位置与大小) */
-    expandTextOn = pBool(@"expandTextOn", NO);
+    expandTextOn = pBool(@"expandTextOn", YES);   /* 2.8.86: 默认开, 0/100% 时无任何视觉变化 */
     expandTextX = pDouble(@"expandTextX", 0.0);
     expandTextY = pDouble(@"expandTextY", 0.0);
     expandTextScale = pDouble(@"expandTextScale", 100.0);
@@ -3232,6 +3235,38 @@ static void diStripMaskFromCover(UIView *cover) {
    DriftIslandAlbumMask 的层收掉:
      · 遮罩关闭时 → 全摘;
      · 遮罩开启时 → 只摘 >80pt 的大层(小岛头像那 22~26pt 的保留)。 */
+static NSString *diMruSharedDir(void);   /* 实现在下方导出段 */
+
+/* ===== 2.8.86: 展开态由 MRU 亲口告诉我们 =====
+   332/333 日志的死结: 展开后 SpringBoard 这边宿主的 bounds 一直停在 198x55
+   (展开的内容是它内部那块 407x489 的跨进程 scene), 所以 2.8.84 的
+   "高>70 或宽>240 就退出" **从来没有触发过** —— 日志里 展开=0 一直是 0,
+   小岛那块 25pt 玻璃在展开时继续画, 于是头像旁边多出一个心形。
+   现在换个判据: MediaRemoteUI 每帧都知道自己的头像是不是 66x66,
+   它把 expanded 写进 state.plist, 这边只读结果, 不再猜尺寸。
+   文件超过 4 秒没更新(MRU 没在跑/退出了)即视为非展开, 不会永久压着。 */
+static BOOL diMruSaysExpanded(void) {
+    static CFAbsoluteTime lastCheck; static BOOL cached;
+    CFAbsoluteTime now = CFAbsoluteTimeGetCurrent();
+    if (now - lastCheck < 0.35) return cached;
+    lastCheck = now;
+    NSString *dir = diMruSharedDir();
+    if (!dir.length) { cached = NO; return NO; }
+    NSString *p = [dir stringByAppendingPathComponent:@"state.plist"];
+    NSDictionary *attr = [[NSFileManager defaultManager] attributesOfItemAtPath:p error:NULL];
+    NSDate *md = attr[NSFileModificationDate];
+    if (!md || now - md.timeIntervalSince1970 > 4.0) { cached = NO; return NO; }
+    NSDictionary *d = [NSDictionary dictionaryWithContentsOfFile:p];
+    cached = [d[@"expanded"] boolValue];
+    return cached;
+}
+/* 我们自己玻璃内部的形状层也叫 kDIMaskLayerName, 清扫时必须放过它,
+   否则"清残留"会把正在旋转的玻璃削成方形。 */
+static BOOL diInsideOwnMaskView(UIView *v) {
+    for (UIView *a = v; a; a = a.superview)
+        if ([a isKindOfClass:DIMaskView.class]) return YES;
+    return NO;
+}
 static void diSweepMasks(BOOL onlyLarge) {
     NSMutableArray<UIWindow *> *wins = [NSMutableArray array];
     @try {
@@ -3245,7 +3280,7 @@ static void diSweepMasks(BOOL onlyLarge) {
     while (stack.count && budget--) {
         UIView *v = stack.lastObject; [stack removeLastObject];
         CALayer *m = v.layer.mask;
-        if (m && [m.name isEqualToString:kDIMaskLayerName]) {
+        if (m && [m.name isEqualToString:kDIMaskLayerName] && !diInsideOwnMaskView(v)) {
             CGSize sz = v.bounds.size;
             if (!onlyLarge || MAX(sz.width, sz.height) > 80.0) {
                 diStripMaskFromCover(v);
@@ -3682,6 +3717,23 @@ static BOOL diApplyMaskToCover(UIView *cover, UIImage *shape) {
         UIView *host = self.superview;
         if (!host || host.window == nil) { [self diTeardown]; if (++_miss > 20) _link.paused = YES; return; }
 
+        /* ===== 2.8.86: 展开态一律由 MRU 负责, 这边整棵退场 =====
+           判据不再看宿主尺寸(展开时宿主还是 198x55), 而是听 MRU 的 state.plist。
+           展开期间每帧都走这里: 一旦系统又重新挂了 mask 或我们又画了玻璃,
+           立刻收掉 —— 这就是"偶尔还会显示"的根本原因(总是慢半拍、抓不到)。
+           不 pause link, 缩回小岛时第一帧就能恢复。 */
+        if (diMruSaysExpanded()) {
+            if (_glassOn || _targets.count || !self.hidden) {
+                [self diTeardown];
+                static CFAbsoluteTime sExpT;
+                if (CFAbsoluteTimeGetCurrent() - sExpT > 2.0) {
+                    sExpT = CFAbsoluteTimeGetCurrent();
+                    DLog(@"遮罩退出: MRU 报展开态, 收掉小岛玻璃+系统蒙版(构建 %@)", DI_BUILD_VER);
+                }
+            }
+            return;
+        }
+
         /* 2.8.39: 遮罩锁死状态(308 反馈: "切歌变回方形然后才遮罩; 展开岛/切换歌曲
            不要影响, 一直显示遮罩")。播放中 → 记 lastPlayT; 玻璃在 + 30s 内播放过
            → lockMask=YES: 门户重建/指纹变化/判定瞬断/展开过渡一律不拆玻璃,
@@ -3697,7 +3749,8 @@ static BOOL diApplyMaskToCover(UIView *cover, UIImage *shape) {
            即使小岛的玻璃被播放锁定，也不能在展开宿主上重显 25pt 的副本。 */
         if (bs.width >= 280.0 && bs.height >= 120.0) {
             if (self.glassOn || !self.hidden) [self diTeardown];
-            _link.paused = YES;
+            /* 2.8.86: 不再 pause display link —— pause 之后没有任何地方 resume,
+               缩回小岛时这个实例就永远醒不过来(遮罩再也不出现)。 */
             return;
         }
 
@@ -10809,12 +10862,16 @@ static void visibilityTick(void) {
     refreshPrefs();
     static CFAbsoluteTime tMR; // CPU 优化: MediaRemote 查询 1秒一次(检测音乐停止够快)
     CFAbsoluteTime now = CFAbsoluteTimeGetCurrent();
-    /* 2.8.85: 残留遮罩清扫 —— 关着时全摘(2s), 开着时只摘大层(5s) */
+    /* 2.8.85: 残留遮罩清扫 —— 关着时全摘(2s), 开着时只摘大层(5s)
+       2.8.86: 展开期间 0.5s 一次、不限大小地扫 —— 展开态任何一个
+       SpringBoard 侧的形状层都会变成"多出来的心形", 一律不许留。 */
     {
         static CFAbsoluteTime tSweep;
-        if (now - tSweep > ((enabled && maskOn) ? 5.0 : 2.0)) {
+        BOOL exp = diMruSaysExpanded();
+        CFAbsoluteTime gap = exp ? 0.5 : ((enabled && maskOn) ? 5.0 : 2.0);
+        if (now - tSweep > gap) {
             tSweep = now;
-            @try { diSweepMasks(enabled && maskOn); } @catch (__unused NSException *e) {}
+            @try { diSweepMasks(exp ? NO : (enabled && maskOn)); } @catch (__unused NSException *e) {}
         }
     }
     if (now - tMR > 1.0) { tMR = now; queryMusicPlaying(); }
@@ -12477,12 +12534,34 @@ static void diActivityHideSystem(UIView *artwork, DIActivityMaskState *state) {
     if (artwork.clipsToBounds) artwork.clipsToBounds = NO;
     if (artwork.layer.cornerRadius != 0) artwork.layer.cornerRadius = 0;
 }
+/* 2.8.86: MRU 自己记的形态标志 —— 头像 66pt 即展开 */
+static BOOL gDIMruExpandedFlag;
+/* 2.8.86: 把展开/小岛状态回传给 SpringBoard(见 diMruSaysExpanded)。
+   判据 = 头像本身的边长: 小岛 22~26pt, 展开 66pt。用 MIN(宽,高)>=38
+   避开两侧配件(45x22)和过渡帧。最多 0.8s 写一次, 内容没变不写。 */
+static void diMruWriteExpandState(BOOL expanded, CGSize box) {
+    static BOOL lastE; static int lastW = -1, lastH = -1; static CFAbsoluteTime lastT;
+    gDIMruExpandedFlag = expanded;   /* 文字调整也用它判形态, 比 root 尺寸可靠 */
+    int w = (int)lround(box.width), h = (int)lround(box.height);
+    CFAbsoluteTime now = CFAbsoluteTimeGetCurrent();
+    if (now - lastT < 0.8 && expanded == lastE && w == lastW && h == lastH) return;
+    lastT = now; lastE = expanded; lastW = w; lastH = h;
+    NSString *dir = diMruSelfDir();
+    if (!dir.length) return;
+    NSDictionary *d = @{@"expanded": @(expanded), @"w": @(w), @"h": @(h),
+                        @"t": @(now), @"v": DI_BUILD_VER};
+    @try { [d writeToFile:[dir stringByAppendingPathComponent:@"state.plist"] atomically:YES]; }
+    @catch (__unused NSException *e) {}
+}
 /* 2.8.82: 自绘玻璃 —— 图 + 同一张遮罩 + 同速旋转, 系统那张层只藏起来。
    这是小岛 2.8.13 起一直在用、已验证有效的那套观感, 这里在 MediaRemoteUI 内复刻。 */
 static void diActivityApply(UIView *artwork) {
     if (!NSThread.isMainThread || ![artwork isKindOfClass:UIView.class]) return;
     DIActivityMaskState *state = objc_getAssociatedObject(artwork, &kDIActivityMaskState);
     BOOL sized = artwork.bounds.size.width > 20 && artwork.bounds.size.height > 20;
+    /* 2.8.86: 每次布局都把"我是不是展开态"告诉 SpringBoard */
+    diMruWriteExpandState(sized && artwork.bounds.size.width >= 38.0 && artwork.bounds.size.height >= 38.0,
+                          artwork.bounds.size);
     /* 2.8.78: 判定过程必须可观测 —— 否则"没遮上"到底是没注入、没素材、还是
        上下文校验挡掉, 全靠猜(325 日志已经吃过这个亏)。
        2.8.79: 上下文校验保留退让档(类不存在时放行并把真实祖先打出来)。 */
@@ -12673,13 +12752,17 @@ static BOOL diTextHasLabelChild(UIView *v, int depth) {
 static BOOL diTextIsCandidate(UIView *v, UIView *root) {
     if (!v || v == root || v.hidden || v.alpha < 0.05 || !v.window) return NO;
     CGSize s = v.bounds.size;
-    if (s.width < 16 || s.height < 8 || s.height > 60) return NO;
+    /* 2.8.86: 放宽到 12x6 ~ 90 高 —— 歌词常是 20~40 高的多行容器,
+       上一版卡在 60, MRU 里稍微大一点的文字块整块被漏掉。 */
+    if (s.width < 12 || s.height < 6 || s.height > 90) return NO;
+    if (s.width > root.bounds.size.width * 0.96) return NO;
     NSString *cn = NSStringFromClass(v.class);
     BOOL isUILabel = [v isKindOfClass:UILabel.class];
-    BOOL nameLike = [cn containsString:@"Label"] || [cn containsString:@"Text"];
+    BOOL nameLike = [cn containsString:@"Label"] || [cn containsString:@"Text"]
+                 || [cn containsString:@"Header"] || [cn containsString:@"Marquee"];
     if (!isUILabel && !nameLike) return NO;
     /* 自定义容器(标题+歌词的竖排栈)也收 —— 但必须真的装着文字, 否则可能误伤图标容器 */
-    if (!isUILabel && ![cn containsString:@"Label"] && !diTextHasLabelChild(v, 2)) return NO;
+    if (!isUILabel && ![cn containsString:@"Label"] && !diTextHasLabelChild(v, 3)) return NO;
     if (isUILabel && diTextIsClock(((UILabel *)v).text)) return NO;
     return YES;
 }
@@ -12698,32 +12781,70 @@ static void diActivityTextApply(UIView *root) {
     if (!NSThread.isMainThread) return;
     DIExpTextParams p; diMruExpandTextParams(&p);
     if (!gDIActivityTexts) gDIActivityTexts = [NSHashTable weakObjectsHashTable];
-    if (!p.on || !root || !root.window
-        || root.bounds.size.width < 240 || root.bounds.size.height < 90) {
+    /* 2.8.86: 每条分支都留痕 —— 上一版"没反应"和"根本没装"在日志里长得一模一样,
+       333 日志里连一条 text 都没有, 根本没法判断卡在哪。 */
+    static CFAbsoluteTime sSkipT; static NSString *sSkipWhy;
+    NSString *why = nil;
+    if (!p.on) why = @"开关=关(params.plist etOn=0)";
+    else if (!root || !root.window) why = @"root 不在窗口上";
+    else if (!gDIMruExpandedFlag) why = @"小岛态(MRU 头像 <38pt)";
+    else if (root.bounds.size.width < 200) why = [NSString stringWithFormat:@"root 太窄 %.0f",
+               root.bounds.size.width];
+    if (why) {
         diActivityTextRestore();
+        if (![why isEqualToString:sSkipWhy] || CFAbsoluteTimeGetCurrent() - sSkipT > 8.0) {
+            sSkipT = CFAbsoluteTimeGetCurrent(); sSkipWhy = [why copy];
+            diMruFileLog([NSString stringWithFormat:@"text 跳过 %@", why]);
+        }
         return;
     }
     /* 收集文字层(最多 8 层/1200 节点, 展开岛层级很浅) */
     NSMutableArray<UIView *> *cands = [NSMutableArray array];
+    UIView *header = nil;
     NSMutableArray<UIView *> *stack = [NSMutableArray arrayWithObject:root];
     NSUInteger budget = 1200;
     while (stack.count && budget--) {
         UIView *v = stack.lastObject; [stack removeLastObject];
-        if (v != root && diTextIsCandidate(v, root)) [cands addObject:v];
+        if (v != root && diTextIsCandidate(v, root)) {
+            [cands addObject:v];
+            /* 2.8.86: 头部容器里就是歌名 + 歌词 + 歌手, 整块搬最稳 */
+            if (!header && [NSStringFromClass(v.class) containsString:@"Header"]) header = v;
+        }
         for (UIView *c in v.subviews) [stack addObject:c];
     }
-    if (!cands.count) { diActivityTextRestore(); return; }
-    /* 祖先已经进候选的, 不再单独转(转父层就够, 避免重复缩放) */
-    NSMutableArray<UIView *> *targets = [NSMutableArray array];
-    for (UIView *v in cands) {
-        BOOL covered = NO;
-        for (UIView *a = v.superview; a && a != root; a = a.superview) {
-            if ([cands containsObject:a]) { covered = YES; break; }
+    if (!cands.count) {
+        diActivityTextRestore();
+        if (CFAbsoluteTimeGetCurrent() - sSkipT > 8.0) {
+            sSkipT = CFAbsoluteTimeGetCurrent();
+            sSkipWhy = @"候选=0";
+            diMruFileLog([NSString stringWithFormat:@"text 跳过 候选=0 (root %.0fx%.0f)",
+                root.bounds.size.width, root.bounds.size.height]);
         }
-        if (!covered) [targets addObject:v];
+        return;
+    }
+    NSMutableArray<UIView *> *targets = [NSMutableArray array];
+    if (header) {
+        [targets addObject:header];
+    } else {
+        /* 祖先已经进候选的, 不再单独转(转父层就够, 避免重复缩放) */
+        for (UIView *v in cands) {
+            BOOL covered = NO;
+            for (UIView *a = v.superview; a && a != root; a = a.superview) {
+                if ([cands containsObject:a]) { covered = YES; break; }
+            }
+            if (!covered) [targets addObject:v];
+        }
     }
     if (!targets.count) { diActivityTextRestore(); return; }
-    /* 锚点 = 原始位置的并集中心(用记录值算, 重复调用不会漂移) */
+    /* 2.8.86: 目标集合变了(逐标签 ↔ 头部容器)必须先把上一轮改过的全部还原,
+       否则旧目标会永久停在缩放态 —— 上一版 [gDIActivityTexts removeAllObjects]
+       只是忘了表, 变换还留在视图上。 */
+    BOOL sameSet = (gDIActivityTexts.count == targets.count);
+    if (sameSet) {
+        for (UIView *v in targets) if (![gDIActivityTexts containsObject:v]) { sameSet = NO; break; }
+    }
+    if (sameSet) [gDIActivityTexts removeAllObjects];
+    else diActivityTextRestore();
     CGRect u = CGRectNull;
     for (UIView *v in targets) {
         DITextAnchor *a = objc_getAssociatedObject(v, &kDITextAnchorKey);
@@ -12738,7 +12859,6 @@ static void diActivityTextApply(UIView *root) {
     if (CGRectIsNull(u)) return;
     CGPoint gc = CGPointMake(CGRectGetMidX(u), CGRectGetMidY(u));
     CGFloat s = p.scale;
-    [gDIActivityTexts removeAllObjects];
     NSMutableString *dump = [NSMutableString string];
     for (UIView *v in targets) {
         UIView *sv = v.superview;
@@ -12761,13 +12881,16 @@ static void diActivityTextApply(UIView *root) {
         [dump appendFormat:@"%@(%.0fx%.0f) ", NSStringFromClass(v.class),
             v.bounds.size.width, v.bounds.size.height];
     }
-    static NSString *lastDump;
-    if (![dump isEqualToString:lastDump]) {
-        lastDump = [dump copy];
-        diMruFileLog([NSString stringWithFormat:@"text 移动 %lu 层 偏移(%.0f,%.0f) 缩放 %.0f%% [%@]",
-            (unsigned long)targets.count, p.x, p.y, p.scale * 100, dump]);
-        diMruReport(@"text", [NSString stringWithFormat:@"n%lu_%.0f_%.0f_%.0f",
-            (unsigned long)targets.count, p.x, p.y, p.scale * 100]);
+    static NSString *lastDump; static CFAbsoluteTime lastLogT;
+    NSString *sig = [NSString stringWithFormat:@"%.0f_%.0f_%.0f_%@", p.x, p.y, p.scale * 100, dump];
+    if (![sig isEqualToString:lastDump] || CFAbsoluteTimeGetCurrent() - lastLogT > 15.0) {
+        lastDump = [sig copy];
+        lastLogT = CFAbsoluteTimeGetCurrent();
+        diMruFileLog([NSString stringWithFormat:@"text 移动 %lu 层(%@) 偏移(%.0f,%.0f) 缩放 %.0f%% [%@]",
+            (unsigned long)targets.count, header ? @"头部容器" : @"逐标签",
+            p.x, p.y, p.scale * 100, dump]);
+        diMruReport(@"text", [NSString stringWithFormat:@"n%lu_%.0f_%.0f_%.0f_%@",
+            (unsigned long)targets.count, p.x, p.y, p.scale * 100, header ? @"h" : @"l"]);
     }
 }
 /* 2.8.85: 控制器每次布局后重新应用一次 —— 系统会重排标签, 只在定时器里改会被覆盖 */
@@ -12781,13 +12904,30 @@ static void diActivityTextLayout(id self, SEL cmd) {
         }
     } @catch (__unused NSException *e) {}
 }
+/* ===== 2.8.86: 文字 hook 独立安装, 可重试 =====
+   上一版的死结: `if (installed) return;` 在文字 hook **之前**, 而这个 hook 只在
+   diActivityStart 调一次 —— 那时 MRUActivityNowPlayingViewController 往往还没被
+   runtime 注册(要等展开过第一次), 于是 textHooked 永远是 NO, 之后再也不会重试。
+   333 日志里一条 text 都没有, 就是这个原因。 */
+static void diActivityInstallTextHook(void) {
+    static BOOL hooked;
+    if (hooked) return;
+    Class vcCls = NSClassFromString(@"MRUActivityNowPlayingViewController");
+    if (!vcCls) return;                 /* 类还没加载, 下一轮心跳再来 */
+    SEL sel = @selector(viewDidLayoutSubviews);
+    if (!class_getInstanceMethod(vcCls, sel)) return;
+    MSHookMessageEx(vcCls, sel, (IMP)diActivityTextLayout, &gDIActivityOrigTextLayout);
+    hooked = YES;
+    diMruFileLog([NSString stringWithFormat:@"text hook 已装 %@ (orig=%@)",
+        NSStringFromClass(vcCls), gDIActivityOrigTextLayout ? @"有" : @"无"]);
+}
 
 static void diActivityReload(void) {
     gDIActivityEnabled = diMruPrefOn();
     logEnabled = pBool(@"logging", NO);
     gMaskGen++;
     gDIActivityShape = gDIActivityEnabled ? diActivityLoadShape() : nil;
-    diMruReport(@"reload", [NSString stringWithFormat:@"开关=%d 形状=%@",
+    diMruReport(@"reload", [NSString stringWithFormat:@"v%@ 开关=%d 形状=%@", DI_BUILD_VER,
         gDIActivityEnabled, gDIActivityShape ? [NSString stringWithFormat:@"%.0fx%.0f",
         gDIActivityShape.size.width, gDIActivityShape.size.height] : @"(无)"]);
     for (UIView *view in gDIActivityArtworks.allObjects) diActivityApply(view);
@@ -12808,6 +12948,16 @@ static void diActivityRegister(UIView *view) {
 static void diActivityLayout(id self, SEL cmd) {
     if (gDIActivityOrigLayout) ((void (*)(id, SEL))gDIActivityOrigLayout)(self, cmd);
     @try { diActivityRegister((UIView *)self); } @catch (NSException *e) { DLog(@"[真实专辑遮罩] 布局异常 %@", e.reason); }
+    /* 2.8.86: 展开岛自己每次布局都补一次文字位置 —— 系统重排会把我们改过的
+       center/transform 覆盖回去, 只在 1 秒心跳里改会出现"动一下就弹回"。 */
+    @try {
+        static CFAbsoluteTime tText;
+        CFAbsoluteTime now = CFAbsoluteTimeGetCurrent();
+        if (now - tText > 0.3) {
+            UIViewController *vc = diActivityAncestorVC((UIView *)self);
+            if (vc && vc.isViewLoaded) { tText = now; diActivityTextApply(vc.view); }
+        }
+    } @catch (__unused NSException *e) {}
 }
 static void diActivityMove(id self, SEL cmd) {
     if (gDIActivityOrigMove) ((void (*)(id, SEL))gDIActivityOrigMove)(self, cmd);
@@ -12863,20 +13013,9 @@ static void diActivitySetImage(id self, SEL cmd, id img) {
 }
 static void diActivityInstall(void) {
     static BOOL installed;
+    /* 2.8.86: 文字 hook 放在最前面且可重试(不受 installed 影响) */
+    diActivityInstallTextHook();
     if (installed) return;
-    /* 2.8.85: 展开定义 —— 文字 hook 独立安装(即使专辑类不在, 文字也要能摆)。
-       自己的静态标志防止重试时把 hook 套在自己身上。 */
-    static BOOL textHooked;
-    if (!textHooked) {
-        Class vcCls = NSClassFromString(@"MRUActivityNowPlayingViewController");
-        if (vcCls) {
-            SEL vcLayout = @selector(viewDidLayoutSubviews);
-            if (class_getInstanceMethod(vcCls, vcLayout)) {
-                MSHookMessageEx(vcCls, vcLayout, (IMP)diActivityTextLayout, &gDIActivityOrigTextLayout);
-                textHooked = YES;
-            }
-        }
-    }
     /* 2.8.82: 只 hook 一个类(按优先级取第一个存在的)。
        之前把三个类都挂到同一组 IMP 变量上 —— MSHookMessageEx 会覆盖同一个
        *result, 三个类同时存在时 orig 指向最后一个类, 转调就是错的/会递归。
@@ -12948,6 +13087,8 @@ static void diActivityScanTree(UIView *root, NSUInteger *nodes, NSUInteger *matc
     }
 }
 static void diActivityScan(void) {
+    /* 2.8.86: 心跳里补装文字 hook —— 展开过一次之后类才注册, 必须能重试 */
+    @try { diActivityInstallTextHook(); } @catch (__unused NSException *e) {}
     /* 2.8.81: 心跳不再被开关/素材挡在前面 —— 之前"没遮上"和"根本没跑"在日志里长得一模一样 */
     NSMutableArray<UIWindow *> *wins = [NSMutableArray array];
     @try {
@@ -12979,6 +13120,13 @@ static void diActivityScan(void) {
             }
         }
     } @catch (__unused NSException *e) {}
+    /* 2.8.86: 一个活着的头像都没有(音乐停了/岛收了) → 明确告诉 SpringBoard"非展开",
+       否则 state.plist 会一直停在 expanded=1, 小岛回来时那 4 秒没有遮罩。 */
+    {
+        BOOL anyLive = NO;
+        for (UIView *a in gDIActivityArtworks.allObjects) if (a.window) { anyLive = YES; break; }
+        if (!anyLive) diMruWriteExpandState(NO, CGSizeZero);
+    }
     if (now - lastReport > 5.0) {
         lastReport = now;
         diMruPostPayload(@"hb", [NSString stringWithFormat:@"on%d_shape%d_win%lu_nodes%lu_match%lu_hit%d",
@@ -13140,8 +13288,8 @@ __attribute__((constructor)) static void init(void) {
             return;
         }
         logHandle = os_log_create("com.abgg332.driftisland", "runtime");
-        DLog(@"===== 漂流岛 tweak 加载 (SpringBoard) 版本 %@ =====", \
-         [NSBundle.mainBundle.infoDictionary[@"CFBundleShortVersionString"] description] ?: @"?");
+        DLog(@"===== 漂流岛 tweak 加载 (SpringBoard) 版本 %@ (构建 %@) =====", \
+         [NSBundle.mainBundle.infoDictionary[@"CFBundleShortVersionString"] description] ?: @"?", DI_BUILD_VER);
         /* 2.8.78: 接收 MediaRemoteUI 的打点 + 把遮罩素材导出给那个进程 */
         diMruObserve();
         diMruTailInstall();

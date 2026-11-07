@@ -18,7 +18,7 @@
 
 static NSString *const kDomain = @"com.abgg332.driftisland";
 /* 2.6.25: 设置页底部显示的版本号 */
-static NSString *const DI_VERSION_STR = @"2.8.85";
+static NSString *const DI_VERSION_STR = @"2.8.86";
 /* 2.6.10: 专辑光晕遮罩 —— 与 Tweak 侧 DIAlbumMask.h 保持一致 */
 static NSString *const kDIAlbumMaskKey = @"diAlbumMaskAsset";
 static NSString *const kDIMaskRoot = @"/var/mobile/灵动岛/遮罩素材";
@@ -5123,7 +5123,7 @@ static void diOpenHomeBarPickWindow(void) {
        展开岛的专辑遮罩在 MediaRemoteUI 里自绘, 文字层也在那个进程;
        这组参数由 SpringBoard 导出到 MRU 容器, 那边读到后整组平移/缩放。 */
     [specs addObject:[self groupSpec:@"展开定义" footer:nil]];
-    [specs addObject:[self switchSpec:@"启用自定义" key:@"expandTextOn" def:@NO]];
+    [specs addObject:[self switchSpec:@"启用自定义" key:@"expandTextOn" def:@YES]];
     [specs addObject:[self numSlider:@"左右位置" key:@"expandTextX" def:0 mn:-120 mx:120]];
     [specs addObject:[self numSlider:@"上下位置" key:@"expandTextY" def:0 mn:-120 mx:120]];
     [specs addObject:[self numSlider:@"文字大小" key:@"expandTextScale" def:100 mn:50 mx:200]];
