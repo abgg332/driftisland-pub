@@ -56,10 +56,9 @@ static BOOL expandTextOn = YES;       // 启用自定义(位置/大小)
 static double expandTextX = 0.0;      // 左右偏移(pt, 右为正)
 static double expandTextY = 0.0;      // 上下偏移(pt, 下为正)
 static double expandTextScale = 100.0; // 文字大小(%, 100=原样)
-static BOOL expandTextColorOn = YES;   // 2.8.87: 文字颜色跟随小岛(「文字颜色」页的色表/流光)
 /* 2.8.86: 构建戳 —— 之前横幅打的是 SpringBoard 自己的 CFBundleShortVersionString(恒 1.0),
    日志里根本看不出装的是哪一版。所有诊断行都带这个戳, 下轮日志一眼定位。 */
-#define DI_BUILD_VER @"2.8.87"
+#define DI_BUILD_VER @"2.8.88"
 static BOOL gRecordingActive = NO; // 保留: 岛素材总闸条件
 static NSString *diElementId(UIView *host);
 static BOOL diMiniMusicActive(UIView *host); // 2.6.3: 前置(遮罩层使用)
@@ -772,7 +771,6 @@ static void refreshPrefs(void) {
     expandTextX = pDouble(@"expandTextX", 0.0);
     expandTextY = pDouble(@"expandTextY", 0.0);
     expandTextScale = pDouble(@"expandTextScale", 100.0);
-    expandTextColorOn = pBool(@"expandTextColorOn", YES);
     if (expandTextX < -120) expandTextX = -120; if (expandTextX > 120) expandTextX = 120;
     if (expandTextY < -120) expandTextY = -120; if (expandTextY > 120) expandTextY = 120;
     if (expandTextScale < 50) expandTextScale = 50; if (expandTextScale > 200) expandTextScale = 200;
@@ -4740,15 +4738,6 @@ static NSString *diMruSharedDir(void) {
     NSString *c = diMruOwnContainer();
     return c.length ? [c stringByAppendingPathComponent:@"Library/Caches/com.abgg332.driftisland"] : nil;
 }
-/* 2.8.87: 小岛色表 → HEX 列表, 随 params.plist 下发给 MRU 给展开岛文字上色 */
-static NSArray<NSString *> *diExpTextHexList(void) {
-    NSMutableArray<NSString *> *out = [NSMutableArray array];
-    for (UIColor *c in gNotifyColors) {
-        NSString *h = diHexFromUIColor(c);
-        if (h.length) [out addObject:h];
-    }
-    return out;
-}
 static void diExportMaskForMRU(void) {
     @autoreleasepool {
         NSString *path = diMaskCurrentPathV2();
@@ -4791,10 +4780,7 @@ static void diExportMaskForMRU(void) {
                                      @"mask": path.lastPathComponent ?: @"",
                                      /* 2.8.85: 展开定义 —— MRU 内的歌词/歌名位置与大小 */
                                      @"etOn": @(expandTextOn), @"etX": @(expandTextX),
-                                     @"etY": @(expandTextY), @"etScale": @(expandTextScale),
-                                     /* 2.8.87: 文字颜色 —— 与小岛同源 */
-                                     @"co": @(expandTextColorOn), @"fl": @(notifyFlowOn),
-                                     @"cs": diExpTextHexList()};
+                                     @"etY": @(expandTextY), @"etScale": @(expandTextScale)};
             [params writeToFile:[own stringByAppendingPathComponent:@"params.plist"] atomically:YES];
         }
         RLog(@"[遮罩导出] → MediaRemoteUI: 素材=%@ 文件=%@ 偏好=%lu字节 开关=%d 容器=%@ 容器写入=%@ 错误=%@",
@@ -12719,11 +12705,9 @@ static void diActivityApply(UIView *artwork) {
      · 以整组文字的并集中心为锚点缩放(字号一起变, 相对位置不变);
      · 平移量就是设置页里的左右/上下偏移;
      · 每层都记录原始 center/transform, 关掉开关立刻还原。 */
-typedef struct { BOOL on; CGFloat x, y, scale; BOOL colorOn, flow; } DIExpTextParams;
-/* 2.8.87: 颜色 —— 与小岛同源(设置页"文字颜色"那套: 多色 / 流光), 由 SpringBoard 导出 */
-static NSArray<NSString *> *gDIExpTextHex;
+typedef struct { BOOL on; CGFloat x, y, scale; } DIExpTextParams;
 static void diMruExpandTextParams(DIExpTextParams *p) {
-    static BOOL cOn, cColor; static CGFloat cX, cY, cScale = 100.0; static BOOL cFlow;
+    static BOOL cOn; static CGFloat cX, cY, cScale = 100.0;
     static CFAbsoluteTime last; static NSString *lastSig;
     CFAbsoluteTime now = CFAbsoluteTimeGetCurrent();
     if (last == 0 || now - last > 1.0) {
@@ -12741,17 +12725,10 @@ static void diMruExpandTextParams(DIExpTextParams *p) {
                 cScale = [d[@"etScale"] doubleValue];
                 if (cScale < 50) cScale = 50;
                 if (cScale > 200) cScale = 200;
-                cColor = [d[@"co"] boolValue];
-                cFlow = [d[@"fl"] boolValue];
-                NSArray *cs = [d[@"cs"] isKindOfClass:NSArray.class] ? d[@"cs"] : nil;
-                NSMutableArray *hexes = [NSMutableArray array];
-                for (id h in cs) if ([h isKindOfClass:NSString.class] && [h length]) [hexes addObject:h];
-                gDIExpTextHex = hexes.count ? [hexes copy] : nil;
             }
         }
     }
     p->on = cOn; p->x = cX; p->y = cY; p->scale = cScale / 100.0;
-    p->colorOn = cColor; p->flow = cFlow;
 }
 /* 2.8.87: 不再记录 center —— 位置改成"以系统布局的左上角为锚点"换算进 transform,
    这样每次布局都从系统原值重算, 不会越积越偏, 也不会因为头部宽度变了而整体漂移。 */
@@ -12799,9 +12776,8 @@ static void diActivityTextRestore(void) {
     }
     [gDIActivityTexts removeAllObjects];
 }
-/* ===== 2.8.87: 文字颜色 —— 直接复用小岛那套(多色 / 流光) =====
-   「文字颜色」页里配的色表由 SpringBoard 随 params.plist 下发(cs/co/fl),
-   这里对头部容器里的每个 UILabel 调同一个 applyFlow —— 观感和通知岛一致。 */
+/* 2.8.88: 展开岛文字不再自动上色 —— 用户要求"颜色保持原样"。
+   这里只保留还原: 早期版本给标签上过色的, 会把系统原色换回去。 */
 static NSHashTable<UILabel *> *gDIExpColored;
 static char kDIExpTextOrigKey;
 static void diActivityTextColorRestore(void) {
@@ -12809,7 +12785,6 @@ static void diActivityTextColorRestore(void) {
     for (UILabel *lb in gDIExpColored.allObjects) {
         NSDictionary *m = objc_getAssociatedObject(lb, &kDIExpTextOrigKey);
         if ([m isKindOfClass:NSDictionary.class]) {
-            /* 用"当前"文字还原(可能是切歌后的新歌词), 不能回退到上色时那份旧文本 */
             if (lb.attributedText.length) lb.text = lb.attributedText.string;
             id c = m[@"color"];
             if ([c isKindOfClass:UIColor.class]) lb.textColor = c;
@@ -12817,33 +12792,6 @@ static void diActivityTextColorRestore(void) {
         objc_setAssociatedObject(lb, &kDIExpTextOrigKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
     }
     [gDIExpColored removeAllObjects];
-}
-static void diActivityTextColorize(UIView *root, BOOL on, BOOL flow, NSArray<NSString *> *hexes) {
-    if (!gDIExpColored) gDIExpColored = [NSHashTable weakObjectsHashTable];
-    if (!on || !root || !hexes.count) { diActivityTextColorRestore(); return; }
-    NSMutableArray<UIColor *> *cols = [NSMutableArray array];
-    for (NSString *h in hexes) { UIColor *c = diColorFromHex(h); if (c) [cols addObject:c]; }
-    if (!cols.count) { diActivityTextColorRestore(); return; }
-    gNotifyColors = cols;
-    CGFloat phase = flow ? (CGFloat)fmod(CFAbsoluteTimeGetCurrent() / 2.5, 1.0) : 0.0;
-    NSMutableArray<UIView *> *stack = [NSMutableArray arrayWithObject:root];
-    NSUInteger budget = 400;
-    while (stack.count && budget--) {
-        UIView *v = stack.lastObject; [stack removeLastObject];
-        if ([v isKindOfClass:UILabel.class]) {
-            UILabel *lb = (UILabel *)v;
-            if (lb.text.length || lb.attributedText.length) {
-                if (!objc_getAssociatedObject(lb, &kDIExpTextOrigKey)) {
-                    NSMutableDictionary *m = [NSMutableDictionary dictionary];
-                    if (lb.attributedText.length) m[@"attr"] = [lb.attributedText copy];
-                    if (lb.textColor) m[@"color"] = lb.textColor;
-                    objc_setAssociatedObject(lb, &kDIExpTextOrigKey, m, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-                }
-                if (applyFlow(lb, phase)) [gDIExpColored addObject:lb];
-            }
-        }
-        for (UIView *c in v.subviews) [stack addObject:c];
-    }
 }
 static void diActivityTextApply(UIView *root) {
     if (!NSThread.isMainThread) return;
@@ -12933,16 +12881,16 @@ static void diActivityTextApply(UIView *root) {
         [dump appendFormat:@"%@(%.0fx%.0f@%.0f,%.0f) ", NSStringFromClass(v.class),
             base.size.width, base.size.height, base.origin.x, base.origin.y];
     }
-    /* 2.8.87: 颜色作用在整块文字容器上(头部容器优先) */
-    diActivityTextColorize(targets.firstObject, p.colorOn, p.flow, gDIExpTextHex);
+    /* 2.8.88: 只摆位置/大小, 颜色一律保持系统原样(之前自动上色会"变回彩色") */
+    diActivityTextColorRestore();
     static NSString *lastDump; static CFAbsoluteTime lastLogT;
     NSString *sig = [NSString stringWithFormat:@"%.0f_%.0f_%.0f_%@", p.x, p.y, p.scale * 100, dump];
     if (![sig isEqualToString:lastDump] || CFAbsoluteTimeGetCurrent() - lastLogT > 15.0) {
         lastDump = [sig copy];
         lastLogT = CFAbsoluteTimeGetCurrent();
-        diMruFileLog([NSString stringWithFormat:@"text 移动 %lu 层(%@) 偏移(%.0f,%.0f) 缩放 %.0f%% 颜色=%@ [%@]",
+        diMruFileLog([NSString stringWithFormat:@"text 移动 %lu 层(%@) 偏移(%.0f,%.0f) 缩放 %.0f%% [%@]",
             (unsigned long)targets.count, header ? @"头部容器" : @"逐标签",
-            p.x, p.y, p.scale * 100, p.colorOn ? (p.flow ? @"流光" : @"多色") : @"关", dump]);
+            p.x, p.y, p.scale * 100, dump]);
         diMruReport(@"text", [NSString stringWithFormat:@"n%lu_%.0f_%.0f_%.0f_%@",
             (unsigned long)targets.count, p.x, p.y, p.scale * 100, header ? @"h" : @"l"]);
     }

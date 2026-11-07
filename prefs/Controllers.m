@@ -18,7 +18,7 @@
 
 static NSString *const kDomain = @"com.abgg332.driftisland";
 /* 2.6.25: 设置页底部显示的版本号 */
-static NSString *const DI_VERSION_STR = @"2.8.87";
+static NSString *const DI_VERSION_STR = @"2.8.88";
 /* 2.6.10: 专辑光晕遮罩 —— 与 Tweak 侧 DIAlbumMask.h 保持一致 */
 static NSString *const kDIAlbumMaskKey = @"diAlbumMaskAsset";
 static NSString *const kDIMaskRoot = @"/var/mobile/灵动岛/遮罩素材";
@@ -1425,6 +1425,9 @@ static void diWriteColors(NSArray<NSString *> *colors) {
         DI_ADD([self linkSpec:@"锁屏通知" detail:[DILockScreenPage class]]);
         /* 2.8.22: "歌词岛"更名"专辑遮罩"(左侧专辑帧率 + 右侧音频帧率 + 专辑遮罩) */
         DI_ADD([self linkSpec:@"专辑遮罩" detail:[DILyricsIslandSettings class]]);
+        /* 2.8.88: 展开定义 —— 按用户要求做成独立入口, 就放在「专辑遮罩」下面;
+           页内上面是帧率, 下面是展开岛的歌词/歌名位置与大小 */
+        DI_ADD([self linkSpec:@"展开定义" detail:[DIExpandDefinePage class]]);
         /* 2.8.41: 控制中心入口回归 */
         DI_ADD([self linkSpec:@"控制中心" detail:[DICCSettings class]]);
 
@@ -5143,16 +5146,33 @@ static void diOpenHomeBarPickWindow(void) {
 }
 @end
 
-/* 2.8.87: 展开定义页 —— 展开岛(长按展开)的歌名/歌词 位置、大小、颜色 */
+/* 2.8.88: 展开定义页 —— 上面是帧率(与主页「帧率」组同一批键), 下面是展开岛文字 */
 @implementation DIExpandDefinePage
+- (id)readFrameName:(PSSpecifier *)sp {
+    CFPreferencesAppSynchronize((__bridge CFStringRef)kDomain);
+    id v = CFBridgingRelease(CFPreferencesCopyAppValue(CFSTR("animFolder"), (__bridge CFStringRef)kDomain));
+    if ([v isKindOfClass:NSString.class] && [(NSString *)v length]) return v;
+    return @"默认(全部帧)";
+}
 - (NSArray *)buildSpecifiers {
     NSMutableArray *specs = [NSMutableArray array];
-    [specs addObject:[self groupSpec:@"展开定义" footer:@"只作用于展开后的音乐岛: 歌名/歌词整块移动与缩放; 颜色直接沿用「文字颜色」页里给小岛配的色表与流光。"]];
+    /* ---- 上: 帧率 ---- */
+    [specs addObject:[self groupSpec:@"帧率" footer:@"与主页「帧率」组是同一套设置, 在哪边改都会同步。"]];
+    [specs addObject:[self switchSpec:@"音频开关" key:@"spectrumOn" def:@NO]];
+    [specs addObject:[self switchSpec:@"帧率开关" key:@"materialOn" def:@YES]];
+    [specs addObject:[self numSlider:@"帧率速度" key:@"animFPS" def:50 mn:10 mx:200]];
+    [specs addObject:[self numSlider:@"素材大小" key:@"animScaleAdj" def:0 mn:-20 mx:20]];
+    [specs addObject:[self numSlider:@"左右偏移" key:@"animOffsetX3" def:0 mn:-50 mx:50]];
+    [specs addObject:[self numSlider:@"上下偏移" key:@"animOffsetY3" def:0 mn:-50 mx:50]];
+    PSSpecifier *animSet = [PSSpecifier preferenceSpecifierNamed:@"素材名称" target:self
+        set:NULL get:@selector(readFrameName:) detail:[DIFrameFolders class] cell:PSLinkCell edit:nil];
+    [specs addObject:animSet];
+    /* ---- 下: 展开定义 ---- */
+    [specs addObject:[self groupSpec:@"展开定义" footer:@"只作用于展开后的音乐岛: 歌名/歌词整块按这里设的大小与位置摆放, 颜色保持系统原样。"]];
     [specs addObject:[self switchSpec:@"启用自定义" key:@"expandTextOn" def:@YES]];
     [specs addObject:[self numSlider:@"左右位置" key:@"expandTextX" def:0 mn:-120 mx:120]];
     [specs addObject:[self numSlider:@"上下位置" key:@"expandTextY" def:0 mn:-120 mx:120]];
     [specs addObject:[self numSlider:@"文字大小" key:@"expandTextScale" def:100 mn:50 mx:200]];
-    [specs addObject:[self switchSpec:@"文字颜色(跟随小岛)" key:@"expandTextColorOn" def:@YES]];
     return specs;
 }
 @end
