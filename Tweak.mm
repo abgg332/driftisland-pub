@@ -63,7 +63,7 @@ static double expandTextY = DI_EXP_TEXT_BASE_Y;   // 上下偏移(pt, 下为正,
 static double expandTextScale = 100.0; // 文字大小(%, 100=原样)
 /* 2.8.86: 构建戳 —— 之前横幅打的是 SpringBoard 自己的 CFBundleShortVersionString(恒 1.0),
    日志里根本看不出装的是哪一版。所有诊断行都带这个戳, 下轮日志一眼定位。 */
-#define DI_BUILD_VER @"2.8.95"
+#define DI_BUILD_VER @"2.8.96"
 static BOOL gRecordingActive = NO; // 保留: 岛素材总闸条件
 static NSString *diElementId(UIView *host);
 static BOOL diMiniMusicActive(UIView *host); // 2.6.3: 前置(遮罩层使用)
@@ -555,6 +555,20 @@ static UIView *diRecIslandHost(void) {
 static CGRect diRecSlotRect(UIView *island, BOOL onRight, UIView **outAcc) {
     if (outAcc) *outAcc = nil;
     if (!island) return CGRectZero;
+    /* 2.8.96: 优先走系统自带的 leadingView/trailingView —— 这是 DynamicislandAnimation
+       的同款做法(hook SAUIElementView 直接拿这两个 accessory), 比按类名翻
+       _SAUIProvidedViewContainerView 靠谱: 录屏岛的 accessory 容器类不一定叫那个。
+       拿不到(accessor 不存在/不在屏)再退回旧的形状判定。 */
+    SEL asel = NSSelectorFromString(onRight ? @"trailingView" : @"leadingView");
+    if ([island respondsToSelector:asel]) {
+        UIView *acc = ((id (*)(id, SEL))objc_msgSend)(island, asel);
+        if ([acc isKindOfClass:UIView.class] && acc.window
+            && acc.bounds.size.width > 1 && acc.bounds.size.height > 1) {
+            CGRect f = [island convertRect:acc.frame fromView:acc.superview];
+            if (outAcc) *outAcc = acc;
+            return f;
+        }
+    }
     NSMutableArray<UIView *> *accs = [NSMutableArray array];
     NSMutableArray<UIView *> *stack = [NSMutableArray arrayWithObject:island];
     int guard = 0;
@@ -908,7 +922,7 @@ static void refreshPrefs(void) {
 @end
 
 static char kWinVideoSmall, kWinVideoExpand, kWinVideoRec, kWinVideoSpec;
-static char kWinAnimRecL, kWinAnimRecR;   /* 2.8.95: 录屏岛左右帧率图层 */
+/* 2.8.96: 录屏岛帧率层不再按窗口挂(旧 kWinAnimRecL/R 已删), 改挂在 elementView 上 */
 
 /* ===== 音频会话: 2.3.2 定稿(2.3.1 删错了一次, 这里写清楚为什么必须保留) =====
 
@@ -6063,41 +6077,11 @@ static void updateSingleVideo(UIWindow *win) {
             /* 每轮重申保持在最底(系统重排可能把它提上来) */
             if (recHost.subviews.firstObject != recV) [recHost sendSubviewToBack:recV];
             recV.syncLink.paused = NO;
-
-            /* 2.8.95: 录屏岛左右帧率图层 —— 挂在同一个指示岛上, 各自贴自己那格 */
-            for (NSInteger side = 0; side < 2; side++) {
-                char *key = (side == 0) ? &kWinAnimRecL : &kWinAnimRecR;
-                DIAnimView *av = objc_getAssociatedObject(win, key);
-                if (!av) {
-                    av = [[DIAnimView alloc] initWithFrame:CGRectZero];
-                    av.recMode = YES;
-                    av.side = side;
-                    av.hidden = YES;
-                    objc_setAssociatedObject(win, key, av, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-                }
-                if (av.superview != recHost) {
-                    [av removeFromSuperview];
-                    [recHost addSubview:av];
-                }
-                [recHost bringSubviewToFront:av];   /* 素材要盖在原生图层之上 */
-                av.link.paused = NO;
-            }
         } else if (recV.superview) {
             [recV removeFromSuperview];
             recV.hidden = YES;
         }
-        /* 岛没了/关闭总开关: 两层帧率一起撤 */
-        if (!recHost || recHost.window != win) {
-            for (NSInteger side = 0; side < 2; side++) {
-                char *key = (side == 0) ? &kWinAnimRecL : &kWinAnimRecR;
-                DIAnimView *av = objc_getAssociatedObject(win, key);
-                if (av.superview) [av removeFromSuperview];
-                if (!av.hidden) av.hidden = YES;
-                av.link.paused = YES;
-                if (av.iv.image) av.iv.image = nil;
-            }
-            gRecVideoLeftShowing = NO;
-        }
+        gRecVideoLeftShowing = (recV && !recV.hidden && recV.superview != nil);
     }
 
     if (!enabled) {
@@ -8723,6 +8707,108 @@ static void diRestyleAllLockPlatters(void) {
     });
 }
 
+/* ===== 2.8.96: 录屏岛图层 —— 真 hook SAUIElementView =====
+   2.8.95 把层挂到 hostTable 里"按尺寸猜"的方形宿主上 —— 那多半是岛的外层
+   容器而不是 accessory 所在的 elementView, 系统一重排层就漂走或被盖,
+   表现为"有开关没画面"。DynamicislandAnimation(用户给的源码包)的做法是
+   直接 hook SAUIElementView 拿 leadingView/trailingView; 这个类本来就在
+   installKnownHosts 的 hook 表里, 所以 layoutHook 顺手同步就行:
+     · 录屏中 + 有开关打开 → 在 elementView 上挂左右两个帧率层;
+     · 不满足 → 原地复原(撤层 + 恢复原生 accessory 的 hidden)。
+   开关切换的即时生效走 diPrefsRefreshNow → diRecSyncAllWindows。 */
+static char kDIRecElemL, kDIRecElemR, kDIRecElemMark;
+
+static void diRecElementClear(UIView *ev) {
+    for (NSUInteger side = 0; side < 2; side++) {
+        char *key = (side == 0) ? &kDIRecElemL : &kDIRecElemR;
+        DIAnimView *av = objc_getAssociatedObject(ev, key);
+        if (!av) continue;
+        if (av.recAcc && av.recAcc.layer)
+            diRecAccHidden(av.recAcc.layer, (side == 0) ? gRecVideoLeftShowing : NO);
+        if (av.superview) [av removeFromSuperview];
+        av.hidden = YES;
+        av.link.paused = YES;
+        if (av.iv.image) av.iv.image = nil;
+    }
+    objc_setAssociatedObject(ev, &kDIRecElemMark, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+}
+
+static void diRecSyncElement(UIView *ev) {
+    /* 0.2s 缓存的快速闸门: 没开功能/没在录屏时, 这里只有一个关联对象查询 */
+    static CFAbsoluteTime gT; static BOOL gV;
+    CFAbsoluteTime now = CFAbsoluteTimeGetCurrent();
+    BOOL gate;
+    if (now - gT < 0.2) gate = gV;
+    else {
+        gate = enabled && (recLeftOn || recRightOn || recHideDot || recHideCount)
+            && diIsScreenRecording();
+        gV = gate; gT = now;
+    }
+    BOOL marked = objc_getAssociatedObject(ev, &kDIRecElemMark) != nil;
+    if (!gate) {
+        if (marked) diRecElementClear(ev);
+        return;
+    }
+    /* 识别录屏岛: elementIdentifier 带 rec, 或 30~45 方形(实测 ~39×39) */
+    SEL es = NSSelectorFromString(@"elementIdentifier");
+    BOOL isRec = NO;
+    if ([ev respondsToSelector:es]) {
+        NSString *eid = ((id (*)(id, SEL))objc_msgSend)(ev, es);
+        if ([eid.lowercaseString containsString:@"rec"]) isRec = YES;
+    }
+    if (!isRec) {
+        CGFloat w = ev.bounds.size.width, h = ev.bounds.size.height;
+        if (w >= 30 && w <= 45 && h >= 30 && h <= 45 && fabs(w - h) < 3) isRec = YES;
+    }
+    if (!isRec) {
+        if (marked) diRecElementClear(ev);   /* 层挂在被复用/回收的元素上: 撤 */
+        return;
+    }
+    if (!marked) {
+        objc_setAssociatedObject(ev, &kDIRecElemMark, @YES, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        static BOOL loggedHit;
+        if (!loggedHit) {
+            loggedHit = YES;
+            RLog(@"录屏岛图层: hook 命中 %@ identifier=%@ %.0fx%.0f",
+                 NSStringFromClass(ev.class),
+                 ([ev respondsToSelector:es]
+                     ? ((id (*)(id, SEL))objc_msgSend)(ev, es) : nil) ?: @"(无)",
+                 ev.bounds.size.width, ev.bounds.size.height);
+        }
+    }
+    for (NSUInteger side = 0; side < 2; side++) {
+        char *key = (side == 0) ? &kDIRecElemL : &kDIRecElemR;
+        DIAnimView *av = objc_getAssociatedObject(ev, key);
+        if (!av) {
+            av = [[DIAnimView alloc] initWithFrame:CGRectZero];
+            av.recMode = YES;
+            av.side = (NSInteger)side;
+            av.hidden = YES;
+            objc_setAssociatedObject(ev, key, av, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+            [ev addSubview:av];
+        }
+        [ev bringSubviewToFront:av];   /* 素材永远盖在原生内容之上 */
+        av.link.paused = NO;           /* 布局重申时唤醒(开关中途切换也能接上) */
+    }
+}
+
+/* 开关切换的即时生效: 把所有窗口里的 SAUIElementView 全部重新 sync 一遍 */
+static void diRecSyncAllWindows(void) {
+    Class saCls = NSClassFromString(@"SAUIElementView");
+    if (!saCls || !NSThread.isMainThread) return;
+    for (UIScene *sc in UIApplication.sharedApplication.connectedScenes)
+        if ([sc isKindOfClass:[UIWindowScene class]])
+            for (UIWindow *w in ((UIWindowScene *)sc).windows) {
+                NSMutableArray<UIView *> *st = [NSMutableArray arrayWithObject:w];
+                int guard = 0;
+                while (st.count && guard++ < 400) {
+                    UIView *v = st.firstObject; [st removeObjectAtIndex:0];
+                    if ([v isKindOfClass:saCls]) diRecSyncElement(v);
+                    for (UIView *c in v.subviews) [st addObject:c];
+                }
+            }
+}
+
 static void layoutHook(UIView *self, SEL selector) {
     Class concrete = object_getClass(self);
     for (Class c = concrete; c; c = class_getSuperclass(c)) {
@@ -8733,7 +8819,11 @@ static void layoutHook(UIView *self, SEL selector) {
     }
     if (lockWOn) applyLockWidth(self); // 2.2.10: 锁屏通知宽度(先于 updateHost, 避免岛相关开销)
     applyLockStyle(self);              // 2.2.17: 锁屏通知边框/背景/阴影
-    if (NSThread.isMainThread) { diInstallGeometryWatch(); updateHost(self); }
+    if (NSThread.isMainThread) {
+        diRecSyncElement(self);   /* 2.8.96: 录屏岛图层(SAUIElementView 在 hook 表里) */
+        diInstallGeometryWatch();
+        updateHost(self);
+    }
 }
 
 static void installKnownHosts(void);
@@ -11309,6 +11399,9 @@ static void diPrefsRefreshNow(void) {
         }
         /* 2.8.8: 发光开关/半径/颜色变更 → 立即重绘所有锁屏卡片 */
         diRestyleAllLockPlatters();
+        /* 2.8.96: 录屏岛开关(启用帧率/隐藏圆点/隐藏倒计时)变更 → 全窗重新 sync,
+           不用等下一次布局触发(layout 稳定后不再被调用) */
+        diRecSyncAllWindows();
     } @catch (NSException *e) {
         RLog(@"偏好刷新异常(已吞): %@ — %@", e.name, e.reason);
     }
