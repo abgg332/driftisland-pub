@@ -38,18 +38,23 @@ jobs:
       - name: Install iPhoneOS SDK
         run: |
           mkdir -p "$THEOS/sdks"
-          URL="https://github.com/theos/sdks/releases/download/master-146e41f/iPhoneOS16.5.sdk.tar.xz"
+          # 2026-11: 上游 theos/sdks 的 release 频繁 504, 构建经常卡在这一步。
+          # 仓库自带的 sdk-cache release 作首选源, 上游只作兜底。
+          PRIMARY="https://github.com/abgg332/driftisland-pub/releases/download/sdk-cache/iPhoneOS16.5.sdk.tar.xz"
+          FALLBACK="https://github.com/theos/sdks/releases/download/master-146e41f/iPhoneOS16.5.sdk.tar.xz"
           ok=0
-          for i in 1 2 3 4 5 6; do
-            echo "== SDK 下载尝试 $i"
-            if curl -L --retry 3 --retry-delay 5 --retry-all-errors -o /tmp/sdk.tar.xz "$URL" && tar -tJf /tmp/sdk.tar.xz >/dev/null 2>&1; then
+          for URL in "$PRIMARY" "$FALLBACK" "$PRIMARY" "$FALLBACK"; do
+            echo "== SDK 下载 $URL"
+            if curl -fL --retry 3 --retry-delay 5 --retry-all-errors --connect-timeout 30 -o /tmp/sdk.tar.xz "$URL" \
+               && tar -tJf /tmp/sdk.tar.xz >/dev/null 2>&1; then
               ok=1; break
             fi
             rm -f /tmp/sdk.tar.xz
-            sleep 15
+            sleep 10
           done
-          if [ "$ok" != "1" ]; then echo "SDK 下载失败(源头 504), 稍后重跑"; exit 1; fi
+          if [ "$ok" != "1" ]; then echo "SDK 下载失败, 稍后重跑"; exit 1; fi
           tar -xJf /tmp/sdk.tar.xz -C "$THEOS/sdks"
+          ls "$THEOS/sdks"
 
       # 无根 rootless：arm64 + arm64e（多巴胺等无根越狱，装 /var/jb）
       - name: Build rootless package
