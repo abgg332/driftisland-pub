@@ -73,7 +73,7 @@ static double expandTextY = DI_EXP_TEXT_BASE_Y;   // 上下偏移(pt, 下为正,
 static double expandTextScale = 100.0; // 文字大小(%, 100=原样)
 /* 2.8.86: 构建戳 —— 之前横幅打的是 SpringBoard 自己的 CFBundleShortVersionString(恒 1.0),
    日志里根本看不出装的是哪一版。所有诊断行都带这个戳, 下轮日志一眼定位。 */
-#define DI_BUILD_VER @"2.9.6"
+#define DI_BUILD_VER @"2.9.7"
 static BOOL gRecordingActive = NO; // 保留: 岛素材总闸条件
 static NSString *diElementId(UIView *host);
 static BOOL diMiniMusicActive(UIView *host); // 2.6.3: 前置(遮罩层使用)
@@ -12411,7 +12411,6 @@ static int gRhyDotsN = 10;
 static double gRhyGain = 100.0, gRhySmooth = 60.0;
 static float gRhyPeak = 0.02f;
 static char kDIRhyViewKey;
-static char kDIRhyBaseKey;      /* 专辑封面原始 transform, 鼓点缩放用 */
 
 static void diRhyPublish(void);
 
@@ -12955,7 +12954,7 @@ static CGPathRef diRhyBitPath(DIRhyBit kind, CGFloat sz) {
 #define DI_RHY_DOTS_MAX 20
 
 /* 2.9.5: 只留粒子。辐条频谱和扩散波环全部删掉 —— 用户要的是
-   "粒子 + 专辑封面本身跟着鼓点震", 震动由 diRhythmShake 作用在封面上。 */
+   "粒子 + 专辑封面本身跟着鼓点震", 震动由 diRhythmPunch 以叠加动画实现。 */
 @interface DIRhyView : UIView
 @property (nonatomic, strong) NSMutableArray<CAShapeLayer *> *bits;
 @property (nonatomic, strong) UIImage *lastArt;
@@ -13172,7 +13171,7 @@ static void diRhythmApply(UIView *artwork) {
             && p.bounds.size.height >= as.height * 1.25) { host = p; break; }
         probe = p;
     }
-    if (host != artwork && !host.window && !host.superview) host = artwork;
+    if (host != artwork && !host.window) host = artwork;
 
     CGFloat coverR = side * 0.5;
     CGFloat wantR = coverR * 1.78;
@@ -13222,35 +13221,32 @@ static void diRhythmApply(UIView *artwork) {
     }
 }
 
-/* 2.9.5: 鼓点震动作用在专辑封面本身。
-   把"当前 transform"当基准保存, 每帧只叠加一个很小的缩放;
-   kick 落回 0 时把基准清掉, 下次重新采样 —— 这样系统自己做展开动画时不会被打断太久。 */
-static void diRhythmShake(UIView *v, CGFloat kick) {
-    if (!v || !v.layer) return;
-    NSValue *bv = objc_getAssociatedObject(v, &kDIRhyBaseKey);
-    if (kick < 0.02) {
-        if (bv) {
-            CATransform3D base = CATransform3DIdentity;
-            [bv getValue:&base];
-            v.layer.transform = base;
-            objc_setAssociatedObject(v, &kDIRhyBaseKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-        }
-        return;
-    }
-    CATransform3D base;
-    if (bv) {
-        [bv getValue:&base];
-    } else {
-        base = v.layer.transform;
-        objc_setAssociatedObject(v, &kDIRhyBaseKey, [NSValue valueWithCATransform3D:base],
-                                 OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-    }
+/* 2.9.7: 鼓点冲击 —— 绝对不再写 layer.transform。
+   2.9.6 是每帧把 layer.transform 设成"基准 × 缩放"。灵动岛的展开/收起本身
+   就靠这个 transform 做 morph, 模型值被我们盖掉之后, 岛就渲染不出来、也点不开
+   (352 日志: 小岛/大岛全消失)。现在改用 additive 动画: 只叠加在呈现层上,
+   model 一点不动, 系统怎么写都行, 播完自己移除。
+   每记鼓点触发一次, 由 [layer animationForKey:] 防止重入。 */
+static void diRhythmPunch(UIView *v, CGFloat kick, BOOL onset) {
+    if (!v || !v.layer || !onset || kick <= 0.02) return;
     CGFloat side = MIN(v.bounds.size.width, v.bounds.size.height);
-    /* 小封面按比例给大一点, 否则 23pt 的岛放大 4% 只有 1pt, 看不出来 */
-    CGFloat amp = side < 40 ? 0.20 : (side < 90 ? 0.13 : 0.09);
+    if (side < 8) return;
+    if ([v.layer animationForKey:@"diKick"]) return;    /* 上一记还在播 */
+
+    CGFloat amp = side < 40 ? 0.12 : (side < 90 ? 0.085 : 0.06);
     amp *= (CGFloat)(gRhyKickAmt / 100.0);
-    CGFloat s = 1.0 + amp * kick;
-    v.layer.transform = CATransform3DScale(base, s, s, 1.0);
+    amp *= kick;
+    if (amp < 0.004) return;
+
+    CABasicAnimation *a = [CABasicAnimation animationWithKeyPath:@"transform.scale"];
+    a.fromValue = @(0.0);
+    a.toValue = @(amp);
+    a.additive = YES;                                   /* 关键: 相对叠加, 不覆盖系统 transform */
+    a.duration = 0.09;
+    a.autoreverses = YES;                               /* 放大 -> 回弹 */
+    a.timingFunction = [CAMediaTimingFunction functionWithName:kCAMediaTimingFunctionEaseOut];
+    a.removedOnCompletion = YES;
+    [v.layer addAnimation:a forKey:@"diKick"];
 }
 
 /* 心跳: 挂载 + 渲染 + 安装重试。30fps, 只有 gRhyOn 打开才做实际工作。 */
@@ -13308,8 +13304,8 @@ static void diRhythmTick(void) {
     CFAbsoluteTime now = CFAbsoluteTimeGetCurrent();
 
     if (!gRhyOn) {
-        for (UIView *a in gRhyArtworks.allObjects) { diRhyDrop(a); diRhythmShake(a, 0); }
-        for (UIView *a in gDIActivityArtworks.allObjects) { diRhyDrop(a); diRhythmShake(a, 0); }
+        for (UIView *a in gRhyArtworks.allObjects) diRhyDrop(a);
+        if (gDIActivityArtworks) for (UIView *a in gDIActivityArtworks.allObjects) diRhyDrop(a);
         return;
     }
     /* 2.9.6: 全树扫描只在"一个可用视图都没有"时才做 —— 原来每 2.5 秒固定扫 800 节点,
@@ -13317,7 +13313,7 @@ static void diRhythmTick(void) {
     if (!gRhyArtworks) gRhyArtworks = [NSHashTable weakObjectsHashTable];
     {
         BOOL anyAlive = NO;
-        for (UIView *a in gRhyArtworks.allObjects) if (a.window || a.superview) { anyAlive = YES; break; }
+        for (UIView *a in gRhyArtworks.allObjects) if (a.window) { anyAlive = YES; break; }
         if (!anyAlive && now - gRhyLastScan > 3.0) { gRhyLastScan = now; diRhyScanWindows(); }
     }
 
@@ -13351,12 +13347,16 @@ static void diRhythmTick(void) {
     if (doApply) lastApply = now;
 
     NSMutableArray<UIView *> *alive = [NSMutableArray array];
-    for (UIView *a in gRhyArtworks.allObjects) if (a.window || a.superview) [alive addObject:a];
+    /* 2.9.7: 只认真正在窗口里的视图。2.9.6 放宽成 superview 之后, 布局过程中
+       那些还没上屏的岛封面也被算进来, 于是被鼓点改了 transform, 上屏后就是坏的。 */
+    for (UIView *a in gRhyArtworks.allObjects) if (a.window) [alive addObject:a];
     if (gDIActivityArtworks) for (UIView *a in gDIActivityArtworks.allObjects)
-        if ((a.window || a.superview) && ![alive containsObject:a]) [alive addObject:a];
+        if (a.window && ![alive containsObject:a]) [alive addObject:a];
 
     CGFloat lv = sLv;
     CGFloat dt = 1.0 / 30.0;
+    /* 鼓点刚落地的那一两帧才算 onset —— 冲击动画只在这时加一次 */
+    BOOL onset = (sLastKick > 0 && tau < 0.06);
     BOOL active = (age < 1.2) || (tau < 0.52);
     int cnt = gRhyDotsN;
 
@@ -13370,7 +13370,7 @@ static void diRhythmTick(void) {
     [CATransaction setDisableActions:YES];
     for (UIView *a in alive) {
         if (!diRhySideOK(a)) continue;
-        diRhythmShake(a, kick);
+        diRhythmPunch(a, kick, onset);
         DIRhyView *v = objc_getAssociatedObject(a, &kDIRhyViewKey);
         if (v) [v applyKick:kick lv:lv dt:dt count:cnt];
     }
