@@ -62,7 +62,7 @@ static double expandTextY = DI_EXP_TEXT_BASE_Y;   // 上下偏移(pt, 下为正,
 static double expandTextScale = 100.0; // 文字大小(%, 100=原样)
 /* 2.8.86: 构建戳 —— 之前横幅打的是 SpringBoard 自己的 CFBundleShortVersionString(恒 1.0),
    日志里根本看不出装的是哪一版。所有诊断行都带这个戳, 下轮日志一眼定位。 */
-#define DI_BUILD_VER @"2.9.11"
+#define DI_BUILD_VER @"2.9.12"
 static BOOL gRecordingActive = NO; // 保留: 岛素材总闸条件
 static NSString *diElementId(UIView *host);
 static BOOL diMiniMusicActive(UIView *host); // 2.6.3: 前置(遮罩层使用)
@@ -364,9 +364,8 @@ void diGainRestoreAll(void);
 static void diGainInstallHook(void);
 static void diGainTriggerVisible(void);
 static void diGainScanAperture(void);
-static CFAbsoluteTime gVolumeUntil; // 2.9.11 起重新启用: 音量变化后的 6 秒让位窗口(见 syncFrameToHost)
-static CFAbsoluteTime gVolLastChange; // 2.9.11: 最近一次音量变化时间(0=本次开机还没按过)
-static BOOL gVolHUDActive;            // 2.9.11: 音量 HUD 窗口正在屏上
+static CFAbsoluteTime gVolumeUntil; // 2.9.12: 音量变化后 4 秒"我们让位"窗口(见 syncFrameToHost)
+static BOOL gVolHUDActive;            // 2.9.12: 音量 HUD 窗口是否在屏(仅供日志, 不参与任何写入)
 static id gVolumeObserver; // NSNotificationCenter 观察者 token: 必须持有否则观察者被释放收不到通知
 static NSInteger smallIdx, expandIdx;
 /* 频谱帧率动画参数 */
@@ -892,10 +891,10 @@ static BOOL diIsVolumeIsland(UIView *host) {
    iOS16 的音量 HUD 不是"岛里的一个控件", 而是一个独立的 HUD 窗口(内部挂着
    CCUIContentModuleContentContainerView + MTMaterialView)。所以上面那套"在岛容器里
    找音量控件"的判据永远命中不了 —— 视频层照旧每帧贴着岛做布局, 音量条就缩不回去。
-   这里加两条硬判据:
-     ① 抓到 HUD 窗口 → 我们的视频层全部让位; 音量停止变化 1.5 秒后把该窗口 alpha 归零
-        (下一次按音量键立刻恢复)。只碰类名带 HUD / Volume 的窗口, 绝不碰 CC/锁屏/岛窗口。
-     ② 按音量键后 6 秒内, 宿主不是音乐岛(没有 CALayerHost 音频层) 时, 小岛层不显示。 */
+   做法只有一条: 按音量键之后的几秒内, 我们自己的视频层全部让位(见 syncFrameToHost),
+   岛恢复成系统内容, 系统自己按原生节奏淡出音量条。
+   2.9.12 更正: 绝不能去改 HUD 窗口的 alpha(2.9.11 干过, 结果窗口复用时整块看不见,
+   而且瞬间归零=没有淡出动画)。这里的 diHUDWindows 只用于"看一眼", 一个像素都不碰。 */
 static NSArray<UIWindow *> *diHUDWindows(void) {
     NSMutableArray<UIWindow *> *out = [NSMutableArray array];
     @try {
@@ -904,26 +903,12 @@ static NSArray<UIWindow *> *diHUDWindows(void) {
             for (UIWindow *w in ((UIWindowScene *)sc).windows) {
                 if (![w isKindOfClass:UIWindow.class] || w.hidden) continue;
                 NSString *cn = NSStringFromClass(w.class);
-                BOOL byName = ([cn rangeOfString:@"HUD"].location != NSNotFound ||
-                               [cn rangeOfString:@"Volume"].location != NSNotFound);
-                if (byName) { [out addObject:w]; continue; }
-                /* 名字不带 HUD 的版本: 窗口里有"细高"的控制中心模块容器 = 竖着的音量条。
-                   控制中心自己的窗口排除掉, 免得把整个控制中心隐藏了。 */
-                if ([cn containsString:@"ControlCenter"] || [cn containsString:@"CoverSheet"]) continue;
-                NSMutableArray<UIView *> *st = [NSMutableArray arrayWithObject:w];
-                int g0 = 0;
-                while (st.count && g0++ < 120) {
-                    UIView *v = st.firstObject; [st removeObjectAtIndex:0];
-                    NSString *vn = NSStringFromClass(v.class);
-                    if ([vn containsString:@"ContentModule"]) {
-                        CGSize bs = v.bounds.size;
-                        if (bs.width >= 20 && bs.width <= 110 && bs.height >= 90 && bs.height <= 300) {
-                            [out addObject:w];
-                            break;
-                        }
-                    }
-                    for (UIView *s in v.subviews) [st addObject:s];
-                }
+                /* 2.9.12: 只按窗口类名认 HUD。2.9.11 那条"窗口里有细高 ContentModule 就当 HUD"
+                   的猜测太宽 —— 控制中心/展开的通知容器都长这样, 会把它误判成音量条,
+                   进而连累小岛素材被无谓隐藏(用户反馈"有时候显示不了了")。 */
+                if ([cn rangeOfString:@"HUD"].location == NSNotFound &&
+                    [cn rangeOfString:@"Volume"].location == NSNotFound) continue;
+                if ([cn containsString:@"CoverSheet"]) continue;
             }
         }
     } @catch (__unused NSException *e) {}
@@ -1129,17 +1114,24 @@ static void diDumpWindowsForVolume(void) {
         /* 2.6.30: 与开头拦截保持一致, 去掉 !isAudio 短路 */
         if (diIsVolumeIsland(host)) want = nil;
     }
-    /* 2.9.11: 音量让位窗口 —— 按了音量键之后 6 秒内, 宿主不是音乐岛时本层一律不显示。
-       iOS16 的音量 HUD 是独立 HUD 窗口, diIsVolumeIsland 抓不到它; 而我们的视频层还在
-       每帧贴着岛做布局, 岛就一直"有内容", 音量条永远等不到缩回的时机。
+    /* 2.9.12: 音量让位窗口 —— 按了音量键之后 4 秒内, 小岛层无条件让位。
+       iOS16 的音量 HUD 是独立 HUD 窗口(挂在 CCUIContentModuleContentContainerView 下),
+       diIsVolumeIsland 抓不到它。2.9.11 的让位条件是"宿主没有 CALayerHost 音频层",
+       可是放歌时这个条件永远不成立 → 视频一直贴着岛 → 岛一直"有内容" → 音量条收不回。
+       现在小岛层不看宿主, 直接退出, 岛恢复成纯系统内容, 系统自己按原生节奏淡出。
+       展开层保持原判据(宿主无音频层才让位), 免得大岛按音量键时整块黑掉。
        判据每秒最多算一次(diFindAudioLayer 是 300 节点 BFS, 不能每帧跑)。 */
     {
         CFAbsoluteTime vn = CFAbsoluteTimeGetCurrent();
-        if (gVolumeUntil > vn && (gVolHUDActive || !self.expandedLayer)) {
-            static CFAbsoluteTime tAud;
-            static BOOL audOK;
-            if (vn - tAud > 0.5) { tAud = vn; audOK = (diFindAudioLayer(host) != nil); }
-            if (!audOK) {
+        if (gVolumeUntil > vn) {
+            BOOL mustYield = !self.expandedLayer;
+            if (!mustYield) {
+                static CFAbsoluteTime tAud;
+                static BOOL audOK;
+                if (vn - tAud > 0.5) { tAud = vn; audOK = (diFindAudioLayer(host) != nil); }
+                mustYield = !audOK;
+            }
+            if (mustYield) {
                 if (!self.hidden) {
                     self.hidden = YES;
                     DLog(@"音量让位: 本层%@ 隐藏, 让音量条缩回", self.expandedLayer ? @"展开" : @"小岛");
@@ -10829,70 +10821,28 @@ static void visibilityTick(void) {
             tVol = now;
             float v = AVAudioSession.sharedInstance.outputVolume;
             if (lastVol >= 0 && fabsf(v - lastVol) > 0.0001f) {
-                gVolumeUntil = now + 6.0;
-                gVolLastChange = now;
-                DLog(@"音量变化轮询捕获: %.2f→%.2f → 6秒窗口内非音乐岛不挂视频", lastVol, v);
-                /* 2.9.11: 新的音量事件 —— 先把上一轮被我们藏起来的 HUD 窗口放出来 */
-                for (UIWindow *w in diHUDWindows()) if (w.alpha < 0.02) w.alpha = 1.0;
+                gVolumeUntil = now + 4.0;
+                DLog(@"音量变化轮询捕获: %.2f→%.2f → 4秒内我们让位, 让系统自己收音量条", lastVol, v);
                 diDumpWindowsForVolume();
             }
             lastVol = v;
         }
     }
-    /* 2.9.11: 音量 HUD 看门狗 —— HUD 窗口在屏且音量 1.5 秒没再变化, 就把窗口 alpha 归零。
-       只处理类名带 HUD/Volume 的窗口, 岛/锁屏/控制中心窗口一律不碰。 */
+    /* 2.9.12: 音量 HUD 只"看"不"动"。
+       2.9.11 在音量停止变化 1.5 秒后把 HUD 窗口 alpha 直接归零, 结果是:
+         · HUD 窗口是复用的, 归零后系统下次要显示时窗口仍是 0 → "有时候显示不了了";
+         · 归零是瞬间的(没有系统那 0.3 秒淡出) → "有时候一下就没了";
+       系统本来就管得住自己的 HUD。我们唯一要做的是别占着岛的 portal ——
+       也就是 syncFrameToHost 里的"让位", 让它恢复成纯系统内容即可。
+       这里只记一个"HUD 在屏"的布尔量用于日志, 一个 alpha 都不写。 */
     {
         static CFAbsoluteTime tHUD;
-        static __weak UIWindow *hiddenWin;
-        static __weak UIView *hiddenBody;    /* 当时 HUD 里那块内容视图 —— 它没了就说明 HUD 走了 */
-        static CFAbsoluteTime tHidden;
         if (now - tHUD > 0.25) {
             tHUD = now;
-            NSArray<UIWindow *> *hw = diHUDWindows();
-            /* 内容视图已经不在窗口里(= HUD 被系统收走) → 立刻把窗口 alpha 放回去,
-               免得窗口被下一个 HUD(铃声/亮度)复用时整块看不见 */
-            UIView *body = hiddenBody;
-            UIWindow *hw0 = hiddenWin;
-            if (hiddenWin && (!body || body.window != hw0 || now - tHidden > 6.0)) {
-                if (hw0 && hw0.alpha < 0.02) hw0.alpha = 1.0;
-                hiddenWin = nil; hiddenBody = nil;
-                RLog(@"[音量条] HUD 内容已收走, 恢复窗口透明度");
-            }
-            if (hw.count) {
-                if (!gVolHUDActive) {
-                    gVolHUDActive = YES;
-                    for (UIWindow *w in hw)
-                        RLog(@"[音量条] HUD 窗口在屏: %@ %@ alpha=%.2f level=%.0f",
-                             NSStringFromClass(w.class), NSStringFromCGRect(w.frame),
-                             (double)w.alpha, (double)w.windowLevel);
-                }
-                if (gVolLastChange > 0 && now - gVolLastChange > 1.5) {
-                    for (UIWindow *w in hw) {
-                        if (w.alpha > 0.02) {
-                            /* 找 HUD 的内容视图: 优先 CC 模块容器, 退到最后一个子视图 */
-                            UIView *content = nil;
-                            NSMutableArray<UIView *> *st = [NSMutableArray arrayWithObject:w];
-                            int g0 = 0;
-                            while (st.count && g0++ < 200) {
-                                UIView *v = st.firstObject; [st removeObjectAtIndex:0];
-                                NSString *vn = NSStringFromClass(v.class);
-                                if ([vn containsString:@"ContentModule"] || [vn containsString:@"PlatterView"]) { content = v; break; }
-                                for (UIView *s in v.subviews) [st addObject:s];
-                            }
-                            if (!content) content = w.subviews.lastObject;
-                            w.alpha = 0.0;
-                            hiddenWin = w; hiddenBody = content; tHidden = now;
-                            RLog(@"[音量条] 停留超时, 隐藏 HUD 窗口 %@ 内容=%@", NSStringFromClass(w.class),
-                                 content ? NSStringFromClass(content.class) : @"(无)");
-                        }
-                    }
-                }
-            } else if (gVolHUDActive) {
-                gVolHUDActive = NO;
-                UIWindow *w = hiddenWin;
-                if (w && w.alpha < 0.02) w.alpha = 1.0;
-                hiddenWin = nil; hiddenBody = nil;
-                RLog(@"[音量条] HUD 窗口已消失");
+            BOOL on = (diHUDWindows().count > 0);
+            if (on != gVolHUDActive) {
+                gVolHUDActive = on;
+                RLog(@"[音量条] HUD 窗口%@", on ? @"在屏(只观察, 不动它)" : @"已离开");
             }
         }
     }
@@ -13525,9 +13475,8 @@ __attribute__((constructor)) static void init(void) {
             gVolumeObserver = [[NSNotificationCenter defaultCenter]
                 addObserverForName:@"AVSystemController_SystemVolumeDidChangeNotification" object:nil queue:nil
                 usingBlock:^(NSNotification *n) {
-                    gVolumeUntil = CFAbsoluteTimeGetCurrent() + 6.0;
-                    gVolLastChange = CFAbsoluteTimeGetCurrent();
-                    DLog(@"音量键事件: 6秒窗口内非音乐岛不挂视频");
+                    gVolumeUntil = CFAbsoluteTimeGetCurrent() + 4.0;
+                    DLog(@"音量键事件: 4秒内我们让位, 让系统自己收音量条");
                 }];
             // 播放状态轮询: 岛触发才加载/播放, 无通知(岛收回)即暂停; 锁屏期间整个 timer 挂起(零功耗)
             gTickTimer = dispatch_source_create(DISPATCH_SOURCE_TYPE_TIMER, 0, 0, dispatch_get_main_queue());
