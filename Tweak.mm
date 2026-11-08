@@ -63,7 +63,7 @@ static double expandTextY = DI_EXP_TEXT_BASE_Y;   // 上下偏移(pt, 下为正,
 static double expandTextScale = 100.0; // 文字大小(%, 100=原样)
 /* 2.8.86: 构建戳 —— 之前横幅打的是 SpringBoard 自己的 CFBundleShortVersionString(恒 1.0),
    日志里根本看不出装的是哪一版。所有诊断行都带这个戳, 下轮日志一眼定位。 */
-#define DI_BUILD_VER @"2.8.98"
+#define DI_BUILD_VER @"2.8.99"
 static BOOL gRecordingActive = NO; // 保留: 岛素材总闸条件
 static NSString *diElementId(UIView *host);
 static BOOL diMiniMusicActive(UIView *host); // 2.6.3: 前置(遮罩层使用)
@@ -8811,6 +8811,9 @@ static void diRecWalkCells(UIView *root, UIView *v, NSInteger depth, NSMutableAr
     if (depth > 6 || out.count > 180) return;
     if (v != root) {
         CGSize sz = v.bounds.size, bs = root.bounds.size;
+        /* 2.8.99: 我们自己挂的素材层不能被当成"格位候选" —— 344 日志里
+           右格被算成 {{2534,983},{20,20}} 就是抓到了 DAAnimView 自己 */
+        if ([v isKindOfClass:[DIAnimView class]]) return;
         if (v.window && !v.hidden && v.alpha > 0.02
             && sz.width >= 8 && sz.height >= 8
             && sz.width <= bs.width * 0.62 && sz.height <= bs.height * 1.05)
@@ -8871,25 +8874,10 @@ static BOOL diRecSlotFor(UIView *island, BOOL onRight, CGRect *outRect, UIView *
         }
     }
 
-    /* ③ 小方块兜底 */
-    NSMutableArray<UIView *> *squares = [NSMutableArray array];
-    for (UIView *v in cells) {
-        CGSize sz = v.bounds.size;
-        if (sz.width <= bs.width * 0.45 && sz.height >= 12 && sz.height <= bs.height)
-            [squares addObject:v];
-    }
-    if (squares.count >= 2) {
-        [squares sortUsingFunction:diRecByCenterX context:(__bridge void *)island];
-        UIView *f = squares.firstObject, *l = squares.lastObject;
-        CGRect fr = [island convertRect:f.bounds fromView:f];
-        CGRect lr = [island convertRect:l.bounds fromView:l];
-        if (fabs(CGRectGetMidX(lr) - CGRectGetMidX(fr)) > bs.width * 0.25) {
-            UIView *t = onRight ? l : f;
-            *outRect = onRight ? lr : fr;
-            if (outAcc) *outAcc = t;
-            return YES;
-        }
-    }
+    /* ③ 已删除(2.8.99): 按 x 排序取首尾在录屏岛上会把"隔了好几层、坐标还
+       在远处的无关视图"选进来(344 日志: 右格 {{2534,983}}), 直接跳过,
+       落到 ④ 的左右分栏 —— 实测 133x39 上它给出的就是 {{7,5},{29,29}} 与
+       {{97,5},{29,29}}, 与真实两格完全一致。 */
 
     /* ④ 左右分栏 */
     CGFloat d = bs.height - 10.0;
@@ -8917,8 +8905,32 @@ static void diRecElementClear(UIView *ev) {
     objc_setAssociatedObject(ev, &kDIRecElemMark, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
 }
 
+/* 2.8.99: 硬闸门 —— 只处理"灵动岛窗口"或"录屏指示窗口"里的视图。
+   344 里桌面图标(30x30/40x40 的 SBIcon 子视图)也被方形判据认成录屏岛,
+   于是每个图标都贴了一帧素材, 用户看到"全屏都是帧率"。窗口归属这一条
+   一加, 桌面/通知中心/控制中心的视图全部出局, 只剩余灵动岛。 */
+static BOOL diRecWindowOK(UIView *ev) {
+    UIWindow *w = ev.window;
+    if (!w) return NO;
+    static NSMutableDictionary<NSString *, NSNumber *> *cache;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{ cache = [NSMutableDictionary dictionary]; });
+    NSString *cn = NSStringFromClass(w.class);
+    if (!cn) return NO;
+    NSNumber *hit = cache[cn];
+    if (hit) return hit.boolValue;
+    NSString *low = cn.lowercaseString;
+    BOOL ok = ([low containsString:@"systemaperture"] || [low containsString:@"recording"]);
+    cache[cn] = @(ok);
+    return ok;
+}
+
 static void diRecSyncElement(UIView *ev) {
     if (!ev) return;
+    if (!diRecWindowOK(ev)) {
+        if (objc_getAssociatedObject(ev, &kDIRecElemMark)) diRecElementClear(ev);
+        return;
+    }
     /* 2.8.98: 节流 —— 音乐岛布局每秒会触发几十次, 每次都做一次 260 节点的
        portal 检查会掉帧; 同一元素 0.25s 内只认第一次, 其余靠 0.5s 的 tick 补。 */
     CFAbsoluteTime tickNow = CFAbsoluteTimeGetCurrent();
@@ -8985,6 +8997,10 @@ static void diRecSyncElement(UIView *ev) {
         UIView *acc = nil;
         if (!diRecSlotFor(ev, right, &slot, &acc)) continue;
         if (slot.size.width < 4 || slot.size.height < 4) continue;
+        /* 2.8.99: 落点必须落在岛内(允许 4pt 外扩), 否则宁可不要 —— 344 里
+           出现 {{2534,983},{20,20}} 这种坐标, 层就被甩到屏幕外/整屏乱铺 */
+        CGRect sane = CGRectInset(ev.bounds, -4.0, -4.0);
+        if (!CGRectIntersectsRect(sane, slot) || slot.size.width > ev.bounds.size.width) continue;
         char *key = right ? &kDIRecElemR : &kDIRecElemL;
         DIAnimView *av = objc_getAssociatedObject(ev, key);
         if (!av) {
@@ -9010,14 +9026,38 @@ static void diRecSyncElement(UIView *ev) {
 /* 2.8.98: 全窗口扫一遍 —— 不再只认 SAUIElementView。录屏岛在某些系统上
    是 SBRecordingIndicatorWindow 里的普通视图(不是灵动岛元素), 只 hook
    SAUIElementView 会永远等不到它。 */
+/* 2.8.99: 一次性清场 —— 2.8.98 把层挂到了桌面图标上(全屏都是帧率),
+   装新版后那些层还留在原来的视图上(它们不再被扫描到, 也就不会自己撤)。
+   这里在所有窗口里找一遍带标记的元素, 统一撤层 + 恢复原生。 */
+static void diRecPurgeRest(void) {
+    int total = 0;
+    for (UIScene *sc in UIApplication.sharedApplication.connectedScenes) {
+        if (![sc isKindOfClass:[UIWindowScene class]]) continue;
+        for (UIWindow *w in ((UIWindowScene *)sc).windows) {
+            NSMutableArray<UIView *> *st = [NSMutableArray arrayWithObject:w];
+            int guard = 0;
+            while (st.count && guard++ < 1200 && total < 8000) {
+                UIView *v = st.firstObject; [st removeObjectAtIndex:0];
+                total++;
+                if (objc_getAssociatedObject(v, &kDIRecElemMark)) diRecElementClear(v);
+                for (UIView *c in v.subviews) [st addObject:c];
+            }
+        }
+    }
+}
+
 static void diRecSyncAllWindows(void) {
     if (!NSThread.isMainThread) return;
+    static BOOL purged;
+    if (!purged) { purged = YES; @try { diRecPurgeRest(); } @catch (__unused NSException *e) {} }
     if (!enabled || !diRecAnyOn() || !diIsScreenRecording()) return;
     Class saCls = NSClassFromString(@"SAUIElementView");
     int total = 0;
     for (UIScene *sc in UIApplication.sharedApplication.connectedScenes) {
         if (![sc isKindOfClass:[UIWindowScene class]]) continue;
         for (UIWindow *w in ((UIWindowScene *)sc).windows) {
+            NSString *wcn = NSStringFromClass(w.class).lowercaseString;
+            if (!([wcn containsString:@"systemaperture"] || [wcn containsString:@"recording"])) continue;
             NSMutableArray<UIView *> *st = [NSMutableArray arrayWithObject:w];
             int guard = 0;
             while (st.count && guard++ < 700 && total < 2600) {
