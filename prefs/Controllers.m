@@ -18,7 +18,7 @@
 
 static NSString *const kDomain = @"com.abgg332.driftisland";
 /* 2.6.25: 设置页底部显示的版本号 */
-static NSString *const DI_VERSION_STR = @"2.8.97";
+static NSString *const DI_VERSION_STR = @"2.8.98";
 /* 2.6.10: 专辑光晕遮罩 —— 与 Tweak 侧 DIAlbumMask.h 保持一致 */
 static NSString *const kDIAlbumMaskKey = @"diAlbumMaskAsset";
 static NSString *const kDIMaskRoot = @"/var/mobile/灵动岛/遮罩素材";
@@ -5217,9 +5217,9 @@ static void diOpenHomeBarPickWindow(void) {
 
     /* ---- 左侧: 录屏圆点那一格 ---- */
     [specs addObject:[self groupSpec:@"左侧图层(录屏圆点)"
-        footer:@"显示逻辑: 系统录屏中、且这里「启用帧率」打开时才出现。\n"
-               @"显示图层: 序列帧盖在原生录屏圆点这一格上(实测 22×22 那格)。\n"
-               @"用处效果: 把左格换成自己的动图; 打开「隐藏录屏圆点」原生圆点让位, 只剩你的素材; 两个开关都关就完全原生。"]];
+        footer:@"显示逻辑: 系统录屏中、且这里「启用帧率」打开、素材目录里有帧时才出现。\n"
+               @"显示图层: 序列帧贴在录屏岛左格(原生录屏圆点那一格)上。\n"
+               @"用处效果: 一打开就替换掉原生圆点并显示你的素材; 全关即完全原生。"]];
     [specs addObject:[self switchSpec:@"启用帧率" key:@"recLeftOn" def:@NO]];
     [specs addObject:[self numSlider:@"帧率速度" key:@"recLeftFPS" def:50 mn:10 mx:200]];
     [specs addObject:[self numSlider:@"素材大小" key:@"recLeftScale" def:0 mn:-20 mx:20]];
@@ -5232,9 +5232,9 @@ static void diOpenHomeBarPickWindow(void) {
 
     /* ---- 右侧: 倒计时那一格 ---- */
     [specs addObject:[self groupSpec:@"右侧图层(倒计时 321)"
-        footer:@"显示逻辑: 系统录屏中、且这里「启用帧率」打开时才出现。\n"
-               @"显示图层: 序列帧盖在原生倒计时这一格上(圆点右边那一格)。\n"
-               @"用处效果: 把右格换成自己的动图; 打开「隐藏倒计时」原生数字让位, 只剩你的素材; 两个开关都关就完全原生。"]];
+        footer:@"显示逻辑: 系统录屏中、且这里「启用帧率」打开、素材目录里有帧时才出现。\n"
+               @"显示图层: 序列帧贴在录屏岛右格(原生 321 倒计时那一格)上。\n"
+               @"用处效果: 一打开就替换掉原生倒计时并显示你的素材; 全关即完全原生。"]];
     [specs addObject:[self switchSpec:@"启用帧率" key:@"recRightOn" def:@NO]];
     [specs addObject:[self numSlider:@"帧率速度" key:@"recRightFPS" def:50 mn:10 mx:200]];
     [specs addObject:[self numSlider:@"素材大小" key:@"recRightScale" def:0 mn:-20 mx:20]];
