@@ -12946,6 +12946,7 @@ static CGPathRef diRhyBitPath(DIRhyBit kind, CGFloat sz) {
     CGFloat _life[DI_RHY_DOTS], _dur[DI_RHY_DOTS];   /* 2.9.4: 粒子的外飘生命周期 */
     NSInteger _kind[DI_RHY_DOTS];
     CGFloat _ringT[DI_RHY_RINGS];
+    BOOL _ringOn[DI_RHY_RINGS];
     int _ringNext;
     CGFloat _kick, _prevBass, _lastKick, _sBass;
     UIColor *_tint;
@@ -12986,7 +12987,8 @@ static CGPathRef diRhyBitPath(DIRhyBit kind, CGFloat sz) {
             r.lineCap = kCALineCapRound;
             [self.layer addSublayer:r];
             [_rings addObject:r];
-            _ringT[i] = (CGFloat)i / (CGFloat)DI_RHY_RINGS;
+            _ringT[i] = 1.0;                 /* 1.0 = 未激活, 只在鼓点时才涌出一圈 */
+            _ringOn[i] = NO;
         }
 
         _bits = [NSMutableArray array];
@@ -13093,6 +13095,7 @@ static CGPathRef diRhyBitPath(DIRhyBit kind, CGFloat sz) {
         _kick = 1.0;
         _lastKick = now;
         _ringT[_ringNext] = 0.0;                       /* 每次鼓点从边缘涌出一圈 */
+        _ringOn[_ringNext] = YES;
         _ringNext = (_ringNext + 1) % DI_RHY_RINGS;
     }
     _prevBass = bass;
@@ -13127,16 +13130,17 @@ static CGPathRef diRhyBitPath(DIRhyBit kind, CGFloat sz) {
     CGPathRelease(p);
     CGFloat lw = MAX(0.7, (2.0 * 3.1415926 * r0 / (CGFloat)N) * 0.52);
     _bars.lineWidth = lw;
-    _glow.lineWidth = lw * 2.2;
+    _glow.lineWidth = lw * 1.9;
     _grad.opacity = (float)(0.94 + 0.06 * lv);
-    _glow.opacity = (float)((0.26 + 0.14 * lv) * (0.72 + 0.50 * _kick));
+    _glow.opacity = (float)((0.18 + 0.12 * lv) * (0.70 + 0.55 * _kick));
 
     /* ---- 扩散波: 半径从封面边缘一路推到视图外沿, 同时变细变淡 ---- */
     CGFloat rmax = MIN(capR - 0.04, 1.98);
     for (int i = 0; i < DI_RHY_RINGS; i++) {
         CAShapeLayer *r = _rings[i];
-        _ringT[i] += dt / 1.45;
-        if (_ringT[i] >= 1.0) _ringT[i] -= 1.0;
+        if (!_ringOn[i]) { r.opacity = 0; continue; }
+        _ringT[i] += dt / 1.35;
+        if (_ringT[i] >= 1.0) { _ringOn[i] = NO; r.opacity = 0; continue; }
         CGFloat ph = _ringT[i];
         CGFloat rr = coverR * (1.01 + (rmax - 1.01) * ph);
         CGPathRef rp = CGPathCreateWithEllipseInRect(CGRectMake(_cx - rr, _cy - rr, rr * 2, rr * 2), NULL);
