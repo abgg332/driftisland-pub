@@ -62,7 +62,7 @@ static double expandTextY = DI_EXP_TEXT_BASE_Y;   // 上下偏移(pt, 下为正,
 static double expandTextScale = 100.0; // 文字大小(%, 100=原样)
 /* 2.8.86: 构建戳 —— 之前横幅打的是 SpringBoard 自己的 CFBundleShortVersionString(恒 1.0),
    日志里根本看不出装的是哪一版。所有诊断行都带这个戳, 下轮日志一眼定位。 */
-#define DI_BUILD_VER @"2.9.14"
+#define DI_BUILD_VER @"2.9.15"
 static BOOL gRecordingActive = NO; // 保留: 岛素材总闸条件
 static NSString *diElementId(UIView *host);
 static BOOL diMiniMusicActive(UIView *host); // 2.6.3: 前置(遮罩层使用)
@@ -555,6 +555,11 @@ static BOOL diIsScreenRecording(void) {
 /* 找方形指示岛(录屏岛)。优先取真正在屏上的那颗。 */
 static UIView *diRecIslandHost(void) {
     if (!hostTable) return nil;
+    /* 2.9.15: 不在录屏时直接返回 nil。
+       音乐岛收起后的"音频 accessory 容器"也是 37x37 的方岛, 2.9.14 的几何扫描会在它
+       里面找到 accessory 并把原生圆点 hidden 掉 —— 用户看到的就是"小岛右侧的素材
+       不显示了"(素材层没在显示, 原生层又被我们藏了)。录屏岛只在录屏时存在, 用它当判据。 */
+    if (!diIsScreenRecording()) return nil;
     UIView *found = nil, *visibleFound = nil;
     for (UIView *h in hostTable) {
         if (!h || h.isHidden || h.window == nil) continue;
@@ -573,37 +578,9 @@ static UIView *diRecIslandHost(void) {
 static CGRect diRecSlotRect(UIView *island, BOOL onRight, UIView **outAcc) {
     if (outAcc) *outAcc = nil;
     if (!island) return CGRectZero;
-    /* 2.9.14: 先按几何取"最左/最右那颗方形 accessory" —— 358 反馈第一次录屏素材
-       跑到右边去了: leadingView 在录屏岛上并不一定是左侧那个圆点格。
-       系统给的是两颗 ~22pt 的方槽, 按 x 排序取最左就等于圆点格。 */
-    {
-        NSMutableArray<UIView *> *accs = [NSMutableArray array];
-        NSMutableArray<UIView *> *stack = [NSMutableArray arrayWithObject:island];
-        int guard = 0;
-        while (stack.count && guard++ < 300) {
-            UIView *v = stack.firstObject; [stack removeObjectAtIndex:0];
-            NSString *vn = NSStringFromClass(v.class);
-            if ([vn containsString:@"ProvidedViewContainer"] || [vn containsString:@"AccessoryView"]) {
-                CGSize s = v.bounds.size;
-                if (s.width >= 12 && s.width <= 40 && s.height >= 12 && s.height <= 40) {
-                    [accs addObject:v];
-                    continue;
-                }
-            }
-            for (UIView *s in v.subviews) [stack addObject:s];
-        }
-        if (accs.count) {
-            [accs sortUsingComparator:^NSComparisonResult(UIView *a, UIView *b) {
-                return a.frame.origin.x < b.frame.origin.x ? NSOrderedAscending : NSOrderedDescending;
-            }];
-            UIView *target = onRight ? accs.lastObject : accs.firstObject;
-            CGRect f = [island convertRect:target.frame fromView:target.superview];
-            if (f.size.width > 2 && f.size.height > 2) {
-                if (outAcc) *outAcc = target;
-                return f;
-            }
-        }
-    }
+    /* 2.9.15: 去掉 2.9.14 的"按 x 排序取最左 accessory" —— 两颗 accessory 常常分属
+       leading/trailing 两个容器, frame 的参照系不同, 排序结果不可靠, 会把素材和
+       要被隐藏的原生层对到不同位置。回到 leadingView / trailingView 优先。 */
     SEL asel = NSSelectorFromString(onRight ? @"trailingView" : @"leadingView");
     if ([island respondsToSelector:asel]) {
         UIView *acc = ((id (*)(id, SEL))objc_msgSend)(island, asel);
@@ -1230,6 +1207,17 @@ static void diDumpWindowsForVolume(void) {
             }
         }
 
+        if (!show) {
+            /* 2.9.15: 只要不在显示, 就必须把之前藏过的原生层还回来。
+               2.9.14 只在"离开宿主"时还原, 宿主一直挂着的话原生层会一直是 hidden
+               —— 用户看到的就是那格永远空白(小岛右侧素材/录屏圆点消失)。 */
+            CALayer *prev = objc_getAssociatedObject(self, &kRecAccLayer);
+            if (prev) {
+                diRecAccHidden(prev, NO);
+                objc_setAssociatedObject(self, &kRecAccLayer, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+            }
+        }
+
         if (show) {
             /* 素材大小直接算 frame(不用 layer.transform —— AVPlayerLayer 会在设 frame 时
                重写 transform, 之前那样调完就还原)。绕 slot 中心按 recScale 缩放。 */
@@ -1245,7 +1233,11 @@ static void diDumpWindowsForVolume(void) {
             if (!CATransform3DIsIdentity(self.layer.transform))
                 self.layer.transform = CATransform3DIdentity;
             NSString *want = recVideoPath();
-            if (want && ![want isEqualToString:self.currentPath]) [self loadVideo:want];
+            /* 2.9.15: currentPath 相同但播放器已经空了(上一轮被摘下时释放)也要重新加载 */
+            if (want && (![want isEqualToString:self.currentPath] || !self.player.currentItem)) {
+                [self loadVideo:want];
+                DLog(@"录屏素材: 加载 %@ (slot=%@)", want.lastPathComponent, NSStringFromCGRect(slot));
+            }
         }
         if (self.hidden == show) self.hidden = !show;
         if (show && self.player.timeControlStatus != AVPlayerTimeControlStatusPlaying
@@ -2603,6 +2595,7 @@ __attribute__((unused)) static BOOL diMiniMusicActive(UIView *host) {
     if (!CGRectEqualToRect(self.frame, f)) { self.frame = f; }
     if (fabs(self.layer.cornerRadius - d * 0.5) > 0.5) self.layer.cornerRadius = d * 0.5;
     if (!self.clipsToBounds) self.clipsToBounds = YES;
+    /* 2.9.15: 圆槽保留, 但图片必须自己铺满圆 —— 见下面 transform 那段说明 */
     if (self.hidden) self.hidden = NO;
     CFTimeInterval now = self.link.timestamp;
     if (!_lastTS) _lastTS = now;
@@ -2626,14 +2619,24 @@ __attribute__((unused)) static BOOL diMiniMusicActive(UIView *host) {
     CGFloat dx = (CGFloat)useOx * unit * 0.04;
     CGFloat dy = (CGFloat)useOy * unit * 0.04;
     CGSize base = self.bounds.size;
-    CGSize wantSize = CGSizeMake(base.width * k, base.height * k);
-    CGPoint wantCenter = CGPointMake(base.width * 0.5 + dx, base.height * 0.5 + dy);
-    if (fabs(_iv.bounds.size.width - wantSize.width) > 0.5 || fabs(_iv.bounds.size.height - wantSize.height) > 0.5) {
-        _iv.bounds = CGRectMake(0, 0, wantSize.width, wantSize.height);
+    /* 2.9.15: 图片"铺满圆槽", 缩放/平移全部走 transform, 且平移量夹在"放大后多出来的部分"以内。
+       2.9.14 改用 bounds+center 摆图, 又把视图裁成圆: 用户之前是按旧几何(半个岛宽的长方框)
+       调好的偏移, 动辄几十 pt, 换成 22pt 方槽后整张图被推到圆外, 再被裁掉 ——
+       表现就是"小岛右侧的素材完全不显示"。夹住之后图片永远盖住圆, 滑杆依旧能用。 */
+    if (fabs(_iv.bounds.size.width - base.width) > 0.5 || fabs(_iv.bounds.size.height - base.height) > 0.5
+        || fabs(_iv.center.x - base.width * 0.5) > 0.5 || fabs(_iv.center.y - base.height * 0.5) > 0.5) {
+        _iv.transform = CGAffineTransformIdentity;
+        _iv.bounds = CGRectMake(0, 0, base.width, base.height);
+        _iv.center = CGPointMake(base.width * 0.5, base.height * 0.5);
     }
-    if (fabs(_iv.center.x - wantCenter.x) > 0.3 || fabs(_iv.center.y - wantCenter.y) > 0.3) {
-        _iv.center = wantCenter;
-    }
+    if (_iv.contentMode != UIViewContentModeScaleAspectFill) _iv.contentMode = UIViewContentModeScaleAspectFill;
+    CGFloat maxPanX = MAX(0.0, (base.width  * k - base.width)  * 0.5);
+    CGFloat maxPanY = MAX(0.0, (base.height * k - base.height) * 0.5);
+    dx = MAX(-maxPanX, MIN(maxPanX, dx));
+    dy = MAX(-maxPanY, MIN(maxPanY, dy));
+    CGAffineTransform tf = CGAffineTransformConcat(CGAffineTransformMakeScale(k, k),
+                                                   CGAffineTransformMakeTranslation(dx, dy));
+    if (!CGAffineTransformEqualToTransform(_iv.transform, tf)) _iv.transform = tf;
     } @catch (NSException *e) { DLog(@"stepMini 异常(已忽略): %@", e); }
 }
 
@@ -5139,11 +5142,11 @@ static void syncNativeSpectrum(UIView *bestRoot) {
        2.8.15: 高度门槛 90 → 60 —— 系统默认展开岛实测只有 330x72 / 333x65
        (285 日志), 旧门槛把它们全排除, 用户原话"展开岛的音频你没有隐藏"。
        小岛最高 207x58, 仍被 60 挡在外面, 小岛右侧波形不动。 */
-    /* 2.9.14: 再加一条"不是通知类岛" —— 录屏停止/收到的通知都是这种又宽又扁的提示岛,
-       命中宽高门槛后右侧波形会被藏、还会被挖洞, 表现就是"通知右侧被一块东西挡住"。 */
+    /* 2.9.15: 去掉 2.9.14 加的"非通知岛"判据 —— diHostLooksLikeNotification 靠"长文本+图标"
+       猜, 展开音乐岛里歌名够长就会被它判成通知(359 日志: 407x84 正放歌 → 通知岛),
+       结果展开岛的波形藏不掉, 素材底下一直透出原生波形。通知岛的问题已由"视频层只挂音乐岛"解决。 */
     BOOL expandedish = (bs.width >= 250 && bs.height >= 60 && bs.height <= 320)
-                        && diIsNowPlayingHostCached(bestRoot)
-                        && !diHostLooksLikeNotification(bestRoot, NULL);
+                        && diIsNowPlayingHostCached(bestRoot);
 
     /* ① 本地代理波形视图: 直接 hidden( instantly 生效, 无动画无延迟) */
     NSHashTable *hits = objc_getAssociatedObject(bestRoot, &kDiSpecHit);
@@ -6079,20 +6082,19 @@ static void updateSingleVideo(UIWindow *win) {
             objc_setAssociatedObject(win, &kWinVideoRec, recV, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
         }
         UIView *recHost = enabled ? diRecIslandHost() : nil;
-        /* 2.9.14: 每次"开始录屏"的那一帧重置本层 —— 358 反馈首次录屏有素材、第二次就没了。
-           原因是一轮结束后本层被摘下, currentPath 还留着上次的值, 下一轮 show 时
-           "路径没变"就不 loadVideo; 而播放器此时已经停机, 于是整层空白。
-           边沿触发里清掉 currentPath + 隐藏状态, 保证每次录屏都从干净状态重来。 */
+        /* 2.9.15: 会话边界改用"录屏指示岛出现/消失", 不再看 diIsScreenRecording()。
+           后者在启动时可能误判为 YES(359 日志 22:15:28 就打了"新一轮录屏开始"),
+           之后一直 YES, 于是真正的第二次录屏拿不到重置 → 素材层带着上一次的停机状态。 */
         {
-            static BOOL sPrevRec;
-            BOOL recNow = diIsScreenRecording();
-            if (recNow && !sPrevRec) {
+            static BOOL sPrevIsland;
+            BOOL islandNow = (recHost != nil);
+            if (islandNow && !sPrevIsland) {
                 [recV removeFromSuperview];
                 recV.hidden = YES;
                 recV.currentPath = nil;
                 DLog(@"录屏素材: 新一轮录屏开始, 重置素材层");
             }
-            sPrevRec = recNow;
+            sPrevIsland = islandNow;
         }
         if (recHost && recHost.window == win) {
             if (recV.superview != recHost) {
@@ -6136,39 +6138,23 @@ static void updateSingleVideo(UIWindow *win) {
        每轮(0.25s)可能 break 到不同容器 → 视频/素材/遮罩玻璃在几个岛之间
        搬来搬去(removeFromSuperview + addSubview), 用户看到的就是
        通知岛背景一闪一闪、充电岛视频时有时无("有些隐藏")。
-       2.8.22 再拆一层(292 反馈"人脸解锁 充电岛背景不显示"): 2.8.21 把
-       "正在播放的音乐岛"设为第一优先级, 放歌时人脸/充电岛一出现, bestRoot
-       就被音乐岛占据, 视频层整个挂在音乐岛上, 后出现的人脸/充电岛只剩裸岛。
-       现在选主拆成两个宿主, 各走各的:
-         · matRoot(素材宿主) = 正在播放的音乐岛。遮罩玻璃/左右帧率素材/
-           展开频谱素材/原生门户隐藏 全部只跟它 —— 与 2.8.19 闸门一致;
-         · videoRoot(视频宿主) = 最新出现的岛 → 音乐岛 → 上一轮的岛(粘滞)
-           → 面积最大。小岛背景视频(smallV)只挂它: 人脸/充电/来电/通知
-           这些后出现的系统岛照样有自己的背景视频, 不再被音乐岛挤掉。 */
-    static __weak UIView *sStickyRoot;
-    /* 2.9.13: 录屏指示岛不参与背景视频选主(精确比对, 不用尺寸猜)。它有自己的录屏素材层
-       (函数开头单独挂), 放歌时录屏中它后出现会按"最新岛"把背景视频抢走。 */
-    UIView *recHost = enabled ? diRecIslandHost() : nil;
-    UIView *musicRoot = nil, *stickyAlive = nil, *bigRoot = nil, *newestRoot = nil;
-    CGFloat bestA = 0; CFAbsoluteTime newestT = 0;
+       2.9.15: 现在只剩一个宿主 matRoot = 正在播放的音乐岛, 视频层与素材层都只跟它,
+       不再有"最新岛/面积最大岛"这些会漂到通知、充电、来电岛上的分支。 */
+    /* 2.9.15: 视频层也只认音乐岛 —— 359 反馈"录屏停止的通知右侧被一块东西挡住"。
+       2.8.22 把小岛层挂到"最新出现的岛"(人脸/充电/来电/通知都有份), 于是通知横幅一出现
+       就被小岛素材整块铺上, 通知的图标和文字全被盖掉。现在两层都只跟音乐岛
+       (matRoot, 已含暂停粘滞); 其他岛 100% 原生, 我们一个像素都不碰。 */
+    /* 2.9.15: 视频层也只认音乐岛 —— 359 反馈"录屏停止的通知右侧被一块东西挡住"。
+       2.8.22 把小岛层挂到"最新出现的岛"(人脸/充电/来电/通知都有份), 于是通知横幅一出现
+       就被小岛素材整块铺上, 通知的图标和文字全被盖掉。现在两层都只跟音乐岛
+       (matRoot, 已含暂停粘滞); 其他岛 100% 原生, 我们一个像素都不碰。 */
+    UIView *musicRoot = nil;
     for (UIView *h in hostTable) {
         if (h.window != win || h.isHidden) continue; // 不看 alpha: 岛淡入淡出期间仍要贴合
         if (h.bounds.size.width < 2 || h.bounds.size.height < 2) continue;
-        if (h == recHost) continue;
-        if (notifyBgOff) {
-            BOOL notif = [objc_getAssociatedObject(h, &kHostIsNotif) boolValue];
-            if (!notif) notif = diHostLooksLikeNotification(h, NULL); // 兜底: applyNotifyStyle 还没跑过
-            if (notif) continue;
-        }
         UIView *root = islandRoot(h);
         if (!root) continue;
-        if (!musicRoot && diIsNowPlayingHostCached(root)) musicRoot = root;
-        if (root == sStickyRoot) stickyAlive = root;
-        NSNumber *seen = objc_getAssociatedObject(h, &kHostSeenT);
-        CFAbsoluteTime t = seen ? [seen doubleValue] : 0;
-        if (t > newestT) { newestT = t; newestRoot = root; }
-        CGFloat a = root.bounds.size.width * root.bounds.size.height;
-        if (a > bestA) { bestA = a; bigRoot = root; }
+        if (diIsNowPlayingHostCached(root)) { musicRoot = root; break; }
     }
     UIView *matRoot = musicRoot;                                    /* 素材: 只跟音乐岛 */
     /* 2.8.39: 音乐岛瞬断/暂停**粘滞**(308: "展开背景有时候暂停, 播放完就黑屏")。
@@ -6185,7 +6171,7 @@ static void updateSingleVideo(UIWindow *win) {
     } else {
         sStickyMat = nil;
     }
-    UIView *bestRoot = newestRoot ?: musicRoot ?: (stickyAlive ?: bigRoot);  /* 视频: 最新岛优先 */
+    UIView *bestRoot = matRoot;   /* 2.9.15: 小岛视频层也只挂音乐岛(不再"最新岛优先") */
     /* 2.8.39: 视频宿主切换宽限 —— smallV 已挂的 root 还活着就别搬
        (removeFromSuperview + insertSubview = 黑一下, 308 "循环播放会黑一下")。
        新 root 只是"更新"(hostTable 枚举顺序/新岛出现)时保持旧的, 2s 宽限。 */
@@ -6197,7 +6183,6 @@ static void updateSingleVideo(UIWindow *win) {
     } else {
         sVideoRoot = bestRoot; sVideoT = 0;
     }
-    sStickyRoot = bestRoot;
     if (!bestRoot && !matRoot) {
         for (DIVideoView *v in diLayers(smallV, expandV)) {
             if (v && !v.hidden) { v.hidden = YES; if (v.player.timeControlStatus != AVPlayerTimeControlStatusPaused) [v.player pause]; }
@@ -6315,17 +6300,12 @@ static void updateSingleVideo(UIWindow *win) {
         miniAudio.side = 1;
         objc_setAssociatedObject(win, &kWinAnimMiniAudio, miniAudio, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
     }
-    /* 2.9.14: 素材类操作(左右帧率层 / 藏原生门户层)只对"音乐岛的真实形态"生效。
-       358 反馈: 录屏停止的宽岛、通知岛也被当成素材宿主 —— 右侧 22x22 原生层被藏掉,
-       帧率层贴上去, 表现就是"录屏停止通知右侧被一块东西遮挡"。
-       收口成系统实际存在的两种形态: 小岛(100~208 x 24~62) / 展开(280~440 x 120~300),
-       且必须不是通知岛。其他尺寸的岛(录屏提示/充电/来电/音量)一律不碰, 100% 原生。 */
-    CGSize ms = matRoot.bounds.size;
-    BOOL mIsMini = (ms.height >= 24 && ms.height <= 62 && ms.width >= 100 && ms.width <= 208
-                    && ms.width > ms.height * 1.55);
-    BOOL mIsExpand = (ms.height >= 120 && ms.height <= 300 && ms.width >= 280 && ms.width <= 440);
-    BOOL mIsNotif = matRoot ? diHostLooksLikeNotification(matRoot, NULL) : YES;
-    BOOL cleanMusic = musicHost && !mIsNotif && (mIsMini || mIsExpand);
+    /* 2.9.15: 闸门回到"是不是音乐岛"这一个判据。
+       2.9.14 加的尺寸白名单反而把右侧素材自己挡死了: 小岛的音频位经常单独挂在
+       37x37 的 accessory 容器上(359 日志有 SBSystemApertureContainerView 36.67x36.67
+       @285.67), 宽 37 < 100 被判成"非小岛" → 左右两层每轮都被撤掉, 用户看到的就是
+       "小岛右侧的素材都不显示了"。通知岛的问题改用"视频层只挂音乐岛"根治。 */
+    BOOL cleanMusic = musicHost;
     for (DIAnimView *mv in @[miniAnim, miniAudio]) {
         /* 2.8.19: 非音乐岛(来电/充电/通知)不挂歌词岛的两层帧率素材 */
         if (!enabled || gRecordingActive || !cleanMusic) {
