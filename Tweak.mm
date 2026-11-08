@@ -4658,30 +4658,6 @@ static void diExportMaskForMRU(void) {
     }
 }
 
-/* 2.9.1: 音律数据接力 —— 数据在 MRU 进程产生(系统 FFT), 设置页在 Preferences 进程,
-   两边都读不到对方的沙盒。MRU 把它写进自己的 Caches, SpringBoard 能读那个目录,
-   于是由 SpringBoard 转写到 /var/mobile/灵动岛/rhythm.plist 给设置页看。
-   只搬一个小字典, 0.5s 一次, 开关关掉就删掉。 */
-static void diRhyRelay(void) {
-    static CFAbsoluteTime last;
-    static BOOL cleaned;
-    CFAbsoluteTime now = CFAbsoluteTimeGetCurrent();
-    if (now - last < 0.4) return;
-    last = now;
-    NSString *out = [kMaterialDir stringByAppendingPathComponent:@"rhythm.plist"];
-    if (!rhyOn) {
-        if (!cleaned) { cleaned = YES; [[NSFileManager defaultManager] removeItemAtPath:out error:NULL]; }
-        return;
-    }
-    cleaned = NO;
-    NSString *dir = diMruSharedDir();
-    if (!dir.length) return;
-    NSDictionary *d = [NSDictionary dictionaryWithContentsOfFile:
-                       [dir stringByAppendingPathComponent:@"spectrum.plist"]];
-    if (![d isKindOfClass:NSDictionary.class]) return;
-    @try { [d writeToFile:out atomically:YES]; } @catch (__unused NSException *e) {}
-}
-
 /* 2.8.93: 导出合并 —— 拖滑杆时每秒几十次偏好变更, 每次都整包导一遍
    (读图 + 写两个容器 + base64 塞进 CFPreferences), 几十个任务并发跑会把
    cfprefsd 顶死, 主线程跟着卡 → 看门狗杀 SpringBoard(用户看到"一拖就进安全模式")。
@@ -10766,7 +10742,6 @@ static void diCCInstallLayoutHook(void) {
 
 static void visibilityTick(void) {
     refreshPrefs();
-    @try { diRhyRelay(); } @catch (__unused NSException *e) {}
     static CFAbsoluteTime tMR; // CPU 优化: MediaRemote 查询 1秒一次(检测音乐停止够快)
     CFAbsoluteTime now = CFAbsoluteTimeGetCurrent();
     /* 2.8.85: 残留遮罩清扫 —— 关着时全摘(2s), 开着时只摘大层(5s)
@@ -12584,7 +12559,8 @@ static void diRhyFeedAmp(double a) {
 static void diRhyPublish(void) {
     static CFAbsoluteTime last;
     CFAbsoluteTime now = CFAbsoluteTimeGetCurrent();
-    if (now - last < 0.1) return;
+    /* 2.9.5: 设置页不再读这份数据, 只留作排查 —— 降到 2Hz, 关掉时不写盘 */
+    if (!gRhyOn || now - last < 0.5) return;
     last = now;
     NSString *p = diRhySpectrumPath();
     if (!p) return;
@@ -12766,7 +12742,7 @@ static void diRhyDumpObj(id o) {
     NSMutableString *b = [NSMutableString string];
     NSString *desc = [o description] ?: @"";
     if (desc.length > 260) desc = [desc substringToIndex:260];
-    [b appendFormat:@"[音律] 认不出的数据对象 class=%@ desc=%@", NSStringFromClass([o class]), desc];
+    [b appendFormat:@"[律动] 认不出的数据对象 class=%@ desc=%@", NSStringFromClass([o class]), desc];
     Class c = [o class];
     while (c && c != NSObject.class) {
         unsigned cnt = 0;
@@ -12889,7 +12865,7 @@ static void diRhythmInstall(void) {
     free(all);
 
     done = (gRhyHookCount > 0);
-    diMruFileLog([NSString stringWithFormat:@"[音律] 安装 %@ hook=%d%@",
+    diMruFileLog([NSString stringWithFormat:@"[律动] 安装 %@ hook=%d%@",
                   done ? @"成功" : @"失败", gRhyHookCount, log]);
 }
 
@@ -13380,7 +13356,7 @@ static void diRhythmStart(void) {
         @try { diRhythmTick(); } @catch (__unused NSException *e) {}
     }];
     [[NSRunLoop mainRunLoop] addTimer:gRhyTimer forMode:NSRunLoopCommonModes];
-    diMruFileLog(@"[音律] 启动 版本=" DI_BUILD_VER);
+    diMruFileLog(@"[律动] 启动 版本=" DI_BUILD_VER);
 }
 
 static void diActivityTeardown(UIView *artwork, DIActivityMaskState *state) {
