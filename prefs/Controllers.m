@@ -18,7 +18,7 @@
 
 static NSString *const kDomain = @"com.abgg332.driftisland";
 /* 2.6.25: 设置页底部显示的版本号 */
-static NSString *const DI_VERSION_STR = @"2.9.2";
+static NSString *const DI_VERSION_STR = @"2.9.3";
 /* 2.6.10: 专辑光晕遮罩 —— 与 Tweak 侧 DIAlbumMask.h 保持一致 */
 static NSString *const kDIAlbumMaskKey = @"diAlbumMaskAsset";
 static NSString *const kDIMaskRoot = @"/var/mobile/灵动岛/遮罩素材";
@@ -754,7 +754,7 @@ static Class diStepSliderClass(void) {
 @interface DICCSettings : DIMiniBaseController @end
 /* 2.8.87: 展开定义 —— 遮罩素材下面的二级页(位置/大小/颜色) */
 @interface DIExpandDefinePage : DIMiniBaseController @end
-/* 2.9.2: 音律律动(独立测试入口) */
+/* 2.9.3: 音律律动(独立测试入口) */
 @interface DIRhythmPage : DIMiniBaseController
 @property (nonatomic, strong) PSSpecifier *liveSpec;
 @property (nonatomic, strong) NSTimer *liveTimer;
@@ -1427,7 +1427,7 @@ static void diWriteColors(NSArray<NSString *> *colors) {
         /* 2.8.88: 展开定义 —— 按用户要求做成独立入口, 就放在「专辑遮罩」下面;
            页内上面是帧率, 下面是展开岛的歌词/歌名位置与大小 */
         DI_ADD([self linkSpec:@"歌词位置" detail:[DIExpandDefinePage class]]);
-        /* 2.9.2: 音律律动 —— 先给一个独立测试入口, 不混进专辑遮罩 */
+        /* 2.9.3: 音律律动 —— 先给一个独立测试入口, 不混进专辑遮罩 */
         DI_ADD([self linkSpec:@"音律律动" detail:[DIRhythmPage class]]);
         /* 2.8.41: 控制中心入口回归 */
         DI_ADD([self linkSpec:@"控制中心" detail:[DICCSettings class]]);
@@ -5173,7 +5173,7 @@ static void diOpenHomeBarPickWindow(void) {
 }
 @end
 
-/* ===== 2.9.2: 音律律动 =====
+/* ===== 2.9.3: 音律律动 =====
    数据链: MediaRemoteUI 内的系统 FFT(见 Tweak.mm diRhythmInstall)
            → <MRU 容器>/spectrum.plist
            → SpringBoard 心跳转写 /var/mobile/灵动岛/rhythm.plist(设置页能读)
@@ -5198,7 +5198,7 @@ static void diOpenHomeBarPickWindow(void) {
             bass, mid, high, e, age, frames, src];
 }
 
-/* 2.9.2: 预览 —— 往偏好里写一个时间戳, SpringBoard 导出到 params.plist,
+/* 2.9.3: 预览 —— 往偏好里写一个时间戳, SpringBoard 导出到 params.plist,
    MediaRemoteUI 读到后打 3 秒合成脉冲(不需要有音乐在播) */
 - (void)previewRhy:(PSSpecifier *)sp {
     double t = CFAbsoluteTimeGetCurrent();
@@ -5224,15 +5224,15 @@ static void diOpenHomeBarPickWindow(void) {
     [specs addObject:[self groupSpec:@"音律律动"
         footer:@"显示逻辑: 只在有音乐在播时出数。取的是系统自己算好的频谱(MediaRemoteUI 内), "
                @"不抓录音、不额外解码, 所以几乎不耗电。\n"
-               @"显示图层: 测试模式下, 小岛与展开岛的专辑封面上各挂一圈律动(外环随低音呼吸、"
-               @"内环随高音抖动、周围少量粒子)。\n"
+               @"显示图层: 测试模式下, 专辑封面圆边外挂一圈细密辐条(每根长度跟着对应频段起伏, "
+               @"沿圆周渐变色), 封面外面再飘一层空心星/三角/方/圆的几何粒子。\n"
                @"用处效果: 这一版先用来看数据通不通 —— 环在动 = 链路通了; 不动就看下面那行"
                @"「实时能量」, 它末尾会写数据源(哪个类的几段数组)。没有音乐时可以先点"
                @"「预览律动」, 打 3 秒合成脉冲验证渲染; 有真实数据时自动换成真实数据。"]];
 
     [specs addObject:[self switchSpec:@"启用音律" key:@"rhyOn" def:@NO]];
     [specs addObject:[self switchSpec:@"测试模式" key:@"rhyTest" def:@YES]];
-    /* 2.9.2: 没有音乐也能先确认"层挂上了、位置对、会动" */
+    /* 2.9.3: 没有音乐也能先确认"层挂上了、位置对、会动" */
     [specs addObject:[self buttonSpec:@"预览律动 (3 秒)" action:@selector(previewRhy:)]];
 
     /* 实时能量: 做成按钮行, 每 0.5s 直接把名字改成最新数值 —— 一直停在页面上

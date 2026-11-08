@@ -53,7 +53,7 @@ static NSString *maskAnimFolder;  // 遮罩素材文件夹(帧率素材下的子
    params.plist, 由 MRU 进程内的文字调整器读取并应用(见 diActivityTextApply)。 */
 static BOOL expandTextOn = YES;       // 展开位置开关
 static BOOL hideRouteOn = NO;        /* 2.8.93: 隐藏投送(AirPlay)按钮 */
-/* ===== 2.9.2: 音律律动 =====
+/* ===== 2.9.3: 音律律动 =====
    数据由 MediaRemoteUI 内的系统 FFT 提供(见 diRhythmInstall), 这里只放用户设置。
    rhyTest = 测试模式: 先在两个专辑上挂一圈律动, 验证数据链路通了再整合。 */
 static BOOL rhyOn = NO;
@@ -72,7 +72,7 @@ static double expandTextY = DI_EXP_TEXT_BASE_Y;   // 上下偏移(pt, 下为正,
 static double expandTextScale = 100.0; // 文字大小(%, 100=原样)
 /* 2.8.86: 构建戳 —— 之前横幅打的是 SpringBoard 自己的 CFBundleShortVersionString(恒 1.0),
    日志里根本看不出装的是哪一版。所有诊断行都带这个戳, 下轮日志一眼定位。 */
-#define DI_BUILD_VER @"2.9.2"
+#define DI_BUILD_VER @"2.9.3"
 static BOOL gRecordingActive = NO; // 保留: 岛素材总闸条件
 static NSString *diElementId(UIView *host);
 static BOOL diMiniMusicActive(UIView *host); // 2.6.3: 前置(遮罩层使用)
@@ -681,7 +681,7 @@ static void refreshPrefs(void) {
     if (expandTextY > DI_EXP_TEXT_BASE_Y + 120) expandTextY = DI_EXP_TEXT_BASE_Y + 120;
     if (expandTextScale < 50) expandTextScale = 50; if (expandTextScale > 200) expandTextScale = 200;
     hideRouteOn = pBool(@"hideRouteOn", NO);      /* 2.8.93: 隐藏投送 */
-    /* 2.9.2: 音律律动 */
+    /* 2.9.3: 音律律动 */
     rhyOn = pBool(@"rhyOn", NO);
     rhyTest = pBool(@"rhyTest", YES);
     rhyTint = pBool(@"rhyTint", YES);
@@ -4637,7 +4637,7 @@ static void diExportMaskForMRU(void) {
                                      @"etY": @(expandTextY), @"etScale": @(expandTextScale),
                                      /* 2.8.93: 隐藏投送按钮 */
                                      @"hideRoute": @(hideRouteOn),
-                                     /* 2.9.2: 音律律动 */
+                                     /* 2.9.3: 音律律动 */
                                      @"rhyOn": @(rhyOn), @"rhyTest": @(rhyTest),
                                      @"rhyTint": @(rhyTint), @"rhyDots": @(rhyDots),
                                      @"rhyGain": @(rhyGain), @"rhySmooth": @(rhySmooth),
@@ -4651,7 +4651,7 @@ static void diExportMaskForMRU(void) {
     }
 }
 
-/* 2.9.2: 音律数据接力 —— 数据在 MRU 进程产生(系统 FFT), 设置页在 Preferences 进程,
+/* 2.9.1: 音律数据接力 —— 数据在 MRU 进程产生(系统 FFT), 设置页在 Preferences 进程,
    两边都读不到对方的沙盒。MRU 把它写进自己的 Caches, SpringBoard 能读那个目录,
    于是由 SpringBoard 转写到 /var/mobile/灵动岛/rhythm.plist 给设置页看。
    只搬一个小字典, 0.5s 一次, 开关关掉就删掉。 */
@@ -12385,7 +12385,7 @@ static UIImage *diActivityArtworkImage(UIView *view) {
     }
     return nil;
 }
-/* ===== 2.9.2: 音律律动（方案 A）=====
+/* ===== 2.9.3: 音律律动（方案 A）=====
    数据源: MediaRemoteUI 进程内系统自己算好的 FFT。
      · MRUWaveformController 的 initWithFFTSamples:count:sampleRate: 直接给
        一帧幅度谱(float 数组), 这是最干净的一路;
@@ -12398,7 +12398,7 @@ static UIImage *diActivityArtworkImage(UIView *view) {
    也画不上去。挂载与"真实专辑遮罩"完全独立(不看 mask 开关)。 */
 #define DI_RHY_TAG 0xD1A7
 #define DI_RHY_BANDS 8
-#define DI_RHY_DOTS 10
+#define DI_RHY_DOTS 14
 #define DI_RHY_SCRATCH 1024
 
 typedef struct {
@@ -12410,7 +12410,7 @@ typedef struct {
 
 static DIRhyState gRhy;
 static BOOL gRhyOn, gRhyTestOn, gRhyTintOn, gRhyDotsOn;
-static double gRhyDemoT = 0;        /* 2.9.2: 预览脉动的起点(CFAbsoluteTime) */
+static double gRhyDemoT = 0;        /* 2.9.3: 预览脉动的起点(CFAbsoluteTime) */
 static double gRhyGain = 100.0, gRhySmooth = 60.0;
 static float gRhyPeak = 0.02f;
 static char kDIRhyViewKey;
@@ -12758,13 +12758,13 @@ static int diRhyFeedObject(id o) {
     /* 极低地址不可能是对象 —— 万一某个 setter 传的是结构体, 这里直接放弃, 不去解引用 */
     if ((uintptr_t)(__bridge void *)o < 0x10000) return 0;
     int n = diRhyFloatsFrom(o, gRhyScratch, DI_RHY_SCRATCH);
-    if (n >= 8) {
+    if (n >= 4) {
         if (n >= 48) diRhyFeedFFT(gRhyScratch, (NSUInteger)n, 0);
         else diRhyFeedBands(gRhyScratch, (NSUInteger)n);
         gRhySrc = [NSString stringWithFormat:@"%@/%d段", NSStringFromClass([o class]), n];
         return 1;
     }
-    if (n >= 2 && n < 8) {
+    if (n >= 2) {
         float sum = 0;
         for (int i = 0; i < n; i++) sum += gRhyScratch[i];
         diRhyFeedAmp(sum / (float)n);
@@ -12868,21 +12868,81 @@ static void diRhythmInstall(void) {
 }
 
 /* ---- 渲染: 专辑封面上的一圈律动 ---- */
+/* ---- 渲染: 封面外圈"辐条频谱" + 外围漂浮几何粒子 ----
+   2.9.3: 按用户提供的参考效果重做。原来那版是"一圈细环 + 圈内几个点",
+   看起来就是个框; 参考效果是:
+     · 封面圆边外一圈**细密辐条**(像向日葵), 每根长度跟着对应频段起伏, 沿圆周渐变色;
+     · 封面**外面**一圈缓慢漂移、自转的空心图形(星/三角/方/圆/菱形), 半透明;
+     · 没有方框、没有整块底色。
+   辐条用一个 CAShapeLayer 画完(每帧重算 path), 上色用 conic 渐变 + mask,
+   粒子是 14 个 CAShapeLayer 描边, 只改 position/transform/opacity, 不新建层。 */
+
+typedef NS_ENUM(NSInteger, DIRhyBit) {
+    DIRhyBitStar = 0, DIRhyBitTri, DIRhyBitSquare, DIRhyBitCircle, DIRhyBitDiamond
+};
+
+static CGPathRef diRhyBitPath(DIRhyBit kind, CGFloat sz) {
+    CGMutablePathRef p = CGPathCreateMutable();
+    CGFloat h = sz * 0.5;
+    switch (kind) {
+        case DIRhyBitStar: {                     /* 四角星: 8 个点, 内半径 0.34 */
+            CGFloat ro = h, ri = h * 0.34;
+            for (int i = 0; i < 8; i++) {
+                CGFloat a = -1.5707963 + (CGFloat)i * 0.7853982;
+                CGFloat r = (i % 2 == 0) ? ro : ri;
+                CGPoint pt = CGPointMake(h + cos(a) * r, h + sin(a) * r);
+                if (i == 0) CGPathMoveToPoint(p, NULL, pt.x, pt.y);
+                else CGPathAddLineToPoint(p, NULL, pt.x, pt.y);
+            }
+            CGPathCloseSubpath(p);
+            break;
+        }
+        case DIRhyBitTri: {
+            for (int i = 0; i < 3; i++) {
+                CGFloat a = -1.5707963 + (CGFloat)i * 2.0943951;
+                CGPoint pt = CGPointMake(h + cos(a) * h * 0.92, h + sin(a) * h * 0.92);
+                if (i == 0) CGPathMoveToPoint(p, NULL, pt.x, pt.y);
+                else CGPathAddLineToPoint(p, NULL, pt.x, pt.y);
+            }
+            CGPathCloseSubpath(p);
+            break;
+        }
+        case DIRhyBitSquare: {
+            CGPathAddRect(p, NULL, CGRectMake(h * 0.30, h * 0.30, sz * 0.70, sz * 0.70));
+            break;
+        }
+        case DIRhyBitCircle: {
+            CGPathAddEllipseInRect(p, NULL, CGRectMake(h * 0.34, h * 0.34, sz * 0.66, sz * 0.66));
+            break;
+        }
+        default: {                                /* 菱形 */
+            CGPathMoveToPoint(p, NULL, h, h * 0.08);
+            CGPathAddLineToPoint(p, NULL, sz - h * 0.08, h);
+            CGPathAddLineToPoint(p, NULL, h, sz - h * 0.08);
+            CGPathAddLineToPoint(p, NULL, h * 0.08, h);
+            CGPathCloseSubpath(p);
+            break;
+        }
+    }
+    return p;
+}
+
 @interface DIRhyView : UIView
-@property (nonatomic, strong) CAShapeLayer *ring;
-@property (nonatomic, strong) CAShapeLayer *ringInner;
-@property (nonatomic, strong) CAGradientLayer *glow;
-@property (nonatomic, strong) NSMutableArray<CALayer *> *dots;
-@property (nonatomic, assign) CGFloat lv, bassLv, hiLv;
+@property (nonatomic, strong) CAShapeLayer *bars;
+@property (nonatomic, strong) CAGradientLayer *grad;
+@property (nonatomic, strong) NSMutableArray<CAShapeLayer *> *bits;
 @property (nonatomic, strong) UIImage *lastArt;
+@property (nonatomic, assign) CGFloat lv, bassLv, hiLv;
+@property (nonatomic, assign) CGFloat coverR;      /* 封面半径(本视图坐标) */
 @end
 
 @implementation DIRhyView {
     CGFloat _ang[DI_RHY_DOTS], _rad[DI_RHY_DOTS], _spd[DI_RHY_DOTS];
-    CGFloat _life[DI_RHY_DOTS], _max[DI_RHY_DOTS], _sz[DI_RHY_DOTS];
+    CGFloat _sz[DI_RHY_DOTS], _spin[DI_RHY_DOTS], _fade[DI_RHY_DOTS];
+    NSInteger _kind[DI_RHY_DOTS];
     UIColor *_tint;
     BOOL _built;
-    CGFloat _dt;
+    CGFloat _cx, _cy, _side;
 }
 
 - (instancetype)initWithFrame:(CGRect)frame {
@@ -12890,34 +12950,35 @@ static void diRhythmInstall(void) {
         self.userInteractionEnabled = NO;
         self.backgroundColor = UIColor.clearColor;
         self.tag = DI_RHY_TAG;
-        _ring = [CAShapeLayer layer];
-        _ring.fillColor = UIColor.clearColor.CGColor;
-        _ring.lineCap = kCALineCapRound;
-        [self.layer addSublayer:_ring];
+        self.clipsToBounds = NO;
 
-        _ringInner = [CAShapeLayer layer];
-        _ringInner.fillColor = UIColor.clearColor.CGColor;
-        _ringInner.lineCap = kCALineCapRound;
-        [self.layer addSublayer:_ringInner];
+        _grad = [CAGradientLayer layer];
+        _grad.type = kCAGradientLayerConic;       /* 沿圆周渐变 —— 参考效果就是每根颜色都不同 */
+        _grad.startPoint = CGPointMake(0.5, 0.5);
+        _grad.endPoint = CGPointMake(0.5, 0.0);
+        [self.layer addSublayer:_grad];
 
-        _glow = [CAGradientLayer layer];
-        _glow.type = kCAGradientLayerRadial;
-        _glow.startPoint = CGPointMake(0.5, 0.5);
-        _glow.endPoint = CGPointMake(1.0, 1.0);
-        _glow.locations = @[@0.0, @0.55, @1.0];
-        [self.layer insertSublayer:_glow atIndex:0];
+        _bars = [CAShapeLayer layer];
+        _bars.fillColor = UIColor.clearColor.CGColor;
+        _bars.lineCap = kCALineCapRound;
+        _grad.mask = _bars;
 
-        _dots = [NSMutableArray array];
+        _bits = [NSMutableArray array];
         for (int i = 0; i < DI_RHY_DOTS; i++) {
-            CALayer *d = [CALayer layer];
-            d.opacity = 0;
-            [self.layer addSublayer:d];
-            [_dots addObject:d];
-            _ang[i] = (CGFloat)i / DI_RHY_DOTS * 6.2831853;
-            _rad[i] = 0.5; _spd[i] = 0.4 + 0.8 * ((i * 37 % 100) / 100.0);
-            _life[i] = 0; _max[i] = 1.0; _sz[i] = 1.0 + 0.6 * ((i * 53 % 100) / 100.0);
+            CAShapeLayer *b = [CAShapeLayer layer];
+            b.fillColor = UIColor.clearColor.CGColor;
+            b.lineJoin = kCALineJoinRound;
+            b.lineCap = kCALineCapRound;
+            [self.layer addSublayer:b];
+            [_bits addObject:b];
+            _kind[i] = (NSInteger)(i % 5);
+            _ang[i] = (CGFloat)(i * 137 % 360) / 57.2958;
+            _rad[i] = 1.14 + 0.55 * ((i * 41 % 100) / 100.0);   /* 相对封面半径 */
+            _spd[i] = 0.10 + 0.22 * ((i * 29 % 100) / 100.0);
+            _sz[i] = 0.16 + 0.22 * ((i * 53 % 100) / 100.0);
+            _spin[i] = (CGFloat)(i * 71 % 360) / 57.2958;
+            _fade[i] = 0.10 + 0.30 * ((i * 67 % 100) / 100.0);
         }
-        _dt = 1.0 / 30.0;
         [self setTint:UIColor.whiteColor];
     }
     return self;
@@ -12927,12 +12988,28 @@ static void diRhythmInstall(void) {
     if (!tint) tint = UIColor.whiteColor;
     if ([_tint isEqual:tint] && _built) return;
     _tint = tint;
-    _ring.strokeColor = tint.CGColor;
-    _ringInner.strokeColor = [tint colorWithAlphaComponent:0.55].CGColor;
-    _glow.colors = @[(id)[tint colorWithAlphaComponent:0.60].CGColor,
-                     (id)[tint colorWithAlphaComponent:0.18].CGColor,
-                     (id)[tint colorWithAlphaComponent:0.0].CGColor];
-    for (CALayer *d in _dots) d.backgroundColor = tint.CGColor;
+
+    CGFloat hh = 0, ss = 0, bb = 0, aa = 1;
+    [tint getHue:&hh saturation:&ss brightness:&bb alpha:&aa];
+    NSMutableArray *cols = [NSMutableArray array];
+    const int CN = 10;
+    for (int i = 0; i < CN; i++) {
+        CGFloat t = (CGFloat)i / (CGFloat)CN;
+        CGFloat hue = fmod(hh + 0.10 * t, 1.0);
+        CGFloat sat = MIN(1.0, ss * (0.55 + 0.75 * t));
+        CGFloat bri = MIN(1.0, bb * (0.85 + 0.35 * (1.0 - t)) + 0.12 * t);
+        UIColor *c = [UIColor colorWithHue:hue saturation:sat brightness:bri alpha:1.0];
+        [cols addObject:(id)c.CGColor];
+    }
+    [cols addObject:cols.firstObject];
+    _grad.colors = cols;
+    _grad.locations = nil;
+
+    for (int i = 0; i < DI_RHY_DOTS; i++) {
+        CAShapeLayer *b = _bits[i];
+        UIColor *c = (i % 3 == 0) ? [tint colorWithAlphaComponent:0.85] : UIColor.whiteColor;
+        b.strokeColor = c.CGColor;
+    }
     _built = YES;
     [self setNeedsLayout];
 }
@@ -12940,65 +13017,69 @@ static void diRhythmInstall(void) {
 - (void)layoutSubviews {
     [super layoutSubviews];
     CGRect b = self.bounds;
-    CGFloat side = MIN(b.size.width, b.size.height);
-    if (side < 6) return;
-    CGFloat lw = MAX(1.1, side * 0.075);
-    _ring.lineWidth = lw;
-    _ring.frame = b;
-    _ring.path = [UIBezierPath bezierPathWithOvalInRect:
-                  CGRectInset(b, lw * 0.75, lw * 0.75)].CGPath;
-    _ringInner.lineWidth = MAX(0.6, lw * 0.45);
-    _ringInner.frame = b;
-    _ringInner.path = [UIBezierPath bezierPathWithOvalInRect:
-                       CGRectInset(b, lw * 1.9, lw * 1.9)].CGPath;
-    _glow.frame = b;
-    _glow.cornerRadius = side * 0.5;
-    _glow.masksToBounds = YES;
+    _side = MIN(b.size.width, b.size.height);
+    if (_side < 6) return;
+    _cx = b.size.width * 0.5;
+    _cy = b.size.height * 0.5;
+    _grad.frame = b;
+    _bars.frame = b;
     for (int i = 0; i < DI_RHY_DOTS; i++) {
-        CALayer *d = _dots[i];
-        CGFloat sz = MAX(1.0, _sz[i] * MAX(1.0, side * 0.045));
-        d.bounds = CGRectMake(0, 0, sz, sz);
-        d.cornerRadius = sz * 0.5;
+        CAShapeLayer *l = _bits[i];
+        CGFloat sz = MAX(2.0, _sz[i] * MAX(6.0, self.coverR));
+        l.bounds = CGRectMake(0, 0, sz, sz);
+        l.lineWidth = MAX(0.5, self.coverR * 0.045);
+        CGPathRef p = diRhyBitPath((DIRhyBit)_kind[i], sz);
+        l.path = p;
+        CGPathRelease(p);
     }
 }
 
-/* 每帧(30fps)更新。lv/bass/hi 已在外面做过平滑。 */
-- (void)applyLevel:(CGFloat)lv bass:(CGFloat)bass high:(CGFloat)hi dt:(CGFloat)dt {
+/* bands: 8 段能量(0~1) */
+- (void)applyBands:(const CGFloat *)bands count:(int)n lv:(CGFloat)lv bass:(CGFloat)bass high:(CGFloat)hi dt:(CGFloat)dt {
     self.lv = lv; self.bassLv = bass; self.hiLv = hi;
-    CGRect b = self.bounds;
-    CGFloat side = MIN(b.size.width, b.size.height);
-    if (side < 6) return;
+    if (_side < 6 || self.coverR < 3 || n <= 0) return;
 
-    /* 外环: 低频让它"呼吸"(缩放), 整体能量给透明度 */
-    CGFloat sc = 1.0 + 0.09 * bass;
-    _ring.transform = CATransform3DMakeScale(sc, sc, 1.0);
-    _ring.opacity = (float)(0.26 + 0.74 * lv);
-    _ringInner.transform = CATransform3DMakeScale(1.0 + 0.16 * hi, 1.0 + 0.16 * hi, 1.0);
-    _ringInner.opacity = (float)(0.10 + 0.55 * lv);
-    _glow.opacity = (float)(0.14 + 0.62 * lv);
+    CGFloat coverR = self.coverR;
+    CGFloat r0 = coverR * 1.03;
+    CGFloat unit = coverR * 0.62;
+    int N = (int)lrint(MAX(18.0, MIN(56.0, coverR * 1.15)));
+    CGMutablePathRef p = CGPathCreateMutable();
+    for (int i = 0; i < N; i++) {
+        CGFloat t = (CGFloat)i / (CGFloat)N;
+        CGFloat a = -1.5707963 + t * 6.2831853;
+        CGFloat pos = t * (CGFloat)n;
+        int i0 = (int)pos; if (i0 >= n) i0 = n - 1;
+        int i1 = (i0 + 1) % n;
+        CGFloat fr = pos - (CGFloat)i0;
+        CGFloat v = bands[i0] * (1.0 - fr) + bands[i1] * fr;
+        if (v < 0) v = 0; if (v > 1) v = 1;
+        /* 长短跟着频段走; 整体再乘一点"低音呼吸", 看起来是活的 */
+        CGFloat len = unit * (0.16 + 0.84 * pow(v, 1.15)) * (0.80 + 0.40 * bass);
+        CGFloat c = cos(a), s = sin(a);
+        CGPathMoveToPoint(p, NULL, _cx + c * r0, _cy + s * r0);
+        CGPathAddLineToPoint(p, NULL, _cx + c * (r0 + len), _cy + s * (r0 + len));
+    }
+    _bars.path = p;
+    CGPathRelease(p);
+    _bars.lineWidth = MAX(0.6, (2.0 * 3.1415926 * r0 / (CGFloat)N) * 0.60);
+    _grad.opacity = (float)(0.60 + 0.40 * lv);
 
-    /* 粒子: 固定 10 个对象池, 不新建/销毁 layer(岛内空间小, 池子够用) */
-    CGFloat baseR = side * 0.34;
-    CGFloat maxR = side * 0.62;
+    /* 外围图形: 缓慢绕行 + 自转 + 呼吸, 不进入封面内圈 */
+    CGFloat now = (CGFloat)CFAbsoluteTimeGetCurrent();
     for (int i = 0; i < DI_RHY_DOTS; i++) {
-        CALayer *d = _dots[i];
-        if (!gRhyDotsOn) { d.opacity = 0; continue; }
-        _life[i] -= dt;
-        if (_life[i] <= 0) {
-            if (lv < 0.10) { d.opacity = 0; continue; }
-            /* 重生: 能量越大, 出现在越靠外的位置、初始更快 */
-            _life[i] = _max[i] = 0.55 + 0.75 * ((i * 29 % 100) / 100.0);
-            _ang[i] = (CGFloat)arc4random_uniform(6283) / 1000.0;
-            _rad[i] = baseR;
-            _spd[i] = (0.5 + 1.5 * lv) * (0.6 + 0.8 * ((i * 37 % 100) / 100.0));
-        }
-        _rad[i] += _spd[i] * (0.6 + 1.8 * lv) * dt * 30.0 * 0.06 * side;
-        if (_rad[i] > maxR) { _life[i] = 0; d.opacity = 0; continue; }
-        CGFloat x = b.size.width * 0.5 + cos(_ang[i]) * _rad[i];
-        CGFloat y = b.size.height * 0.5 + sin(_ang[i]) * _rad[i];
-        d.position = CGPointMake(x, y);
-        CGFloat k = MAX(0.0, _life[i] / MAX(_max[i], 0.01));
-        d.opacity = (float)(k * (0.25 + 0.75 * lv));
+        CAShapeLayer *l = _bits[i];
+        _ang[i] += _spd[i] * dt * (0.55 + 0.75 * lv);
+        CGFloat wob = sinf((float)(now * 0.5 + (CGFloat)i)) * 0.06;
+        CGFloat capR = (_side * 0.5) / MAX(coverR, 1.0);
+        CGFloat frac = _rad[i] + wob + 0.10 * bass;
+        if (frac > capR - 0.05) frac = capR - 0.05;
+        if (capR < 1.08) { l.opacity = 0; continue; }
+        CGFloat rr = coverR * frac;
+        CGFloat x = _cx + cos(_ang[i]) * rr;
+        CGFloat y = _cy + sin(_ang[i]) * rr * 0.94;
+        l.position = CGPointMake(x, y);
+        l.transform = CATransform3DMakeRotation(_spin[i] + now * _spd[i] * 0.6, 0, 0, 1);
+        l.opacity = (float)(_fade[i] * (0.45 + 0.55 * lv));
     }
 }
 @end
@@ -13037,7 +13118,7 @@ static UIColor *diRhyColorFromImage(UIImage *img) {
     /* 提一点亮度, 深色封面上环也要看得见 */
     CGFloat mx = MAX(br, MAX(bg, bb));
     if (mx > 0.01) { br = MIN(1, br / mx * 0.95 + 0.10); bg = MIN(1, bg / mx * 0.95 + 0.10); bb = MIN(1, bb / mx * 0.95 + 0.10); }
-    /* 2.9.2: 深色封面取出来的颜色贴在黑色岛上等于看不见 —— 亮度不够就往白色里掺 */
+    /* 2.9.3: 深色封面取出来的颜色贴在黑色岛上等于看不见 —— 亮度不够就往白色里掺 */
     CGFloat lum = 0.299 * br + 0.587 * bg + 0.114 * bb;
     if (lum < 0.42) {
         CGFloat k = (0.42 - lum) / 0.42 * 0.62;
@@ -13057,22 +13138,56 @@ static void diRhythmApply(UIView *artwork) {
        否则动画每一帧都在"挂上-撤掉"之间来回闪。只在开关关掉时撤。 */
     DIRhyView *v = objc_getAssociatedObject(artwork, &kDIRhyViewKey);
     BOOL want = gRhyOn && gRhyTestOn;
-    if (!want || artwork.bounds.size.width < 14 || artwork.bounds.size.height < 14) {
+    CGSize as = artwork.bounds.size;
+    if (!want || as.width < 16 || as.height < 16) {
         if (v) {
             [v removeFromSuperview];
             objc_setAssociatedObject(artwork, &kDIRhyViewKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
         }
         return;
     }
-    if (!v) {
-        v = [[DIRhyView alloc] initWithFrame:artwork.bounds];
-        objc_setAssociatedObject(artwork, &kDIRhyViewKey, v, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-        [artwork addSubview:v];
-        diMruFileLog([NSString stringWithFormat:@"[音律] 挂到 %@ %@",
-                      NSStringFromClass(artwork.class), NSStringFromCGRect(artwork.bounds)]);
+
+    /* 2.9.3: 粒子和辐条要画到封面**外面** —— 挂在封面自身上会被它的圆角裁掉,
+       所以往上找一个不裁剪的祖先当宿主(最多 3 层)。找不到就退化成只画封面内。 */
+    UIView *host = artwork;
+    UIView *probe = artwork;
+    for (int i = 0; i < 3 && probe.superview; i++) {
+        UIView *p = probe.superview;
+        if (!p.clipsToBounds
+            && p.bounds.size.width >= as.width * 1.1
+            && p.bounds.size.height >= as.height * 1.05) { host = p; break; }
+        probe = p;
     }
-    if (!CGRectEqualToRect(v.frame, artwork.bounds)) v.frame = artwork.bounds;
-    if (artwork.subviews.lastObject != v) [artwork bringSubviewToFront:v];
+    if (host != artwork && !host.window) host = artwork;
+
+    CGFloat coverR = MIN(as.width, as.height) * 0.5;
+    CGFloat wantR = coverR * 1.72;
+    if (host == artwork) {
+        wantR = coverR;                                   /* 只能画在封面里 */
+    } else {
+        CGFloat maxR = MIN(host.bounds.size.width, host.bounds.size.height) * 0.5 - 1.0;
+        if (maxR < wantR) wantR = MAX(coverR * 1.10, maxR);
+    }
+    if (wantR < 6.0) {
+        if (v) { [v removeFromSuperview]; objc_setAssociatedObject(artwork, &kDIRhyViewKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC); }
+        return;
+    }
+
+    CGRect ref = [artwork convertRect:artwork.bounds toView:host];
+    CGRect f = CGRectMake(CGRectGetMidX(ref) - wantR, CGRectGetMidY(ref) - wantR,
+                          wantR * 2.0, wantR * 2.0);
+    if (v && v.superview != host) { [v removeFromSuperview]; v = nil; }
+    if (!v) {
+        v = [[DIRhyView alloc] initWithFrame:f];
+        objc_setAssociatedObject(artwork, &kDIRhyViewKey, v, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        [host addSubview:v];
+        diMruFileLog([NSString stringWithFormat:@"[音律] 挂到 %@ %@ 宿主=%@ r=%.0f",
+                      NSStringFromClass(artwork.class), NSStringFromCGRect(ref),
+                      NSStringFromClass(host.class), (double)coverR]);
+    }
+    if (fabs(v.coverR - coverR) > 0.5) { v.coverR = coverR; [v setNeedsLayout]; }
+    if (!CGRectEqualToRect(v.frame, f)) v.frame = f;
+    if (v.superview && v.superview.subviews.lastObject != v) [v.superview bringSubviewToFront:v];
     if (gRhyTintOn) {
         /* 换图才重算 —— 这个函数每次 layout 都会被调, 每帧取图+缩图会把 MRU 主线程拖死 */
         UIImage *art = diActivityArtworkImage(artwork);
@@ -13083,10 +13198,9 @@ static void diRhythmApply(UIView *artwork) {
         }
     } else {
         v.lastArt = nil;
-        [v setTint:[UIColor colorWithRed:0.30 green:0.85 blue:1.0 alpha:1.0]];
+        [v setTint:[UIColor colorWithRed:0.62 green:0.55 blue:1.0 alpha:1.0]];
     }
 }
-
 /* 心跳: 挂载 + 渲染 + 安装重试。30fps, 只有 gRhyOn 打开才做实际工作。 */
 static NSHashTable *gRhyArtworks;
 static CFAbsoluteTime gRhyLastScan;
@@ -13136,15 +13250,15 @@ static void diRhythmTick(void) {
     CGFloat target = age < 1.2 ? (CGFloat)gRhy.energy : 0;
     CGFloat bass = age < 1.2 ? (CGFloat)gRhy.bass : 0;
     CGFloat high = age < 1.2 ? (CGFloat)gRhy.high : 0;
-    /* 2.9.2: 设置页「预览律动」—— 没有真实数据时打 3 秒合成脉冲。
+    /* 2.9.3: 设置页「预览律动」—— 没有真实数据时打 3 秒合成脉冲。
        只用来验证"层挂上了、位置对、能跟着动", 有真实数据时自动让位。 */
     double demoAge = gRhyDemoT > 0 ? (now - gRhyDemoT) : 99;
-    if (demoAge >= 0 && demoAge < 3.0 && target <= 0.001) {
+    BOOL demoNow = (demoAge >= 0 && demoAge < 3.0 && target <= 0.001);
+    if (demoNow) {
         float beat = (float)(0.5 + 0.5 * sin(demoAge * 2.0 * 6.2831853));
-        float bright = (float)(0.5 + 0.5 * sin(demoAge * 7.0 * 6.2831853));
-        target = 0.30 + 0.60 * beat;
-        bass = 0.10 + 0.90 * beat;
-        high = 0.20 + 0.55 * bright;
+        target = 0.45 + 0.50 * beat;
+        bass = 0.35 + 0.60 * beat;
+        high = 0.30 + 0.50 * (float)(0.5 + 0.5 * sin(demoAge * 7.0 * 6.2831853));
     }
 
     /* 平滑: 设置里的"响应速度"越大跟得越紧; 上升快、下降慢(鼓点不抖) */
@@ -13161,12 +13275,20 @@ static void diRhythmTick(void) {
     }
     for (UIView *a in alive) diRhythmApply(a);
     /* 遍历所有挂过层的视图(包括 hook 注册进来的) */
+    CGFloat cb[DI_RHY_BANDS];
+    for (int i = 0; i < DI_RHY_BANDS; i++) cb[i] = (CGFloat)gRhy.band[i];
+    if (demoNow) {
+        for (int i = 0; i < DI_RHY_BANDS; i++) {
+            double ph = demoAge * 4.0 + i * 0.85;
+            cb[i] = (CGFloat)(0.25 + 0.70 * fabs(sin(ph)));
+        }
+    }
     NSMutableSet<UIView *> *seen = [NSMutableSet set];
     for (UIView *a in alive) {
         if ([seen containsObject:a]) continue;
         [seen addObject:a];
         DIRhyView *v = objc_getAssociatedObject(a, &kDIRhyViewKey);
-        if (v) [v applyLevel:sLv bass:sBass high:sHi dt:1.0 / 30.0];
+        if (v) [v applyBands:cb count:DI_RHY_BANDS lv:sLv bass:sBass high:sHi dt:1.0 / 30.0];
     }
     if (gDIActivityArtworks) {
         for (UIView *a in gDIActivityArtworks.allObjects) {
@@ -13174,7 +13296,7 @@ static void diRhythmTick(void) {
             [seen addObject:a];
             DIRhyView *v = objc_getAssociatedObject(a, &kDIRhyViewKey);
             if (!v) { diRhythmApply(a); v = objc_getAssociatedObject(a, &kDIRhyViewKey); }
-            if (v) [v applyLevel:sLv bass:sBass high:sHi dt:1.0 / 30.0];
+            if (v) [v applyBands:cb count:DI_RHY_BANDS lv:sLv bass:sBass high:sHi dt:1.0 / 30.0];
         }
     }
     /* 诊断: 5 秒一条, 看得到数据源到底有没有在出数 */
@@ -13244,7 +13366,7 @@ static void diActivityHideSystem(UIView *artwork, DIActivityMaskState *state) {
     }
     for (UIView *sub in artwork.subviews) {
         if (sub == state.glass) continue;
-        if (sub.tag == 0xD1A7) continue;   /* 2.9.2: 音律律动层, 不是系统图层 */
+        if (sub.tag == 0xD1A7) continue;   /* 2.9.3: 音律律动层, 不是系统图层 */
         if ([state.hiddenViews containsObject:sub]) continue;
         [state.hiddenViews addObject:sub];
         [state.hiddenStates addObject:@(sub.hidden)];
@@ -13287,7 +13409,7 @@ static void diMruWriteExpandState(BOOL expanded, CGSize box) {
    这是小岛 2.8.13 起一直在用、已验证有效的那套观感, 这里在 MediaRemoteUI 内复刻。 */
 static void diActivityApply(UIView *artwork) {
     if (!NSThread.isMainThread || ![artwork isKindOfClass:UIView.class]) return;
-    /* 2.9.2: 音律律动 —— 与遮罩完全独立, 开关只看 rhyOn/rhyTest */
+    /* 2.9.3: 音律律动 —— 与遮罩完全独立, 开关只看 rhyOn/rhyTest */
     @try { diRhythmApply(artwork); } @catch (__unused NSException *e) {}
     DIActivityMaskState *state = objc_getAssociatedObject(artwork, &kDIActivityMaskState);
     BOOL sized = artwork.bounds.size.width > 20 && artwork.bounds.size.height > 20;
@@ -13419,7 +13541,7 @@ static void diActivityApply(UIView *artwork) {
     }
     diMruReport(@"apply", [NSString stringWithFormat:@"%@ 旋转=%@", NSStringFromCGRect(box),
         rotOn ? [NSString stringWithFormat:@"%.0f°/s", speed] : @"关"]);
-    /* 2.9.2: 遮罩玻璃刚被提到最前, 律动层再提一次 —— 环应该浮在封面之上 */
+    /* 2.9.3: 遮罩玻璃刚被提到最前, 律动层再提一次 —— 环应该浮在封面之上 */
     @try { diRhythmApply(artwork); } @catch (__unused NSException *e) {}
 }
 
