@@ -53,7 +53,7 @@ static NSString *maskAnimFolder;  // 遮罩素材文件夹(帧率素材下的子
    params.plist, 由 MRU 进程内的文字调整器读取并应用(见 diActivityTextApply)。 */
 static BOOL expandTextOn = YES;       // 展开位置开关
 static BOOL hideRouteOn = NO;        /* 2.8.93: 隐藏投送(AirPlay)按钮 */
-/* ===== 2.9.1: 音律律动 =====
+/* ===== 2.9.2: 音律律动 =====
    数据由 MediaRemoteUI 内的系统 FFT 提供(见 diRhythmInstall), 这里只放用户设置。
    rhyTest = 测试模式: 先在两个专辑上挂一圈律动, 验证数据链路通了再整合。 */
 static BOOL rhyOn = NO;
@@ -62,6 +62,7 @@ static BOOL rhyTint = YES;
 static BOOL rhyDots = YES;
 static double rhyGain = 100.0;
 static double rhySmooth = 60.0;
+static double rhyDemoT = 0;         /* 2.9.2: 设置页「预览」按下的时间戳, 只用来验证渲染 */
 /* 2.8.92: 基准落点 —— 用户自己调到满意的那一版就是 (120,45)。
    设置页的左右/上下现在是"相对这个基准"的增量, 滑杆默认 0 即这个位置, 左右 ±200。 */
 #define DI_EXP_TEXT_BASE_X 120.0
@@ -71,7 +72,7 @@ static double expandTextY = DI_EXP_TEXT_BASE_Y;   // 上下偏移(pt, 下为正,
 static double expandTextScale = 100.0; // 文字大小(%, 100=原样)
 /* 2.8.86: 构建戳 —— 之前横幅打的是 SpringBoard 自己的 CFBundleShortVersionString(恒 1.0),
    日志里根本看不出装的是哪一版。所有诊断行都带这个戳, 下轮日志一眼定位。 */
-#define DI_BUILD_VER @"2.9.1"
+#define DI_BUILD_VER @"2.9.2"
 static BOOL gRecordingActive = NO; // 保留: 岛素材总闸条件
 static NSString *diElementId(UIView *host);
 static BOOL diMiniMusicActive(UIView *host); // 2.6.3: 前置(遮罩层使用)
@@ -680,7 +681,7 @@ static void refreshPrefs(void) {
     if (expandTextY > DI_EXP_TEXT_BASE_Y + 120) expandTextY = DI_EXP_TEXT_BASE_Y + 120;
     if (expandTextScale < 50) expandTextScale = 50; if (expandTextScale > 200) expandTextScale = 200;
     hideRouteOn = pBool(@"hideRouteOn", NO);      /* 2.8.93: 隐藏投送 */
-    /* 2.9.1: 音律律动 */
+    /* 2.9.2: 音律律动 */
     rhyOn = pBool(@"rhyOn", NO);
     rhyTest = pBool(@"rhyTest", YES);
     rhyTint = pBool(@"rhyTint", YES);
@@ -689,6 +690,7 @@ static void refreshPrefs(void) {
     if (rhyGain < 20) rhyGain = 20; if (rhyGain > 400) rhyGain = 400;
     rhySmooth = pDouble(@"rhySmooth", 60.0);
     if (rhySmooth < 0) rhySmooth = 0; if (rhySmooth > 100) rhySmooth = 100;
+    rhyDemoT = pDouble(@"rhyDemo", 0);
     /* 2.5.7: 隐藏横条 / 渐隐模式 / 手势保护 */
     homeBarHideOn = pBool(@"homeBarHideOn", NO);
     homeBarHideMode = pBool(@"homeBarHideFade", NO) ? @"fade" : @"full";   /* 2.5.11: 子开关 */
@@ -4635,10 +4637,11 @@ static void diExportMaskForMRU(void) {
                                      @"etY": @(expandTextY), @"etScale": @(expandTextScale),
                                      /* 2.8.93: 隐藏投送按钮 */
                                      @"hideRoute": @(hideRouteOn),
-                                     /* 2.9.1: 音律律动 */
+                                     /* 2.9.2: 音律律动 */
                                      @"rhyOn": @(rhyOn), @"rhyTest": @(rhyTest),
                                      @"rhyTint": @(rhyTint), @"rhyDots": @(rhyDots),
-                                     @"rhyGain": @(rhyGain), @"rhySmooth": @(rhySmooth)};
+                                     @"rhyGain": @(rhyGain), @"rhySmooth": @(rhySmooth),
+                                     @"rhyDemo": @(rhyDemoT)};
             [params writeToFile:[own stringByAppendingPathComponent:@"params.plist"] atomically:YES];
         }
         RLog(@"[遮罩导出] → MediaRemoteUI: 素材=%@ 文件=%@ 偏好=%lu字节 开关=%d 容器=%@ 容器写入=%@ 错误=%@",
@@ -4648,7 +4651,7 @@ static void diExportMaskForMRU(void) {
     }
 }
 
-/* 2.9.1: 音律数据接力 —— 数据在 MRU 进程产生(系统 FFT), 设置页在 Preferences 进程,
+/* 2.9.2: 音律数据接力 —— 数据在 MRU 进程产生(系统 FFT), 设置页在 Preferences 进程,
    两边都读不到对方的沙盒。MRU 把它写进自己的 Caches, SpringBoard 能读那个目录,
    于是由 SpringBoard 转写到 /var/mobile/灵动岛/rhythm.plist 给设置页看。
    只搬一个小字典, 0.5s 一次, 开关关掉就删掉。 */
@@ -12382,7 +12385,7 @@ static UIImage *diActivityArtworkImage(UIView *view) {
     }
     return nil;
 }
-/* ===== 2.9.1: 音律律动（方案 A）=====
+/* ===== 2.9.2: 音律律动（方案 A）=====
    数据源: MediaRemoteUI 进程内系统自己算好的 FFT。
      · MRUWaveformController 的 initWithFFTSamples:count:sampleRate: 直接给
        一帧幅度谱(float 数组), 这是最干净的一路;
@@ -12396,6 +12399,7 @@ static UIImage *diActivityArtworkImage(UIView *view) {
 #define DI_RHY_TAG 0xD1A7
 #define DI_RHY_BANDS 8
 #define DI_RHY_DOTS 10
+#define DI_RHY_SCRATCH 1024
 
 typedef struct {
     float band[DI_RHY_BANDS];
@@ -12406,6 +12410,7 @@ typedef struct {
 
 static DIRhyState gRhy;
 static BOOL gRhyOn, gRhyTestOn, gRhyTintOn, gRhyDotsOn;
+static double gRhyDemoT = 0;        /* 2.9.2: 预览脉动的起点(CFAbsoluteTime) */
 static double gRhyGain = 100.0, gRhySmooth = 60.0;
 static float gRhyPeak = 0.02f;
 static char kDIRhyViewKey;
@@ -12432,6 +12437,7 @@ static void diRhyParams(void) {
     if (g >= 20 && g <= 400) gRhyGain = g;
     double s = [d[@"rhySmooth"] doubleValue];
     if (s >= 0 && s <= 100) gRhySmooth = s;
+    gRhyDemoT = [d[@"rhyDemo"] doubleValue];
 }
 
 static NSString *diRhySpectrumPath(void) {
@@ -12439,38 +12445,19 @@ static NSString *diRhySpectrumPath(void) {
     return d.length ? [d stringByAppendingPathComponent:@"spectrum.plist"] : nil;
 }
 
-/* 把一帧幅度谱切成 8 段。stems 用 f^1.6 分段 —— 低频 bin 少、能量大,
-   按线性等分会让 8 段全被低频占满, 高低频永远不动。 */
-static void diRhyFeedFFT(const float *s, NSUInteger n, double rate) {
-    if (!s || n < 8) return;
-    float acc[DI_RHY_BANDS] = {0};
-    int cnt[DI_RHY_BANDS] = {0};
-    for (NSUInteger i = 0; i < n; i++) {
-        float x = s[i];
-        if (x != x || x < 0) x = 0;            /* NaN / 负值当 0 */
-        if (x > 1e6f) x = 1e6f;
-        double f = (double)i / (double)n;
-        int b = (int)(pow(f, 1.6) * DI_RHY_BANDS);
-        if (b < 0) b = 0;
-        if (b >= DI_RHY_BANDS) b = DI_RHY_BANDS - 1;
-        acc[b] += x;
-        cnt[b]++;
-    }
-    float v[DI_RHY_BANDS];
+static float gRhyScratch[DI_RHY_SCRATCH];
+static const char *diRhySrcName(void);
+
+/* 收尾: 8 段数值(任意量纲) → 自适应峰值 + 增益 → 落进 gRhy */
+static void diRhyCommit8(const float *v) {
     float mx = 0;
-    for (int i = 0; i < DI_RHY_BANDS; i++) {
-        float m = cnt[i] ? acc[i] / (float)cnt[i] : 0;
-        v[i] = sqrtf(m);                        /* 幅度谱压缩, 不然永远是低音满格 */
-        if (v[i] > mx) mx = v[i];
-    }
-    /* 自适应峰值: 涨得快、落得慢(0.9985/帧 @ 10Hz ≈ 8 秒回一半),
-       这样安静段落不会因为"绝对数值小"就整圈不亮 */
+    for (int i = 0; i < DI_RHY_BANDS; i++) if (v[i] > mx) mx = v[i];
     if (mx > gRhyPeak) gRhyPeak = mx;
     else gRhyPeak = gRhyPeak * 0.9985f + mx * 0.0015f;
     if (gRhyPeak < 0.02f) gRhyPeak = 0.02f;
     double gain = gRhyGain / 100.0;
     for (int i = 0; i < DI_RHY_BANDS; i++) {
-        float x = v[i] / gRhyPeak * gain;
+        float x = (float)((double)v[i] / (double)gRhyPeak * gain);
         if (x > 1.0f) x = 1.0f;
         if (x < 0.0f) x = 0.0f;
         gRhy.band[i] = x;
@@ -12478,12 +12465,75 @@ static void diRhyFeedFFT(const float *s, NSUInteger n, double rate) {
     gRhy.bass = (gRhy.band[0] + gRhy.band[1] + gRhy.band[2]) / 3.0f;
     gRhy.mid = (gRhy.band[3] + gRhy.band[4] + gRhy.band[5]) / 3.0f;
     gRhy.high = (gRhy.band[6] + gRhy.band[7]) / 2.0f;
-    gRhy.energy = (gRhy.bass * 0.45f + gRhy.mid * 0.35f + gRhy.high * 0.20f);
+    gRhy.energy = gRhy.bass * 0.45f + gRhy.mid * 0.35f + gRhy.high * 0.20f;
     gRhy.amp = gRhy.energy;
     gRhy.stamp = CFAbsoluteTimeGetCurrent();
     gRhy.frames++;
     diRhyPublish();
+}
+
+/* 量纲统一: 有的系统给 dB(负数, 0=满格), 有的给 0~1, 有的给未归一化的幅值。
+   统一成"非负、越大越响"。 */
+static void diRhyNormalize(float *v, NSUInteger n) {
+    if (!n) return;
+    float mx = -1e30f, mn = 1e30f;
+    for (NSUInteger i = 0; i < n; i++) {
+        if (v[i] != v[i]) v[i] = 0;
+        if (v[i] > mx) mx = v[i];
+        if (v[i] < mn) mn = v[i];
+    }
+    if (mx <= 0.0f && mn < -5.0f) {                 /* dBFS */
+        for (NSUInteger i = 0; i < n; i++) {
+            float d = v[i] < -90.0f ? -90.0f : v[i];
+            v[i] = powf(10.0f, d / 20.0f);
+        }
+        return;
+    }
+    if (mx > 4.0f) {                                 /* 未归一化的大数值 */
+        for (NSUInteger i = 0; i < n; i++) v[i] /= mx;
+    }
+    for (NSUInteger i = 0; i < n; i++) if (v[i] < 0) v[i] = 0;
+}
+
+/* 一段原始幅度谱(几十~几百个频点) → 8 段。
+   用 f^1.6 分段 —— 低频 bin 少、能量大, 线性等分会让 8 段全被低频占满。 */
+static void diRhyFeedFFT(const float *s, NSUInteger n, double rate) {
+    if (!s || n < 16) return;
+    NSUInteger m = n > DI_RHY_SCRATCH ? DI_RHY_SCRATCH : n;
+    memcpy(gRhyScratch, s, m * sizeof(float));
+    diRhyNormalize(gRhyScratch, m);
+    float acc[DI_RHY_BANDS] = {0};
+    int cnt[DI_RHY_BANDS] = {0};
+    for (NSUInteger i = 0; i < m; i++) {
+        double f = (double)i / (double)m;
+        int b = (int)(pow(f, 1.6) * DI_RHY_BANDS);
+        if (b < 0) b = 0;
+        if (b >= DI_RHY_BANDS) b = DI_RHY_BANDS - 1;
+        acc[b] += gRhyScratch[i];
+        cnt[b]++;
+    }
+    float v[DI_RHY_BANDS];
+    for (int i = 0; i < DI_RHY_BANDS; i++)
+        v[i] = sqrtf(cnt[i] ? acc[i] / (float)cnt[i] : 0.0f);
+    diRhyCommit8(v);
     (void)rate;
+}
+
+/* 一段"已经是分段电平"的数组(2~47 段) → 8 段, 线性重采样 */
+static void diRhyFeedBands(const float *s, NSUInteger n) {
+    if (!s || n < 2) return;
+    NSUInteger m = n > DI_RHY_SCRATCH ? DI_RHY_SCRATCH : n;
+    memcpy(gRhyScratch, s, m * sizeof(float));
+    diRhyNormalize(gRhyScratch, m);
+    float v[DI_RHY_BANDS];
+    for (int b = 0; b < DI_RHY_BANDS; b++) {
+        double pos = (double)b * (double)(m - 1) / (double)(DI_RHY_BANDS - 1);
+        NSUInteger i0 = (NSUInteger)pos;
+        NSUInteger i1 = (i0 + 1 < m) ? (i0 + 1) : i0;
+        double fr = pos - (double)i0;
+        v[b] = (float)((double)gRhyScratch[i0] * (1.0 - fr) + (double)gRhyScratch[i1] * fr);
+    }
+    diRhyCommit8(v);
 }
 
 /* 单值通道(setAmplitude:) —— 只有整体能量, 8 段按同一值走 */
@@ -12517,100 +12567,304 @@ static void diRhyPublish(void) {
     NSDictionary *d = @{@"t": @(now), @"bands": b,
                         @"bass": @(gRhy.bass), @"mid": @(gRhy.mid), @"high": @(gRhy.high),
                         @"e": @(gRhy.energy), @"amp": @(gRhy.amp),
-                        @"n": @(gRhy.frames), @"v": DI_BUILD_VER};
+                        @"n": @(gRhy.frames), @"src": [NSString stringWithUTF8String:diRhySrcName()], @"v": DI_BUILD_VER};
     @try { [d writeToFile:p atomically:YES]; } @catch (__unused NSException *e) {}
 }
 
-/* ---- FFT hook ---- */
-static IMP gRhyOrigFFT;
-static id diRhyFFTHook(id self, SEL cmd, const float *s, NSUInteger n, double rate, id extra) {
-    @try { diRhyFeedFFT(s, n, rate); } @catch (__unused NSException *e) {}
-    if (gRhyOrigFFT)
-        return ((id (*)(id, SEL, const float *, NSUInteger, double, id))gRhyOrigFFT)(self, cmd, s, n, rate, extra);
-    return self;
+/* ===== 2.9.2: 数据源重写 =====
+   348 日志证明这台系统上根本没有 initWithFFTSamples:count:sampleRate: —— 旧版
+   挂不上去, 所以 FFT=0 AMP=0、帧=0、环一直不亮。系统实际提供的是:
+
+     MRUWaveformController   -setWaveform:  -waveform  -audioAnalyzer:didUpdateWaveform:
+     MRUAudioAnalyzer        -waveformData
+     MRUWaveformView         -waveformData  -setWaveformData:
+
+   于是改成"按名字自己找": 凡是类名带 MRU/Waveform/AudioAnalyzer、方法名带 waveform 的
+     ①单参数 set 方法   ②双参数 xxx:didUpdateWaveform:
+   全部挂上; 拿到的对象再由 diRhyFloatsFrom() 自己找 float 数组 —— C 数组 ivar、
+   指针 ivar + 同族 count ivar、NSData、NSArray 四种形状都认。都认不出来就把对象的
+   类名 / ivar 列表 / description 打进日志, 下一版照着改, 不用再猜。 */
+static NSString *gRhySrc = @"无";
+
+static const char *diRhySrcName(void) {
+    return gRhySrc.length ? gRhySrc.UTF8String : "无";
 }
-static IMP gRhyOrigAmpD, gRhyOrigAmpF;
-static void diRhyAmpDHook(id self, SEL cmd, double a) {
-    @try { diRhyFeedAmp(a); } @catch (__unused NSException *e) {}
-    if (gRhyOrigAmpD) ((void (*)(id, SEL, double))gRhyOrigAmpD)(self, cmd, a);
+
+/* 从 ivar 里读一个整数(各种宽度都认) */
+static NSUInteger diRhyReadUInt(void *p, const char *te) {
+    if (!te) return 0;
+    switch (te[0]) {
+        case 'Q': return (NSUInteger)(*(unsigned long long *)p);
+        case 'q': return (NSUInteger)(*(long long *)p);
+        case 'I': return (NSUInteger)(*(unsigned int *)p);
+        case 'i': return (NSUInteger)(*(int *)p);
+        case 'L': return (NSUInteger)(*(unsigned long *)p);
+        case 'l': return (NSUInteger)(*(long *)p);
+        case 'S': return (NSUInteger)(*(unsigned short *)p);
+        case 's': return (NSUInteger)(*(short *)p);
+        case 'C': return (NSUInteger)(*(unsigned char *)p);
+        default: return 0;
+    }
 }
-static void diRhyAmpFHook(id self, SEL cmd, float a) {
-    @try { diRhyFeedAmp((double)a); } @catch (__unused NSException *e) {}
-    if (gRhyOrigAmpF) ((void (*)(id, SEL, float))gRhyOrigAmpF)(self, cmd, a);
-}
-/* 参数编码里第 3 个业务参数的类型字符(f / d) —— setAmplitude: 在不同系统版本
-   上一个是 float 一个是 double, 用错寄存器会读到垃圾 */
-static char diRhyThirdArgType(Method m) {
-    const char *t = m ? method_getTypeEncoding(m) : NULL;
-    if (!t) return 0;
-    int colons = 0;
-    for (const char *p = t; *p; p++) {
-        if (*p != ':') continue;
-        colons++;
-        if (colons == 2) {
-            const char *q = p + 1;
-            while (*q && (*q == 'r' || *q == 'n' || *q == 'o' || *q == 'R' || *q == 'V')) q++;
-            return *q;
+
+/* 猜"这个 float 指针有多少个元素": 找同级 ivar 里名字含 count/num/len/size/band 的整数 */
+static NSUInteger diRhyGuessCount(id o) {
+    Class c = [o class];
+    while (c && c != NSObject.class) {
+        unsigned cnt = 0;
+        Ivar *ivs = class_copyIvarList(c, &cnt);
+        for (unsigned i = 0; i < cnt; i++) {
+            const char *nm = ivar_getName(ivs[i]);
+            const char *te = ivar_getTypeEncoding(ivs[i]);
+            if (!nm || !te || te[0] == '@' || te[0] == '[') continue;
+            char low[64];
+            size_t k = 0;
+            for (const char *q = nm; *q && k < 63; q++) {
+                char ch = *q;
+                if (ch >= 'A' && ch <= 'Z') ch = (char)(ch + 32);
+                low[k++] = ch;
+            }
+            low[k] = 0;
+            if (!strstr(low, "count") && !strstr(low, "num") && !strstr(low, "len")
+                && !strstr(low, "size") && !strstr(low, "band") && !strstr(low, "sample"))
+                continue;
+            NSUInteger v = diRhyReadUInt((char *)(__bridge void *)o + ivar_getOffset(ivs[i]), te);
+            if (v >= 4 && v <= DI_RHY_SCRATCH) { free(ivs); return v; }
         }
+        free(ivs);
+        c = class_getSuperclass(c);
     }
     return 0;
 }
+
+static int diRhyFloatsFromData(NSData *d, float *out, NSUInteger cap) {
+    if (![d isKindOfClass:NSData.class]) return 0;
+    NSUInteger len = d.length;
+    if (len >= 16 && (len % 4) == 0 && len / 4 <= cap) {
+        memcpy(out, d.bytes, len);
+        return (int)(len / 4);
+    }
+    if (len >= 16 && (len % 8) == 0 && len / 8 <= cap) {
+        const double *p = (const double *)d.bytes;
+        NSUInteger n = len / 8;
+        for (NSUInteger i = 0; i < n; i++) out[i] = (float)p[i];
+        return (int)n;
+    }
+    return 0;
+}
+
+static int diRhyFloatsFromArray(NSArray *a, float *out, NSUInteger cap) {
+    NSUInteger n = a.count;
+    if (n < 2 || n > cap) return 0;
+    NSUInteger k = 0;
+    for (id v in a) {
+        if (![v isKindOfClass:NSNumber.class]) return 0;
+        out[k++] = [(NSNumber *)v floatValue];
+    }
+    return (int)k;
+}
+
+/* 从任意对象里榨 float 数组。返回条数, 0 = 认不出来。 */
+static int diRhyFloatsFrom(id o, float *out, NSUInteger cap) {
+    if (!o) return 0;
+    if ([o isKindOfClass:NSData.class]) return diRhyFloatsFromData((NSData *)o, out, cap);
+    if ([o isKindOfClass:NSArray.class]) return diRhyFloatsFromArray((NSArray *)o, out, cap);
+
+    Class c = [o class];
+    while (c && c != NSObject.class) {
+        unsigned cnt = 0;
+        Ivar *ivs = class_copyIvarList(c, &cnt);
+        for (unsigned i = 0; i < cnt; i++) {
+            const char *te = ivar_getTypeEncoding(ivs[i]);
+            const char *nm = ivar_getName(ivs[i]);
+            if (!te || !nm) continue;
+            void *base = (char *)(__bridge void *)o + ivar_getOffset(ivs[i]);
+            if (te[0] == '[') {                       /* [20f] / [32d] */
+                const char *p = te + 1;
+                NSUInteger n = 0;
+                while (*p >= '0' && *p <= '9') { n = n * 10 + (NSUInteger)(*p - '0'); p++; }
+                if ((*p == 'f' || *p == 'd') && n >= 4 && n <= cap) {
+                    if (*p == 'f') memcpy(out, base, n * sizeof(float));
+                    else { const double *dp = (const double *)base; for (NSUInteger k = 0; k < n; k++) out[k] = (float)dp[k]; }
+                    free(ivs);
+                    return (int)n;
+                }
+            } else if (te[0] == '^' && (te[1] == 'f' || te[1] == 'd')) {   /* ^f + count */
+                void *ptr = *(void **)base;
+                NSUInteger n = diRhyGuessCount(o);
+                if (ptr && n >= 4 && n <= cap) {
+                    if (te[1] == 'f') memcpy(out, ptr, n * sizeof(float));
+                    else { const double *dp = (const double *)ptr; for (NSUInteger k = 0; k < n; k++) out[k] = (float)dp[k]; }
+                    free(ivs);
+                    return (int)n;
+                }
+            } else if (te[0] == '@') {                 /* 嵌套的 NSData / NSArray */
+                id sub = *(__unsafe_unretained id *)base;
+                if (sub && sub != o) {
+                    int n = 0;
+                    if ([sub isKindOfClass:NSData.class]) n = diRhyFloatsFromData((NSData *)sub, out, cap);
+                    else if ([sub isKindOfClass:NSArray.class]) n = diRhyFloatsFromArray((NSArray *)sub, out, cap);
+                    if (n >= 4) { free(ivs); return n; }
+                }
+            }
+        }
+        free(ivs);
+        c = class_getSuperclass(c);
+    }
+    return 0;
+}
+
+/* 只剩一个标量幅度时(amplitude/level/power)也能用 */
+static BOOL diRhyScalarFrom(id o, float *out) {
+    static const char *names[] = {"_amplitude", "_level", "_power", "_energy", "_rms", "_value"};
+    for (size_t k = 0; k < sizeof(names) / sizeof(names[0]); k++) {
+        Class c = [o class];
+        while (c && c != NSObject.class) {
+            Ivar iv = class_getInstanceVariable(c, names[k]);
+            if (iv) {
+                const char *te = ivar_getTypeEncoding(iv);
+                void *p = (char *)(__bridge void *)o + ivar_getOffset(iv);
+                if (te && te[0] == 'f') { *out = *(float *)p; return YES; }
+                if (te && te[0] == 'd') { *out = (float)*(double *)p; return YES; }
+            }
+            c = class_getSuperclass(c);
+        }
+    }
+    return NO;
+}
+
+static void diRhyDumpObj(id o) {
+    static int dumped;
+    if (dumped >= 2 || !o) return;
+    dumped++;
+    NSMutableString *b = [NSMutableString string];
+    NSString *desc = [o description] ?: @"";
+    if (desc.length > 260) desc = [desc substringToIndex:260];
+    [b appendFormat:@"[音律] 认不出的数据对象 class=%@ desc=%@", NSStringFromClass([o class]), desc];
+    Class c = [o class];
+    while (c && c != NSObject.class) {
+        unsigned cnt = 0;
+        Ivar *ivs = class_copyIvarList(c, &cnt);
+        for (unsigned i = 0; i < cnt; i++)
+            [b appendFormat:@" %s:%s", ivar_getName(ivs[i]), ivar_getTypeEncoding(ivs[i])];
+        free(ivs);
+        c = class_getSuperclass(c);
+    }
+    diMruFileLog(b);
+}
+
+static int diRhyFeedObject(id o) {
+    if (!o) return 0;
+    /* 极低地址不可能是对象 —— 万一某个 setter 传的是结构体, 这里直接放弃, 不去解引用 */
+    if ((uintptr_t)(__bridge void *)o < 0x10000) return 0;
+    int n = diRhyFloatsFrom(o, gRhyScratch, DI_RHY_SCRATCH);
+    if (n >= 8) {
+        if (n >= 48) diRhyFeedFFT(gRhyScratch, (NSUInteger)n, 0);
+        else diRhyFeedBands(gRhyScratch, (NSUInteger)n);
+        gRhySrc = [NSString stringWithFormat:@"%@/%d段", NSStringFromClass([o class]), n];
+        return 1;
+    }
+    if (n >= 2 && n < 8) {
+        float sum = 0;
+        for (int i = 0; i < n; i++) sum += gRhyScratch[i];
+        diRhyFeedAmp(sum / (float)n);
+        gRhySrc = [NSString stringWithFormat:@"%@/%d段均值", NSStringFromClass([o class]), n];
+        return 1;
+    }
+    float a = 0;
+    if (diRhyScalarFrom(o, &a)) {
+        diRhyFeedAmp(a);
+        gRhySrc = [NSString stringWithFormat:@"%@/标量", NSStringFromClass([o class])];
+        return 1;
+    }
+    diRhyDumpObj(o);
+    return 0;
+}
+
+/* ---- hook ---- 同一个 selector 只挂一次(避免互相覆盖原 IMP) */
+static NSMutableDictionary<NSString *, NSValue *> *gRhyOrig;
+static int gRhyHookCount;
+
+static IMP diRhyOrigIMP(SEL cmd) {
+    NSValue *v = gRhyOrig[NSStringFromSelector(cmd)];
+    return v ? (IMP)v.pointerValue : NULL;
+}
+
+static void diRhyHookObj(id self, SEL cmd, id a1) {
+    @try { diRhyFeedObject(a1); } @catch (__unused NSException *e) {}
+    IMP orig = diRhyOrigIMP(cmd);
+    if (orig) ((void (*)(id, SEL, id))orig)(self, cmd, a1);
+}
+
+static void diRhyHookObj2(id self, SEL cmd, id a1, id a2) {
+    @try { diRhyFeedObject(a2); } @catch (__unused NSException *e) {}
+    IMP orig = diRhyOrigIMP(cmd);
+    if (orig) ((void (*)(id, SEL, id, id))orig)(self, cmd, a1, a2);
+}
+
+static id diRhyHookFFTInit(id self, SEL cmd, const float *s, NSUInteger n, double rate) {
+    @try { diRhyFeedFFT(s, n, rate); } @catch (__unused NSException *e) {}
+    IMP orig = diRhyOrigIMP(cmd);
+    if (orig) return ((id (*)(id, SEL, const float *, NSUInteger, double))orig)(self, cmd, s, n, rate);
+    return self;
+}
+
 static void diRhythmInstall(void) {
-    static BOOL installed;
+    static BOOL done;
     static CFAbsoluteTime lastTry;
     CFAbsoluteTime now = CFAbsoluteTimeGetCurrent();
-    if (installed) return;
+    if (done) return;
     if (lastTry && now - lastTry < 3.0) return;
     lastTry = now;
 
-    NSArray<NSString *> *names = @[@"MRUWaveformController", @"MRUAudioAnalyzer",
-                                   @"MRUWaveformView", @"MRUEqualizerView",
-                                   @"MRUNowPlayingView", @"MRUFlippingArtworkView"];
-    NSMutableString *dump = [NSMutableString string];
-    int fftHit = 0, ampHit = 0;
-    for (NSString *cn in names) {
-        Class c = NSClassFromString(cn);
-        if (!c) { [dump appendFormat:@" %@=无", cn]; continue; }
-        /* 本类 + 父类(最多 3 层) —— 这些方法多半在父类里 */
-        Class cur = c;
-        for (int depth = 0; depth < 3 && cur; depth++, cur = class_getSuperclass(cur)) {
-            unsigned int cnt = 0;
-            Method *ms = class_copyMethodList(cur, &cnt);
-            for (unsigned int i = 0; i < cnt; i++) {
-                NSString *sn = NSStringFromSelector(method_getName(ms[i]));
-                if ([sn containsString:@"FFTSamples"] || [sn hasPrefix:@"initWithFFT"]) {
-                    if (!gRhyOrigFFT) {
-                        MSHookMessageEx(cur, method_getName(ms[i]), (IMP)diRhyFFTHook, &gRhyOrigFFT);
-                        fftHit++;
-                        [dump appendFormat:@" FFT:%@.%@", NSStringFromClass(cur), sn];
-                    }
-                } else if ([sn isEqualToString:@"setAmplitude:"]) {
-                    char t = diRhyThirdArgType(ms[i]);
-                    if (t == 'd' && !gRhyOrigAmpD) {
-                        MSHookMessageEx(cur, method_getName(ms[i]), (IMP)diRhyAmpDHook, &gRhyOrigAmpD);
-                        ampHit++;
-                        [dump appendFormat:@" AMPd:%@", NSStringFromClass(cur)];
-                    } else if (t == 'f' && !gRhyOrigAmpF) {
-                        MSHookMessageEx(cur, method_getName(ms[i]), (IMP)diRhyAmpFHook, &gRhyOrigAmpF);
-                        ampHit++;
-                        [dump appendFormat:@" AMPf:%@", NSStringFromClass(cur)];
-                    }
-                } else if ([sn.lowercaseString containsString:@"amplitude"]
-                           || [sn.lowercaseString containsString:@"spectrum"]
-                           || [sn.lowercaseString containsString:@"waveform"]
-                           || [sn.lowercaseString containsString:@"bandlevel"]) {
-                    if (dump.length < 900) [dump appendFormat:@" %@.%@", NSStringFromClass(cur), sn];
-                }
+    if (!gRhyOrig) gRhyOrig = [NSMutableDictionary dictionary];
+
+    int total = objc_getClassList(NULL, 0);
+    if (total <= 0) return;
+    Class *all = (Class *)malloc(sizeof(Class) * (size_t)total);
+    if (!all) return;
+    total = objc_getClassList(all, total);
+
+    NSMutableString *log = [NSMutableString string];
+    for (int i = 0; i < total; i++) {
+        const char *cn = class_getName(all[i]);
+        if (!cn) continue;
+        if (!strstr(cn, "MRU") && !strstr(cn, "Waveform") && !strstr(cn, "AudioAnalyzer")) continue;
+
+        unsigned cnt = 0;
+        Method *ms = class_copyMethodList(all[i], &cnt);
+        for (unsigned k = 0; k < cnt; k++) {
+            NSString *sn = NSStringFromSelector(method_getName(ms[k]));
+            NSString *low = sn.lowercaseString;
+            if (![low containsString:@"waveform"]) continue;
+            if (gRhyOrig[sn]) continue;
+
+            NSUInteger colons = 0;
+            for (NSUInteger q = 0; q < sn.length; q++)
+                if ([sn characterAtIndex:q] == ':') colons++;
+
+            IMP old = NULL;
+            if (colons == 1 && [sn hasPrefix:@"set"]) {
+                MSHookMessageEx(all[i], method_getName(ms[k]), (IMP)diRhyHookObj, &old);
+            } else if (colons == 2) {
+                MSHookMessageEx(all[i], method_getName(ms[k]), (IMP)diRhyHookObj2, &old);
+            } else if (colons == 3 && [low containsString:@"fft"]) {
+                MSHookMessageEx(all[i], method_getName(ms[k]), (IMP)diRhyHookFFTInit, &old);
+            } else {
+                continue;
             }
-            free(ms);
+            if (!old) continue;
+            gRhyOrig[sn] = [NSValue valueWithPointer:(const void *)old];
+            gRhyHookCount++;
+            if (log.length < 800) [log appendFormat:@" %@@%@", NSStringFromClass(all[i]), sn];
         }
+        free(ms);
     }
-    installed = (fftHit + ampHit) > 0;
-    diMruFileLog([NSString stringWithFormat:@"[音律] 安装 %@ FFT=%d AMP=%d 探针:%@",
-                  installed ? @"成功" : @"失败", fftHit, ampHit, dump]);
-    if (installed) {
-        diMruReport(@"rhy.install", [NSString stringWithFormat:@"fft%d_amp%d", fftHit, ampHit]);
-    }
+    free(all);
+
+    done = (gRhyHookCount > 0);
+    diMruFileLog([NSString stringWithFormat:@"[音律] 安装 %@ hook=%d%@",
+                  done ? @"成功" : @"失败", gRhyHookCount, log]);
 }
 
 /* ---- 渲染: 专辑封面上的一圈律动 ---- */
@@ -12718,10 +12972,10 @@ static void diRhythmInstall(void) {
     /* 外环: 低频让它"呼吸"(缩放), 整体能量给透明度 */
     CGFloat sc = 1.0 + 0.09 * bass;
     _ring.transform = CATransform3DMakeScale(sc, sc, 1.0);
-    _ring.opacity = (float)(0.16 + 0.84 * lv);
+    _ring.opacity = (float)(0.26 + 0.74 * lv);
     _ringInner.transform = CATransform3DMakeScale(1.0 + 0.16 * hi, 1.0 + 0.16 * hi, 1.0);
     _ringInner.opacity = (float)(0.10 + 0.55 * lv);
-    _glow.opacity = (float)(0.08 + 0.62 * lv);
+    _glow.opacity = (float)(0.14 + 0.62 * lv);
 
     /* 粒子: 固定 10 个对象池, 不新建/销毁 layer(岛内空间小, 池子够用) */
     CGFloat baseR = side * 0.34;
@@ -12783,6 +13037,12 @@ static UIColor *diRhyColorFromImage(UIImage *img) {
     /* 提一点亮度, 深色封面上环也要看得见 */
     CGFloat mx = MAX(br, MAX(bg, bb));
     if (mx > 0.01) { br = MIN(1, br / mx * 0.95 + 0.10); bg = MIN(1, bg / mx * 0.95 + 0.10); bb = MIN(1, bb / mx * 0.95 + 0.10); }
+    /* 2.9.2: 深色封面取出来的颜色贴在黑色岛上等于看不见 —— 亮度不够就往白色里掺 */
+    CGFloat lum = 0.299 * br + 0.587 * bg + 0.114 * bb;
+    if (lum < 0.42) {
+        CGFloat k = (0.42 - lum) / 0.42 * 0.62;
+        br = br + (1.0 - br) * k; bg = bg + (1.0 - bg) * k; bb = bb + (1.0 - bb) * k;
+    }
     UIColor *c = [UIColor colorWithRed:br green:bg blue:bb alpha:1.0];
     if (cache.count > 24) [cache removeAllObjects];
     cache[key] = c;
@@ -12876,6 +13136,16 @@ static void diRhythmTick(void) {
     CGFloat target = age < 1.2 ? (CGFloat)gRhy.energy : 0;
     CGFloat bass = age < 1.2 ? (CGFloat)gRhy.bass : 0;
     CGFloat high = age < 1.2 ? (CGFloat)gRhy.high : 0;
+    /* 2.9.2: 设置页「预览律动」—— 没有真实数据时打 3 秒合成脉冲。
+       只用来验证"层挂上了、位置对、能跟着动", 有真实数据时自动让位。 */
+    double demoAge = gRhyDemoT > 0 ? (now - gRhyDemoT) : 99;
+    if (demoAge >= 0 && demoAge < 3.0 && target <= 0.001) {
+        float beat = (float)(0.5 + 0.5 * sin(demoAge * 2.0 * 6.2831853));
+        float bright = (float)(0.5 + 0.5 * sin(demoAge * 7.0 * 6.2831853));
+        target = 0.30 + 0.60 * beat;
+        bass = 0.10 + 0.90 * beat;
+        high = 0.20 + 0.55 * bright;
+    }
 
     /* 平滑: 设置里的"响应速度"越大跟得越紧; 上升快、下降慢(鼓点不抖) */
     CGFloat k = 0.08 + 0.55 * (gRhySmooth / 100.0);
@@ -12912,8 +13182,8 @@ static void diRhythmTick(void) {
     if (gRhyOn && now - lastLog > 5.0) {
         lastLog = now;
         diMruFileLog([NSString stringWithFormat:
-            @"[音律] 帧=%d 低=%.2f 中=%.2f 高=%.2f 年龄=%.1fs 视图=%lu",
-            gRhy.frames, gRhy.bass, gRhy.mid, gRhy.high, (double)age,
+            @"[音律] 帧=%d 源=%@ 低=%.2f 中=%.2f 高=%.2f 年龄=%.1fs 视图=%lu",
+            gRhy.frames, gRhySrc, gRhy.bass, gRhy.mid, gRhy.high, (double)age,
             (unsigned long)seen.count]);
     }
 }
@@ -12974,7 +13244,7 @@ static void diActivityHideSystem(UIView *artwork, DIActivityMaskState *state) {
     }
     for (UIView *sub in artwork.subviews) {
         if (sub == state.glass) continue;
-        if (sub.tag == 0xD1A7) continue;   /* 2.9.1: 音律律动层, 不是系统图层 */
+        if (sub.tag == 0xD1A7) continue;   /* 2.9.2: 音律律动层, 不是系统图层 */
         if ([state.hiddenViews containsObject:sub]) continue;
         [state.hiddenViews addObject:sub];
         [state.hiddenStates addObject:@(sub.hidden)];
@@ -13017,7 +13287,7 @@ static void diMruWriteExpandState(BOOL expanded, CGSize box) {
    这是小岛 2.8.13 起一直在用、已验证有效的那套观感, 这里在 MediaRemoteUI 内复刻。 */
 static void diActivityApply(UIView *artwork) {
     if (!NSThread.isMainThread || ![artwork isKindOfClass:UIView.class]) return;
-    /* 2.9.1: 音律律动 —— 与遮罩完全独立, 开关只看 rhyOn/rhyTest */
+    /* 2.9.2: 音律律动 —— 与遮罩完全独立, 开关只看 rhyOn/rhyTest */
     @try { diRhythmApply(artwork); } @catch (__unused NSException *e) {}
     DIActivityMaskState *state = objc_getAssociatedObject(artwork, &kDIActivityMaskState);
     BOOL sized = artwork.bounds.size.width > 20 && artwork.bounds.size.height > 20;
@@ -13149,7 +13419,7 @@ static void diActivityApply(UIView *artwork) {
     }
     diMruReport(@"apply", [NSString stringWithFormat:@"%@ 旋转=%@", NSStringFromCGRect(box),
         rotOn ? [NSString stringWithFormat:@"%.0f°/s", speed] : @"关"]);
-    /* 2.9.1: 遮罩玻璃刚被提到最前, 律动层再提一次 —— 环应该浮在封面之上 */
+    /* 2.9.2: 遮罩玻璃刚被提到最前, 律动层再提一次 —— 环应该浮在封面之上 */
     @try { diRhythmApply(artwork); } @catch (__unused NSException *e) {}
 }
 
