@@ -18,7 +18,7 @@
 
 static NSString *const kDomain = @"com.abgg332.driftisland";
 /* 2.6.25: 设置页底部显示的版本号 */
-static NSString *const DI_VERSION_STR = @"2.9.7";
+static NSString *const DI_VERSION_STR = @"2.9.8";
 /* 2.6.10: 专辑光晕遮罩 —— 与 Tweak 侧 DIAlbumMask.h 保持一致 */
 static NSString *const kDIAlbumMaskKey = @"diAlbumMaskAsset";
 static NSString *const kDIMaskRoot = @"/var/mobile/灵动岛/遮罩素材";
@@ -5258,7 +5258,7 @@ static double diGetNum(NSString *key, double def) {
 
     [specs addObject:[self groupSpec:@"专辑律动"
         footer:@"取的是系统自己算好的频谱(MediaRemoteUI 内), 不抓录音、不额外解码。\n"
-               @"作用位置: 小岛封面、岛展开封面、锁屏播放器卡片封面。点开专辑后的全屏大封面不生效。\n"
+               @"作用位置: 小岛(沿岛的形状轮廓)、锁屏播放器卡片。粒子会飘到卡片各处, 不受边框限制。\n"
                @"每记鼓点(低频上冲)封面会放大→回弹→缩一点→归位, 同时外圈粒子被震散一下。"]];
 
     [specs addObject:[self switchSpec:@"启用律动" key:@"rhyOn" def:@NO]];
