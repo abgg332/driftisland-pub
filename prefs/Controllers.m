@@ -18,7 +18,7 @@
 
 static NSString *const kDomain = @"com.abgg332.driftisland";
 /* 2.6.25: 设置页底部显示的版本号 */
-static NSString *const DI_VERSION_STR = @"2.9.3";
+static NSString *const DI_VERSION_STR = @"2.9.4";
 /* 2.6.10: 专辑光晕遮罩 —— 与 Tweak 侧 DIAlbumMask.h 保持一致 */
 static NSString *const kDIAlbumMaskKey = @"diAlbumMaskAsset";
 static NSString *const kDIMaskRoot = @"/var/mobile/灵动岛/遮罩素材";
@@ -5228,12 +5228,12 @@ static void diOpenHomeBarPickWindow(void) {
                @"沿圆周渐变色), 封面外面再飘一层空心星/三角/方/圆的几何粒子。\n"
                @"用处效果: 这一版先用来看数据通不通 —— 环在动 = 链路通了; 不动就看下面那行"
                @"「实时能量」, 它末尾会写数据源(哪个类的几段数组)。没有音乐时可以先点"
-               @"「预览律动」, 打 3 秒合成脉冲验证渲染; 有真实数据时自动换成真实数据。"]];
+               @"「预览律动」, 打 4 秒合成鼓点验证渲染; 有真实数据时自动换成真实数据。"]];
 
     [specs addObject:[self switchSpec:@"启用音律" key:@"rhyOn" def:@NO]];
     [specs addObject:[self switchSpec:@"测试模式" key:@"rhyTest" def:@YES]];
     /* 2.9.3: 没有音乐也能先确认"层挂上了、位置对、会动" */
-    [specs addObject:[self buttonSpec:@"预览律动 (3 秒)" action:@selector(previewRhy:)]];
+    [specs addObject:[self buttonSpec:@"预览律动 (4 秒)" action:@selector(previewRhy:)]];
 
     /* 实时能量: 做成按钮行, 每 0.5s 直接把名字改成最新数值 —— 一直停在页面上
        就能连续看到"低/中/高"在跳, 点一下还能看原始数据。 */
