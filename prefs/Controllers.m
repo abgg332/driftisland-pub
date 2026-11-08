@@ -18,7 +18,7 @@
 
 static NSString *const kDomain = @"com.abgg332.driftisland";
 /* 2.6.25: 设置页底部显示的版本号 */
-static NSString *const DI_VERSION_STR = @"2.8.101";
+static NSString *const DI_VERSION_STR = @"2.9";
 /* 2.6.10: 专辑光晕遮罩 —— 与 Tweak 侧 DIAlbumMask.h 保持一致 */
 static NSString *const kDIAlbumMaskKey = @"diAlbumMaskAsset";
 static NSString *const kDIMaskRoot = @"/var/mobile/灵动岛/遮罩素材";
@@ -62,8 +62,6 @@ static NSString *const kNotifyStr = @"com.abgg332.driftisland.reload";
 static NSString *const kMaterialDir = @"/var/mobile/灵动岛";
 static NSString *const kFrameDir = @"/var/mobile/灵动岛/帧率素材";
 static NSString *const kMaskDir = @"/var/mobile/灵动岛/遮罩素材"; // 2.6.4: 遮罩素材(图片)
-
-static NSString *const kRecDir = @"/var/mobile/灵动岛"; /* 2.7.32: 录屏素材不再单独目录, 直接用主目录 */
 
 /* 现场日志: 不受日志开关控制, 设置页崩溃时也要留痕(与 Tweak.mm 的 DI_STEP 同一格式) */
 static void diStep(NSString *fmt, ...) NS_FORMAT_FUNCTION(1,2);
@@ -756,11 +754,7 @@ static Class diStepSliderClass(void) {
 @interface DICCSettings : DIMiniBaseController @end
 /* 2.8.87: 展开定义 —— 遮罩素材下面的二级页(位置/大小/颜色) */
 @interface DIExpandDefinePage : DIMiniBaseController @end
-/* 2.8.95: 录屏岛页 —— 录屏指示岛左右两格各贴一层帧率序列 */
-@interface DIRecIslandPage : DIMiniBaseController @end
 @interface DIFrameFoldersMask : DIFrameFolders @end /* 2.6.3: 遮罩素材选择(键 maskAnimFolder) */
-@interface DIFrameFoldersRecL : DIFrameFolders @end /* 2.8.95: 录屏岛左侧帧率素材 */
-@interface DIFrameFoldersRecR : DIFrameFolders @end /* 2.8.95: 录屏岛右侧帧率素材 */
 @interface DIFrameFoldersMini : DIFrameFolders @end  /* 左侧(mini)帧率素材选择(键 smallAnimFolder) */
 @interface DIFrameFoldersAudio : DIFrameFolders @end /* 右侧音频素材(键 miniAudioFolder) */
 @interface DIPrefsController (ZoneLinkFwd)
@@ -1164,9 +1158,8 @@ static void diPrefsReloadCB(CFNotificationCenterRef center, void *observer, CFSt
 
 /* 素材选择行右侧显示的当前素材名 */
 - (NSString *)nameForMode:(NSInteger)mode {
-    /* 2.2.54: 录屏素材(mode=2)走独立目录 kRecDir, 其余走通用素材目录 */
-    NSArray *files = (mode == 2) ? videoFilesIn(kRecDir) : videoFiles();
-    NSString *key = (mode == 0) ? @"smallIndex" : (mode == 1 ? @"expandIndex" : @"recIndex");
+    NSArray *files = videoFiles();
+    NSString *key = (mode == 0) ? @"smallIndex" : @"expandIndex";
     NSInteger idx = indexForKey(key);
     if (idx < 0 || idx >= (NSInteger)files.count) return @"无素材";
     return files[idx];
@@ -1419,13 +1412,6 @@ static void diWriteColors(NSArray<NSString *> *colors) {
         /* 2.8.89: 主页「帧率」组整体移除 —— 已并入「附加功能 → 展开定义」页的顶部,
            两处一模一样的东西没必要重复显示。参数键一个字没改, 老设置照旧生效。 */
 
-        /* ---- 录屏素材 ---- */
-        DI_ADD([self groupSpec:@"录屏素材" footer:nil]);
-        PSSpecifier *recMat = [self buttonSpec:@"素材选择" action:@selector(openRecGrid:)];
-        DI_ADD([self switchSpec:@"录屏显示素材" key:@"recOn" def:@NO]);
-        DI_ADD(recMat);
-        DI_ADD([self stepSlider:@"素材大小" key:@"recScale" def:100 mn:50 mx:200]);
-
         /* ---- 2.6.29: 附加功能 —— 文字颜色 / 锁屏通知 / 专辑遮罩 统一进页 ---- */
         DI_ADD([self groupSpec:@"附加功能" footer:nil]);
         DI_ADD([self linkSpec:@"文字颜色" detail:[DITextStylePage class]]);
@@ -1435,8 +1421,6 @@ static void diWriteColors(NSArray<NSString *> *colors) {
         /* 2.8.88: 展开定义 —— 按用户要求做成独立入口, 就放在「专辑遮罩」下面;
            页内上面是帧率, 下面是展开岛的歌词/歌名位置与大小 */
         DI_ADD([self linkSpec:@"歌词位置" detail:[DIExpandDefinePage class]]);
-        /* 2.8.95: 录屏岛入口 —— 左右两格各自的帧率图层 + 隐藏原生图层 */
-        DI_ADD([self linkSpec:@"录屏岛" detail:[DIRecIslandPage class]]);
         /* 2.8.41: 控制中心入口回归 */
         DI_ADD([self linkSpec:@"控制中心" detail:[DICCSettings class]]);
 
@@ -1669,7 +1653,7 @@ static void diWriteColors(NSArray<NSString *> *colors) {
     /* 2.2.52: 动态定位组 section —— 之前硬编码 indexPath.section == 2/3/4,
        一旦插入/移动"录屏素材"组, 帧率/素材名的 section 全部错位(2.2.51 的教训)。
        现在按组名(PSGroupCell 的 name)实时算 section, 组顺序怎么调都不失效。 */
-    NSInteger secSmall = -1, secExpand = -1, secFrame = -1, secRec = -1;
+    NSInteger secSmall = -1, secExpand = -1, secFrame = -1;
     {
         NSInteger sec = -1;
         for (PSSpecifier *gs in self.specifiers) {
@@ -1678,7 +1662,6 @@ static void diWriteColors(NSArray<NSString *> *colors) {
             NSString *gnm = gs.name ?: @"";
             if ([gnm isEqualToString:@"小岛素材"]) secSmall = sec;
             else if ([gnm isEqualToString:@"展开素材"]) secExpand = sec;
-            else if ([gnm isEqualToString:@"录屏素材"]) secRec = sec;
             else if ([gnm isEqualToString:@"帧率"]) secFrame = sec;
         }
     }
@@ -1742,7 +1725,6 @@ static void diWriteColors(NSArray<NSString *> *colors) {
     NSString *name = nil;
     if (indexPath.section == secSmall && secSmall >= 0 && indexPath.row == 1) name = [self nameForMode:0];
     if (indexPath.section == secExpand && secExpand >= 0 && indexPath.row == 1) name = [self nameForMode:1];
-    if (indexPath.section == secRec && secRec >= 0 && indexPath.row == 1) name = [self nameForMode:2];
     if (indexPath.section == secFrame && secFrame >= 0 && indexPath.row == 6) name = [self frameStatusName];
     if (name) {
         if ([cell respondsToSelector:@selector(setValue:)])
@@ -2019,7 +2001,7 @@ static NSCache *diThumbCache(void) {
 @end
 
 @interface DIPreviewGrid : UICollectionViewController
-@property (nonatomic, assign) NSInteger matMode; /* 0=小岛 1=展开 2=录屏(2.2.50) 3=壁纸更换(2.7.32 起只有一套) */
+@property (nonatomic, assign) NSInteger matMode; /* 0=小岛 1=展开 3=壁纸更换(2.7.32 起只有一套) */
 + (void)diRefreshHostingList;   /* 2.2.58: 选完素材后让主页那一行立刻刷新 */
 /* 2.7.1: 分类 Import 里要用到这些, 先声明一次 */
 - (BOOL)isWallpaperMode;
@@ -2029,17 +2011,16 @@ static NSCache *diThumbCache(void) {
 @end
 
 @implementation DIPreviewGrid
-/* 2.2.50: 素材目录与偏好键按模式取 —— 小岛/展开共用主目录, 录屏独立目录 */
+/* 素材目录与偏好键按模式取 —— 小岛/展开共用主目录 */
 - (BOOL)isWallpaperMode { return (self.matMode == 3); }   /* 2.7.32: 深色(mode 4)已删除 */
 - (NSString *)dirForMode {
     if (self.isWallpaperMode) return kDIWallpaperRoot;
-    return (self.matMode == 2) ? kRecDir : kMaterialDir;
+    return kMaterialDir;
 }
 - (NSString *)keyForMode {
     if (self.matMode == 0) return @"smallIndex";
-    if (self.matMode == 1) return @"expandIndex";
     if (self.matMode == 3) return @"wpLightAsset";   /* 2.7.1: 壁纸存的是相对路径字符串, 不是序号 */
-    return @"recIndex";
+    return @"expandIndex";
 }
 - (NSArray<NSString *> *)filesForMode {
     if (self.isWallpaperMode) return diWallpaperFiles();
@@ -2060,8 +2041,7 @@ static NSCache *diThumbCache(void) {
     diInstallStepSliderOnPSSliderCell();
     /* 2.7.32: 深浅两套合并, mode 4(深色背景)整体删除 */
     self.title = (self.matMode == 0) ? @"小岛素材"
-               : (self.matMode == 2 ? @"录屏素材"
-               : (self.matMode == 3 ? @"壁纸更换" : @"展开素材"));
+               : (self.matMode == 3 ? @"壁纸更换" : @"展开素材");
     self.collectionView.backgroundColor = DI_PAGE_BG;
     [self.collectionView registerClass:[DIPreviewCell class] forCellWithReuseIdentifier:@"cell"];
     self.navigationItem.rightBarButtonItem = [[UIBarButtonItem alloc] initWithTitle:@"相册导入" style:UIBarButtonItemStylePlain target:self action:NSSelectorFromString(@"diImportFromAlbumWP")]; // 右上角相册导入(支持图片, 实现在分类里)
@@ -2258,7 +2238,7 @@ static NSCache *diThumbCache(void) {
         NSMutableArray *specs = [NSMutableArray array];
         NSInteger cnt = (NSInteger)videoFiles().count;
         (void)cnt;
-        NSString *title = (self.matMode == 0) ? @"小岛素材" : (self.matMode == 2 ? @"录屏素材" : @"展开素材");
+        NSString *title = (self.matMode == 0) ? @"小岛素材" : @"展开素材";
         [specs addObject:[self groupSpec:title footer:@"进入本页会自动弹出预览网格; 点选封面即生效。素材目录: /var/mobile/灵动岛"]];
         PSSpecifier *btn = [PSSpecifier preferenceSpecifierNamed:@"重新打开预览" target:self
             set:NULL get:NULL detail:nil cell:PSButtonCell edit:nil];
@@ -2565,12 +2545,6 @@ static NSCache *diThumbCache(void) {
 }
 - (void)openSmallGrid:(PSSpecifier *)s { [self presentGridMode:0]; }
 - (void)openExpandGrid:(PSSpecifier *)s { [self presentGridMode:1]; }
-/* 2.2.50: 录屏素材(matMode=2, 目录 /var/mobile/灵动岛/录屏素材) */
-- (void)openRecGrid:(PSSpecifier *)s {
-    [[NSFileManager defaultManager] createDirectoryAtPath:kRecDir withIntermediateDirectories:YES attributes:nil error:NULL];
-    [self presentGridMode:2];
-}
-
 /* 相册素材导入: PHPicker(系统相册选择器, 无需相册权限)选视频, 拷入素材目录 */
 - (void)importFromAlbum {
     Class phpPicker = NSClassFromString(@"PHPickerViewController");
@@ -5090,12 +5064,6 @@ static void diOpenHomeBarPickWindow(void) {
 @implementation DIFrameFoldersAudio
 - (NSString *)prefKey { return @"miniAudioFolder"; }
 @end
-@implementation DIFrameFoldersRecL
-- (NSString *)prefKey { return @"recLeftAnimFolder"; }
-@end
-@implementation DIFrameFoldersRecR
-- (NSString *)prefKey { return @"recRightAnimFolder"; }
-@end
 @implementation DIFrameFoldersMask
 - (NSString *)prefKey { return @"maskAnimFolder"; }
 - (NSString *)rootDir { return kMaskDir; }  /* 2.6.4: 遮罩素材独立目录 */
@@ -5193,55 +5161,6 @@ static void diOpenHomeBarPickWindow(void) {
     [specs addObject:[self numSlider:@"文字大小" key:@"expandTextScale" def:100 mn:50 mx:200]];
     /* 2.8.93: 隐藏投送 —— 右下角那颗 AirPlay/输出按钮 */
     [specs addObject:[self switchSpec:@"隐藏投送" key:@"hideRouteOn" def:@NO]];
-    return specs;
-}
-@end
-
-/* ===== 2.8.95: 录屏岛 =====
-   录屏时系统会出现一颗 ~39×39 的方形指示岛, 里面两格: 左=录屏圆点, 右=倒计时 321。
-   这里给两格各配一层帧率序列(与「专辑遮罩」页左右帧率同一套素材目录), 并各配一个
-   "隐藏原生图层"开关 —— 打开后原生圆点/倒计时让位, 只留自己的素材。 */
-@implementation DIRecIslandPage
-
-- (id)readRecLeftName:(PSSpecifier *)sp {
-    NSString *v = readPrefString(@"recLeftAnimFolder");
-    return v.length ? v : @"默认(全部帧)";
-}
-- (id)readRecRightName:(PSSpecifier *)sp {
-    NSString *v = readPrefString(@"recRightAnimFolder");
-    return v.length ? v : @"默认(全部帧)";
-}
-
-- (NSArray *)buildSpecifiers {
-    NSMutableArray *specs = [NSMutableArray array];
-
-    /* ---- 左侧: 录屏圆点那一格 ---- */
-    [specs addObject:[self groupSpec:@"左侧图层(录屏圆点)"
-        footer:@"显示逻辑: 只在系统录屏时那颗岛上出现(靠左有一颗小红点才算), 通知、充电、人脸、录屏停止提示等其他岛一律不显示。\n"
-               @"显示图层: 序列帧贴在录屏岛左格(原生录屏圆点那一格)上, 打开就把原生圆点盖住。\n"
-               @"用处效果: 打开「启用帧率」= 盖住原生 + 显示你的素材, 不用再单独开隐藏开关; 全关即完全原生。"]];
-    [specs addObject:[self switchSpec:@"启用帧率" key:@"recLeftOn" def:@NO]];
-    [specs addObject:[self numSlider:@"帧率速度" key:@"recLeftFPS" def:50 mn:10 mx:200]];
-    [specs addObject:[self numSlider:@"素材大小" key:@"recLeftScale" def:0 mn:-20 mx:20]];
-    [specs addObject:[self numSlider:@"左右偏移" key:@"recLeftOffsetX" def:0 mn:-20 mx:20]];
-    [specs addObject:[self numSlider:@"上下偏移" key:@"recLeftOffsetY" def:0 mn:-20 mx:20]];
-    PSSpecifier *nameL = [PSSpecifier preferenceSpecifierNamed:@"素材名称" target:self
-        set:NULL get:@selector(readRecLeftName:) detail:[DIFrameFoldersRecL class] cell:PSLinkCell edit:nil];
-    [specs addObject:nameL];
-
-    /* ---- 右侧: 倒计时那一格 ---- */
-    [specs addObject:[self groupSpec:@"右侧图层(倒计时 321)"
-        footer:@"显示逻辑: 只在系统录屏时那颗岛上出现, 与左边同一颗岛的右格; 其他岛不显示。\n"
-               @"显示图层: 序列帧贴在录屏岛右格(原生 321 倒计时那一格)上, 打开就把原生倒计时盖住。\n"
-               @"用处效果: 打开「启用帧率」= 盖住原生 + 显示你的素材, 不用再单独开隐藏开关; 全关即完全原生。"]];
-    [specs addObject:[self switchSpec:@"启用帧率" key:@"recRightOn" def:@NO]];
-    [specs addObject:[self numSlider:@"帧率速度" key:@"recRightFPS" def:50 mn:10 mx:200]];
-    [specs addObject:[self numSlider:@"素材大小" key:@"recRightScale" def:0 mn:-20 mx:20]];
-    [specs addObject:[self numSlider:@"左右偏移" key:@"recRightOffsetX" def:0 mn:-20 mx:20]];
-    [specs addObject:[self numSlider:@"上下偏移" key:@"recRightOffsetY" def:0 mn:-20 mx:20]];
-    PSSpecifier *nameR = [PSSpecifier preferenceSpecifierNamed:@"素材名称" target:self
-        set:NULL get:@selector(readRecRightName:) detail:[DIFrameFoldersRecR class] cell:PSLinkCell edit:nil];
-    [specs addObject:nameR];
     return specs;
 }
 @end
