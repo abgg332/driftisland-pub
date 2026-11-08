@@ -18,7 +18,7 @@
 
 static NSString *const kDomain = @"com.abgg332.driftisland";
 /* 2.6.25: 设置页底部显示的版本号 */
-static NSString *const DI_VERSION_STR = @"2.9.4";
+static NSString *const DI_VERSION_STR = @"2.9.5";
 /* 2.6.10: 专辑光晕遮罩 —— 与 Tweak 侧 DIAlbumMask.h 保持一致 */
 static NSString *const kDIAlbumMaskKey = @"diAlbumMaskAsset";
 static NSString *const kDIMaskRoot = @"/var/mobile/灵动岛/遮罩素材";
@@ -754,11 +754,8 @@ static Class diStepSliderClass(void) {
 @interface DICCSettings : DIMiniBaseController @end
 /* 2.8.87: 展开定义 —— 遮罩素材下面的二级页(位置/大小/颜色) */
 @interface DIExpandDefinePage : DIMiniBaseController @end
-/* 2.9.3: 音律律动(独立测试入口) */
+/* 2.9.5: 专辑律动(粒子 + 鼓点震动) */
 @interface DIRhythmPage : DIMiniBaseController
-@property (nonatomic, strong) PSSpecifier *liveSpec;
-@property (nonatomic, strong) NSTimer *liveTimer;
-- (NSString *)liveText;
 @end
 @interface DIFrameFoldersMask : DIFrameFolders @end /* 2.6.3: 遮罩素材选择(键 maskAnimFolder) */
 @interface DIFrameFoldersMini : DIFrameFolders @end  /* 左侧(mini)帧率素材选择(键 smallAnimFolder) */
@@ -1427,8 +1424,8 @@ static void diWriteColors(NSArray<NSString *> *colors) {
         /* 2.8.88: 展开定义 —— 按用户要求做成独立入口, 就放在「专辑遮罩」下面;
            页内上面是帧率, 下面是展开岛的歌词/歌名位置与大小 */
         DI_ADD([self linkSpec:@"歌词位置" detail:[DIExpandDefinePage class]]);
-        /* 2.9.3: 音律律动 —— 先给一个独立测试入口, 不混进专辑遮罩 */
-        DI_ADD([self linkSpec:@"音律律动" detail:[DIRhythmPage class]]);
+        /* 2.9.5: 专辑律动 —— 封面粒子 + 鼓点震动 */
+        DI_ADD([self linkSpec:@"专辑律动" detail:[DIRhythmPage class]]);
         /* 2.8.41: 控制中心入口回归 */
         DI_ADD([self linkSpec:@"控制中心" detail:[DICCSettings class]]);
 
@@ -5173,105 +5170,84 @@ static void diOpenHomeBarPickWindow(void) {
 }
 @end
 
-/* ===== 2.9.3: 音律律动 =====
+/* ===== 2.9.5: 专辑律动 =====
    数据链: MediaRemoteUI 内的系统 FFT(见 Tweak.mm diRhythmInstall)
            → <MRU 容器>/spectrum.plist
            → SpringBoard 心跳转写 /var/mobile/灵动岛/rhythm.plist(设置页能读)
-   这一页先当"测试台": 打开「启用音律」+「测试模式」, 两个专辑上会各挂一圈律动,
-   下面那行实时能量能直接看出数据有没有在出。链路确认正常后再做整合。 */
+   效果: 小岛 / 岛展开 / 锁屏卡片的封面外圈飘几何粒子, 封面本身跟着鼓点轻微缩放。
+   点开专辑后的全屏大封面不挂(会拖死锁屏)。 */
 @implementation DIRhythmPage
 
-- (NSString *)liveText {
-    NSDictionary *d = [NSDictionary dictionaryWithContentsOfFile:
-                       @"/var/mobile/灵动岛/rhythm.plist"];
-    if (![d isKindOfClass:NSDictionary.class]) return @"无数据(先放首歌)";
-    double t = [d[@"t"] doubleValue];
-    double age = t > 0 ? CFAbsoluteTimeGetCurrent() - t : 99;
-    if (age > 6.0) return [NSString stringWithFormat:@"停在 %.0f 秒前(没在播?)", age];
-    double bass = [d[@"bass"] doubleValue] * 100;
-    double mid = [d[@"mid"] doubleValue] * 100;
-    double high = [d[@"high"] doubleValue] * 100;
-    double e = [d[@"e"] doubleValue] * 100;
-    long frames = [d[@"n"] longValue];
-    NSString *src = d[@"src"] ?: @"?";
-    return [NSString stringWithFormat:@"低%.0f 中%.0f 高%.0f · 总%.0f%% · %.1fs前 · %ld帧 · %@",
-            bass, mid, high, e, age, frames, src];
+/* 预设色: 名称 + RGB(0~255) */
+static NSArray *diRhyPresets(void) {
+    return @[@[@"白", @255, @255, @255],
+             @[@"青", @90, @235, @255],
+             @[@"粉", @255, @120, @200],
+             @[@"金", @255, @205, @90],
+             @[@"紫", @175, @130, @255],
+             @[@"绿", @120, @255, @170],
+             @[@"橙", @255, @150, @70],
+             @[@"蓝", @110, @160, @255]];
 }
 
-/* 2.9.3: 预览 —— 往偏好里写一个时间戳, SpringBoard 导出到 params.plist,
-   MediaRemoteUI 读到后打 3 秒合成脉冲(不需要有音乐在播) */
-- (void)previewRhy:(PSSpecifier *)sp {
-    double t = CFAbsoluteTimeGetCurrent();
-    CFPreferencesSetAppValue(CFSTR("rhyDemo"), (__bridge CFPropertyListRef)@(t),
+static void diSetNum(NSString *key, double v) {
+    CFPreferencesSetAppValue((__bridge CFStringRef)key, (__bridge CFPropertyListRef)@(v),
                              (__bridge CFStringRef)kDomain);
+}
+
+static double diGetNum(NSString *key, double def) {
+    CFPreferencesAppSynchronize((__bridge CFStringRef)kDomain);
+    id v = CFBridgingRelease(CFPreferencesCopyAppValue((__bridge CFStringRef)key,
+                                                       (__bridge CFStringRef)kDomain));
+    return [v respondsToSelector:@selector(doubleValue)] ? [v doubleValue] : def;
+}
+
+- (void)pickPreset:(PSSpecifier *)sp {
+    NSArray *rgb = [sp propertyForKey:@"diRGB"];
+    if (rgb.count != 3) return;
+    diSetNum(@"rhyR", [rgb[0] doubleValue]);
+    diSetNum(@"rhyG", [rgb[1] doubleValue]);
+    diSetNum(@"rhyB", [rgb[2] doubleValue]);
+    diSetNum(@"rhyTint", 0);          /* 点了色块就是"不跟封面" */
     CFPreferencesAppSynchronize((__bridge CFStringRef)kDomain);
     postReload();
+    [self reloadSpecifiers];
 }
 
-- (void)showRhyLive:(PSSpecifier *)sp {
-    NSDictionary *d = [NSDictionary dictionaryWithContentsOfFile:@"/var/mobile/灵动岛/rhythm.plist"];
-    NSString *detail = d ? [d description] : @"还没有 rhythm.plist —— 先打开上面的开关并放首歌";
-    UIAlertController *ac = [UIAlertController alertControllerWithTitle:@"音律 · 实时数据"
-        message:[NSString stringWithFormat:@"%@\n\n%@", [self liveText], detail]
-        preferredStyle:UIAlertControllerStyleAlert];
-    [ac addAction:[UIAlertAction actionWithTitle:@"好" style:UIAlertActionStyleDefault handler:nil]];
-    [self presentViewController:ac animated:YES completion:nil];
+- (NSString *)colorHexText {
+    int r = (int)lrint(diGetNum(@"rhyR", 255));
+    int g = (int)lrint(diGetNum(@"rhyG", 255));
+    int b = (int)lrint(diGetNum(@"rhyB", 255));
+    BOOL follow = diGetNum(@"rhyTint", 1) > 0.5;
+    if (follow) return @"当前: 跟随封面取色";
+    return [NSString stringWithFormat:@"当前: #%02X%02X%02X  (R%d G%d B%d)", r, g, b, r, g, b];
 }
 
 - (NSArray *)buildSpecifiers {
     NSMutableArray *specs = [NSMutableArray array];
 
-    [specs addObject:[self groupSpec:@"音律律动"
-        footer:@"显示逻辑: 只在有音乐在播时出数。取的是系统自己算好的频谱(MediaRemoteUI 内), "
-               @"不抓录音、不额外解码, 所以几乎不耗电。\n"
-               @"显示图层: 从封面背后向外放射一圈细密辐条(每根长度跟着对应频段起伏, 沿圆周渐变色), "
-               @"每一记鼓点会从封面边缘再涌出一圈波纹、整圈随之震一下; 封面外面同时向外飘散空心星/三角/方/圆的几何粒子。\n"
-               @"用处效果: 这一版先用来看数据通不通 —— 环在动 = 链路通了; 不动就看下面那行"
-               @"「实时能量」, 它末尾会写数据源(哪个类的几段数组)。没有音乐时可以先点"
-               @"「预览律动」, 打 4 秒合成鼓点验证渲染; 有真实数据时自动换成真实数据。"]];
+    [specs addObject:[self groupSpec:@"专辑律动"
+        footer:@"取的是系统自己算好的频谱(MediaRemoteUI 内), 不抓录音、不额外解码。\n"
+               @"作用位置: 小岛封面、岛展开封面、锁屏播放器卡片封面。点开专辑后的全屏大封面不生效(会卡)。\n"
+               @"每记鼓点(低频上冲)封面会轻微放大回弹一次, 同时外圈粒子被震散一下。"]];
 
-    [specs addObject:[self switchSpec:@"启用音律" key:@"rhyOn" def:@NO]];
-    [specs addObject:[self switchSpec:@"测试模式" key:@"rhyTest" def:@YES]];
-    /* 2.9.3: 没有音乐也能先确认"层挂上了、位置对、会动" */
-    [specs addObject:[self buttonSpec:@"预览律动 (4 秒)" action:@selector(previewRhy:)]];
-
-    /* 实时能量: 做成按钮行, 每 0.5s 直接把名字改成最新数值 —— 一直停在页面上
-       就能连续看到"低/中/高"在跳, 点一下还能看原始数据。 */
-    PSSpecifier *live = [self buttonSpec:@"实时能量  (点一下看详情)" action:@selector(showRhyLive:)];
-    self.liveSpec = live;
-    [specs addObject:live];
-
-    [specs addObject:[self groupSpec:@"手感" footer:nil]];
-    [specs addObject:[self numSlider:@"灵敏度" key:@"rhyGain" def:100 mn:20 mx:400]];
-    [specs addObject:[self numSlider:@"响应速度" key:@"rhySmooth" def:60 mn:0 mx:100]];
-    [specs addObject:[self switchSpec:@"跟随封面颜色" key:@"rhyTint" def:@YES]];
+    [specs addObject:[self switchSpec:@"启用律动" key:@"rhyOn" def:@NO]];
     [specs addObject:[self switchSpec:@"粒子" key:@"rhyDots" def:@YES]];
+    [specs addObject:[self numSlider:@"粒子数量" key:@"rhyCount" def:10 mn:4 mx:20]];
+    [specs addObject:[self numSlider:@"鼓点强度" key:@"rhyKick" def:100 mn:20 mx:300]];
+
+    [specs addObject:[self groupSpec:@"颜色" footer:[self colorHexText]]];
+    [specs addObject:[self switchSpec:@"跟随封面颜色" key:@"rhyTint" def:@YES]];
+    for (NSArray *p in diRhyPresets()) {
+        PSSpecifier *sp = [self buttonSpec:p[0] action:@selector(pickPreset:)];
+        [sp setProperty:@[p[1], p[2], p[3]] forKey:@"diRGB"];
+        [specs addObject:sp];
+    }
+    [specs addObject:[self numSlider:@"自定义 红" key:@"rhyR" def:255 mn:0 mx:255]];
+    [specs addObject:[self numSlider:@"自定义 绿" key:@"rhyG" def:255 mn:0 mx:255]];
+    [specs addObject:[self numSlider:@"自定义 蓝" key:@"rhyB" def:255 mn:0 mx:255]];
 
     return specs;
-}
-
-- (void)viewWillAppear:(BOOL)animated {
-    [super viewWillAppear:animated];
-    if (self.liveTimer) [self.liveTimer invalidate];
-    __weak DIRhythmPage *weakSelf = self;
-    self.liveTimer = [NSTimer scheduledTimerWithTimeInterval:0.5 repeats:YES block:^(NSTimer *t) {
-        DIRhythmPage *me = weakSelf;
-        if (!me || !me.liveSpec) return;
-        if (!me.isViewLoaded || !me.view.window) return;
-        NSString *txt = [me liveText];
-        NSString *oldName = me.liveSpec.name ?: @"";
-        if (![oldName isEqualToString:txt]) {
-            [me.liveSpec setName:txt];
-            [me reloadSpecifier:me.liveSpec];
-        }
-    }];
-    [[NSRunLoop mainRunLoop] addTimer:self.liveTimer forMode:NSRunLoopCommonModes];
-}
-
-- (void)viewWillDisappear:(BOOL)animated {
-    [super viewWillDisappear:animated];
-    [self.liveTimer invalidate];
-    self.liveTimer = nil;
 }
 
 @end
