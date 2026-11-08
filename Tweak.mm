@@ -904,9 +904,26 @@ static NSArray<UIWindow *> *diHUDWindows(void) {
             for (UIWindow *w in ((UIWindowScene *)sc).windows) {
                 if (![w isKindOfClass:UIWindow.class] || w.hidden) continue;
                 NSString *cn = NSStringFromClass(w.class);
-                if ([cn rangeOfString:@"HUD"].location == NSNotFound &&
-                    [cn rangeOfString:@"Volume"].location == NSNotFound) continue;
-                [out addObject:w];
+                BOOL byName = ([cn rangeOfString:@"HUD"].location != NSNotFound ||
+                               [cn rangeOfString:@"Volume"].location != NSNotFound);
+                if (byName) { [out addObject:w]; continue; }
+                /* 名字不带 HUD 的版本: 窗口里有"细高"的控制中心模块容器 = 竖着的音量条。
+                   控制中心自己的窗口排除掉, 免得把整个控制中心隐藏了。 */
+                if ([cn containsString:@"ControlCenter"] || [cn containsString:@"CoverSheet"]) continue;
+                NSMutableArray<UIView *> *st = [NSMutableArray arrayWithObject:w];
+                int g0 = 0;
+                while (st.count && g0++ < 120) {
+                    UIView *v = st.firstObject; [st removeObjectAtIndex:0];
+                    NSString *vn = NSStringFromClass(v.class);
+                    if ([vn containsString:@"ContentModule"]) {
+                        CGSize bs = v.bounds.size;
+                        if (bs.width >= 20 && bs.width <= 110 && bs.height >= 90 && bs.height <= 300) {
+                            [out addObject:w];
+                            break;
+                        }
+                    }
+                    for (UIView *s in v.subviews) [st addObject:s];
+                }
             }
         }
     } @catch (__unused NSException *e) {}
