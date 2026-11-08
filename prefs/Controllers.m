@@ -18,7 +18,7 @@
 
 static NSString *const kDomain = @"com.abgg332.driftisland";
 /* 2.6.25: 设置页底部显示的版本号 */
-static NSString *const DI_VERSION_STR = @"2.9.12";
+static NSString *const DI_VERSION_STR = @"2.9.13";
 /* 2.6.10: 专辑光晕遮罩 —— 与 Tweak 侧 DIAlbumMask.h 保持一致 */
 static NSString *const kDIAlbumMaskKey = @"diAlbumMaskAsset";
 static NSString *const kDIMaskRoot = @"/var/mobile/灵动岛/遮罩素材";
@@ -719,7 +719,7 @@ static Class diStepSliderClass(void) {
 }
 
 @interface DIMaterialsController : PSListController
-- (NSInteger)matMode; /* 0=小岛 1=展开 */
+- (NSInteger)matMode; /* 0=小岛 1=展开 2=录屏(2.9.13) */
 @end
 
 @interface DIMaterialsSmall : DIMaterialsController @end
@@ -1412,6 +1412,14 @@ static void diWriteColors(NSArray<NSString *> *colors) {
         /* 2.8.89: 主页「帧率」组整体移除 —— 已并入「附加功能 → 展开定义」页的顶部,
            两处一模一样的东西没必要重复显示。参数键一个字没改, 老设置照旧生效。 */
 
+        /* ---- 2.9.13: 录屏素材(旧版录屏岛: 加载视频 + 调大小)恢复 ----
+           2.9 误删了整块, 用户要的只是删掉"录屏岛左右两格帧率"那个二级页。 */
+        DI_ADD([self groupSpec:@"录屏素材" footer:@"录屏时把视频贴到录屏指示岛左侧圆点那一格上。\n素材目录与主素材相同: /var/mobile/灵动岛"]);
+        PSSpecifier *recMat = [self buttonSpec:@"素材选择" action:@selector(openRecGrid:)];
+        DI_ADD([self switchSpec:@"录屏显示素材" key:@"recOn" def:@NO]);
+        DI_ADD(recMat);
+        DI_ADD([self stepSlider:@"素材大小" key:@"recScale" def:100 mn:50 mx:200]);
+
         /* ---- 2.6.29: 附加功能 —— 文字颜色 / 锁屏通知 / 专辑遮罩 统一进页 ---- */
         DI_ADD([self groupSpec:@"附加功能" footer:nil]);
         DI_ADD([self linkSpec:@"文字颜色" detail:[DITextStylePage class]]);
@@ -2001,7 +2009,7 @@ static NSCache *diThumbCache(void) {
 @end
 
 @interface DIPreviewGrid : UICollectionViewController
-@property (nonatomic, assign) NSInteger matMode; /* 0=小岛 1=展开 3=壁纸更换(2.7.32 起只有一套) */
+@property (nonatomic, assign) NSInteger matMode; /* 0=小岛 1=展开 2=录屏(2.9.13) 3=壁纸更换 */
 + (void)diRefreshHostingList;   /* 2.2.58: 选完素材后让主页那一行立刻刷新 */
 /* 2.7.1: 分类 Import 里要用到这些, 先声明一次 */
 - (BOOL)isWallpaperMode;
@@ -2011,7 +2019,7 @@ static NSCache *diThumbCache(void) {
 @end
 
 @implementation DIPreviewGrid
-/* 素材目录与偏好键按模式取 —— 小岛/展开共用主目录 */
+/* 素材目录与偏好键按模式取 —— 小岛/展开/录屏共用主目录(2.9.13: 录屏恢复) */
 - (BOOL)isWallpaperMode { return (self.matMode == 3); }   /* 2.7.32: 深色(mode 4)已删除 */
 - (NSString *)dirForMode {
     if (self.isWallpaperMode) return kDIWallpaperRoot;
@@ -2019,6 +2027,7 @@ static NSCache *diThumbCache(void) {
 }
 - (NSString *)keyForMode {
     if (self.matMode == 0) return @"smallIndex";
+    if (self.matMode == 2) return @"recIndex";        /* 2.9.13: 录屏素材独立序号 */
     if (self.matMode == 3) return @"wpLightAsset";   /* 2.7.1: 壁纸存的是相对路径字符串, 不是序号 */
     return @"expandIndex";
 }
@@ -2041,7 +2050,8 @@ static NSCache *diThumbCache(void) {
     diInstallStepSliderOnPSSliderCell();
     /* 2.7.32: 深浅两套合并, mode 4(深色背景)整体删除 */
     self.title = (self.matMode == 0) ? @"小岛素材"
-               : (self.matMode == 3 ? @"壁纸更换" : @"展开素材");
+               : (self.matMode == 2 ? @"录屏素材"
+               : (self.matMode == 3 ? @"壁纸更换" : @"展开素材"));
     self.collectionView.backgroundColor = DI_PAGE_BG;
     [self.collectionView registerClass:[DIPreviewCell class] forCellWithReuseIdentifier:@"cell"];
     self.navigationItem.rightBarButtonItem = [[UIBarButtonItem alloc] initWithTitle:@"相册导入" style:UIBarButtonItemStylePlain target:self action:NSSelectorFromString(@"diImportFromAlbumWP")]; // 右上角相册导入(支持图片, 实现在分类里)
@@ -2545,6 +2555,7 @@ static NSCache *diThumbCache(void) {
 }
 - (void)openSmallGrid:(PSSpecifier *)s { [self presentGridMode:0]; }
 - (void)openExpandGrid:(PSSpecifier *)s { [self presentGridMode:1]; }
+- (void)openRecGrid:(PSSpecifier *)s { [self presentGridMode:2]; }   /* 2.9.13: 录屏素材 */
 /* 相册素材导入: PHPicker(系统相册选择器, 无需相册权限)选视频, 拷入素材目录 */
 - (void)importFromAlbum {
     Class phpPicker = NSClassFromString(@"PHPickerViewController");
