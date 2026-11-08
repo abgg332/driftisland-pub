@@ -18,7 +18,7 @@
 
 static NSString *const kDomain = @"com.abgg332.driftisland";
 /* 2.6.25: 设置页底部显示的版本号 */
-static NSString *const DI_VERSION_STR = @"2.9.13";
+static NSString *const DI_VERSION_STR = @"2.9.14";
 /* 2.6.10: 专辑光晕遮罩 —— 与 Tweak 侧 DIAlbumMask.h 保持一致 */
 static NSString *const kDIAlbumMaskKey = @"diAlbumMaskAsset";
 static NSString *const kDIMaskRoot = @"/var/mobile/灵动岛/遮罩素材";
@@ -1158,8 +1158,9 @@ static void diPrefsReloadCB(CFNotificationCenterRef center, void *observer, CFSt
 
 /* 素材选择行右侧显示的当前素材名 */
 - (NSString *)nameForMode:(NSInteger)mode {
-    NSArray *files = videoFiles();
-    NSString *key = (mode == 0) ? @"smallIndex" : @"expandIndex";
+    /* 2.9.14: 录屏素材(mode 2)用同名主目录的顶层视频列表, 与 Tweak 侧 cachedRecMaterials 一致 */
+    NSArray *files = (mode == 2) ? videoFilesIn(kMaterialDir) : videoFiles();
+    NSString *key = (mode == 0) ? @"smallIndex" : (mode == 2 ? @"recIndex" : @"expandIndex");
     NSInteger idx = indexForKey(key);
     if (idx < 0 || idx >= (NSInteger)files.count) return @"无素材";
     return files[idx];
@@ -1414,7 +1415,7 @@ static void diWriteColors(NSArray<NSString *> *colors) {
 
         /* ---- 2.9.13: 录屏素材(旧版录屏岛: 加载视频 + 调大小)恢复 ----
            2.9 误删了整块, 用户要的只是删掉"录屏岛左右两格帧率"那个二级页。 */
-        DI_ADD([self groupSpec:@"录屏素材" footer:@"录屏时把视频贴到录屏指示岛左侧圆点那一格上。\n素材目录与主素材相同: /var/mobile/灵动岛"]);
+        DI_ADD([self groupSpec:@"录屏素材" footer:nil]);
         PSSpecifier *recMat = [self buttonSpec:@"素材选择" action:@selector(openRecGrid:)];
         DI_ADD([self switchSpec:@"录屏显示素材" key:@"recOn" def:@NO]);
         DI_ADD(recMat);
@@ -1661,7 +1662,7 @@ static void diWriteColors(NSArray<NSString *> *colors) {
     /* 2.2.52: 动态定位组 section —— 之前硬编码 indexPath.section == 2/3/4,
        一旦插入/移动"录屏素材"组, 帧率/素材名的 section 全部错位(2.2.51 的教训)。
        现在按组名(PSGroupCell 的 name)实时算 section, 组顺序怎么调都不失效。 */
-    NSInteger secSmall = -1, secExpand = -1, secFrame = -1;
+    NSInteger secSmall = -1, secExpand = -1, secRec = -1, secFrame = -1;
     {
         NSInteger sec = -1;
         for (PSSpecifier *gs in self.specifiers) {
@@ -1670,6 +1671,7 @@ static void diWriteColors(NSArray<NSString *> *colors) {
             NSString *gnm = gs.name ?: @"";
             if ([gnm isEqualToString:@"小岛素材"]) secSmall = sec;
             else if ([gnm isEqualToString:@"展开素材"]) secExpand = sec;
+            else if ([gnm isEqualToString:@"录屏素材"]) secRec = sec;
             else if ([gnm isEqualToString:@"帧率"]) secFrame = sec;
         }
     }
@@ -1733,6 +1735,7 @@ static void diWriteColors(NSArray<NSString *> *colors) {
     NSString *name = nil;
     if (indexPath.section == secSmall && secSmall >= 0 && indexPath.row == 1) name = [self nameForMode:0];
     if (indexPath.section == secExpand && secExpand >= 0 && indexPath.row == 1) name = [self nameForMode:1];
+    if (indexPath.section == secRec && secRec >= 0 && indexPath.row == 1) name = [self nameForMode:2];   /* 2.9.14: 录屏素材行右侧显示当前文件名 */
     if (indexPath.section == secFrame && secFrame >= 0 && indexPath.row == 6) name = [self frameStatusName];
     if (name) {
         if ([cell respondsToSelector:@selector(setValue:)])
