@@ -73,7 +73,7 @@ static double expandTextY = DI_EXP_TEXT_BASE_Y;   // 上下偏移(pt, 下为正,
 static double expandTextScale = 100.0; // 文字大小(%, 100=原样)
 /* 2.8.86: 构建戳 —— 之前横幅打的是 SpringBoard 自己的 CFBundleShortVersionString(恒 1.0),
    日志里根本看不出装的是哪一版。所有诊断行都带这个戳, 下轮日志一眼定位。 */
-#define DI_BUILD_VER @"2.9.9"
+#define DI_BUILD_VER @"2.9.10"
 static BOOL gRecordingActive = NO; // 保留: 岛素材总闸条件
 static NSString *diElementId(UIView *host);
 static BOOL diMiniMusicActive(UIView *host); // 2.6.3: 前置(遮罩层使用)
@@ -12989,6 +12989,7 @@ static BOOL diRRInside(CGSize s, CGFloat c, CGFloat x, CGFloat y) {
 @property (nonatomic, assign) BOOL islandShape;      /* YES: 沿圆角矩形轮廓 */
 @property (nonatomic, assign) CGSize shapeSize;
 @property (nonatomic, assign) CGFloat shapeCorner;
+@property (nonatomic, assign) BOOL live;             /* NO: 没在放歌, 粒子淡出并停住 */
 @end
 
 @implementation DIRhyView {
@@ -13002,6 +13003,7 @@ static BOOL diRRInside(CGSize s, CGFloat c, CGFloat x, CGFloat y) {
     CGFloat _lutCorner;
     UIColor *_tint;
     BOOL _built;
+    CGFloat _fade;                                  /* 0~1: 放歌=1, 暂停淡到 0 */
 }
 
 - (instancetype)initWithFrame:(CGRect)frame {
@@ -13133,6 +13135,17 @@ static BOOL diRRInside(CGSize s, CGFloat c, CGFloat x, CGFloat y) {
     if (cnt > DI_RHY_DOTS_MAX) cnt = DI_RHY_DOTS_MAX;
     CGFloat now = (CGFloat)CFAbsoluteTimeGetCurrent();
 
+    /* 2.9.10: 放歌才画。暂停/停止后整体淡出并冻结(不再累加相位),
+       否则粒子会一直飘, 看起来像没停。 */
+    CGFloat tf = self.live ? 1.0 : 0.0;
+    _fade += (tf - _fade) * (self.live ? 0.28 : 0.22);
+    if (_fade < 0.002) _fade = 0;
+    if (_fade > 0.995) _fade = 1;
+    if (_fade <= 0.0) {
+        for (int i = 0; i < DI_RHY_DOTS_MAX; i++) _bits[i].opacity = 0;
+        return;
+    }
+
     for (int i = 0; i < DI_RHY_DOTS_MAX; i++) {
         CAShapeLayer *l = _bits[i];
         if (i >= cnt) { l.opacity = 0; continue; }
@@ -13140,7 +13153,7 @@ static BOOL diRRInside(CGSize s, CGFloat c, CGFloat x, CGFloat y) {
         /* 每个粒子一条独立的"出生 -> 飘远 -> 淡出"周期。
            2.9.9: 角度只在完全透明时换, 而且换得小 —— 之前一次跳 0.8~2.5 rad,
            眼睛看到的就是整圈粒子"啪"地闪一下, 这就是"抖动"的主因之一。 */
-        _ph[i] += dt / _dur[i];
+        _ph[i] += (self.live ? dt : 0.0) / _dur[i];
         if (_ph[i] >= 1.0) {
             _ph[i] -= 1.0;
             _ang[i] += 0.35 + ((CGFloat)(i * 37 % 100) / 100.0) * 0.85;
@@ -13161,7 +13174,7 @@ static BOOL diRRInside(CGSize s, CGFloat c, CGFloat x, CGFloat y) {
         /* 出生 0.3 -> 中段 1.0 -> 尽头 0, 用正弦包络, 两头都柔 */
         CGFloat env = sinf((float)(M_PI * MIN(1.0, MAX(0.0, ph))));
         env = 0.30 + 0.70 * env;
-        l.opacity = (float)(_alpha[i] * MIN(1.0, env) * (0.86 + 0.14 * lv));
+        l.opacity = (float)(_alpha[i] * MIN(1.0, env) * (0.86 + 0.14 * lv) * _fade);
         CGFloat sc = (1.0 + 0.22 * kick) * (0.86 + 0.24 * env);
         l.transform = CATransform3DScale(
             CATransform3DMakeRotation(_spin[i] + now * 0.30 + ph * 1.2, 0, 0, 1), sc, sc, 1);
@@ -13224,6 +13237,22 @@ static UIColor *diRhyColorFromImage(UIImage *img) {
     if (cache.count > 24) [cache removeAllObjects];
     cache[key] = c;
     return c;
+}
+
+/* 2.9.10: 岛上封面(MRUActivityArtworkView)整体排除在律动之外 —— 不挂子视图,
+   也不加鼓点动画。它被 portal 到灵动岛, 动它的图层就可能让岛空白/展不开,
+   这是 2.9.6 起连续几版"小岛没了"的根源。 */
+static BOOL diRhyIsIsland(UIView *v) {
+    if (!v) return YES;
+    NSString *cn = NSStringFromClass(v.class);
+    if ([cn rangeOfString:@"Activity"].location != NSNotFound) return YES;
+    /* 兜底: 祖先里有灵动岛容器也算 */
+    UIView *p = v.superview;
+    for (int i = 0; i < 6 && p; i++, p = p.superview) {
+        NSString *pn = NSStringFromClass(p.class);
+        if ([pn rangeOfString:@"SystemAperture"].location != NSNotFound) return YES;
+    }
+    return NO;
 }
 
 /* 2.9.9: 粒子层只做两件事 —— 加一个透明子视图、改它自己的 frame。
@@ -13373,7 +13402,7 @@ static void diRhyScanTree(UIView *root) {
             NSString *cn = NSStringFromClass(v.class);
             /* 2.9.5: 扫描阶段就把大封面挡掉(360pt 的全屏专辑), 免得每帧再判 */
             CGFloat mn = MIN(v.bounds.size.width, v.bounds.size.height);
-            if ([cn containsString:@"Artwork"] && mn >= 16 && mn <= 140)
+            if ([cn containsString:@"Artwork"] && mn >= 16 && mn <= 140 && !diRhyIsIsland(v))
                 [gRhyArtworks addObject:v];
         }
         for (UIView *c in v.subviews) [stack addObject:c];
@@ -13466,10 +13495,10 @@ static void diRhythmTick(void) {
 
     NSMutableArray<UIView *> *alive = [NSMutableArray array];
     /* 2.9.7: 只认真正在窗口里的视图。2.9.6 放宽成 superview 之后, 布局过程中
-       那些还没上屏的岛封面也被算进来, 于是被鼓点改了 transform, 上屏后就是坏的。 */
-    for (UIView *a in gRhyArtworks.allObjects) if (a.window) [alive addObject:a];
-    if (gDIActivityArtworks) for (UIView *a in gDIActivityArtworks.allObjects)
-        if (a.window && ![alive containsObject:a]) [alive addObject:a];
+       那些还没上屏的岛封面也被算进来, 于是被鼓点改了 transform, 上屏后就是坏的。
+       2.9.10: 岛的封面彻底出队 —— 只留锁屏播放器卡片。 */
+    for (UIView *a in gRhyArtworks.allObjects)
+        if (a.window && !diRhyIsIsland(a)) [alive addObject:a];
 
     CGFloat lv = sLv;
     static CFAbsoluteTime sPrevFrame;
@@ -13477,7 +13506,15 @@ static void diRhythmTick(void) {
     if (dt < 0.008) dt = 0.008;
     if (dt > 0.12) dt = 0.12;                 /* 掉帧时不要一次跳很远 */
     sPrevFrame = now;
-    BOOL active = (age < 1.2) || (tau < 0.75);
+    /* 2.9.10: 只有"正在放歌"才画。两道闸:
+       ① 频谱 1 秒没更新 = MRU 不再回传(暂停/停止);
+       ② 电平真的掉到 0 超过 2 秒(有些系统暂停后仍推 0 值帧)。
+       一旦不满足, 粒子 0.4 秒内淡出并冻结, 鼓点回 0。 */
+    CGFloat sig = (age < 1.0) ? MAX(rawBass, MAX((CGFloat)gRhy.mid, (CGFloat)gRhy.high)) : 0.0;
+    static CFAbsoluteTime sLastSig = -1;
+    if (sig > 0.03) sLastSig = now;
+    BOOL playing = (age < 1.0) && (sLastSig > 0 && (now - sLastSig) < 2.0);
+    BOOL active = playing;
     int cnt = gRhyDotsN;
 
     for (UIView *a in alive) {
@@ -13486,13 +13523,15 @@ static void diRhythmTick(void) {
     }
     /* 2.9.6: 所有视图的所有属性写进同一个事务。原来是每个视图/每个方法各开一次
        CATransaction, 一帧 6~8 次提交, 下拉锁屏时这些提交会和系统动画抢主线程。 */
+    CGFloat pk = playing ? kick : 0.0;
+    CGFloat pb = playing ? sBreathe : 0.0;
     [CATransaction begin];
     [CATransaction setDisableActions:YES];
     for (UIView *a in alive) {
         if (!diRhySideOK(a)) continue;
-        diRhythmPunch(a, kick, sBreathe);
+        diRhythmPunch(a, pk, pb);
         DIRhyView *v = objc_getAssociatedObject(a, &kDIRhyViewKey);
-        if (v) [v applyKick:kick lv:lv dt:dt count:cnt];
+        if (v) { v.live = playing; [v applyKick:pk lv:(playing ? lv : 0.0) dt:dt count:cnt]; }
     }
     [CATransaction commit];
 
@@ -13534,178 +13573,11 @@ static void diRhythmTick(void) {
 }
 @end
 
-/* ===== 2.9.9: 小岛 / 展开岛的粒子 —— SpringBoard 窗口级叠加层 =====
-   为什么不在 MediaRemoteUI 里做: 岛上的封面(MRUActivityArtworkView)是远程
-   渲染后 portal 到灵动岛的, 往它的视图树里加任何子视图都会把封面顶掉
-   (353 日志: 23pt 封面里加了粒子层, 系统紧接着报 noart, 小岛就空了)。
-   这里改用 SpringBoard 自己的窗口: 找 SBSystemApertureContainerView 的
-   屏幕矩形, 在窗口最上层铺一张透明层, 粒子从岛的圆角轮廓向外飘。
-   岛的任何视图、frame、transform 都不碰。 */
-static DIRhyView *gIslView;
-static UIView *gIslHost;
-static CADisplayLink *gIslLink;
-static CGRect gIslRect;
-static CGFloat gIslKick, gIslLv;
-static CFAbsoluteTime gIslLastKick = -1;
-
-static void diIslOverlayDrop(void) {
-    if (gIslView) { [gIslView removeFromSuperview]; gIslView = nil; }
-    gIslHost = nil;
-    gIslRect = CGRectZero;
-}
-
-/* 在窗口树里找岛容器(胶囊/展开都算), 返回屏幕坐标 */
-static UIView *diIslFindContainer(UIView *root, CGRect *outRect) {
-    NSMutableArray<UIView *> *stk = [NSMutableArray arrayWithObject:root];
-    int budget = 500;
-    while (stk.count && budget-- > 0) {
-        UIView *v = stk.lastObject;
-        [stk removeLastObject];
-        NSString *cn = NSStringFromClass(v.class);
-        if ([cn containsString:@"SystemApertureContainer"] && !v.hidden && v.alpha > 0.05) {
-            CGSize s = v.bounds.size;
-            if (s.width >= 80 && s.width <= 470 && s.height >= 18 && s.height <= 240) {
-                UIWindow *w = v.window;
-                if (w) { *outRect = [v convertRect:v.bounds toView:w]; return v; }
-            }
-        }
-        for (UIView *c in v.subviews) [stk addObject:c];
-    }
-    return nil;
-}
-
-static void diIslOverlayTick(void) {
-    if (!NSThread.isMainThread) return;
-    diRhyParams();
-    if (!(gRhyOn && gRhyDotsOn)) {
-        diIslOverlayDrop();
-        if (gIslLink && gIslLink.preferredFramesPerSecond != 2) gIslLink.preferredFramesPerSecond = 2;
-        return;
-    }
-    if (gIslLink && gIslLink.preferredFramesPerSecond != 20) gIslLink.preferredFramesPerSecond = 20;
-
-    CFAbsoluteTime now = CFAbsoluteTimeGetCurrent();
-    static CFAbsoluteTime lastFind;
-    if (now - lastFind > 0.22) {
-        lastFind = now;
-        CGRect r = CGRectZero;
-        UIView *cont = nil;
-        @try {
-            for (UIScene *sc in UIApplication.sharedApplication.connectedScenes) {
-                if (![sc isKindOfClass:UIWindowScene.class]) continue;
-                for (UIWindow *w in ((UIWindowScene *)sc).windows) {
-                    if (w.hidden || w.alpha < 0.05) continue;
-                    cont = diIslFindContainer(w, &r);
-                    if (cont) break;
-                }
-                if (cont) break;
-            }
-        } @catch (__unused NSException *e) {}
-        if (!cont) {
-            diIslOverlayDrop();
-            if (gIslLink && gIslLink.preferredFramesPerSecond != 5) gIslLink.preferredFramesPerSecond = 5;
-            return;
-        }
-
-        UIWindow *win = cont.window;
-        if (!gIslView || gIslHost != win || !gIslView.superview) {
-            diIslOverlayDrop();
-            gIslHost = win;
-            gIslView = [[DIRhyView alloc] initWithFrame:win.bounds];
-            gIslView.islandShape = YES;
-            [gIslView setTint:diRhyCustomColor()];
-            [win addSubview:gIslView];
-            diMruFileLog([NSString stringWithFormat:
-                @"[律动] 岛叠加层挂上 岛=%.0fx%.0f @%.0f,%.0f",
-                r.size.width, r.size.height, r.origin.x, r.origin.y]);
-        }
-        gIslRect = r;
-        CGSize cs = r.size;
-        CGFloat cr = cont.layer.cornerRadius;
-        gIslView.frame = win.bounds;
-        gIslView.anchor = CGPointMake(CGRectGetMidX(r), CGRectGetMidY(r));
-        gIslView.shapeSize = cs;
-        gIslView.shapeCorner = (cr > 0.5) ? MIN(cr, MIN(cs.width, cs.height) * 0.5)
-                                         : MIN(cs.width, cs.height) * 0.5;
-        gIslView.maxTravel = 26.0 + MIN(cs.height, 56.0) * 1.05;
-        if (gRhyTintOn) {
-            /* 小岛封面拿不到图, 跟随封面时用自适应色: 按当前低频把色相推一点,
-               保证不是死白一片 */
-            ;
-        } else {
-            [gIslView setTint:diRhyCustomColor()];
-        }
-    }
-
-    /* 频谱: MRU 12Hz 落盘的 spectrum.plist */
-    static CFAbsoluteTime lastData;
-    if (now - lastData > 0.09) {
-        lastData = now;
-        NSString *dir = diMruSharedDir();
-        if (dir.length) {
-            NSDictionary *d = [NSDictionary dictionaryWithContentsOfFile:
-                               [dir stringByAppendingPathComponent:@"spectrum.plist"]];
-            if ([d isKindOfClass:NSDictionary.class]) {
-                double t = [d[@"t"] doubleValue];
-                if (t > 0 && now - t < 1.5) {
-                    gRhy.bass = [d[@"bass"] floatValue];
-                    gRhy.mid = [d[@"mid"] floatValue];
-                    gRhy.high = [d[@"high"] floatValue];
-                    gRhy.energy = [d[@"e"] floatValue];
-                    gRhy.stamp = t;
-                }
-            }
-        }
-    }
-    CGFloat age = gRhy.stamp > 0 ? (CGFloat)(now - gRhy.stamp) : 99;
-    CGFloat rawBass = age < 1.2 ? (CGFloat)gRhy.bass : 0;
-    CGFloat target = age < 1.2 ? (CGFloat)gRhy.energy : 0;
-
-    /* 鼓点包络(与 MRU 侧同一套: 自适应阈值 + attack/release) */
-    static CGFloat sPrevBass, sBassVar, sBreathe, sLv;
-    CGFloat dBass = rawBass - sPrevBass;
-    sPrevBass = rawBass;
-    sBassVar += (dBass * dBass - sBassVar) * 0.06;
-    CGFloat thr = 0.030 + (CGFloat)sqrt(MAX(0.0, sBassVar)) * 0.55;
-    if (dBass > thr && rawBass > 0.10 && now - gIslLastKick > 0.14) gIslLastKick = now;
-    CGFloat tau = gIslLastKick > 0 ? (CGFloat)(now - gIslLastKick) : 99.0;
-    CGFloat kick = 0;
-    if (tau < 0.75) {
-        if (tau < 0.045) kick = tau / 0.045;
-        else kick = (CGFloat)exp(-(double)(tau - 0.045) / 0.17);
-    }
-    sBreathe += (rawBass - sBreathe) * (rawBass > sBreathe ? 0.45 : 0.10);
-    sLv += (target - sLv) * 0.25;
-    gIslKick = kick;
-    gIslLv = sLv;
-    (void)sBreathe;
-
-    /* 必须关隐式动画, 否则每帧写入都会被 CA 补间 0.25s, 看起来像慢半拍 + 糊 */
-    [CATransaction begin];
-    [CATransaction setDisableActions:YES];
-    [gIslView applyKick:kick lv:sLv dt:1.0 / 20.0 count:gRhyDotsN];
-    [CATransaction commit];
-
-}
-
-@interface DIIslPulse : NSObject
-@end
-@implementation DIIslPulse
-- (void)fire:(CADisplayLink *)link {
-    @try { diIslOverlayTick(); } @catch (__unused NSException *e) {}
-}
-@end
-
-static void diIslOverlayStart(void) {
-    static BOOL started;
-    if (started) return;
-    started = YES;
-    static DIIslPulse *p;
-    p = [DIIslPulse new];
-    gIslLink = [CADisplayLink displayLinkWithTarget:p selector:@selector(fire:)];
-    gIslLink.preferredFramesPerSecond = 20;
-    [gIslLink addToRunLoop:[NSRunLoop mainRunLoop] forMode:NSRunLoopCommonModes];
-}
+/* ===== 2.9.10: 小岛/展开岛一律不碰 =====
+   2.9.7~2.9.9 为了"小岛也有粒子", 先后在岛封面里加子视图、在 SBSystemApertureWindow
+   上铺全屏叠加层 —— 两者都会打断灵动岛的 portal 组合(magicians curtain),
+   表现就是小岛空白、拉不出来。这里整段删除: 律动只作用在锁屏播放器卡片上,
+   岛的视图树 / 图层 / 动画一个字节都不碰。 */
 
 static void diRhythmStart(void) {
     static BOOL started;
@@ -14740,7 +14612,6 @@ __attribute__((constructor)) static void init(void) {
         dispatch_async(dispatch_get_main_queue(), ^{
             @try {
                 refreshAll(); installKnownHosts();
-                diIslOverlayStart(); // 2.9.9: 小岛粒子(窗口级叠加层, 只在律动开时干活)
                 diStartFlowTicker(); // 流光常驻驱动(岛静止时也能流动)
                 diStartBarFlowTicker(); // 2.5.11: 横条流光心跳(与文字同一套相位驱动)
             } @catch (NSException *e) {
