@@ -81,8 +81,29 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           rm -rf ~/theos "$THEOS"
-          bash -c "$(curl -fsSL https://raw.githubusercontent.com/roothide/theos/master/bin/install-theos)"
+          # 自带安装脚本会顺手下一个 SDK, 那个源现在经常只回一个 92 字节的文本,
+          # 然后 tar 报 "Unrecognized archive format" 以 exit 8 结束。这里不让它拖垮整步,
+          # 装完自己把 SDK 补进 $THEOS/sdks。
+          bash -c "$(curl -fsSL https://raw.githubusercontent.com/roothide/theos/master/bin/install-theos)" || echo "== roothide 安装脚本的 SDK 步骤失败, 继续自己补"
           echo "THEOS=$HOME/theos" >> "$GITHUB_ENV"
+          mkdir -p "$HOME/theos/sdks"
+          if [ ! -d "$HOME/theos/sdks/iPhoneOS16.5.sdk" ]; then
+            PRIMARY="https://github.com/abgg332/driftisland-pub/releases/download/sdk-cache/iPhoneOS16.5.sdk.tar.xz"
+            FALLBACK="https://github.com/theos/sdks/releases/download/master-146e41f/iPhoneOS16.5.sdk.tar.xz"
+            ok=0
+            for i in 1 2 3 4 5 6 7 8; do
+              for URL in "$PRIMARY" "$FALLBACK"; do
+                if curl -fL --retry 2 --retry-delay 4 --retry-all-errors --connect-timeout 30 -o /tmp/sdk2.tar.xz "$URL" \
+                   && tar -tJf /tmp/sdk2.tar.xz >/dev/null 2>&1; then ok=1; break; fi
+                rm -f /tmp/sdk2.tar.xz; sleep 8
+              done
+              [ "$ok" = "1" ] && break
+              sleep 15
+            done
+            [ "$ok" = "1" ] || { echo "roothide SDK 补齐失败"; exit 1; }
+            tar -xJf /tmp/sdk2.tar.xz -C "$HOME/theos/sdks"
+          fi
+          ls "$HOME/theos/sdks"
 
       - name: Build roothide package
         run: |
