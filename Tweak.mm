@@ -63,7 +63,7 @@ static double expandTextY = DI_EXP_TEXT_BASE_Y;   // 上下偏移(pt, 下为正,
 static double expandTextScale = 100.0; // 文字大小(%, 100=原样)
 /* 2.8.86: 构建戳 —— 之前横幅打的是 SpringBoard 自己的 CFBundleShortVersionString(恒 1.0),
    日志里根本看不出装的是哪一版。所有诊断行都带这个戳, 下轮日志一眼定位。 */
-#define DI_BUILD_VER @"2.8.96"
+#define DI_BUILD_VER @"2.8.97"
 static BOOL gRecordingActive = NO; // 保留: 岛素材总闸条件
 static NSString *diElementId(UIView *host);
 static BOOL diMiniMusicActive(UIView *host); // 2.6.3: 前置(遮罩层使用)
@@ -589,6 +589,17 @@ static CGRect diRecSlotRect(UIView *island, BOOL onRight, UIView **outAcc) {
     if (outAcc) *outAcc = target;
 
     CGSize bs = island.bounds.size;
+    /* 2.8.97: 长条(胶囊)形态 —— 125x36 这种, 左边圆点、右边倒计时各占一头。
+       旧公式是给 39x39 方形岛写的(左 22%~78%, 右 50%~100%), 套到 125x36 上
+       两格会重叠一半, 用户看到的就是"两个素材放一起"。 */
+    if (bs.width > 70.0) {
+        CGFloat d = bs.height - 10.0;
+        if (d > 26.0) d = 26.0;
+        if (d < 10.0) d = bs.height * 0.6;
+        CGFloat yy = (bs.height - d) * 0.5;
+        return onRight ? CGRectMake(bs.width - d - 8.0, yy, d, d)
+                       : CGRectMake(8.0, yy, d, d);
+    }
     /* 实测回退几何(2.2.45 dump): 左点 accessory = {8.67, 8.67, 22, 22} */
     CGFloat accH = bs.height * 0.56, accY = bs.height * 0.22;
     CGFloat accLX = bs.width * 0.22, accW = bs.width * 0.56;
@@ -2327,7 +2338,8 @@ static BOOL diIsCCBackgroundView(UIView *v) {
 @property (nonatomic, assign) NSInteger dynIdle;
 /* 2.8.95: 录屏岛槽位缓存 —— stepRec 每帧都要这两个值, 不缓存的话 60fps 下
    每帧遍历一次 300 节点的指示岛子树, 光这一次图层就能把小岛录屏录到掉帧。 */
-@property (nonatomic, assign) CGRect recSlot;
+@property (nonatomic, assign) CGRect recSlot;       /* 2.8.97: 落点(宿主坐标系) */
+@property (nonatomic, assign) BOOL recDirect;           /* 2.8.97: 直接挂 elementView(只有它可用时) */
 @property (nonatomic, weak)   UIView *recAcc;
 @property (nonatomic, assign) CFTimeInterval recSlotT;
 @end
@@ -2562,16 +2574,16 @@ __attribute__((unused)) static BOOL diMiniMusicActive(UIView *host) {
         _link.paused = YES;
         return;
     }
-    /* 槽位缓存: 0.5s 或 accessory 换了才重新量 */
-    CFAbsoluteTime nowT = CFAbsoluteTimeGetCurrent();
-    if (!self.recAcc || !self.recAcc.window || nowT - self.recSlotT > 0.5) {
-        UIView *acc = nil;
-        self.recSlot = diRecSlotRect(island, right, &acc);
-        self.recAcc = acc;
-        self.recSlotT = nowT;
+    /* 2.8.97: 落点由 diRecSyncElement 挂载时写好(宿主坐标系), 这里直接用。
+       挂在专用格位宿主上就铺满它; 只有退回 elementView 时才用算好的左右矩形。
+       以前两处各算一套, 胶囊岛上左右两格被算成重叠区域 —— 用户看到的"两个放一起"。 */
+    CGRect slot = self.recSlot;
+    if (self.recDirect) {
+        if (CGRectIsEmpty(slot) || slot.size.width < 2 || slot.size.height < 2) slot = island.bounds;
+    } else {
+        slot = island.bounds;
     }
     UIView *acc = self.recAcc;
-    CGRect slot = self.recSlot;
     /* 原生图层: 右侧只归「隐藏倒计时」管; 左侧还要让位给旧的「录屏显示素材」 */
     if (acc && acc.layer) {
         if (right) diRecAccHidden(acc.layer, hideNative);
@@ -8716,19 +8728,60 @@ static void diRestyleAllLockPlatters(void) {
      · 录屏中 + 有开关打开 → 在 elementView 上挂左右两个帧率层;
      · 不满足 → 原地复原(撤层 + 恢复原生 accessory 的 hidden)。
    开关切换的即时生效走 diPrefsRefreshNow → diRecSyncAllWindows。 */
-static char kDIRecElemL, kDIRecElemR, kDIRecElemMark;
+static char kDIRecElemMark, kDIRecLayerOnHost;
+
+static id diRecVal(id obj, NSString *sel) {
+    SEL s = NSSelectorFromString(sel);
+    if (![obj respondsToSelector:s]) return nil;
+    @try { return ((id (*)(id, SEL))objc_msgSend)(obj, s); } @catch (NSException *e) { return nil; }
+}
+
+/* 2.8.97: 每一格真正该挂的宿主 —— 照 DynamicislandAnimation 的做法:
+   RecordingMini → minimalTransformView, RecordingTrailing → trailingTransformView。
+   不能挂在 elementView 上: 它是所有形态共用的根, 坐标随形态变, 两层会叠在一起。
+   也不接受"比整岛还宽"的候选(那是整岛容器, 铺满会把另一格盖掉), 这种直接
+   退回 elementView 并按左右格算矩形。 */
+static UIView *diRecHostFor(UIView *ev, BOOL right, BOOL *direct) {
+    if (direct) *direct = NO;
+    NSArray<NSString *> *pref = right
+        ? @[@"trailingTransformView", @"trailingView"]
+        : @[@"minimalTransformView", @"detachedMinimalView", @"leadingTransformView", @"leadingView"];
+    CGFloat evW = ev.bounds.size.width;
+    for (NSString *n in pref) {
+        UIView *v = diRecVal(ev, n);
+        if (![v isKindOfClass:UIView.class]) continue;
+        if (!v.window || v.bounds.size.width < 3 || v.bounds.size.height < 3) continue;
+        /* 单格不会比整岛的 55% 还宽(长条岛上尤其明显); 超了就是整岛容器 */
+        if (evW > 60.0 && v.bounds.size.width > evW * 0.55) continue;
+        return v;
+    }
+    if (direct) *direct = YES;
+    return ev;
+}
+
+static UIView *diRecAccFor(UIView *ev, BOOL right) {
+    UIView *v = diRecVal(ev, right ? @"trailingView" : @"leadingView");
+    return [v isKindOfClass:UIView.class] ? v : nil;
+}
 
 static void diRecElementClear(UIView *ev) {
-    for (NSUInteger side = 0; side < 2; side++) {
-        char *key = (side == 0) ? &kDIRecElemL : &kDIRecElemR;
-        DIAnimView *av = objc_getAssociatedObject(ev, key);
+    NSMutableArray<UIView *> *hosts = [NSMutableArray array];
+    [hosts addObject:ev];
+    for (NSString *n in @[@"minimalTransformView", @"detachedMinimalView", @"leadingTransformView",
+                          @"trailingTransformView", @"leadingView", @"trailingView"]) {
+        UIView *v = diRecVal(ev, n);
+        if ([v isKindOfClass:UIView.class]) [hosts addObject:v];
+    }
+    for (UIView *h in hosts) {
+        DIAnimView *av = objc_getAssociatedObject(h, &kDIRecLayerOnHost);
         if (!av) continue;
         if (av.recAcc && av.recAcc.layer)
-            diRecAccHidden(av.recAcc.layer, (side == 0) ? gRecVideoLeftShowing : NO);
+            diRecAccHidden(av.recAcc.layer, (av.side == 0) ? gRecVideoLeftShowing : NO);
         if (av.superview) [av removeFromSuperview];
         av.hidden = YES;
         av.link.paused = YES;
         if (av.iv.image) av.iv.image = nil;
+        objc_setAssociatedObject(h, &kDIRecLayerOnHost, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
     }
     objc_setAssociatedObject(ev, &kDIRecElemMark, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
 }
@@ -8749,19 +8802,39 @@ static void diRecSyncElement(UIView *ev) {
         if (marked) diRecElementClear(ev);
         return;
     }
-    /* 识别录屏岛: elementIdentifier 带 rec, 或 30~45 方形(实测 ~39×39) */
-    SEL es = NSSelectorFromString(@"elementIdentifier");
-    BOOL isRec = NO;
-    if ([ev respondsToSelector:es]) {
-        NSString *eid = ((id (*)(id, SEL))objc_msgSend)(ev, es);
-        if ([eid.lowercaseString containsString:@"rec"]) isRec = YES;
-    }
+    /* 识别录屏岛。三道判据, 优先靠内容而不是尺寸 —— 放歌的紧凑小岛也是
+       125×36, 只按尺寸判会把素材贴到音乐岛上(用户报的"加到放歌的录屏那里")。
+       ① elementIdentifier 带 rec;
+       ② 子树里出现类名带 recording / screenrecord 的视图(系统录屏指示本体);
+       ③ 兜底: 30~45 方形 + 整棵子树没有跨进程门户(音乐岛必有 CALayerHost/CAPortalLayer)。 */
+    NSString *eid = diRecVal(ev, @"elementIdentifier");
+    BOOL isRec = ([eid isKindOfClass:NSString.class] && [eid.lowercaseString containsString:@"rec"]);
     if (!isRec) {
         CGFloat w = ev.bounds.size.width, h = ev.bounds.size.height;
-        if (w >= 30 && w <= 45 && h >= 30 && h <= 45 && fabs(w - h) < 3) isRec = YES;
+        BOOL square = (w >= 30 && w <= 45 && h >= 30 && h <= 45 && fabs(w - h) < 3);
+        BOOL pill   = (w >= 90 && w <= 170 && h >= 26 && h <= 48);
+        if ((square || pill) && ev.window) {
+            BOOL hasRec = NO, hasPortal = NO;
+            NSMutableArray<UIView *> *st = [NSMutableArray arrayWithObject:ev];
+            int guard = 0;
+            while (st.count && guard++ < 220) {
+                UIView *v = st.firstObject; [st removeObjectAtIndex:0];
+                NSString *cn = NSStringFromClass(v.class).lowercaseString;
+                if ([cn containsString:@"recording"] || [cn containsString:@"screenrecord"]) { hasRec = YES; break; }
+                for (CALayer *l in v.layer.sublayers) {
+                    NSString *ln = NSStringFromClass(l.class);
+                    if ([ln containsString:@"CALayerHost"] || [ln containsString:@"CAPortalLayer"]) { hasPortal = YES; break; }
+                }
+                if (hasPortal) break;
+                for (UIView *c in v.subviews) [st addObject:c];
+            }
+            if (hasRec) isRec = YES;
+            else if (!hasPortal) isRec = YES;
+            else if (square) isRec = NO;   /* 有门户 + 长条 = 放歌的小岛 */
+        }
     }
     if (!isRec) {
-        if (marked) diRecElementClear(ev);   /* 层挂在被复用/回收的元素上: 撤 */
+        if (marked) diRecElementClear(ev);
         return;
     }
     if (!marked) {
@@ -8770,25 +8843,47 @@ static void diRecSyncElement(UIView *ev) {
         if (!loggedHit) {
             loggedHit = YES;
             RLog(@"录屏岛图层: hook 命中 %@ identifier=%@ %.0fx%.0f",
-                 NSStringFromClass(ev.class),
-                 ([ev respondsToSelector:es]
-                     ? ((id (*)(id, SEL))objc_msgSend)(ev, es) : nil) ?: @"(无)",
+                 NSStringFromClass(ev.class), (eid.length ? eid : @"(无)"),
                  ev.bounds.size.width, ev.bounds.size.height);
         }
     }
     for (NSUInteger side = 0; side < 2; side++) {
-        char *key = (side == 0) ? &kDIRecElemL : &kDIRecElemR;
-        DIAnimView *av = objc_getAssociatedObject(ev, key);
+        BOOL right = (side == 1);
+        BOOL direct = NO;
+        UIView *host = diRecHostFor(ev, right, &direct);
+        if (!host) continue;
+        CGRect slot = host.bounds;
+        if (direct) {
+            /* 只有 elementView 可用: 按系统 accessory 的真实矩形摆(左右各一格) */
+            UIView *a = nil;
+            slot = diRecSlotRect(ev, right, &a);
+            if (CGRectIsEmpty(slot)) continue;
+        }
+        DIAnimView *av = objc_getAssociatedObject(host, &kDIRecLayerOnHost);
         if (!av) {
             av = [[DIAnimView alloc] initWithFrame:CGRectZero];
             av.recMode = YES;
             av.side = (NSInteger)side;
             av.hidden = YES;
-            objc_setAssociatedObject(ev, key, av, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-            [ev addSubview:av];
+            objc_setAssociatedObject(host, &kDIRecLayerOnHost, av, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+            [host addSubview:av];
         }
-        [ev bringSubviewToFront:av];   /* 素材永远盖在原生内容之上 */
-        av.link.paused = NO;           /* 布局重申时唤醒(开关中途切换也能接上) */
+        av.recDirect = direct;
+        av.recSlot = slot;
+        av.recAcc = diRecAccFor(ev, right);
+        if (side == 0) {
+            static BOOL loggedMount;
+            if (!loggedMount) {
+                loggedMount = YES;
+                RLog(@"录屏岛图层: 挂载 左=%@ 右=%@ (岛 %.0fx%.0f 左格=%@)",
+                     NSStringFromClass(host.class),
+                     NSStringFromClass(diRecHostFor(ev, YES, NULL).class),
+                     ev.bounds.size.width, ev.bounds.size.height,
+                     NSStringFromCGRect(slot));
+            }
+        }
+        [host bringSubviewToFront:av];   /* 素材永远盖在原生内容之上 */
+        av.link.paused = NO;             /* 布局重申时唤醒(开关中途切换也能接上) */
     }
 }
 
