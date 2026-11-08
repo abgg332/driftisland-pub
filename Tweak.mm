@@ -62,7 +62,7 @@ static double expandTextY = DI_EXP_TEXT_BASE_Y;   // 上下偏移(pt, 下为正,
 static double expandTextScale = 100.0; // 文字大小(%, 100=原样)
 /* 2.8.86: 构建戳 —— 之前横幅打的是 SpringBoard 自己的 CFBundleShortVersionString(恒 1.0),
    日志里根本看不出装的是哪一版。所有诊断行都带这个戳, 下轮日志一眼定位。 */
-#define DI_BUILD_VER @"2.9.15"
+#define DI_BUILD_VER @"2.9.16"
 static BOOL gRecordingActive = NO; // 保留: 岛素材总闸条件
 static NSString *diElementId(UIView *host);
 static BOOL diMiniMusicActive(UIView *host); // 2.6.3: 前置(遮罩层使用)
@@ -555,11 +555,6 @@ static BOOL diIsScreenRecording(void) {
 /* 找方形指示岛(录屏岛)。优先取真正在屏上的那颗。 */
 static UIView *diRecIslandHost(void) {
     if (!hostTable) return nil;
-    /* 2.9.15: 不在录屏时直接返回 nil。
-       音乐岛收起后的"音频 accessory 容器"也是 37x37 的方岛, 2.9.14 的几何扫描会在它
-       里面找到 accessory 并把原生圆点 hidden 掉 —— 用户看到的就是"小岛右侧的素材
-       不显示了"(素材层没在显示, 原生层又被我们藏了)。录屏岛只在录屏时存在, 用它当判据。 */
-    if (!diIsScreenRecording()) return nil;
     UIView *found = nil, *visibleFound = nil;
     for (UIView *h in hostTable) {
         if (!h || h.isHidden || h.window == nil) continue;
@@ -573,24 +568,12 @@ static UIView *diRecIslandHost(void) {
     return visibleFound ?: found;
 }
 
-/* 在指示岛里找 accessory 容器, 返回素材应贴的矩形(相对 island 坐标系)。
-   优先用系统自带的 leadingView —— 比按类名翻 _SAUIProvidedViewContainerView 靠谱。 */
+/* 在指示岛里找 accessory 容器(_SAUIProvidedViewContainerView), 按 x 排序取最左(录屏圆点位)。
+   返回素材应贴的矩形(相对 island 坐标系); 找不到 accessory 时按实测比例回退。
+   2.9.16: 完全回到 2.8.75/2.8.78 的做法(不优先 leadingView), 与旧版一致。 */
 static CGRect diRecSlotRect(UIView *island, BOOL onRight, UIView **outAcc) {
     if (outAcc) *outAcc = nil;
     if (!island) return CGRectZero;
-    /* 2.9.15: 去掉 2.9.14 的"按 x 排序取最左 accessory" —— 两颗 accessory 常常分属
-       leading/trailing 两个容器, frame 的参照系不同, 排序结果不可靠, 会把素材和
-       要被隐藏的原生层对到不同位置。回到 leadingView / trailingView 优先。 */
-    SEL asel = NSSelectorFromString(onRight ? @"trailingView" : @"leadingView");
-    if ([island respondsToSelector:asel]) {
-        UIView *acc = ((id (*)(id, SEL))objc_msgSend)(island, asel);
-        if ([acc isKindOfClass:UIView.class] && acc.window
-            && acc.bounds.size.width > 1 && acc.bounds.size.height > 1) {
-            CGRect f = [island convertRect:acc.frame fromView:acc.superview];
-            if (outAcc) *outAcc = acc;
-            return f;
-        }
-    }
     NSMutableArray<UIView *> *accs = [NSMutableArray array];
     NSMutableArray<UIView *> *stack = [NSMutableArray arrayWithObject:island];
     int guard = 0;
@@ -611,15 +594,7 @@ static CGRect diRecSlotRect(UIView *island, BOOL onRight, UIView **outAcc) {
     if (outAcc) *outAcc = target;
 
     CGSize bs = island.bounds.size;
-    /* 长条(胶囊)形态: 左边圆点、右边倒计时各占一头 */
-    if (bs.width > 70.0) {
-        CGFloat d = bs.height - 10.0;
-        if (d > 26.0) d = 26.0;
-        if (d < 10.0) d = bs.height * 0.6;
-        CGFloat yy = (bs.height - d) * 0.5;
-        return onRight ? CGRectMake(bs.width - d - 8.0, yy, d, d)
-                       : CGRectMake(8.0, yy, d, d);
-    }
+    /* 实测回退几何(2.2.45 dump): 左点 accessory = {8.67, 8.67, 22, 22} */
     CGFloat accH = bs.height * 0.56, accY = bs.height * 0.22;
     CGFloat accLX = bs.width * 0.22, accW = bs.width * 0.56;
     CGFloat rightX = bs.width * 0.5;
@@ -635,22 +610,6 @@ static CGRect diRecSlotRect(UIView *island, BOOL onRight, UIView **outAcc) {
     return onRight
         ? CGRectMake(rightX, accY, MAX(bs.width - rightX, bs.width * 0.2), accH)
         : CGRectMake(accLX, accY, accW, accH);
-}
-
-/* 原生 accessory 隐藏统一入口: 显示素材时藏掉原生圆点, 恢复时还原它自己原来的 hidden 值。 */
-static char kDIRecAccOrigHidden;
-static char kRecAccLayer;   /* 2.9.14: 本轮被藏的那颗原生 accessory 层(离开录屏岛时还原) */
-static void diRecAccHidden(CALayer *l, BOOL want) {
-    if (!l) return;
-    id orig = objc_getAssociatedObject(l, &kDIRecAccOrigHidden);
-    if (want) {
-        if (!orig) objc_setAssociatedObject(l, &kDIRecAccOrigHidden, @(l.isHidden),
-                                            OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-        if (!l.hidden) l.hidden = YES;
-    } else if (orig) {
-        l.hidden = [orig boolValue];
-        objc_setAssociatedObject(l, &kDIRecAccOrigHidden, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-    }
 }
 
 /* 录屏圆圈素材路径(录屏指示器圆圈的背景视频, 独立于小岛素材) */
@@ -1195,27 +1154,30 @@ static void diDumpWindowsForVolume(void) {
         UIView *acc = nil;
         CGRect slot = (onRec ? diRecSlotRect(island, NO, &acc) : CGRectZero);
         BOOL show = enabled && recOn && diIsScreenRecording() && onRec && slot.size.width > 2;
-
-        /* 原生圆点层: 显示素材时隐藏, 隐藏素材时还原; 记住是哪一颗, 离开时能还回去 */
-        if (acc && acc.layer) {
-            diRecAccHidden(acc.layer, show);
-            if (show) objc_setAssociatedObject(self, &kRecAccLayer, acc.layer, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-            else {
-                CALayer *prev = objc_getAssociatedObject(self, &kRecAccLayer);
-                if (prev && prev != acc.layer) { diRecAccHidden(prev, NO); }
-                objc_setAssociatedObject(self, &kRecAccLayer, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        /* 2.9.16 诊断: 只在 show 翻转时打一条, 用来确认"挂上了但没显示"卡在哪一步 */
+        {
+            static int sPrevShow = -1; static CFAbsoluteTime sT;
+            CFAbsoluteTime n = CFAbsoluteTimeGetCurrent();
+            if ((int)show != sPrevShow && n - sT > 0.5) {
+                sT = n; sPrevShow = (int)show;
+                RLog(@"[录屏] show=%d 岛=%@ slot=%@ acc=%@ 本层=%@ hidden=%d 播放器=%ld",
+                     (int)show, island ? NSStringFromClass(island.class) : @"无",
+                     NSStringFromCGRect(slot),
+                     acc ? NSStringFromClass(acc.class) : @"无",
+                     NSStringFromCGRect(self.frame), (int)self.hidden,
+                     (long)self.player.timeControlStatus);
             }
         }
 
-        if (!show) {
-            /* 2.9.15: 只要不在显示, 就必须把之前藏过的原生层还回来。
-               2.9.14 只在"离开宿主"时还原, 宿主一直挂着的话原生层会一直是 hidden
-               —— 用户看到的就是那格永远空白(小岛右侧素材/录屏圆点消失)。 */
-            CALayer *prev = objc_getAssociatedObject(self, &kRecAccLayer);
-            if (prev) {
-                diRecAccHidden(prev, NO);
-                objc_setAssociatedObject(self, &kRecAccLayer, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-            }
+        /* 原生圆点层: 显示素材时隐藏, 隐藏素材时恢复(与 2.2.40 同款做法) */
+        static char kRecHiddenLayer;
+        CALayer *prevHidden = objc_getAssociatedObject(self, &kRecHiddenLayer);
+        if (show && acc && acc.layer && !acc.layer.isHidden) {
+            acc.layer.hidden = YES;
+            objc_setAssociatedObject(self, &kRecHiddenLayer, acc.layer, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        } else if (!show && prevHidden) {
+            prevHidden.hidden = NO;
+            objc_setAssociatedObject(self, &kRecHiddenLayer, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
         }
 
         if (show) {
@@ -1233,8 +1195,7 @@ static void diDumpWindowsForVolume(void) {
             if (!CATransform3DIsIdentity(self.layer.transform))
                 self.layer.transform = CATransform3DIdentity;
             NSString *want = recVideoPath();
-            /* 2.9.15: currentPath 相同但播放器已经空了(上一轮被摘下时释放)也要重新加载 */
-            if (want && (![want isEqualToString:self.currentPath] || !self.player.currentItem)) {
+            if (want && ![want isEqualToString:self.currentPath]) {
                 [self loadVideo:want];
                 DLog(@"录屏素材: 加载 %@ (slot=%@)", want.lastPathComponent, NSStringFromCGRect(slot));
             }
@@ -2581,21 +2542,9 @@ __attribute__((unused)) static BOOL diMiniMusicActive(UIView *host) {
     CALayer *pl = host.layer.presentationLayer;
     CGSize bs = pl ? pl.bounds.size : host.bounds.size;
     BOOL onRight = (self.side == 1);
-    /* 2.9.14: 左右两层改成"正方形槽 + 正圆"。
-       旧几何是 CGRectMake(0.48W, 0, 0.52W, H) —— 一个 65x37 的长方框, 素材再按
-       aspectFit 塞进去, 用户看到的就是"专辑在右侧小岛显示时变形、不是圆"(358 反馈)。
-       系统自己那颗 accessory 就是 22x22 的方槽(日志实测 @8,9 / @167,9), 所以这里
-       按同一套胶囊公式取方槽: d = min(H-10, 26), 左右各留 8pt 边距。 */
-    CGFloat d = bs.height - 10.0;
-    if (d > 26.0) d = 26.0;
-    if (d < 10.0) d = bs.height * 0.6;
-    CGFloat y = (bs.height - d) * 0.5;
-    CGRect f = onRight ? CGRectMake(bs.width - 8.0 - d, y, d, d)
-                       : CGRectMake(8.0, y, d, d);
+    CGRect f = onRight ? CGRectMake(bs.width * 0.48, 0, bs.width * 0.52, bs.height)
+                       : CGRectMake(0, 0, bs.width * 0.52, bs.height);
     if (!CGRectEqualToRect(self.frame, f)) { self.frame = f; }
-    if (fabs(self.layer.cornerRadius - d * 0.5) > 0.5) self.layer.cornerRadius = d * 0.5;
-    if (!self.clipsToBounds) self.clipsToBounds = YES;
-    /* 2.9.15: 圆槽保留, 但图片必须自己铺满圆 —— 见下面 transform 那段说明 */
     if (self.hidden) self.hidden = NO;
     CFTimeInterval now = self.link.timestamp;
     if (!_lastTS) _lastTS = now;
@@ -2619,24 +2568,14 @@ __attribute__((unused)) static BOOL diMiniMusicActive(UIView *host) {
     CGFloat dx = (CGFloat)useOx * unit * 0.04;
     CGFloat dy = (CGFloat)useOy * unit * 0.04;
     CGSize base = self.bounds.size;
-    /* 2.9.15: 图片"铺满圆槽", 缩放/平移全部走 transform, 且平移量夹在"放大后多出来的部分"以内。
-       2.9.14 改用 bounds+center 摆图, 又把视图裁成圆: 用户之前是按旧几何(半个岛宽的长方框)
-       调好的偏移, 动辄几十 pt, 换成 22pt 方槽后整张图被推到圆外, 再被裁掉 ——
-       表现就是"小岛右侧的素材完全不显示"。夹住之后图片永远盖住圆, 滑杆依旧能用。 */
-    if (fabs(_iv.bounds.size.width - base.width) > 0.5 || fabs(_iv.bounds.size.height - base.height) > 0.5
-        || fabs(_iv.center.x - base.width * 0.5) > 0.5 || fabs(_iv.center.y - base.height * 0.5) > 0.5) {
-        _iv.transform = CGAffineTransformIdentity;
-        _iv.bounds = CGRectMake(0, 0, base.width, base.height);
-        _iv.center = CGPointMake(base.width * 0.5, base.height * 0.5);
+    CGSize wantSize = CGSizeMake(base.width * k, base.height * k);
+    CGPoint wantCenter = CGPointMake(base.width * 0.5 + dx, base.height * 0.5 + dy);
+    if (fabs(_iv.bounds.size.width - wantSize.width) > 0.5 || fabs(_iv.bounds.size.height - wantSize.height) > 0.5) {
+        _iv.bounds = CGRectMake(0, 0, wantSize.width, wantSize.height);
     }
-    if (_iv.contentMode != UIViewContentModeScaleAspectFill) _iv.contentMode = UIViewContentModeScaleAspectFill;
-    CGFloat maxPanX = MAX(0.0, (base.width  * k - base.width)  * 0.5);
-    CGFloat maxPanY = MAX(0.0, (base.height * k - base.height) * 0.5);
-    dx = MAX(-maxPanX, MIN(maxPanX, dx));
-    dy = MAX(-maxPanY, MIN(maxPanY, dy));
-    CGAffineTransform tf = CGAffineTransformConcat(CGAffineTransformMakeScale(k, k),
-                                                   CGAffineTransformMakeTranslation(dx, dy));
-    if (!CGAffineTransformEqualToTransform(_iv.transform, tf)) _iv.transform = tf;
+    if (fabs(_iv.center.x - wantCenter.x) > 0.3 || fabs(_iv.center.y - wantCenter.y) > 0.3) {
+        _iv.center = wantCenter;
+    }
     } @catch (NSException *e) { DLog(@"stepMini 异常(已忽略): %@", e); }
 }
 
@@ -6082,24 +6021,10 @@ static void updateSingleVideo(UIWindow *win) {
             objc_setAssociatedObject(win, &kWinVideoRec, recV, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
         }
         UIView *recHost = enabled ? diRecIslandHost() : nil;
-        /* 2.9.15: 会话边界改用"录屏指示岛出现/消失", 不再看 diIsScreenRecording()。
-           后者在启动时可能误判为 YES(359 日志 22:15:28 就打了"新一轮录屏开始"),
-           之后一直 YES, 于是真正的第二次录屏拿不到重置 → 素材层带着上一次的停机状态。 */
-        {
-            static BOOL sPrevIsland;
-            BOOL islandNow = (recHost != nil);
-            if (islandNow && !sPrevIsland) {
-                [recV removeFromSuperview];
-                recV.hidden = YES;
-                recV.currentPath = nil;
-                DLog(@"录屏素材: 新一轮录屏开始, 重置素材层");
-            }
-            sPrevIsland = islandNow;
-        }
         if (recHost && recHost.window == win) {
             if (recV.superview != recHost) {
                 [recV removeFromSuperview];
-                /* 垫到指示岛最底层: 原生圆点靠"隐藏它的 layer"让位, 不依赖层级 */
+                /* 2.2.56: 垫到指示岛最底层(原生圆点靠"隐藏它的 layer"让位, 不依赖层级) */
                 [recHost insertSubview:recV atIndex:0];
                 recHost.clipsToBounds = NO;
                 static BOOL loggedMount;
@@ -6114,14 +6039,6 @@ static void updateSingleVideo(UIWindow *win) {
         } else if (recV.superview) {
             [recV removeFromSuperview];
             recV.hidden = YES;
-            /* 2.9.14: 离开录屏岛时把被我们藏起来的原生圆点还回去 —— 2.9.13 漏了这一步,
-               第二轮录屏原生圆点一直是隐藏状态, 看起来就像"素材不见了"。 */
-            CALayer *prev = objc_getAssociatedObject(recV, &kRecAccLayer);
-            if (prev) {
-                diRecAccHidden(prev, NO);
-                objc_setAssociatedObject(recV, &kRecAccLayer, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-            }
-            recV.currentPath = nil;
         }
     }
 
