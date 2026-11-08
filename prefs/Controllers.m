@@ -18,7 +18,7 @@
 
 static NSString *const kDomain = @"com.abgg332.driftisland";
 /* 2.6.25: 设置页底部显示的版本号 */
-static NSString *const DI_VERSION_STR = @"2.8.99";
+static NSString *const DI_VERSION_STR = @"2.8.100";
 /* 2.6.10: 专辑光晕遮罩 —— 与 Tweak 侧 DIAlbumMask.h 保持一致 */
 static NSString *const kDIAlbumMaskKey = @"diAlbumMaskAsset";
 static NSString *const kDIMaskRoot = @"/var/mobile/灵动岛/遮罩素材";
@@ -5217,9 +5217,9 @@ static void diOpenHomeBarPickWindow(void) {
 
     /* ---- 左侧: 录屏圆点那一格 ---- */
     [specs addObject:[self groupSpec:@"左侧图层(录屏圆点)"
-        footer:@"显示逻辑: 系统录屏中、且这里「启用帧率」打开、素材目录里有帧时才出现。\n"
-               @"显示图层: 序列帧贴在录屏岛左格(原生录屏圆点那一格)上。\n"
-               @"用处效果: 一打开就替换掉原生圆点并显示你的素材; 全关即完全原生。"]];
+        footer:@"显示逻辑: 只在系统录屏时那颗岛上出现(靠左有一颗小红点才算), 通知、充电、人脸、录屏停止提示等其他岛一律不显示。\n"
+               @"显示图层: 序列帧贴在录屏岛左格(原生录屏圆点那一格)上, 打开就把原生圆点盖住。\n"
+               @"用处效果: 打开「启用帧率」= 盖住原生 + 显示你的素材, 不用再单独开隐藏开关; 全关即完全原生。"]];
     [specs addObject:[self switchSpec:@"启用帧率" key:@"recLeftOn" def:@NO]];
     [specs addObject:[self numSlider:@"帧率速度" key:@"recLeftFPS" def:50 mn:10 mx:200]];
     [specs addObject:[self numSlider:@"素材大小" key:@"recLeftScale" def:0 mn:-20 mx:20]];
@@ -5228,13 +5228,12 @@ static void diOpenHomeBarPickWindow(void) {
     PSSpecifier *nameL = [PSSpecifier preferenceSpecifierNamed:@"素材名称" target:self
         set:NULL get:@selector(readRecLeftName:) detail:[DIFrameFoldersRecL class] cell:PSLinkCell edit:nil];
     [specs addObject:nameL];
-    [specs addObject:[self switchSpec:@"隐藏录屏圆点" key:@"recHideDot" def:@NO]];
 
     /* ---- 右侧: 倒计时那一格 ---- */
     [specs addObject:[self groupSpec:@"右侧图层(倒计时 321)"
-        footer:@"显示逻辑: 系统录屏中、且这里「启用帧率」打开、素材目录里有帧时才出现。\n"
-               @"显示图层: 序列帧贴在录屏岛右格(原生 321 倒计时那一格)上。\n"
-               @"用处效果: 一打开就替换掉原生倒计时并显示你的素材; 全关即完全原生。"]];
+        footer:@"显示逻辑: 只在系统录屏时那颗岛上出现, 与左边同一颗岛的右格; 其他岛不显示。\n"
+               @"显示图层: 序列帧贴在录屏岛右格(原生 321 倒计时那一格)上, 打开就把原生倒计时盖住。\n"
+               @"用处效果: 打开「启用帧率」= 盖住原生 + 显示你的素材, 不用再单独开隐藏开关; 全关即完全原生。"]];
     [specs addObject:[self switchSpec:@"启用帧率" key:@"recRightOn" def:@NO]];
     [specs addObject:[self numSlider:@"帧率速度" key:@"recRightFPS" def:50 mn:10 mx:200]];
     [specs addObject:[self numSlider:@"素材大小" key:@"recRightScale" def:0 mn:-20 mx:20]];
@@ -5243,7 +5242,6 @@ static void diOpenHomeBarPickWindow(void) {
     PSSpecifier *nameR = [PSSpecifier preferenceSpecifierNamed:@"素材名称" target:self
         set:NULL get:@selector(readRecRightName:) detail:[DIFrameFoldersRecR class] cell:PSLinkCell edit:nil];
     [specs addObject:nameR];
-    [specs addObject:[self switchSpec:@"隐藏倒计时" key:@"recHideCount" def:@NO]];
     return specs;
 }
 @end
