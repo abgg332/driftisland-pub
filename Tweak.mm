@@ -13387,10 +13387,16 @@ static void diRhythmTick(void) {
     static CFAbsoluteTime lastLog;
     if (now - lastLog > 10.0) {
         lastLog = now;
+        NSMutableString *lst = [NSMutableString string];
+        for (UIView *a in alive) {
+            DIRhyView *vv = objc_getAssociatedObject(a, &kDIRhyViewKey);
+            [lst appendFormat:@" %@@%.0f%@|", NSStringFromClass(a.class),
+                MIN(a.bounds.size.width, a.bounds.size.height), vv ? @"+" : @"-"];
+        }
         diMruFileLog([NSString stringWithFormat:
-            @"[律动] 帧=%d 低=%.2f 中=%.2f 高=%.2f 年龄=%.1fs 视图=%lu 粒子=%d",
+            @"[律动] 帧=%d 低=%.2f 中=%.2f 高=%.2f 年龄=%.1fs 视图=%lu 粒子=%d 列表:%@",
             gRhy.frames, gRhy.bass, gRhy.mid, gRhy.high, (double)age,
-            (unsigned long)alive.count, cnt]);
+            (unsigned long)alive.count, cnt, lst]);
     }
 }
 /* 2.9.6: NSTimer 换成 CADisplayLink。
