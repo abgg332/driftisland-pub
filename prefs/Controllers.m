@@ -18,7 +18,7 @@
 
 static NSString *const kDomain = @"com.abgg332.driftisland";
 /* 2.6.25: 设置页底部显示的版本号 */
-static NSString *const DI_VERSION_STR = @"2.9.5";
+static NSString *const DI_VERSION_STR = @"2.9.6";
 /* 2.6.10: 专辑光晕遮罩 —— 与 Tweak 侧 DIAlbumMask.h 保持一致 */
 static NSString *const kDIAlbumMaskKey = @"diAlbumMaskAsset";
 static NSString *const kDIMaskRoot = @"/var/mobile/灵动岛/遮罩素材";
@@ -754,8 +754,9 @@ static Class diStepSliderClass(void) {
 @interface DICCSettings : DIMiniBaseController @end
 /* 2.8.87: 展开定义 —— 遮罩素材下面的二级页(位置/大小/颜色) */
 @interface DIExpandDefinePage : DIMiniBaseController @end
-/* 2.9.5: 专辑律动(粒子 + 鼓点震动) */
-@interface DIRhythmPage : DIMiniBaseController
+/* 2.9.5: 专辑律动(粒子 + 鼓点震动)
+   2.9.6: 颜色改成系统取色器(一行入口), 不再摆一排色块 + 三条滑杆 */
+@interface DIRhythmPage : DIMiniBaseController <UIColorPickerViewControllerDelegate>
 @end
 @interface DIFrameFoldersMask : DIFrameFolders @end /* 2.6.3: 遮罩素材选择(键 maskAnimFolder) */
 @interface DIFrameFoldersMini : DIFrameFolders @end  /* 左侧(mini)帧率素材选择(键 smallAnimFolder) */
@@ -5171,24 +5172,10 @@ static void diOpenHomeBarPickWindow(void) {
 @end
 
 /* ===== 2.9.5: 专辑律动 =====
-   数据链: MediaRemoteUI 内的系统 FFT(见 Tweak.mm diRhythmInstall)
-           → <MRU 容器>/spectrum.plist
-           → SpringBoard 心跳转写 /var/mobile/灵动岛/rhythm.plist(设置页能读)
-   效果: 小岛 / 岛展开 / 锁屏卡片的封面外圈飘几何粒子, 封面本身跟着鼓点轻微缩放。
+   数据链: MediaRemoteUI 内的系统 FFT(见 Tweak.mm diRhythmInstall)。
+   效果: 小岛 / 岛展开 / 锁屏卡片的封面外圈飘几何粒子, 封面本身跟着鼓点缩放。
    点开专辑后的全屏大封面不挂(会拖死锁屏)。 */
 @implementation DIRhythmPage
-
-/* 预设色: 名称 + RGB(0~255) */
-static NSArray *diRhyPresets(void) {
-    return @[@[@"白", @255, @255, @255],
-             @[@"青", @90, @235, @255],
-             @[@"粉", @255, @120, @200],
-             @[@"金", @255, @205, @90],
-             @[@"紫", @175, @130, @255],
-             @[@"绿", @120, @255, @170],
-             @[@"橙", @255, @150, @70],
-             @[@"蓝", @110, @160, @255]];
-}
 
 static void diSetNum(NSString *key, double v) {
     CFPreferencesSetAppValue((__bridge CFStringRef)key, (__bridge CFPropertyListRef)@(v),
@@ -5202,25 +5189,68 @@ static double diGetNum(NSString *key, double def) {
     return [v respondsToSelector:@selector(doubleValue)] ? [v doubleValue] : def;
 }
 
-- (void)pickPreset:(PSSpecifier *)sp {
-    NSArray *rgb = [sp propertyForKey:@"diRGB"];
-    if (rgb.count != 3) return;
-    diSetNum(@"rhyR", [rgb[0] doubleValue]);
-    diSetNum(@"rhyG", [rgb[1] doubleValue]);
-    diSetNum(@"rhyB", [rgb[2] doubleValue]);
-    diSetNum(@"rhyTint", 0);          /* 点了色块就是"不跟封面" */
-    CFPreferencesAppSynchronize((__bridge CFStringRef)kDomain);
-    postReload();
-    [self reloadSpecifiers];
+- (void)diRGBA:(CGFloat *)out {
+    out[0] = (CGFloat)(diGetNum(@"rhyR", 255) / 255.0);
+    out[1] = (CGFloat)(diGetNum(@"rhyG", 255) / 255.0);
+    out[2] = (CGFloat)(diGetNum(@"rhyB", 255) / 255.0);
 }
 
 - (NSString *)colorHexText {
+    if (diGetNum(@"rhyTint", 1) > 0.5) return @"当前: 跟随封面取色";
     int r = (int)lrint(diGetNum(@"rhyR", 255));
     int g = (int)lrint(diGetNum(@"rhyG", 255));
     int b = (int)lrint(diGetNum(@"rhyB", 255));
-    BOOL follow = diGetNum(@"rhyTint", 1) > 0.5;
-    if (follow) return @"当前: 跟随封面取色";
-    return [NSString stringWithFormat:@"当前: #%02X%02X%02X  (R%d G%d B%d)", r, g, b, r, g, b];
+    return [NSString stringWithFormat:@"当前: #%02X%02X%02X", r, g, b];
+}
+
+- (NSString *)colorRowTitle {
+    int r = (int)lrint(diGetNum(@"rhyR", 255));
+    int g = (int)lrint(diGetNum(@"rhyG", 255));
+    int b = (int)lrint(diGetNum(@"rhyB", 255));
+    return [NSString stringWithFormat:@"自定义颜色     #%02X%02X%02X", r, g, b];
+}
+
+- (void)applyPickedColor:(UIColor *)color {
+    if (!color) return;
+    CGFloat r = 1, g = 1, b = 1, a = 1;
+    if (![color getRed:&r green:&g blue:&b alpha:&a]) {
+        CGFloat w = 0;
+        if ([color getWhite:&w alpha:&a]) { r = g = b = w; }
+    }
+    diSetNum(@"rhyR", round(r * 255.0));
+    diSetNum(@"rhyG", round(g * 255.0));
+    diSetNum(@"rhyB", round(b * 255.0));
+    diSetNum(@"rhyTint", 0);          /* 选了自定义色 = 不跟封面 */
+    CFPreferencesAppSynchronize((__bridge CFStringRef)kDomain);
+    postReload();
+}
+
+- (void)openColorPicker:(PSSpecifier *)sp {
+    if (@available(iOS 14.0, *)) {
+        UIColorPickerViewController *p = [UIColorPickerViewController new];
+        CGFloat c[3]; [self diRGBA:c];
+        p.selectedColor = [UIColor colorWithRed:c[0] green:c[1] blue:c[2] alpha:1.0];
+        p.supportsAlpha = NO;
+        p.delegate = self;
+        [self presentViewController:p animated:YES completion:nil];
+    }
+}
+
+- (void)colorPickerViewController:(UIColorPickerViewController *)vc
+                   didSelectColor:(UIColor *)color
+                     continuously:(BOOL)continuously API_AVAILABLE(ios(15.0)) {
+    /* 拖色轮时连续回调 —— 0.2 秒写一次, 页面能实时跟着变又不把 cfprefsd 顶死 */
+    static CFAbsoluteTime last;
+    CFAbsoluteTime now = CFAbsoluteTimeGetCurrent();
+    if (continuously && now - last < 0.2) return;
+    last = now;
+    [self applyPickedColor:color];
+}
+
+- (void)colorPickerViewControllerDidFinish:(UIColorPickerViewController *)vc API_AVAILABLE(ios(15.0)) {
+    [self applyPickedColor:vc.selectedColor];
+    [self dismissViewControllerAnimated:YES completion:nil];
+    [self reloadSpecifiers];
 }
 
 - (NSArray *)buildSpecifiers {
@@ -5228,8 +5258,8 @@ static double diGetNum(NSString *key, double def) {
 
     [specs addObject:[self groupSpec:@"专辑律动"
         footer:@"取的是系统自己算好的频谱(MediaRemoteUI 内), 不抓录音、不额外解码。\n"
-               @"作用位置: 小岛封面、岛展开封面、锁屏播放器卡片封面。点开专辑后的全屏大封面不生效(会卡)。\n"
-               @"每记鼓点(低频上冲)封面会轻微放大回弹一次, 同时外圈粒子被震散一下。"]];
+               @"作用位置: 小岛封面、岛展开封面、锁屏播放器卡片封面。点开专辑后的全屏大封面不生效。\n"
+               @"每记鼓点(低频上冲)封面会放大→回弹→缩一点→归位, 同时外圈粒子被震散一下。"]];
 
     [specs addObject:[self switchSpec:@"启用律动" key:@"rhyOn" def:@NO]];
     [specs addObject:[self switchSpec:@"粒子" key:@"rhyDots" def:@YES]];
@@ -5238,14 +5268,7 @@ static double diGetNum(NSString *key, double def) {
 
     [specs addObject:[self groupSpec:@"颜色" footer:[self colorHexText]]];
     [specs addObject:[self switchSpec:@"跟随封面颜色" key:@"rhyTint" def:@YES]];
-    for (NSArray *p in diRhyPresets()) {
-        PSSpecifier *sp = [self buttonSpec:p[0] action:@selector(pickPreset:)];
-        [sp setProperty:@[p[1], p[2], p[3]] forKey:@"diRGB"];
-        [specs addObject:sp];
-    }
-    [specs addObject:[self numSlider:@"自定义 红" key:@"rhyR" def:255 mn:0 mx:255]];
-    [specs addObject:[self numSlider:@"自定义 绿" key:@"rhyG" def:255 mn:0 mx:255]];
-    [specs addObject:[self numSlider:@"自定义 蓝" key:@"rhyB" def:255 mn:0 mx:255]];
+    [specs addObject:[self buttonSpec:[self colorRowTitle] action:@selector(openColorPicker:)]];
 
     return specs;
 }

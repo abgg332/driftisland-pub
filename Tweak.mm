@@ -73,7 +73,7 @@ static double expandTextY = DI_EXP_TEXT_BASE_Y;   // 上下偏移(pt, 下为正,
 static double expandTextScale = 100.0; // 文字大小(%, 100=原样)
 /* 2.8.86: 构建戳 —— 之前横幅打的是 SpringBoard 自己的 CFBundleShortVersionString(恒 1.0),
    日志里根本看不出装的是哪一版。所有诊断行都带这个戳, 下轮日志一眼定位。 */
-#define DI_BUILD_VER @"2.9.5"
+#define DI_BUILD_VER @"2.9.6"
 static BOOL gRecordingActive = NO; // 保留: 岛素材总闸条件
 static NSString *diElementId(UIView *host);
 static BOOL diMiniMusicActive(UIView *host); // 2.6.3: 前置(遮罩层使用)
@@ -12192,12 +12192,25 @@ static void diMruFileLog(NSString *line) {
         }
     });
     if (!gDiMruLogPath) return;
-    NSDateFormatter *df = [NSDateFormatter new];
-    df.dateFormat = @"yyyy-MM-dd HH:mm:ss";
+    /* 2.9.6: 原来每行都 new 一个 NSDateFormatter, 再 open/seek/write/close 一次文件。
+       MRU 里日志是热路径(每帧都可能写), 这套下来本身就是卡顿源。改成只建一次。 */
+    static NSDateFormatter *df;
+    static dispatch_once_t dfOnce;
+    dispatch_once(&dfOnce, ^{
+        df = [NSDateFormatter new];
+        df.dateFormat = @"yyyy-MM-dd HH:mm:ss";
+    });
+    static NSFileHandle *fh;
+    static NSString *fhPath;
+    if (!fh || fhPath != gDiMruLogPath) {
+        fh = [NSFileHandle fileHandleForWritingAtPath:gDiMruLogPath];
+        fhPath = gDiMruLogPath;
+        if (fh) [fh seekToEndOfFile];
+    }
     NSString *out = [NSString stringWithFormat:@"[%@] [MRU] %@\n", [df stringFromDate:[NSDate date]], line];
-    NSFileHandle *h = [NSFileHandle fileHandleForWritingAtPath:gDiMruLogPath];
-    if (!h) { [out writeToFile:gDiMruLogPath atomically:YES encoding:NSUTF8StringEncoding error:NULL]; return; }
-    [h seekToEndOfFile]; [h writeData:[out dataUsingEncoding:NSUTF8StringEncoding]]; [h closeFile];
+    NSData *data = [out dataUsingEncoding:NSUTF8StringEncoding];
+    if (!fh) { [data writeToFile:gDiMruLogPath atomically:YES]; return; }
+    @try { [fh writeData:data]; } @catch (__unused NSException *e) { fh = nil; }
 }
 static void diMruReport(NSString *tag, NSString *detail) {
     /* 同 tag 3 秒内只报一次 —— 这些函数在每帧布局里被调用, 不能刷屏 */
@@ -12735,9 +12748,11 @@ static BOOL diRhyScalarFrom(id o, float *out) {
     return NO;
 }
 
+static NSMutableDictionary<NSString *, NSNumber *> *gRhyMiss;
+
 static void diRhyDumpObj(id o) {
     static int dumped;
-    if (dumped >= 2 || !o) return;
+    if (dumped >= 1 || !o) return;                 /* 只在第一次失败时打一份 */
     dumped++;
     NSMutableString *b = [NSMutableString string];
     NSString *desc = [o description] ?: @"";
@@ -12759,6 +12774,11 @@ static int diRhyFeedObject(id o) {
     if (!o) return 0;
     /* 极低地址不可能是对象 —— 万一某个 setter 传的是结构体, 这里直接放弃, 不去解引用 */
     if ((uintptr_t)(__bridge void *)o < 0x10000) return 0;
+    /* 2.9.6: setter 传进来的很多是 UIImage/配置对象, 每次都把它整个 ivar 表翻一遍
+       (class_copyIvarList + 逐层父类) 是纯浪费。同一个类失败过一次, 8 秒内不再碰。 */
+    NSString *cn = NSStringFromClass([o class]);
+    NSNumber *missT = gRhyMiss[cn];
+    if (missT && CFAbsoluteTimeGetCurrent() - missT.doubleValue < 8.0) return 0;
     int n = diRhyFloatsFrom(o, gRhyScratch, DI_RHY_SCRATCH);
     if (n >= 4) {
         if (n >= 48) diRhyFeedFFT(gRhyScratch, (NSUInteger)n, 0);
@@ -12779,6 +12799,9 @@ static int diRhyFeedObject(id o) {
         gRhySrc = [NSString stringWithFormat:@"%@/标量", NSStringFromClass([o class])];
         return 1;
     }
+    if (!gRhyMiss) gRhyMiss = [NSMutableDictionary dictionary];
+    if (gRhyMiss.count > 40) [gRhyMiss removeAllObjects];
+    gRhyMiss[cn] = @(CFAbsoluteTimeGetCurrent());
     diRhyDumpObj(o);
     return 0;
 }
@@ -12967,7 +12990,7 @@ static CGPathRef diRhyBitPath(DIRhyBit kind, CGFloat sz) {
             [_bits addObject:b];
             _kind[i] = (NSInteger)(i % 5);
             _ang[i] = (CGFloat)(i * 137 % 360) / 57.2958;
-            _rad[i] = 1.28 + 0.46 * ((i * 41 % 100) / 100.0);   /* 外飘终点(倍封面半径) */
+            _rad[i] = 1.44 + 0.62 * ((i * 41 % 100) / 100.0);   /* 外飘终点(倍封面半径) */
             _ph[i] = (CGFloat)(i * 23 % 100) / 100.0;
             _dur[i] = 2.4 + 2.0 * ((i * 31 % 100) / 100.0);
             _spin[i] = (CGFloat)(i * 71 % 360) / 57.2958;
@@ -13010,9 +13033,11 @@ static CGPathRef diRhyBitPath(DIRhyBit kind, CGFloat sz) {
     [CATransaction setDisableActions:YES];
     for (int i = 0; i < DI_RHY_DOTS_MAX; i++) {
         CAShapeLayer *l = _bits[i];
-        CGFloat sz = MAX(2.5, _sz[i] * MAX(6.0, self.coverR));
+        /* 23pt 的小岛封面按比例算只有 2pt, 等于看不见 —— 给一个绝对下限 */
+        CGFloat base = MAX(4.4, self.coverR * 0.20);
+        CGFloat sz = MAX(3.6, base * (0.72 + 0.56 * ((CGFloat)(i * 53 % 100) / 100.0)));
         l.bounds = CGRectMake(0, 0, sz, sz);
-        l.lineWidth = MAX(1.0, self.coverR * 0.062);
+        l.lineWidth = MAX(1.25, self.coverR * 0.065);
         CGPathRef p = diRhyBitPath((DIRhyBit)_kind[i], sz);
         l.path = p;
         CGPathRelease(p);
@@ -13031,8 +13056,6 @@ static CGPathRef diRhyBitPath(DIRhyBit kind, CGFloat sz) {
     CGFloat now = (CGFloat)CFAbsoluteTimeGetCurrent();
     CGFloat capR = (_side * 0.5) / MAX(coverR, 1.0);
 
-    [CATransaction begin];
-    [CATransaction setDisableActions:YES];
     for (int i = 0; i < DI_RHY_DOTS_MAX; i++) {
         CAShapeLayer *l = _bits[i];
         if (i >= cnt) { l.opacity = 0; continue; }
@@ -13042,8 +13065,12 @@ static CGPathRef diRhyBitPath(DIRhyBit kind, CGFloat sz) {
             _ang[i] += 0.9 + ((CGFloat)(i * 37 % 100) / 100.0) * 1.4;
         }
         CGFloat ph = _ph[i];
-        CGFloat edge = 1.045 + 0.10 * kick;                       /* 出生: 贴着封面边 */
-        CGFloat end = MIN(_rad[i] + 0.10 * kick, capR - 0.03);
+        /* 找到的宿主如果只比封面大一点点, 外圈没地方画 —— 退到封面内部绕,
+           总比整颗都不显示强(小岛经常会退化成这种) */
+        BOOL inner = (capR < 1.30);
+        CGFloat edge = inner ? 0.34 : (1.05 + 0.12 * kick);
+        CGFloat endMax = inner ? 0.94 : (capR - 0.03);
+        CGFloat end = MIN(_rad[i] * (inner ? 0.46 : 1.0) + 0.12 * kick, endMax);
         if (end < edge + 0.05) { l.opacity = 0; continue; }
         CGFloat frac = edge + (end - edge) * ph;
         CGFloat rr = coverR * frac;
@@ -13054,7 +13081,6 @@ static CGPathRef diRhyBitPath(DIRhyBit kind, CGFloat sz) {
         l.transform = CATransform3DScale(
             CATransform3DMakeRotation(_spin[i] + now * 0.40, 0, 0, 1), sc, sc, 1);
     }
-    [CATransaction commit];
 }
 @end
 
@@ -13146,7 +13172,7 @@ static void diRhythmApply(UIView *artwork) {
             && p.bounds.size.height >= as.height * 1.25) { host = p; break; }
         probe = p;
     }
-    if (host != artwork && !host.window) host = artwork;
+    if (host != artwork && !host.window && !host.superview) host = artwork;
 
     CGFloat coverR = side * 0.5;
     CGFloat wantR = coverR * 1.78;
@@ -13206,10 +13232,7 @@ static void diRhythmShake(UIView *v, CGFloat kick) {
         if (bv) {
             CATransform3D base = CATransform3DIdentity;
             [bv getValue:&base];
-            [CATransaction begin];
-            [CATransaction setDisableActions:YES];
             v.layer.transform = base;
-            [CATransaction commit];
             objc_setAssociatedObject(v, &kDIRhyBaseKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
         }
         return;
@@ -13224,13 +13247,10 @@ static void diRhythmShake(UIView *v, CGFloat kick) {
     }
     CGFloat side = MIN(v.bounds.size.width, v.bounds.size.height);
     /* 小封面按比例给大一点, 否则 23pt 的岛放大 4% 只有 1pt, 看不出来 */
-    CGFloat amp = side < 40 ? 0.11 : (side < 90 ? 0.075 : 0.05);
+    CGFloat amp = side < 40 ? 0.20 : (side < 90 ? 0.13 : 0.09);
     amp *= (CGFloat)(gRhyKickAmt / 100.0);
     CGFloat s = 1.0 + amp * kick;
-    [CATransaction begin];
-    [CATransaction setDisableActions:YES];
     v.layer.transform = CATransform3DScale(base, s, s, 1.0);
-    [CATransaction commit];
 }
 
 /* 心跳: 挂载 + 渲染 + 安装重试。30fps, 只有 gRhyOn 打开才做实际工作。 */
@@ -13265,6 +13285,7 @@ static void diRhyScanWindows(void) {
 #pragma clang diagnostic pop
     } @catch (__unused NSException *e) {}
 }
+static CADisplayLink *gRhyLink;
 /* 2.9.5: 心跳只做三件事 —— 挂层(0.25s)、鼓点震动(每帧)、粒子推进(每帧)。
    没有任何每帧的全树遍历, 也没有每帧取封面图。 */
 static BOOL diRhySideOK(UIView *a) {
@@ -13291,25 +13312,38 @@ static void diRhythmTick(void) {
         for (UIView *a in gDIActivityArtworks.allObjects) { diRhyDrop(a); diRhythmShake(a, 0); }
         return;
     }
-    if (now - gRhyLastScan > 2.5) { gRhyLastScan = now; diRhyScanWindows(); }
+    /* 2.9.6: 全树扫描只在"一个可用视图都没有"时才做 —— 原来每 2.5 秒固定扫 800 节点,
+       下拉锁屏正好是布局最忙的时候, 这一下就是一次可感知的顿。 */
+    if (!gRhyArtworks) gRhyArtworks = [NSHashTable weakObjectsHashTable];
+    {
+        BOOL anyAlive = NO;
+        for (UIView *a in gRhyArtworks.allObjects) if (a.window || a.superview) { anyAlive = YES; break; }
+        if (!anyAlive && now - gRhyLastScan > 3.0) { gRhyLastScan = now; diRhyScanWindows(); }
+    }
 
     /* 数据超过 1.2 秒没更新 = 音乐停了 / 系统没在算频谱 */
     CGFloat age = gRhy.stamp > 0 ? (CGFloat)(now - gRhy.stamp) : 99;
     CGFloat target = age < 1.2 ? (CGFloat)gRhy.energy : 0;
     CGFloat rawBass = age < 1.2 ? (CGFloat)gRhy.bass : 0;
 
-    /* ---- 鼓点: 低频突然上冲。用原始值抓上升沿, 平滑值抓不到瞬态 ---- */
-    static CGFloat sPrevBass, sKick, sLv;
-    static CFAbsoluteTime sLastKick;
-    if (rawBass - sPrevBass > 0.05 && rawBass > 0.14 && now - sLastKick > 0.11) {
-        sKick = 1.0;
+    /* ---- 鼓点: 低频突然上冲。用原始值抓上升沿, 平滑值抓不到瞬态 ----
+       2.9.6: 冲击曲线从"跳上去再指数落回"改成带过冲的阻尼振荡:
+       放大 -> 迅速回零 -> 缩一点 -> 弹回 -> 衰减。这样才有"震一下"的手感,
+       单段衰减看起来就是死板地涨缩一次。 */
+    static CGFloat sPrevBass, sLv;
+    static CFAbsoluteTime sLastKick = -1;
+    if (rawBass - sPrevBass > 0.045 && rawBass > 0.12 && now - sLastKick > 0.13) {
         sLastKick = now;
     }
     sPrevBass = rawBass;
-    sKick *= 0.775;                                  /* 30fps 下约 0.13s 衰到 37% */
+    CGFloat tau = sLastKick > 0 ? (CGFloat)(now - sLastKick) : 99.0;
+    CGFloat kick = 0.0;
+    if (tau < 0.52) {
+        kick = (CGFloat)(exp(-(double)tau * 7.0) * cos((double)tau * 24.0));
+        if (kick < -0.42) kick = -0.42;
+        if (kick > 1.0) kick = 1.0;
+    }
     sLv += (target - sLv) * 0.25;
-
-    if (!gRhyArtworks) gRhyArtworks = [NSHashTable weakObjectsHashTable];
 
     /* 挂载/更新: 0.25 秒一次就够, frame 不会跳 */
     static CFAbsoluteTime lastApply;
@@ -13317,22 +13351,36 @@ static void diRhythmTick(void) {
     if (doApply) lastApply = now;
 
     NSMutableArray<UIView *> *alive = [NSMutableArray array];
-    for (UIView *a in gRhyArtworks.allObjects) if (a.window) [alive addObject:a];
+    for (UIView *a in gRhyArtworks.allObjects) if (a.window || a.superview) [alive addObject:a];
     if (gDIActivityArtworks) for (UIView *a in gDIActivityArtworks.allObjects)
-        if (a.window && ![alive containsObject:a]) [alive addObject:a];
+        if ((a.window || a.superview) && ![alive containsObject:a]) [alive addObject:a];
 
     CGFloat lv = sLv;
-    CGFloat kick = sKick;
     CGFloat dt = 1.0 / 30.0;
+    BOOL active = (age < 1.2) || (tau < 0.52);
     int cnt = gRhyDotsN;
 
     for (UIView *a in alive) {
-        BOOL ok = diRhySideOK(a);
-        if (!ok) { diRhyDrop(a); continue; }
-        if (doApply) diRhythmApply(a);
+        if (!diRhySideOK(a)) diRhyDrop(a);
+        else if (doApply) diRhythmApply(a);
+    }
+    /* 2.9.6: 所有视图的所有属性写进同一个事务。原来是每个视图/每个方法各开一次
+       CATransaction, 一帧 6~8 次提交, 下拉锁屏时这些提交会和系统动画抢主线程。 */
+    [CATransaction begin];
+    [CATransaction setDisableActions:YES];
+    for (UIView *a in alive) {
+        if (!diRhySideOK(a)) continue;
         diRhythmShake(a, kick);
         DIRhyView *v = objc_getAssociatedObject(a, &kDIRhyViewKey);
         if (v) [v applyKick:kick lv:lv dt:dt count:cnt];
+    }
+    [CATransaction commit];
+
+    /* 2.9.6: 没音乐又没鼓点时降到 15fps —— 粒子还在飘, 但 CPU 直接砍一半 */
+    if (gRhyLink) {
+        NSInteger fps = active ? 30 : 15;
+        if (@available(iOS 15.0, *)) gRhyLink.preferredFrameRateRange = CAFrameRateRangeMake(fps, fps, fps);
+        else gRhyLink.preferredFramesPerSecond = fps;
     }
 
     /* 诊断: 10 秒一条 */
@@ -13345,17 +13393,33 @@ static void diRhythmTick(void) {
             (unsigned long)alive.count, cnt]);
     }
 }
-static NSTimer *gRhyTimer;
+/* 2.9.6: NSTimer 换成 CADisplayLink。
+   NSTimer 在手势/下拉锁屏时会和渲染不同步, 掉帧后积压的 tick 还会连着补跑;
+   displayLink 跟着屏幕刷新走, 掉帧直接跳过, 不会把主线程越堵越多。 */
+@interface DIRhyPulse : NSObject
+@end
+@implementation DIRhyPulse
+- (void)fire:(CADisplayLink *)link {
+    static CFTimeInterval lastT;
+    CFTimeInterval t = link.timestamp;
+    if (lastT > 0 && (t - lastT) < (1.0 / 45.0)) return;   /* 上限 45fps */
+    lastT = t;
+    @try { diRhythmTick(); } @catch (__unused NSException *e) {}
+}
+@end
+
 static void diRhythmStart(void) {
     static BOOL started;
     if (started) return;
     started = YES;
     diRhythmInstall();
     diRhyParams();
-    gRhyTimer = [NSTimer scheduledTimerWithTimeInterval:1.0 / 30.0 repeats:YES block:^(NSTimer *t) {
-        @try { diRhythmTick(); } @catch (__unused NSException *e) {}
-    }];
-    [[NSRunLoop mainRunLoop] addTimer:gRhyTimer forMode:NSRunLoopCommonModes];
+    static DIRhyPulse *pulse;
+    pulse = [DIRhyPulse new];
+    gRhyLink = [CADisplayLink displayLinkWithTarget:pulse selector:@selector(fire:)];
+    if (@available(iOS 15.0, *)) gRhyLink.preferredFrameRateRange = CAFrameRateRangeMake(15, 30, 30);
+    else gRhyLink.preferredFramesPerSecond = 30;
+    [gRhyLink addToRunLoop:[NSRunLoop mainRunLoop] forMode:NSRunLoopCommonModes];
     diMruFileLog(@"[律动] 启动 版本=" DI_BUILD_VER);
 }
 
