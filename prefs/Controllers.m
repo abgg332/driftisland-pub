@@ -22,7 +22,7 @@
 
 static NSString *const kDomain = @"com.abgg332.driftisland";
 /* 2.6.25: 设置页底部显示的版本号 */
-static NSString *const DI_VERSION_STR = @"2.9.48";
+static NSString *const DI_VERSION_STR = @"2.9.49";
 /* 2.6.10: 专辑光晕遮罩 —— 与 Tweak 侧 DIAlbumMask.h 保持一致 */
 static NSString *const kDIAlbumMaskKey = @"diAlbumMaskAsset";
 static NSString *const kDIMaskRoot = @"/var/mobile/灵动岛/遮罩素材";
@@ -761,6 +761,8 @@ static Class diStepSliderClass(void) {
 /* 2.9.19: 组件隐藏(移植 RemoveWidgetBackground 1.7) */
 @interface DIWidgetHidePage : DIMiniBaseController @end
 @interface DIWidgetAppsPage : DIMiniBaseController @end
+/* 2.9.49: 播放器 —— 自定义原生(控制中心)播放器尺寸/布局 */
+@interface DIPlayerPage : DIMiniBaseController @end
 @interface DIFrameFoldersMask : DIFrameFolders @end /* 2.6.3: 遮罩素材选择(键 maskAnimFolder) */
 @interface DIFrameFoldersMini : DIFrameFolders @end  /* 左侧(mini)帧率素材选择(键 smallAnimFolder) */
 @interface DIFrameFoldersAudio : DIFrameFolders @end /* 右侧音频素材(键 miniAudioFolder) */
@@ -1441,6 +1443,8 @@ static void diWriteColors(NSArray<NSString *> *colors) {
         DI_ADD([self linkSpec:@"控制中心" detail:[DICCSettings class]]);
         /* 2.9.19: 组件隐藏 —— 按用户要求在「控制中心」下面新增入口 */
         DI_ADD([self linkSpec:@"组件隐藏" detail:[DIWidgetHidePage class]]);
+        /* 2.9.49: 播放器 —— 按用户要求在「组件隐藏」下面新增入口 */
+        DI_ADD([self linkSpec:@"播放器" detail:[DIPlayerPage class]]);
 
         _smallRow = _expandRow = -1;
         {
@@ -5560,3 +5564,54 @@ static void diwKillByComm(const char *comm) {
 @end
 
 
+
+/* ============================================================
+   2.9.49: 播放器 —— 自定义原生(控制中心)播放器尺寸/布局
+   开启后在控制中心编辑模式里把播放器拖成 4×1 或 3×2;
+   走 CCFAllowedSizesForModuleIdentifier + MRUNowPlayingView 重排
+   (借鉴 NativePlayerOriginal 的手法, 实现在 DriftIsland.dylib 内)。
+   ============================================================ */
+@implementation DIPlayerPage
+/* 分段控件行: 主页(DIPrefsController)有, 基类没有 —— 这里本地补一份(2.5.8 同款) */
+- (PSSpecifier *)segmentedSpec:(NSString *)name key:(NSString *)key
+                         titles:(NSArray *)titles values:(NSArray *)vals def:(NSString *)def {
+    PSSpecifier *s = [PSSpecifier preferenceSpecifierNamed:name target:self
+        set:@selector(setPreferenceValue:specifier:) get:@selector(readPreferenceValue:)
+        detail:nil cell:PSSegmentCell edit:nil];
+    [s setProperty:key forKey:@"key"];
+    [s setProperty:kDomain forKey:@"defaults"];
+    [s setProperty:def forKey:@"default"];
+    [s setProperty:titles forKey:@"titlesValues"];
+    [s setProperty:vals forKey:@"values"];
+    return s;
+}
+
+- (void)doRespring:(PSSpecifier *)sp {
+    notify_post("com.abgg332.driftisland.widget.respring");
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.8 * NSEC_PER_SEC)),
+                   dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
+        diwKillByComm("chronod");
+        diwKillByComm("SpringBoard");
+    });
+    UIAlertController *ac = [UIAlertController alertControllerWithTitle:@"正在注销"
+        message:@"屏幕会短暂黑一下, 等桌面回来即生效。" preferredStyle:UIAlertControllerStyleAlert];
+    [ac addAction:[UIAlertAction actionWithTitle:@"好" style:UIAlertActionStyleCancel handler:nil]];
+    [self presentViewController:ac animated:YES completion:nil];
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(2.5 * NSEC_PER_SEC)),
+                   dispatch_get_main_queue(), ^{
+        if (ac.presentingViewController) [ac dismissViewControllerAnimated:YES completion:nil];
+    });
+}
+
+- (NSArray *)buildSpecifiers {
+    NSMutableArray *specs = [NSMutableArray array];
+    [specs addObject:[self groupSpec:@"播放器"
+        footer:@"自定义控制中心原生播放器的尺寸与布局。开启后在控制中心编辑模式里, 把播放器模块拖成 4×1 或 3×2; 仅 iOS18 控制中心生效。"]];
+    [specs addObject:[self switchSpec:@"总开关" key:@"playerOn" def:@NO]];
+    [specs addObject:[self segmentedSpec:@"布局" key:@"playerSize"
+        titles:@[@"4×1", @"3×2"] values:@[@"4x1", @"3x2"] def:@"4x1"]];
+    [specs addObject:[self groupSpec:nil footer:nil]];
+    [specs addObject:[self buttonSpec:@"注销生效" action:@selector(doRespring:)]];
+    return specs;
+}
+@end

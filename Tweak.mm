@@ -62,7 +62,7 @@ static double expandTextY = DI_EXP_TEXT_BASE_Y;   // 上下偏移(pt, 下为正,
 static double expandTextScale = 100.0; // 文字大小(%, 100=原样)
 /* 2.8.86: 构建戳 —— 之前横幅打的是 SpringBoard 自己的 CFBundleShortVersionString(恒 1.0),
    日志里根本看不出装的是哪一版。所有诊断行都带这个戳, 下轮日志一眼定位。 */
-#define DI_BUILD_VER @"2.9.48"
+#define DI_BUILD_VER @"2.9.49"
 static BOOL gRecordingActive = NO; // 保留: 岛素材总闸条件
 static NSString *diElementId(UIView *host);
 static BOOL diMiniMusicActive(UIView *host); // 2.6.3: 前置(遮罩层使用)
@@ -14424,6 +14424,203 @@ static void diMruTailInstall(void) {
     [NSRunLoop.mainRunLoop addTimer:t forMode:NSRunLoopCommonModes];
     diMruTailTick();
 }
+/* ============================================================
+   2.9.49: 播放器 —— 自定义原生(控制中心)播放器尺寸/布局 (4x1 / 3x2)
+   手法借鉴 com.yechen.bofangqi(NativePlayerOriginal 0.3):
+   ① hook 控制中心 C 函数 CCFAllowedSizesForModuleIdentifier, 给
+      nowplaying 模块额外放行 4x1 / 3x2(原生只放行 2x2/4x2 这类),
+      CC 编辑模式里就能把播放器拖成这两种尺寸;
+   ② hook CCUIModuleSettingsManager, 系统对未知尺寸答不出设置时,
+      借原生 wide(4x2) 的模块设置喂回去, 避免模块空白;
+   ③ hook MRUNowPlayingView layoutSubviews, 按"宽/高比"识别 4x1(≥3.2)
+      与 3x2(1.3~1.8), 手动排布: 专辑居左成方, 歌名居上, 按键居右下,
+      音量/时间/头部隐藏(参考包 Ratio 方案的简化版)。
+   仅 iOS18(存在 CCUIModuleInstance)生效; 16/17 锁屏播放器既没有
+   这些类、宽高比也落不进两个区间, 双保险, 一行不动。 */
+static BOOL diNPOn(void) { return pBool(@"playerOn", NO); }
+static NSString *diNPSizeKey(void) {
+    NSString *s = pString(@"playerSize");
+    return (s.length ? s : @"4x1");
+}
+static BOOL diNPHasCC(void) { return NSClassFromString(@"CCUIModuleInstance") != nil; }
+static NSString *const diNPModuleId = @"com.apple.mediaremote.controlcenter.nowplaying";
+
+/* 造一个 CCFModuleSize(网格单位, 如 4x1); 类/初始化器不存在时返回 nil */
+static id diNPMakeModuleSize(CGSize grid) {
+    Class c = NSClassFromString(@"CCFModuleSize");
+    SEL sel = NSSelectorFromString(@"initWithPortraitLayoutSize:landscapeLayoutSize:");
+    if (!c || ![(id)c instancesRespondToSelector:sel]) return nil;
+    id (*msg)(id, SEL, CGSize, CGSize) = (id (*)(id, SEL, CGSize, CGSize))objc_msgSend;
+    @try { return msg([c alloc], sel, grid, grid); } @catch (...) { return nil; }
+}
+
+/* ---- ① 放行尺寸 ---- */
+static NSArray *(*gNPOrigAllowedSizes)(NSString *);
+static NSArray *diNPAllowedSizesHook(NSString *identifier) {
+    NSArray *orig = gNPOrigAllowedSizes(identifier);
+    @try {
+        if (!diNPOn() || !diNPHasCC()) return orig;
+        if (![identifier isEqualToString:diNPModuleId]) return orig;
+        NSString *want = diNPSizeKey();
+        CGSize g = [want isEqualToString:@"3x2"] ? CGSizeMake(3, 2) : CGSizeMake(4, 1);
+        id s = diNPMakeModuleSize(g);
+        if (!s) return orig;
+        NSMutableArray *out = orig ? [orig mutableCopy] : [NSMutableArray array];
+        [out addObject:s];
+        static BOOL logged;
+        if (!logged) { logged = YES; RLog(@"[播放器] 已放行 %@ (原生给 %lu 个尺寸)", want, (unsigned long)(orig ? orig.count : 0)); }
+        return out;
+    } @catch (NSException *e) {
+        RLog(@"[播放器] allowedSizes 异常: %@ — %@", e.name, e.reason);
+        return orig;
+    }
+}
+
+/* ---- ② 未知尺寸时借 wide(4x2) 的模块设置 ---- */
+static IMP gNPOrigSettingsFn = NULL;
+static id diNPSettingsHook(id self, SEL _cmd, NSString *identifier, id size) {
+    id r = ((id (*)(id, SEL, NSString *, id))gNPOrigSettingsFn)(self, _cmd, identifier, size);
+    @try {
+        if (!diNPOn() || !diNPHasCC()) return r;
+        if (![identifier isEqualToString:diNPModuleId] || r) return r;
+        id wide = diNPMakeModuleSize(CGSizeMake(4, 2));
+        if (!wide) return r;
+        id r2 = ((id (*)(id, SEL, NSString *, id))gNPOrigSettingsFn)(self, _cmd, identifier, wide);
+        static BOOL logged;
+        if (!logged) { logged = YES; RLog(@"[播放器] 设置答不出 → 借 wide(4x2) 的模块设置"); }
+        return r2 ?: r;
+    } @catch (NSException *e) {
+        RLog(@"[播放器] settings 异常: %@ — %@", e.name, e.reason);
+        return r;
+    }
+}
+
+/* ---- ③ 播放器视图按宽高比重排 ---- */
+static void diNPLayoutPlayer(UIView *v, BOOL four) {
+    CGRect b = v.bounds;
+    CGFloat pad = 12.0;
+    UIView *art = nil, *transport = nil, *volume = nil, *header = nil, *time = nil;
+    NSMutableArray<UIView *> *labels = [NSMutableArray array];
+    for (UIView *s in v.subviews) {
+        if (s.hidden || s.alpha < 0.05) continue;
+        NSString *cn = NSStringFromClass(s.class);
+        if (!art && [cn containsString:@"Artwork"]) art = s;
+        else if ([cn containsString:@"Transport"]) transport = s;
+        else if ([cn containsString:@"Volume"]) volume = s;
+        else if ([cn containsString:@"Header"]) header = s;
+        else if ([cn containsString:@"TimeControls"]) time = s;
+        else if ([cn containsString:@"Label"] || [cn containsString:@"Metadata"]) [labels addObject:s];
+    }
+    /* 两种布局都隐藏 音量/时间/头部(4x1 放不下, 3x2 简化版同) */
+    for (UIView *h in [NSArray arrayWithObjects:volume, time, header, nil])
+        if (h && !h.hidden) h.hidden = YES;
+    BOOL changed = NO;
+    if (four) {
+        /* 4x1: 专辑左(正方形占满高), 文案中上, 按键右下 */
+        CGFloat side = b.size.height - 2 * pad;
+        if (art && side > 20) {
+            CGRect f = CGRectMake(pad, pad, side, side);
+            if (!CGRectEqualToRect(f, art.frame)) { art.frame = f; changed = YES; }
+        }
+        CGFloat tx = transport ? MAX(b.size.width * 0.55, b.size.width - side * 1.6) : b.size.width;
+        CGFloat tw = b.size.width - tx - pad;
+        if (transport && tw > 40) {
+            CGFloat th = MIN(side * 0.52, b.size.height * 0.5);
+            CGRect f = CGRectMake(tx, b.size.height - th - pad, tw, MAX(28.0, th));
+            if (!CGRectEqualToRect(f, transport.frame)) { transport.frame = f; changed = YES; }
+        }
+        CGFloat lx = art ? CGRectGetMaxX(art.frame) + 12 : pad;
+        CGFloat lw = (transport ? tx - 12 : b.size.width - pad) - lx;
+        if (lw > 30) {
+            CGRect lf = CGRectMake(lx, pad + 2, lw, MAX(20.0, b.size.height * 0.45));
+            for (UIView *l in labels) {
+                CGRect f = l.frame;
+                f.origin.x = lf.origin.x; f.origin.y = lf.origin.y; f.size.width = lf.size.width;
+                if (!CGRectEqualToRect(f, l.frame)) { l.frame = f; changed = YES; }
+            }
+        }
+    } else {
+        /* 3x2: 专辑左下大块, 文案右上, 按键右下 */
+        CGFloat side = MIN(b.size.height * 0.62, b.size.width * 0.45);
+        if (art && side > 20) {
+            CGRect f = CGRectMake(pad, b.size.height - side - pad, side, side);
+            if (!CGRectEqualToRect(f, art.frame)) { art.frame = f; changed = YES; }
+        }
+        CGFloat rx = art ? CGRectGetMaxX(art.frame) + 12 : b.size.width * 0.45;
+        CGFloat rw = b.size.width - rx - pad;
+        if (transport && rw > 40) {
+            CGFloat th = b.size.height * 0.38;
+            CGRect f = CGRectMake(rx, b.size.height - th - pad, rw, MAX(28.0, th));
+            if (!CGRectEqualToRect(f, transport.frame)) { transport.frame = f; changed = YES; }
+        }
+        if (rw > 30) {
+            CGRect lf = CGRectMake(rx, pad + 2, rw, MAX(20.0, b.size.height * 0.4));
+            for (UIView *l in labels) {
+                CGRect f = l.frame;
+                f.origin.x = lf.origin.x; f.origin.y = lf.origin.y; f.size.width = lf.size.width;
+                if (!CGRectEqualToRect(f, l.frame)) { l.frame = f; changed = YES; }
+            }
+        }
+    }
+    static BOOL logged;
+    if (changed && !logged) {
+        logged = YES;
+        RLog(@"[播放器] 布局已应用(%@) 宿主 %.0fx%.0f", four ? @"4x1" : @"3x2", b.size.width, b.size.height);
+    }
+}
+static IMP gNPOrigNPLayout = NULL;
+static void diNPLayoutHook(UIView *self, SEL _cmd) {
+    ((void (*)(id, SEL))gNPOrigNPLayout)(self, _cmd);
+    @try {
+        if (!diNPOn() || !diNPHasCC()) return;
+        CGRect b = self.bounds;
+        if (b.size.width < 60 || b.size.height < 30) return;
+        CGFloat ratio = b.size.width / b.size.height;
+        BOOL four = (ratio >= 3.2 && ratio <= 5.5);   /* 4x1 */
+        BOOL three = (ratio >= 1.3 && ratio <= 1.8);  /* 3x2 */
+        if (!four && !three) return;
+        diNPLayoutPlayer(self, four);
+    } @catch (...) {}
+}
+
+static void diNPInstallClassHooks(void) {
+    static BOOL smTried, nvTried;
+    if (!smTried) {
+        Class sm = NSClassFromString(@"CCUIModuleSettingsManager");
+        SEL sel = NSSelectorFromString(@"moduleSettingsForModuleIdentifier:prototypeSize:");
+        Method m = sm ? class_getInstanceMethod(sm, sel) : NULL;
+        if (m) { MSHookMessageEx(sm, sel, (IMP)diNPSettingsHook, &gNPOrigSettingsFn); smTried = YES; }
+    }
+    if (!nvTried) {
+        Class nv = NSClassFromString(@"MRUNowPlayingView");
+        Method m = nv ? class_getInstanceMethod(nv, @selector(layoutSubviews)) : NULL;
+        if (m) { MSHookMessageEx(nv, @selector(layoutSubviews), (IMP)diNPLayoutHook, &gNPOrigNPLayout); nvTried = YES; }
+    }
+    static BOOL logged;
+    if ((gNPOrigSettingsFn && gNPOrigNPLayout) && !logged) {
+        logged = YES;
+        RLog(@"[播放器] 类 hook 就绪(设置管理/播放视图)");
+    }
+}
+
+/* C 函数 hook: ControlCenter 框架在 SpringBoard 里常驻, dlopen 只是保险 */
+static void diNPInstall(void) {
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        void *h = dlopen("/System/Library/PrivateFrameworks/ControlCenter.framework/ControlCenter", RTLD_LAZY);
+        void *fn = h ? dlsym(h, "CCFAllowedSizesForModuleIdentifier") : NULL;
+        if (fn) {
+            MSHookFunction(fn, (void *)diNPAllowedSizesHook, (void **)&gNPOrigAllowedSizes);
+            RLog(@"[播放器] CCFAllowedSizesForModuleIdentifier 已 hook");
+        } else {
+            RLog(@"[播放器] 找不到 CCFAllowedSizesForModuleIdentifier(dlsym=%p h=%p)", fn, h);
+        }
+        RLog(@"[播放器] 环境探测: iOS18CC=%@ 播放器开关=%@",
+             diNPHasCC() ? @"是" : @"否", diNPOn() ? @"开" : @"关");
+    });
+    diNPInstallClassHooks();
+}
+
 __attribute__((constructor)) static void init(void) {
     @autoreleasepool {
         /* 2.7.15: 版本标记写死在这里, 不依赖 CFBundleShortVersionString ——
@@ -14461,6 +14658,8 @@ __attribute__((constructor)) static void init(void) {
         /* 2.8.78: 接收 MediaRemoteUI 的打点 + 把遮罩素材导出给那个进程 */
         diMruObserve();
         diMruTailInstall();
+        /* 2.9.49: 播放器 —— 控制中心尺寸/布局 hook(CC 类可能晚加载, 下面重试循环里会补) */
+        diNPInstall();
         dispatch_async(dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{ diExportMaskForMRU(); });
         /* 2.7.15: 组名 hook **必须在主队列 block 之外、且在最前面** 装 ——
            2.7.14 把它放在 dispatch_async 里, 前面还排了 refreshAll/installKnownHosts/
@@ -14517,7 +14716,7 @@ __attribute__((constructor)) static void init(void) {
             // 私有类可能加载较晚, 分阶段重试
             for (int s : {2, 5, 15, 30, 60})
                 dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)s * NSEC_PER_SEC),
-                    dispatch_get_main_queue(), ^{ installKnownHosts(); refreshAll(); diPreloadIslandVideos(); diHookHomeBarGrabberRetry(); });
+                    dispatch_get_main_queue(), ^{ installKnownHosts(); refreshAll(); diPreloadIslandVideos(); diHookHomeBarGrabberRetry(); diNPInstallClassHooks(); });
         });
     }
 }
