@@ -62,7 +62,7 @@ static double expandTextY = DI_EXP_TEXT_BASE_Y;   // 上下偏移(pt, 下为正,
 static double expandTextScale = 100.0; // 文字大小(%, 100=原样)
 /* 2.8.86: 构建戳 —— 之前横幅打的是 SpringBoard 自己的 CFBundleShortVersionString(恒 1.0),
    日志里根本看不出装的是哪一版。所有诊断行都带这个戳, 下轮日志一眼定位。 */
-#define DI_BUILD_VER @"2.9.47"
+#define DI_BUILD_VER @"2.9.48"
 static BOOL gRecordingActive = NO; // 保留: 岛素材总闸条件
 static NSString *diElementId(UIView *host);
 static BOOL diMiniMusicActive(UIView *host); // 2.6.3: 前置(遮罩层使用)
@@ -13488,7 +13488,15 @@ static void diActivityApply(UIView *artwork) {
     DIActivityMaskState *state = objc_getAssociatedObject(artwork, &kDIActivityMaskState);
     BOOL sized = artwork.bounds.size.width > 20 && artwork.bounds.size.height > 20;
     BOOL ios17 = diIsIOS17Up();
-    BOOL compact17 = ios17 && diMruIslandCompact(artwork);
+    /* ===== 2.9.48: 17 上小岛态 MRU 一律不参与 —— 用头像自身尺寸做硬判据 =====
+       383 日志实锤: 小岛态 MRUActivityArtworkView 是 23x23(noart 行), 展开态才是 66x66。
+       2.9.38 起靠 island.plist 判形态, 但它 6 秒没更新就退回祖先链兜底; 而祖先链里
+       永远挂着那块 407x200 的离屏 NowPlayingView → 兜底判成"展开" → 在小岛左侧铺一块
+       66pt 玻璃, 被岛体裁成一牙 = 用户看到的横向拉伸模糊图(视频 008/016/033 帧)。
+       这里补一条不依赖跨进程文件的物理判据: 头像短边 <36pt 就是收缩态, MRU 立即让位。
+       展开态头像恒 66x66, 不受影响。 */
+    CGFloat artSide = MIN(artwork.bounds.size.width, artwork.bounds.size.height);
+    BOOL compact17 = ios17 && (artSide < 36.0 || diMruIslandCompact(artwork));
     /* 2.9.38: 17 用 SpringBoard 给的真实形态; 16 沿用 2.9.33 的老判据 */
     if (ios17)
         diMruWriteExpandState(sized && !compact17, artwork.bounds.size);
@@ -13524,10 +13532,12 @@ static void diActivityApply(UIView *artwork) {
     if (compact17) {
         if (state) diActivityTeardown(artwork, state);
         diMruWriteExpandState(NO, artwork.bounds.size);   /* 2.9.40: 别让旧 YES 续期 */
-        static BOOL sLoggedCompact17;
-        if (!sLoggedCompact17) {
-            sLoggedCompact17 = YES;
-            diMruFileLog(@"小岛让位: 收缩态由 SpringBoard 负责, MRU 不铺玻璃");
+        static CFAbsoluteTime sCompact17T;
+        if (CFAbsoluteTimeGetCurrent() - sCompact17T > 5.0) {
+            sCompact17T = CFAbsoluteTimeGetCurrent();
+            diMruFileLog([NSString stringWithFormat:
+                          @"小岛让位: 头像 %.0fx%.0f (短边<36) → MRU 不铺玻璃",
+                          artwork.bounds.size.width, artwork.bounds.size.height]);
         }
         return;
     }
