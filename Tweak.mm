@@ -62,7 +62,7 @@ static double expandTextY = DI_EXP_TEXT_BASE_Y;   // 上下偏移(pt, 下为正,
 static double expandTextScale = 100.0; // 文字大小(%, 100=原样)
 /* 2.8.86: 构建戳 —— 之前横幅打的是 SpringBoard 自己的 CFBundleShortVersionString(恒 1.0),
    日志里根本看不出装的是哪一版。所有诊断行都带这个戳, 下轮日志一眼定位。 */
-#define DI_BUILD_VER @"2.9.49"
+#define DI_BUILD_VER @"2.9.50"
 static BOOL gRecordingActive = NO; // 保留: 岛素材总闸条件
 static NSString *diElementId(UIView *host);
 static BOOL diMiniMusicActive(UIView *host); // 2.6.3: 前置(遮罩层使用)
@@ -14442,7 +14442,21 @@ static NSString *diNPSizeKey(void) {
     NSString *s = pString(@"playerSize");
     return (s.length ? s : @"4x1");
 }
-static BOOL diNPHasCC(void) { return NSClassFromString(@"CCUIModuleInstance") != nil; }
+/* 2.9.50: 硬闸门 —— 必须 iOS18 才允许碰播放器这套。
+   2.9.49 只靠"类是否存在"软判据, 结果 16 上 dlopen/dlsym/hook 依然会跑,
+   用户直接进安全模式循环。现在版本不对就一个 hook 都不装, 加载路径与
+   2.9.48 完全一致。 */
+static BOOL diNPIsOS18(void) {
+    static BOOL v; static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        @try { v = [NSProcessInfo.processInfo operatingSystemVersion].majorVersion >= 18; }
+        @catch (...) { v = NO; }
+    });
+    return v;
+}
+static BOOL diNPHasCC(void) {
+    return diNPIsOS18() && NSClassFromString(@"CCUIModuleInstance") != nil;
+}
 static NSString *const diNPModuleId = @"com.apple.mediaremote.controlcenter.nowplaying";
 
 /* 造一个 CCFModuleSize(网格单位, 如 4x1); 类/初始化器不存在时返回 nil */
@@ -14584,6 +14598,7 @@ static void diNPLayoutHook(UIView *self, SEL _cmd) {
 }
 
 static void diNPInstallClassHooks(void) {
+    if (!diNPIsOS18()) return;   /* 2.9.50: 16/17 一个类 hook 都不装 */
     static BOOL smTried, nvTried;
     if (!smTried) {
         Class sm = NSClassFromString(@"CCUIModuleSettingsManager");
@@ -14605,8 +14620,13 @@ static void diNPInstallClassHooks(void) {
 
 /* C 函数 hook: ControlCenter 框架在 SpringBoard 里常驻, dlopen 只是保险 */
 static void diNPInstall(void) {
-    static dispatch_once_t once;
-    dispatch_once(&once, ^{
+    static BOOL checked = NO;
+    if (!checked) {
+        checked = YES;
+        if (!diNPIsOS18()) {
+            RLog(@"[播放器] 系统 < iOS18 → 功能整体休眠, 不加载框架不装 hook");
+            return;
+        }
         void *h = dlopen("/System/Library/PrivateFrameworks/ControlCenter.framework/ControlCenter", RTLD_LAZY);
         void *fn = h ? dlsym(h, "CCFAllowedSizesForModuleIdentifier") : NULL;
         if (fn) {
@@ -14617,7 +14637,7 @@ static void diNPInstall(void) {
         }
         RLog(@"[播放器] 环境探测: iOS18CC=%@ 播放器开关=%@",
              diNPHasCC() ? @"是" : @"否", diNPOn() ? @"开" : @"关");
-    });
+    }
     diNPInstallClassHooks();
 }
 
@@ -14658,8 +14678,9 @@ __attribute__((constructor)) static void init(void) {
         /* 2.8.78: 接收 MediaRemoteUI 的打点 + 把遮罩素材导出给那个进程 */
         diMruObserve();
         diMruTailInstall();
-        /* 2.9.49: 播放器 —— 控制中心尺寸/布局 hook(CC 类可能晚加载, 下面重试循环里会补) */
-        diNPInstall();
+        /* 2.9.49: 播放器 —— 控制中心尺寸/布局 hook(CC 类可能晚加载, 下面重试循环里会补)
+           2.9.50: 加 @try, 这段任何异常都不许影响 SpringBoard 起来 */
+        @try { diNPInstall(); } @catch (NSException *e) { RLog(@"[播放器] 安装异常: %@ — %@", e.name, e.reason); }
         dispatch_async(dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{ diExportMaskForMRU(); });
         /* 2.7.15: 组名 hook **必须在主队列 block 之外、且在最前面** 装 ——
            2.7.14 把它放在 dispatch_async 里, 前面还排了 refreshAll/installKnownHosts/
