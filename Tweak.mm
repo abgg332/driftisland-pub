@@ -62,7 +62,7 @@ static double expandTextY = DI_EXP_TEXT_BASE_Y;   // 上下偏移(pt, 下为正,
 static double expandTextScale = 100.0; // 文字大小(%, 100=原样)
 /* 2.8.86: 构建戳 —— 之前横幅打的是 SpringBoard 自己的 CFBundleShortVersionString(恒 1.0),
    日志里根本看不出装的是哪一版。所有诊断行都带这个戳, 下轮日志一眼定位。 */
-#define DI_BUILD_VER @"2.9.22"
+#define DI_BUILD_VER @"2.9.23"
 static BOOL gRecordingActive = NO; // 保留: 岛素材总闸条件
 static NSString *diElementId(UIView *host);
 static BOOL diMiniMusicActive(UIView *host); // 2.6.3: 前置(遮罩层使用)
@@ -6004,6 +6004,9 @@ static void updateSingleVideo(UIWindow *win) {
     DIVideoView *smallV = objc_getAssociatedObject(win, &kWinVideoSmall);
     DIVideoView *expandV = objc_getAssociatedObject(win, &kWinVideoExpand);
 
+    /* 2.9.23: 录屏指示岛要在下面的宿主统计里排掉, 否则小岛素材会挂到
+       30~45pt 的方岛上, 把录屏圆点盖住。 */
+    UIView *recHostNow = nil;
     /* 2.9.13: 录屏素材层先处理 —— 它挂在独立的"方形录屏指示岛"上, 与小岛胶囊无关。
        放在函数最前面, 避免后面选主为空时提前 return 导致这条路永远走不到。 */
     {
@@ -6015,6 +6018,7 @@ static void updateSingleVideo(UIWindow *win) {
             objc_setAssociatedObject(win, &kWinVideoRec, recV, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
         }
         UIView *recHost = enabled ? diRecIslandHost() : nil;
+        recHostNow = recHost;
         if (recHost && recHost.window == win) {
             if (recV.superview != recHost) {
                 [recV removeFromSuperview];
@@ -6059,13 +6063,32 @@ static void updateSingleVideo(UIWindow *win) {
        2.8.22 把小岛层挂到"最新出现的岛"(人脸/充电/来电/通知都有份), 于是通知横幅一出现
        就被小岛素材整块铺上, 通知的图标和文字全被盖掉。现在两层都只跟音乐岛
        (matRoot, 已含暂停粘滞); 其他岛 100% 原生, 我们一个像素都不碰。 */
-    UIView *musicRoot = nil;
+    /* 2.9.23: 恢复 2.8.78 的宿主统计 —— 2.9.15 为修"通知被遮挡"把这里砍成只认音乐岛,
+       结果人脸/充电/退出 App 返回时的岛都没有背景素材了(2.9.16 回退时漏了这一段)。
+       现在: 音乐岛管素材(matRoot), 小岛视频层按"最新出现的岛"挑(bestRoot),
+       人脸/充电/来电/通知都能拿到背景; 通知可用设置里的"通知背景"开关关掉。 */
+    UIView *musicRoot = nil, *newestRoot = nil, *bigRoot = nil, *stickyAlive = nil;
+    static __weak UIView *sStickyRoot;
+    CFAbsoluteTime newestT = 0;
+    CGFloat bestA = 0;
     for (UIView *h in hostTable) {
         if (h.window != win || h.isHidden) continue; // 不看 alpha: 岛淡入淡出期间仍要贴合
         if (h.bounds.size.width < 2 || h.bounds.size.height < 2) continue;
+        if (recHostNow && h == recHostNow) continue;  // 录屏方岛: 素材归 recV, 小岛层不碰
+        if (notifyBgOff) {
+            BOOL notif = [objc_getAssociatedObject(h, &kHostIsNotif) boolValue];
+            if (!notif) notif = diHostLooksLikeNotification(h, NULL); // 兜底: 通知样式还没跑过
+            if (notif) continue;
+        }
         UIView *root = islandRoot(h);
         if (!root) continue;
-        if (diIsNowPlayingHostCached(root)) { musicRoot = root; break; }
+        if (!musicRoot && diIsNowPlayingHostCached(root)) musicRoot = root;
+        if (root == sStickyRoot) stickyAlive = root;
+        NSNumber *seen = objc_getAssociatedObject(h, &kHostSeenT);
+        CFAbsoluteTime t = seen ? [seen doubleValue] : 0;
+        if (t > newestT) { newestT = t; newestRoot = root; }
+        CGFloat a = root.bounds.size.width * root.bounds.size.height;
+        if (a > bestA) { bestA = a; bigRoot = root; }
     }
     UIView *matRoot = musicRoot;                                    /* 素材: 只跟音乐岛 */
     /* 2.8.39: 音乐岛瞬断/暂停**粘滞**(308: "展开背景有时候暂停, 播放完就黑屏")。
@@ -6082,7 +6105,7 @@ static void updateSingleVideo(UIWindow *win) {
     } else {
         sStickyMat = nil;
     }
-    UIView *bestRoot = matRoot;   /* 2.9.15: 小岛视频层也只挂音乐岛(不再"最新岛优先") */
+    UIView *bestRoot = newestRoot ?: musicRoot ?: (stickyAlive ?: bigRoot);  /* 视频: 最新岛优先 */
     /* 2.8.39: 视频宿主切换宽限 —— smallV 已挂的 root 还活着就别搬
        (removeFromSuperview + insertSubview = 黑一下, 308 "循环播放会黑一下")。
        新 root 只是"更新"(hostTable 枚举顺序/新岛出现)时保持旧的, 2s 宽限。 */
@@ -6093,6 +6116,18 @@ static void updateSingleVideo(UIWindow *win) {
         else sVideoT = 0;
     } else {
         sVideoRoot = bestRoot; sVideoT = 0;
+    }
+    sStickyRoot = bestRoot;
+    /* 2.9.23 诊断: 宿主切换打一条, 下一份日志能直接确认人脸/充电岛有没有拿到层 */
+    {
+        static __weak UIView *sLoggedBest;
+        if (bestRoot != sLoggedBest) {
+            sLoggedBest = bestRoot;
+            DLog(@"[小岛视频] 宿主=%@ %.0fx%.0f (最新岛=%@ 音乐岛=%@ 兜底大岛=%@)",
+                 bestRoot ? NSStringFromClass(bestRoot.class) : @"无",
+                 bestRoot.bounds.size.width, bestRoot.bounds.size.height,
+                 newestRoot ? @"是" : @"否", musicRoot ? @"是" : @"否", bigRoot ? @"是" : @"否");
+        }
     }
     if (!bestRoot && !matRoot) {
         for (DIVideoView *v in diLayers(smallV, expandV)) {
