@@ -62,7 +62,7 @@ static double expandTextY = DI_EXP_TEXT_BASE_Y;   // 上下偏移(pt, 下为正,
 static double expandTextScale = 100.0; // 文字大小(%, 100=原样)
 /* 2.8.86: 构建戳 —— 之前横幅打的是 SpringBoard 自己的 CFBundleShortVersionString(恒 1.0),
    日志里根本看不出装的是哪一版。所有诊断行都带这个戳, 下轮日志一眼定位。 */
-#define DI_BUILD_VER @"2.9.27"
+#define DI_BUILD_VER @"2.9.28"
 static BOOL gRecordingActive = NO; // 保留: 岛素材总闸条件
 static NSString *diElementId(UIView *host);
 static BOOL diMiniMusicActive(UIView *host); // 2.6.3: 前置(遮罩层使用)
@@ -211,7 +211,7 @@ static BOOL ccLongPressOn = YES;       /* 2.7.28: 控制中心空白处长按换
 static int smallEdgeStyle = 0;         /* 2.2.67: 流光风格 0~5, 见 DIEdgeStyle */
 /* 2.2.6: 岛上通知样式 —— 文字颜色自定义 + 通知岛不使用视频背景 */
 static BOOL notifyColorOn, notifyBgOff;
-static BOOL gThemeOn, gThemeLight, gThemeDark;   /* 2.9.25: 强制浅/深色 */
+static BOOL gThemeOn, gThemeDark;   /* 2.9.28: 模拟系统深/浅色(0=light 1=dark) */
 static UIColor *gNotifyColor;
 /* 2.2.8: 流光渐变 —— 多色数组, 沿文字从左到右循环流动 */
 static BOOL notifyFlowOn;
@@ -641,10 +641,9 @@ static void refreshPrefs(void) {
     notifyColorOn = pBool(@"notifyColorOn", NO);
     notifyBgOff = pBool(@"notifyBgOff", NO);
     notifyFlowOn = pBool(@"notifyFlowOn", NO);
-    /* 2.9.26: 强制外观 —— 单开关: 开=深色, 关=浅色; 总开关关=跟随系统 */
+    /* 2.9.28: 模拟系统外观 —— 开=深色, 关=浅色; 总开关关=跟随系统 */
     gThemeOn = pBool(@"themeMasterOn", NO);
     gThemeDark = pBool(@"themeForceDark", NO);
-    gThemeLight = gThemeOn && !gThemeDark;
     {
         /* 2.2.8: 多色数组(diNotifColors, 逗号分隔 HEX)。
            流光关 = 取第1个颜色单色固定; 流光开 = 沿文字从左到右循环流动。 */
@@ -5415,119 +5414,46 @@ static void applyNotifyStyle(UIView *host) {
     }
 }
 
-/* ===== 2.9.25: 强制浅色/深色 —— 锁屏通知卡 + 桌面长按菜单 =====
-   做法: 在卡片子视图最底层垫一块 UIVisualEffectView(systemUltraThinMaterial
-   Dark/Light), 盖住系统原材质 → 背景直接呈现深/浅色观感; 文字按模式换成白/黑
-   (通知着色开着时尊重着色, 不碰文字)。启动开关关 → 走还原分支(摘层+还原文字)。
-   只碰两类卡片: 锁屏通知(PLPlatterView 等, 且排除播放器底板)与桌面长按菜单;
-   dock/控制中心等其它窗口不进 SBCoverSheetWindow/SBWindow 判定, 不受影响。 */
-static char kThemeLayer, kThemeMode, kThemeLblOrig, kThemeHiddenBg;
+/* ===== 2.9.28: 模拟系统深色/浅色模式 =====
+   思路(用户明确): "打开功能等于模拟开了深色模式" —— 不是去改通知卡/模块,
+   而是改系统外观的取值源头, 让 SpringBoard 全进程以为系统处于深色/浅色:
+     ① UISCurrentUserInterfaceStyleValue.userInterfaceStyle (UIKit 当前外观取值)
+     ② -[UITraitCollection userInterfaceStyle] (所有 trait 解析的最终落点)
+   不插视图、不藏材质、不碰任何模块, 发光/边框/布局全部不受影响;
+   开关关闭时两个 hook 直接透传原值, 与未装插件一致。 */
+static NSInteger (*o_uisCurStyle)(id, SEL);
+static NSInteger h_uisCurStyle(id self, SEL _cmd) {
+    if (gThemeOn) return gThemeDark ? 2 : 1;   /* UIUserInterfaceStyle Dark/Light */
+    return o_uisCurStyle(self, _cmd);
+}
 
-static void diThemeWalkLabels(UIView *v, int want) {
-    NSMutableArray<UIView *> *stack = [NSMutableArray arrayWithObject:v];
-    int g = 0;
-    while (stack.count && g++ < 400) {
-        UIView *cur = stack.firstObject; [stack removeObjectAtIndex:0];
-        for (UIView *s in cur.subviews) [stack addObject:s];
-        if (![cur isKindOfClass:UILabel.class]) continue;
-        UILabel *lb = (UILabel *)cur;
-        if (want == 0) {
-            UIColor *orig = objc_getAssociatedObject(lb, &kThemeLblOrig);
-            if (orig) { lb.textColor = orig;
-                        objc_setAssociatedObject(lb, &kThemeLblOrig, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC); }
-            continue;
+static NSInteger (*o_tcStyle)(id, SEL);
+static NSInteger h_tcStyle(id self, SEL _cmd) {
+    if (gThemeOn) return gThemeDark ? 2 : 1;
+    return o_tcStyle(self, _cmd);
+}
+
+static void diInstallThemeHooks(void) {
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        Class uis = NSClassFromString(@"UISCurrentUserInterfaceStyleValue");
+        if (uis) {
+            Method m = class_getClassMethod(uis, @selector(userInterfaceStyle));
+            if (m) {
+                IMP old = NULL;
+                MSHookMessageEx(object_getClass(uis), @selector(userInterfaceStyle), (IMP)h_uisCurStyle, &old);
+                o_uisCurStyle = (NSInteger (*)(id, SEL))old;
+                DLog(@"[模拟外观] 已挂 UISCurrentUserInterfaceStyleValue");
+            }
         }
-        if (!lb.text.length && !lb.attributedText.length) continue;
-        if (!objc_getAssociatedObject(lb, &kThemeLblOrig))
-            objc_setAssociatedObject(lb, &kThemeLblOrig, lb.textColor, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-        lb.textColor = (want == 2) ? [UIColor colorWithWhite:1.0 alpha:0.92]
-                                   : [UIColor colorWithWhite:0.05 alpha:0.95];
-    }
-}
-
-static void diThemeApplyAtInner(UIView *card);
-
-static void diThemeApplyAt(UIView *card) {
-    if (!card) return;
-    /* 2.9.26: 任何异常都不能把 SpringBoard 拖进安全模式(369 教训) */
-    @try { diThemeApplyAtInner(card); } @catch (__unused NSException *e) {
-        DLog(@"[强制外观] 异常已拦截: %@", e);
-    }
-}
-
-/* 2.9.27: 隐藏卡片内部的材质/毛玻璃背景(记账, 还原时恢复显示)。
-   371 实测: 只垫底没用 —— 系统材质是插在我们上层子视图, 会盖住垫底层。 */
-static int diThemeHideBg(UIView *card) {
-    NSMutableArray<UIView *> *hidden = nil;
-    NSMutableArray<UIView *> *stack = [NSMutableArray arrayWithObject:card];
-    int g = 0;
-    while (stack.count && g++ < 400) {
-        UIView *cur = stack.firstObject; [stack removeObjectAtIndex:0];
-        for (UIView *s in cur.subviews) [stack addObject:s];
-        if (cur == card) continue;
-        NSString *cn = NSStringFromClass(cur.class);
-        BOOL isBg = [cur isKindOfClass:UIVisualEffectView.class]
-                 || [cn containsString:@"MTMaterialView"]
-                 || [cn containsString:@"Material"];
-        if (isBg && !cur.isHidden) {
-            if (!hidden) hidden = [NSMutableArray array];
-            [hidden addObject:cur];
-            cur.hidden = YES;
+        Method tm = class_getInstanceMethod([UITraitCollection class], @selector(userInterfaceStyle));
+        if (tm) {
+            IMP old = NULL;
+            MSHookMessageEx([UITraitCollection class], @selector(userInterfaceStyle), (IMP)h_tcStyle, &old);
+            o_tcStyle = (NSInteger (*)(id, SEL))old;
+            DLog(@"[模拟外观] 已挂 UITraitCollection");
         }
-    }
-    if (hidden.count) objc_setAssociatedObject(card, &kThemeHiddenBg, hidden, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-    return (int)hidden.count;
-}
-
-static void diThemeRestoreBg(UIView *card) {
-    NSArray *hidden = objc_getAssociatedObject(card, &kThemeHiddenBg);
-    for (UIView *v in hidden) v.hidden = NO;
-    objc_setAssociatedObject(card, &kThemeHiddenBg, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-}
-
-static void diThemeApplyAtInner(UIView *card) {
-    if (!card) return;
-    UIWindow *w = card.window;
-    if (!w) return;
-    /* 2.9.27: 按用户要求只做锁屏通知 —— 长按菜单等其它界面一律不碰 */
-    if (![NSStringFromClass(w.class) isEqualToString:@"SBCoverSheetWindow"]) return;
-
-    int want = gThemeOn ? (gThemeDark ? 2 : (gThemeLight ? 1 : 0)) : 0;
-    UIVisualEffectView *ev = objc_getAssociatedObject(card, &kThemeLayer);
-    NSNumber *curMode = objc_getAssociatedObject(card, &kThemeMode);
-
-    if (want == 0 || (ev && curMode && curMode.intValue != want)) {
-        if (ev || curMode) {   /* 只处理应用过的卡, 避免每帧白跑遍历 */
-            diThemeWalkLabels(card, 0);
-            diThemeRestoreBg(card);
-            if (ev) [ev removeFromSuperview];
-            objc_setAssociatedObject(card, &kThemeLayer, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-            objc_setAssociatedObject(card, &kThemeMode, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-        }
-        if (want == 0) return;
-    }
-    if (!ev) {
-        int nb = diThemeHideBg(card);
-        ev = [[UIVisualEffectView alloc] initWithFrame:card.bounds];
-        ev.userInteractionEnabled = NO;
-        [CATransaction begin]; [CATransaction setDisableActions:YES];
-        [card insertSubview:ev atIndex:0];
-        [CATransaction commit];
-        objc_setAssociatedObject(card, &kThemeLayer, ev, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-        objc_setAssociatedObject(card, &kThemeMode, @(want), OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-        diThemeWalkLabels(card, notifyColorOn ? 0 : want);
-        static int tlog; if (tlog < 8) { tlog++;
-            DLog(@"[强制外观] %@ → %@ (卡 %.0fx%.0f 材质x%d)", NSStringFromClass(card.class),
-                 want == 2 ? @"深色" : @"浅色", card.bounds.size.width, card.bounds.size.height, nb); }
-    }
-    if (!CGRectEqualToRect(ev.frame, card.bounds)) ev.frame = card.bounds;
-    /* 系统会复用/重建卡片内容(label 新实例), 每秒补一次文字颜色保持一致 */
-    static CFAbsoluteTime lastWalk;
-    CFAbsoluteTime now = CFAbsoluteTimeGetCurrent();
-    if (now - lastWalk > 1.0) {
-        lastWalk = now;
-        diThemeWalkLabels(card, notifyColorOn ? 0 : want);
-    }
+    });
 }
 
 static BOOL viewHasToken(UIView *v, NSString *token) {
@@ -8749,15 +8675,6 @@ static BOOL diInLockScreen(UIView *v) {
 
 static void applyLockStyle(UIView *v) {
     if (!NSThread.isMainThread) return;
-    /* 2.9.25: 强制浅/深色 —— 独立于发光/边框, 不能被下面的早退挡住;
-       2.9.26: 改异步执行, 不在布局/转场中途动视图树 */
-    if (gThemeOn || objc_getAssociatedObject(v, &kLkPlatter)) {
-        __weak UIView *wv = v;
-        dispatch_async(dispatch_get_main_queue(), ^{
-            UIView *sv = wv; if (!sv) return;
-            @try { diThemeApplyAt(diFindPlatter(sv)); } @catch (__unused NSException *e) {}
-        });
-    }
     if (!lkBdOn && !lkShOn && !lkGlowOn) return;
     if (!diInLockScreen(v)) return;   /* 2.8.36: 控制中心等其它窗口不染色 */
     NSString *cn = NSStringFromClass(v.class);
@@ -8977,7 +8894,7 @@ static BOOL install(NSString *name) {
 
 static void installKnownHosts(void) {
     diGainInstallHook();   /* 2.8.31: 隐藏药丸 hook(私有类晚加载时靠分阶段重试补装) */
-    /* 2.9.27: 长按菜单 hook 已整体移除(371 触发安全模式, 用户也确认不再需要) */
+    diInstallThemeHooks(); /* 2.9.28: 模拟系统深/浅色 —— 只改外观取值, 不碰视图 */
     install(@"SAUIElementView");
     installBreathKick();   /* 2.9.19: 通知到达 → 重新起呼吸 */
     /* 2.2.10: 锁屏通知宽度 —— 锁屏通知卡(short look)与通知列表容器都按 layoutSubviews 调宽度 */
