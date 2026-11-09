@@ -62,7 +62,7 @@ static double expandTextY = DI_EXP_TEXT_BASE_Y;   // 上下偏移(pt, 下为正,
 static double expandTextScale = 100.0; // 文字大小(%, 100=原样)
 /* 2.8.86: 构建戳 —— 之前横幅打的是 SpringBoard 自己的 CFBundleShortVersionString(恒 1.0),
    日志里根本看不出装的是哪一版。所有诊断行都带这个戳, 下轮日志一眼定位。 */
-#define DI_BUILD_VER @"2.9.26"
+#define DI_BUILD_VER @"2.9.27"
 static BOOL gRecordingActive = NO; // 保留: 岛素材总闸条件
 static NSString *diElementId(UIView *host);
 static BOOL diMiniMusicActive(UIView *host); // 2.6.3: 前置(遮罩层使用)
@@ -5421,7 +5421,7 @@ static void applyNotifyStyle(UIView *host) {
    (通知着色开着时尊重着色, 不碰文字)。启动开关关 → 走还原分支(摘层+还原文字)。
    只碰两类卡片: 锁屏通知(PLPlatterView 等, 且排除播放器底板)与桌面长按菜单;
    dock/控制中心等其它窗口不进 SBCoverSheetWindow/SBWindow 判定, 不受影响。 */
-static char kThemeLayer, kThemeMode, kThemeLblOrig;
+static char kThemeLayer, kThemeMode, kThemeLblOrig, kThemeHiddenBg;
 
 static void diThemeWalkLabels(UIView *v, int want) {
     NSMutableArray<UIView *> *stack = [NSMutableArray arrayWithObject:v];
@@ -5455,15 +5455,42 @@ static void diThemeApplyAt(UIView *card) {
     }
 }
 
+/* 2.9.27: 隐藏卡片内部的材质/毛玻璃背景(记账, 还原时恢复显示)。
+   371 实测: 只垫底没用 —— 系统材质是插在我们上层子视图, 会盖住垫底层。 */
+static int diThemeHideBg(UIView *card) {
+    NSMutableArray<UIView *> *hidden = nil;
+    NSMutableArray<UIView *> *stack = [NSMutableArray arrayWithObject:card];
+    int g = 0;
+    while (stack.count && g++ < 400) {
+        UIView *cur = stack.firstObject; [stack removeObjectAtIndex:0];
+        for (UIView *s in cur.subviews) [stack addObject:s];
+        if (cur == card) continue;
+        NSString *cn = NSStringFromClass(cur.class);
+        BOOL isBg = [cur isKindOfClass:UIVisualEffectView.class]
+                 || [cn containsString:@"MTMaterialView"]
+                 || [cn containsString:@"Material"];
+        if (isBg && !cur.isHidden) {
+            if (!hidden) hidden = [NSMutableArray array];
+            [hidden addObject:cur];
+            cur.hidden = YES;
+        }
+    }
+    if (hidden.count) objc_setAssociatedObject(card, &kThemeHiddenBg, hidden, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    return (int)hidden.count;
+}
+
+static void diThemeRestoreBg(UIView *card) {
+    NSArray *hidden = objc_getAssociatedObject(card, &kThemeHiddenBg);
+    for (UIView *v in hidden) v.hidden = NO;
+    objc_setAssociatedObject(card, &kThemeHiddenBg, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+}
+
 static void diThemeApplyAtInner(UIView *card) {
     if (!card) return;
     UIWindow *w = card.window;
     if (!w) return;
-    NSString *wcn = NSStringFromClass(w.class);
-    BOOL lock = [wcn isEqualToString:@"SBCoverSheetWindow"];      /* 锁屏 */
-    BOOL home = [wcn isEqualToString:@"SBWindow"]
-             || [wcn containsString:@"MainSwitcher"];             /* 桌面长按 */
-    if (!lock && !home) return;
+    /* 2.9.27: 按用户要求只做锁屏通知 —— 长按菜单等其它界面一律不碰 */
+    if (![NSStringFromClass(w.class) isEqualToString:@"SBCoverSheetWindow"]) return;
 
     int want = gThemeOn ? (gThemeDark ? 2 : (gThemeLight ? 1 : 0)) : 0;
     UIVisualEffectView *ev = objc_getAssociatedObject(card, &kThemeLayer);
@@ -5472,6 +5499,7 @@ static void diThemeApplyAtInner(UIView *card) {
     if (want == 0 || (ev && curMode && curMode.intValue != want)) {
         if (ev || curMode) {   /* 只处理应用过的卡, 避免每帧白跑遍历 */
             diThemeWalkLabels(card, 0);
+            diThemeRestoreBg(card);
             if (ev) [ev removeFromSuperview];
             objc_setAssociatedObject(card, &kThemeLayer, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
             objc_setAssociatedObject(card, &kThemeMode, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
@@ -5479,6 +5507,7 @@ static void diThemeApplyAtInner(UIView *card) {
         if (want == 0) return;
     }
     if (!ev) {
+        int nb = diThemeHideBg(card);
         ev = [[UIVisualEffectView alloc] initWithFrame:card.bounds];
         ev.userInteractionEnabled = NO;
         [CATransaction begin]; [CATransaction setDisableActions:YES];
@@ -5487,9 +5516,9 @@ static void diThemeApplyAtInner(UIView *card) {
         objc_setAssociatedObject(card, &kThemeLayer, ev, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
         objc_setAssociatedObject(card, &kThemeMode, @(want), OBJC_ASSOCIATION_RETAIN_NONATOMIC);
         diThemeWalkLabels(card, notifyColorOn ? 0 : want);
-        static int tlog; if (tlog < 6) { tlog++;
-            DLog(@"[强制外观] %@ → %@ (卡 %.0fx%.0f)", NSStringFromClass(card.class),
-                 want == 2 ? @"深色" : @"浅色", card.bounds.size.width, card.bounds.size.height); }
+        static int tlog; if (tlog < 8) { tlog++;
+            DLog(@"[强制外观] %@ → %@ (卡 %.0fx%.0f 材质x%d)", NSStringFromClass(card.class),
+                 want == 2 ? @"深色" : @"浅色", card.bounds.size.width, card.bounds.size.height, nb); }
     }
     if (!CGRectEqualToRect(ev.frame, card.bounds)) ev.frame = card.bounds;
     /* 系统会复用/重建卡片内容(label 新实例), 每秒补一次文字颜色保持一致 */
@@ -5499,30 +5528,6 @@ static void diThemeApplyAtInner(UIView *card) {
         lastWalk = now;
         diThemeWalkLabels(card, notifyColorOn ? 0 : want);
     }
-}
-
-/* 长按菜单: 从转场容器向下找真正的卡片(宽>=150 且有圆角), 再应用 */
-static UIView *diThemeCtxCard(UIView *root, int depth) {
-    if (!root || depth > 6) return nil;
-    if (root.layer.cornerRadius >= 8 && root.bounds.size.width >= 150
-        && root.bounds.size.width < 500 && root.bounds.size.height >= 60) return root;
-    for (UIView *s in root.subviews) {
-        UIView *r = diThemeCtxCard(s, depth + 1);
-        if (r) return r;
-    }
-    return nil;
-}
-
-static void (*o_diThemeCtxLayout)(id, SEL);
-static void h_diThemeCtxLayout(UIView *self, SEL _cmd) {
-    ((void (*)(id, SEL))o_diThemeCtxLayout)(self, _cmd);
-    /* 2.9.26: 布局过程中插入/移除子视图是 369 安全模式的最可疑来源 ——
-       一律推迟到本轮布局结束之后(下一轮主循环)再动视图树。 */
-    __weak UIView *wself = self;
-    dispatch_async(dispatch_get_main_queue(), ^{
-        UIView *sv = wself; if (!sv || !sv.window) return;
-        @try { diThemeApplyAt(diThemeCtxCard(sv, 0)); } @catch (__unused NSException *e) {}
-    });
 }
 
 static BOOL viewHasToken(UIView *v, NSString *token) {
@@ -8972,21 +8977,7 @@ static BOOL install(NSString *name) {
 
 static void installKnownHosts(void) {
     diGainInstallHook();   /* 2.8.31: 隐藏药丸 hook(私有类晚加载时靠分阶段重试补装) */
-    /* 2.9.25: 桌面长按菜单 —— 单独 hook, 与锁屏样式链无关;
-       2.9.26: dispatch_once 只装一次(installKnownHosts 会被重复调用,
-       369 日志里同一个类被 hook 了 10 遍) */
-    static dispatch_once_t ctxOnce;
-    dispatch_once(&ctxOnce, ^{
-        for (NSString *n in @[@"_UIContextMenuPlatterTransitionView", @"SBIconContextMenuPlatterView"]) {
-            Class c = NSClassFromString(n);
-            if (!c || ![c isSubclassOfClass:[UIView class]]) continue;
-            Method m = class_getInstanceMethod(c, @selector(layoutSubviews));
-            if (!m) continue;
-            IMP old = NULL;
-            MSHookMessageEx(c, @selector(layoutSubviews), (IMP)h_diThemeCtxLayout, &old);
-            if (old) DLog(@"[强制外观] 已 hook %@ (长按菜单)", n);
-        }
-    });
+    /* 2.9.27: 长按菜单 hook 已整体移除(371 触发安全模式, 用户也确认不再需要) */
     install(@"SAUIElementView");
     installBreathKick();   /* 2.9.19: 通知到达 → 重新起呼吸 */
     /* 2.2.10: 锁屏通知宽度 —— 锁屏通知卡(short look)与通知列表容器都按 layoutSubviews 调宽度 */

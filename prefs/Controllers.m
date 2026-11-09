@@ -22,7 +22,7 @@
 
 static NSString *const kDomain = @"com.abgg332.driftisland";
 /* 2.6.25: 设置页底部显示的版本号 */
-static NSString *const DI_VERSION_STR = @"2.9.26";
+static NSString *const DI_VERSION_STR = @"2.9.27";
 /* 2.6.10: 专辑光晕遮罩 —— 与 Tweak 侧 DIAlbumMask.h 保持一致 */
 static NSString *const kDIAlbumMaskKey = @"diAlbumMaskAsset";
 static NSString *const kDIMaskRoot = @"/var/mobile/灵动岛/遮罩素材";
@@ -2409,7 +2409,7 @@ static NSCache *diThumbCache(void) {
     }
 
     /* 2.9.26: 强制外观 —— 页面最底部单独分组 */
-    [specs addObject:[self groupSpec:@"启动功能" footer:@"模拟深/浅色模式: 作用于锁屏全部通知与桌面图标的 3D 长按菜单背景。关闭后恢复跟随系统。"]];
+    [specs addObject:[self groupSpec:@"启动功能" footer:@"模拟深/浅色模式: 作用于锁屏全部通知的背景。关闭后恢复跟随系统。"]];
     [specs addObject:[self switchSpec:@"启动功能" key:@"themeMasterOn" def:@NO]];
     if ([[self readPreferenceValue:[self switchSpec:@"启动功能" key:@"themeMasterOn" def:@NO]] boolValue]) {
         [specs addObject:[self switchSpec:@"强制深色" key:@"themeForceDark" def:@NO]];
