@@ -62,7 +62,7 @@ static double expandTextY = DI_EXP_TEXT_BASE_Y;   // 上下偏移(pt, 下为正,
 static double expandTextScale = 100.0; // 文字大小(%, 100=原样)
 /* 2.8.86: 构建戳 —— 之前横幅打的是 SpringBoard 自己的 CFBundleShortVersionString(恒 1.0),
    日志里根本看不出装的是哪一版。所有诊断行都带这个戳, 下轮日志一眼定位。 */
-#define DI_BUILD_VER @"2.9.17"
+#define DI_BUILD_VER @"2.9.18"
 static BOOL gRecordingActive = NO; // 保留: 岛素材总闸条件
 static NSString *diElementId(UIView *host);
 static BOOL diMiniMusicActive(UIView *host); // 2.6.3: 前置(遮罩层使用)
@@ -6249,11 +6249,8 @@ static void updateSingleVideo(UIWindow *win) {
     {
         static char kHiddenPortals;
         NSMutableArray *found = objc_getAssociatedObject(win, &kHiddenPortals) ?: [NSMutableArray array];
-        /* 2.9.17: 录屏期间不藏任何原生门户层 —— 录屏指示图标也是 22pt 的
-           CAPortalLayer, 之前会被"右侧面罩"这组判据一起藏掉, 系统录屏
-           指示就没了(361 日志: 录屏中打出了"专辑遮罩藏原生门户层 CAPortalLayer 22x22 侧=右")。 */
-        BOOL wantL = cleanMusic && miniAnimOn && miniAnim.superview && !miniAnim.hidden && !diIsScreenRecording();
-        BOOL wantR = cleanMusic && miniAudioOn && miniAudio.superview && !miniAudio.hidden && !diIsScreenRecording();
+        BOOL wantL = cleanMusic && miniAnimOn && miniAnim.superview && !miniAnim.hidden;
+        BOOL wantR = cleanMusic && miniAudioOn && miniAudio.superview && !miniAudio.hidden;
         for (CALayer *l in found) {
             if (l.isHidden) l.hidden = NO;
             diUnmarkLayerHiddenByUs(l);   /* 还原后注销登记: 判定不再把它当可见 */
