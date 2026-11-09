@@ -62,7 +62,7 @@ static double expandTextY = DI_EXP_TEXT_BASE_Y;   // 上下偏移(pt, 下为正,
 static double expandTextScale = 100.0; // 文字大小(%, 100=原样)
 /* 2.8.86: 构建戳 —— 之前横幅打的是 SpringBoard 自己的 CFBundleShortVersionString(恒 1.0),
    日志里根本看不出装的是哪一版。所有诊断行都带这个戳, 下轮日志一眼定位。 */
-#define DI_BUILD_VER @"2.9.44"
+#define DI_BUILD_VER @"2.9.45"
 static BOOL gRecordingActive = NO; // 保留: 岛素材总闸条件
 static NSString *diElementId(UIView *host);
 static BOOL diMiniMusicActive(UIView *host); // 2.6.3: 前置(遮罩层使用)
@@ -14554,6 +14554,51 @@ static UIWindow *diReturnOverlay(UIWindow *refWin) {
     return w;
 }
 
+/* 2.9.45: 快照探针 —— 把快照缩小画进 12x12, 数有多少像素真被画上了。
+   跨进程内容偶尔只能抓到一张透明空图, 光看 layer.contents 非空判断不出来。 */
+static CGFloat diReturnSnapScore(UIView *v) {
+    if (!v || v.bounds.size.width < 1.0 || v.bounds.size.height < 1.0) return -1.0;
+    enum { N = 12 };
+    unsigned char buf[N * N * 4];
+    CGColorSpaceRef cs = CGColorSpaceCreateDeviceRGB();
+    CGContextRef c = CGBitmapContextCreate(buf, N, N, 8, N * 4, cs,
+                                           kCGImageAlphaPremultipliedLast | kCGBitmapByteOrder32Big);
+    CGColorSpaceRelease(cs);
+    if (!c) return -1.0;
+    /* 紫红色打底; 之后数"不是紫红"的像素比例 */
+    CGContextSetRGBFillColor(c, 1.0, 0.0, 1.0, 1.0);
+    CGContextFillRect(c, CGRectMake(0, 0, N, N));
+    CGContextScaleCTM(c, N / v.bounds.size.width, N / v.bounds.size.height);
+    @try { [v.layer renderInContext:c]; } @catch (__unused NSException *e) {}
+    int hit = 0;
+    for (int i = 0; i < N * N; i++) {
+        unsigned char *p = buf + i * 4;
+        if (!(p[0] > 250 && p[1] < 6 && p[2] > 250)) hit++;
+    }
+    CGContextRelease(c);
+    return (CGFloat)hit / (CGFloat)(N * N);
+}
+
+/* 2.9.45: 选一个"系统自己合成、且天然盖在 App 之上"的窗口当动画层。
+   SBSystemApertureWindow 是灵动岛宿主(全屏常驻), 最稳; 找不到才退回自建窗口。 */
+static UIWindow *diReturnTopWindow(UIWindow *refWin) {
+    Class apCls = NSClassFromString(@"SBSystemApertureWindow");
+    UIWindow *best = nil; CGFloat bestLvl = -1e9;
+    NSMutableString *dump = [NSMutableString string];
+    for (UIWindow *w in diReturnWindows()) {
+        if (!w) continue;
+        [dump appendFormat:@"%@(%.0f%@) ", NSStringFromClass(w.class), w.windowLevel,
+                          (w.hidden || w.alpha < 0.05) ? @",隐" : @""];
+        if (w.hidden || w.alpha < 0.05) continue;
+        if (w.bounds.size.width < 200 || w.bounds.size.height < 300) continue;
+        if (apCls && [w isKindOfClass:apCls]) return w;
+        if (w.windowLevel > bestLvl) { bestLvl = w.windowLevel; best = w; }
+    }
+    diReturnLog(@"窗口表: %@", dump);
+    if (best) return best;
+    return diReturnOverlay(refWin);
+}
+
 /* 真正干活: 抓快照 → 挂到桌面 → 缩小到图标 */
 static void diReturnPlay(UIView *sceneView) {
     if (!sceneView) return;
@@ -14583,10 +14628,12 @@ static void diReturnPlay(UIView *sceneView) {
                     iconRect.origin.x, iconRect.origin.y, hw.bounds.size.width, hw.bounds.size.height);
         return;
     }
-    /* 2.9.44: 起点不用 sceneView 的转换坐标 —— SpringBoard 里 App 场景窗口常常被摆在
-       x=-454 这种屏幕外的卡位, 转出来就是负坐标(2.9.43 的动画全在屏幕外播放)。
-       这里直接按"整屏"起, 内容就是那一整页。 */
-    UIWindow *ow = diReturnOverlay(sceneView.window ?: hw);
+    /* 2.9.45: 动画层必须挂在**系统自己的置顶窗口**上。
+       2.9.44 自建的 UIWindow(level=2001) 在 SpringBoard 里根本没被合成出来 ——
+       日志有"播放"但屏幕上什么都没有。改用 SBSystemApertureWindow(灵动岛宿主,
+       全屏、常驻、天然盖在 App 之上), 插到它最底层, 岛本身的内容仍然在上面。
+       桌面窗口、App 窗口一律不碰。 */
+    UIWindow *ow = diReturnTopWindow(sceneView.window ?: hw);
     UIView *host = ow.rootViewController.view ?: ow;
     if (!host) { host = hw; ow = hw; }
     CGRect start = host.bounds;
@@ -14600,13 +14647,23 @@ static void diReturnPlay(UIView *sceneView) {
         diReturnLog(@"跳过: 起点矩形异常 %@", NSStringFromCGRect(start));
         return;
     }
-    UIView *snap = [sceneView snapshotViewAfterScreenUpdates:NO];
-    /* 场景视图是跨进程内容, 偶尔抓到的是空壳 —— 换整窗快照兜底 */
-    if (!snap || (!snap.layer.contents && snap.subviews.count == 0))
-        snap = [sceneView.window snapshotViewAfterScreenUpdates:NO] ?: snap;
+    /* 三个来源各抓一份, 用像素探针挑最实的那张(跨进程内容有时抓到空壳) */
+    UIView *c1 = [sceneView snapshotViewAfterScreenUpdates:NO];
+    UIView *c2 = [sceneView.window snapshotViewAfterScreenUpdates:NO];
+    UIView *c3 = nil;
+    if ([UIScreen.mainScreen respondsToSelector:@selector(snapshotViewAfterScreenUpdates:)])
+        c3 = ((id (*)(id, SEL, BOOL))objc_msgSend)(UIScreen.mainScreen,
+                                                   @selector(snapshotViewAfterScreenUpdates:), NO);
+    CGFloat s1 = diReturnSnapScore(c1), s2 = diReturnSnapScore(c2), s3 = diReturnSnapScore(c3);
+    UIView *snap = c1 ?: (c2 ?: c3);
+    CGFloat best = s1;
+    if (c2 && s2 > best) { snap = c2; best = s2; }
+    if (c3 && s3 > best) { snap = c3; best = s3; }
     if (!snap) { diReturnLog(@"跳过: 快照失败"); return; }
-    if (!snap.layer.contents && snap.subviews.count == 0)
-        diReturnLog(@"警告: 快照内容为空(可能整层是透明的)");
+    diReturnLog(@"快照 场景=%.2f 窗口=%.2f 屏幕=%.2f → 选 %@",
+                s1, s2, s3,
+                (snap == c1 ? @"场景" : (snap == c2 ? @"窗口" : @"屏幕")));
+    if (best <= 0.02) diReturnLog(@"警告: 三个来源都接近空白, 动画可能看不见");
 
     snap.userInteractionEnabled = NO;
     snap.alpha = 1.0;
@@ -14617,7 +14674,9 @@ static void diReturnPlay(UIView *sceneView) {
     /* 用 bounds+center 摆位, 之后只动 transform —— 直接改 frame 会把画面拉变形 */
     snap.bounds = CGRectMake(0, 0, start.size.width, start.size.height);
     snap.center = CGPointMake(CGRectGetMidX(start), CGRectGetMidY(start));
-    [host addSubview:snap];
+    /* 插到最底层: 灵动岛自己的内容仍在我们上面, 但整层已在 App 之上 */
+    if (host.subviews.count > 0) [host insertSubview:snap atIndex:0];
+    else [host addSubview:snap];
 
     double dur = diReturnAnimDur();
     /* 只缩到图标本体(方形), 不连下面的名字 */
@@ -14636,7 +14695,7 @@ static void diReturnPlay(UIView *sceneView) {
         snap.center = CGPointMake(CGRectGetMidX(iconBody), CGRectGetMidY(iconBody));
     } completion:^(BOOL finished) {
         [snap removeFromSuperview];
-        /* 播完把空窗口藏起来, 下次要播再打开, 免得长期压在 SpringBoard 最上层 */
+        /* 只在"自建窗口"是宿主时才回收; 系统窗口(灵动岛宿主)不能动 */
         if (gReturnOverlay && gReturnOverlay == ow) {
             dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)0.25 * NSEC_PER_SEC),
                            dispatch_get_main_queue(), ^{
