@@ -62,7 +62,7 @@ static double expandTextY = DI_EXP_TEXT_BASE_Y;   // 上下偏移(pt, 下为正,
 static double expandTextScale = 100.0; // 文字大小(%, 100=原样)
 /* 2.8.86: 构建戳 —— 之前横幅打的是 SpringBoard 自己的 CFBundleShortVersionString(恒 1.0),
    日志里根本看不出装的是哪一版。所有诊断行都带这个戳, 下轮日志一眼定位。 */
-#define DI_BUILD_VER @"2.9.36"
+#define DI_BUILD_VER @"2.9.37"
 static BOOL gRecordingActive = NO; // 保留: 岛素材总闸条件
 static NSString *diElementId(UIView *host);
 static BOOL diMiniMusicActive(UIView *host); // 2.6.3: 前置(遮罩层使用)
@@ -12170,6 +12170,40 @@ static void diStyleGrabber(UIView *grabber) {
    SBSystemApertureWindow(灵动岛宿主, 全屏)。覆盖层不接收触摸, 手势就永远不触发。
    本版改为: 主监听 = 屏幕边缘平移(系统在边缘区域不会把触摸交给应用/游戏),
    并同时挂到所有全屏窗口上; 再加一条兜底 —— 隐藏状态下只要有触摸落下就唤回。*/
+/* ===== 2.9.37: 横条"触摸唤醒"范围 —— 跟随横条真实长度 =====
+   旧实现: sendEvent 里用 竖屏宽 18% × 竖屏高中部 50% 的粗框, 横屏时是一大块
+   (约 70x420pt), 随手一碰就把横条唤出来 → 误触。窗口级 tap/pan 更是全屏都算。
+   现在统一按"横条实际渲染出来的那条"算: 取横条 pill 在窗口里的 frame,
+   长边不足 50pt 时按 50pt 居中兜底(用户说的"锁死中间底下 50"), 再给 18/24pt
+   触摸容差。框外一律不唤醒。 */
+static BOOL diBarHitTest(CGPoint p, UIView *coordView) {
+    CGRect coordBounds = coordView ? coordView.bounds : [UIScreen mainScreen].bounds;
+    BOOL sawPill = NO;
+    NSArray *pills = gBarPills ? [gBarPills allObjects] : @[];
+    for (UIView *pill in pills) {
+        if (!pill || !pill.window) continue;
+        CGRect r = pill.bounds;
+        if (r.size.width < 2 || r.size.height < 2) continue;
+        UIView *host = coordView ?: pill.window;
+        /* 跨窗口也换算(UIKit 走屏幕坐标), 只要换算结果还落在宿主窗口里就认 */
+        r = [pill convertRect:r toView:host];
+        if (CGRectIsNull(r) || CGRectIsEmpty(r)) continue;
+        if (!CGRectIntersectsRect(r, CGRectInset(host.bounds, -400, -400))) continue;
+        sawPill = YES;
+        if (r.size.width < 50.0) {                     /* 太短就按 50pt 居中撑开 */
+            CGFloat d = (50.0 - r.size.width) * 0.5;
+            r = CGRectInset(r, -d, 0);
+        }
+        CGRect hit = CGRectInset(r, -18.0, -24.0);     /* 触摸容差 */
+        if (CGRectContainsPoint(hit, p)) return YES;
+    }
+    if (sawPill) return NO;
+    /* 横条还没登记到(冷启动/过渡帧): 兜底 = 屏幕底边中间 50pt */
+    CGRect fb = CGRectMake(CGRectGetMidX(coordBounds) - 25.0,
+                           CGRectGetMaxY(coordBounds) - 44.0, 50.0, 44.0);
+    return CGRectContainsPoint(fb, p);
+}
+
 @interface DIBarSwipeWatcher : NSObject <UIGestureRecognizerDelegate>
 @end
 static DIBarSwipeWatcher *diSwipeWatcherShared(void) {
@@ -12207,7 +12241,9 @@ static void diRevealBarNow(const char *why) {
 - (void)diTouched:(UIGestureRecognizer *)g {
     if (g.state != UIGestureRecognizerStateBegan && g.state != UIGestureRecognizerStateChanged) return;
     if (!gestureProtectOn || !gLandHidden || !diLandscapeNow()) return;
-    diRevealBarNow("检测到触摸");
+    /* 2.9.37: 只认横条自己那一小段, 屏幕其他位置不唤醒 */
+    if (!diBarHitTest([g locationInView:g.view], g.view)) return;
+    diRevealBarNow("检测到触摸(横条区域)");
 }
 - (void)diSwiped:(UIPanGestureRecognizer *)g {
     if (g.state != UIGestureRecognizerStateBegan && g.state != UIGestureRecognizerStateChanged) return;
@@ -12215,7 +12251,9 @@ static void diRevealBarNow(const char *why) {
     if (fabs(t.y) < 5 && fabs(t.x) < 5) return;
     if (!gestureProtectOn) return;
     if (!diLandscapeNow()) return;
-    diRevealBarNow("检测到滑动(边缘)");
+    /* 2.9.37: 起点不在横条那一段就不唤醒 */
+    if (!diBarHitTest([g locationInView:g.view], g.view)) return;
+    diRevealBarNow("检测到滑动(横条区域)");
 }
 @end
 
@@ -12600,17 +12638,15 @@ static void di_sendEvent(id self, SEL _cmd, UIEvent *e) {
             /* 关键事实(192 实测反推): 横屏时触摸坐标仍是竖屏(portrait)坐标系 ——
                视觉底部的 home 横条在竖屏坐标里是屏幕"左缘或右缘的中部"。
                用 statusBarOrientation 区分朝向, 只认横条真实所在的那一小块区域。 */
-            CGSize scr = [UIScreen mainScreen].bounds.size;
-            CGFloat pw = MIN(scr.width, scr.height), ph = MAX(scr.width, scr.height); // 竖屏宽高
-            /* 2.6.2: statusBarOrientation 在 SpringBoard 不可靠(193 实测横条处无触发),
-               改为不辨朝向: 左右两短缘(横条原长度) ∩ 竖屏高度中部 50% —— 其他区域一概不触发 */
+            /* 2.9.37: 不再用 18%×50% 的粗框(横屏时约 70x420pt, 到处误触),
+               改为逐点比对横条 pill 的真实 frame, 跟随横条渲染长度。 */
             for (UITouch *t in e.allTouches) {
                 if (t.phase != UITouchPhaseBegan && t.phase != UITouchPhaseMoved) continue;
-                CGPoint p = [t locationInView:nil];
-                BOOL inEdge = (p.x < pw * 0.18 || p.x > pw * 0.82);
-                BOOL inMiddle = (fabs(p.y - ph * 0.5) < ph * 0.25);
-                if (inEdge && inMiddle) {
-                    diRevealBarNow("sendEvent 触摸");
+                UIWindow *tw = t.window;
+                if (!tw) continue;
+                CGPoint p = [t locationInView:tw];
+                if (diBarHitTest(p, tw)) {
+                    diRevealBarNow("sendEvent 触摸(横条区域)");
                     break;
                 }
             }
@@ -13050,6 +13086,14 @@ static UIImage *diActivityArtworkImage(UIView *view) {
    这一版不再看标志, 直接把祖先链每一层的 bounds 换算进头像坐标系求交:
    收缩态自然收敛成那颗小圆所在的窗口(约 26x34), 展开态交出来还是 66x66, 不受影响。
    玻璃按这块窗口铺, 形状图按比例居中缩放(不再拉伸填满), 小圆就不会被压成椭圆。 */
+/* 2.9.37: 16 上 2.9.33 的观感是对的, 17 才需要"可见窗口"这套。
+   所有新逻辑都挂在这道闸门后面, 16 走原来的 bounds 路径, 一个像素都不改。 */
+static BOOL diIsIOS17Up(void) {
+    static int major = -1;
+    if (major < 0) major = (int)NSProcessInfo.processInfo.operatingSystemVersion.majorVersion;
+    return major >= 17;
+}
+
 static CGRect diAspectFitRect(CGSize src, CGRect box) {
     if (src.width <= 0.5 || src.height <= 0.5 || box.size.width <= 0.5 || box.size.height <= 0.5)
         return box;
@@ -13173,6 +13217,10 @@ static void diActivityApply(UIView *artwork) {
     if (!NSThread.isMainThread || ![artwork isKindOfClass:UIView.class]) return;
     DIActivityMaskState *state = objc_getAssociatedObject(artwork, &kDIActivityMaskState);
     BOOL sized = artwork.bounds.size.width > 20 && artwork.bounds.size.height > 20;
+    /* 2.9.37: 16 不做窗口推算, 形态判据沿用老规则(17 在下面按窗口判) */
+    if (!diIsIOS17Up())
+        diMruWriteExpandState(sized && artwork.bounds.size.width >= 38.0 && artwork.bounds.size.height >= 38.0,
+                              artwork.bounds.size);
     /* 2.8.78: 判定过程必须可观测 —— 否则"没遮上"到底是没注入、没素材、还是
        上下文校验挡掉, 全靠猜(325 日志已经吃过这个亏)。
        2.8.79: 上下文校验保留退让档(类不存在时放行并把真实祖先打出来)。 */
@@ -13205,18 +13253,20 @@ static void diActivityApply(UIView *artwork) {
 
     /* 2.9.36: 算"窗口" —— 祖先链 bounds 求交。收缩态 = 小岛左边那颗小圆的口子,
        展开态 = 头像本身 66x66。玻璃只铺这块窗口, 不会再被外层裁成一牙。 */
+    BOOL ios17 = diIsIOS17Up();
     NSMutableString *chain = [NSMutableString string];
-    CGRect box = diActivityVisibleRect(artwork, chain);
+    CGRect box = ios17 ? diActivityVisibleRect(artwork, chain) : artwork.bounds;
     if (box.size.width < 4 || box.size.height < 4) box = artwork.bounds;
-    BOOL collapsed = (MIN(box.size.width, box.size.height) < 42);
-    diMruWriteExpandState(!collapsed, box.size);
+    BOOL collapsed = ios17 && (MIN(box.size.width, box.size.height) < 42);
+    /* 16 保持 2.9.33 的老判据(按 bounds), 不用窗口 */
+    if (ios17) diMruWriteExpandState(!collapsed, box.size);
     if (collapsed && MIN(box.size.width, box.size.height) < 12) {
         /* 口子小到没法画(过渡帧) —— 这一帧撤掉, 免得留一条碎边 */
         if (state) diActivityTeardown(artwork, state);
         return;
     }
     static NSString *lastChain; static CGRect lastBox;
-    if (!CGRectEqualToRect(lastBox, box) || ![lastChain isEqualToString:chain]) {
+    if (ios17 && (!CGRectEqualToRect(lastBox, box) || ![lastChain isEqualToString:chain])) {
         lastBox = box; lastChain = [chain copy];
         diMruFileLog([NSString stringWithFormat:@"窗口 bounds=%@ 可见=%@ 收缩=%d | %@",
                       NSStringFromCGRect(artwork.bounds), NSStringFromCGRect(box),
