@@ -22,7 +22,7 @@
 
 static NSString *const kDomain = @"com.abgg332.driftisland";
 /* 2.6.25: 设置页底部显示的版本号 */
-static NSString *const DI_VERSION_STR = @"2.9.21";
+static NSString *const DI_VERSION_STR = @"2.9.22";
 /* 2.6.10: 专辑光晕遮罩 —— 与 Tweak 侧 DIAlbumMask.h 保持一致 */
 static NSString *const kDIAlbumMaskKey = @"diAlbumMaskAsset";
 static NSString *const kDIMaskRoot = @"/var/mobile/灵动岛/遮罩素材";
@@ -5340,7 +5340,9 @@ static void diwKillByComm(const char *comm) {
 - (instancetype)initWithStyle:(UITableViewCellStyle)style reuseIdentifier:(NSString *)reuseIdentifier specifier:(PSSpecifier *)specifier {
     self = [super initWithStyle:style reuseIdentifier:reuseIdentifier specifier:specifier];
     if (self) {
-        self.selectionStyle = UITableViewCellSelectionStyleNone;
+        /* 2.9.22: 回到"表格原生选中"路径 —— 由 DIWidgetAppsPage 的
+           tableView:didSelectRowAtIndexPath: 统一处理, 这里只保留可选中外观。 */
+        self.selectionStyle = UITableViewCellSelectionStyleDefault;
         self.accessoryType = UITableViewCellAccessoryNone;
         _diwCheck = [[UIImageView alloc] initWithFrame:CGRectZero];
         _diwCheck.contentMode = UIViewContentModeScaleAspectFit;
@@ -5351,28 +5353,8 @@ static void diwKillByComm(const char *comm) {
         _diwIcon.layer.cornerCurve = kCACornerCurveContinuous;
         _diwIcon.clipsToBounds = YES;
         [self.contentView addSubview:_diwIcon];
-        /* 2.9.21: 这一行不靠 tableView 的选中回调 —— PSListController 对
-           非 PSButtonCell 类的自定义 cell 不会转发 buttonAction, 点上去没反应。
-           直接给自己挂手势, 点哪儿都算, 跟表格选中逻辑完全解耦。 */
-        UITapGestureRecognizer *tap =
-            [[UITapGestureRecognizer alloc] initWithTarget:self action:@selector(diwTapped)];
-        tap.cancelsTouchesInView = NO;
-        [self.contentView addGestureRecognizer:tap];
     }
     return self;
-}
-
-- (void)diwTapped {
-    PSSpecifier *sp = self.specifier;
-    if (!sp) return;
-    /* 先给一下按压反馈; 勾选后页面会 rebuild(cell 可能被回收), 所以后面一律用 weak */
-    self.highlighted = YES;
-    __weak DIWAppCell *weakSelf = self;
-    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.12 * NSEC_PER_SEC)),
-                   dispatch_get_main_queue(), ^{ weakSelf.highlighted = NO; });
-    SEL act = sp.buttonAction;
-    id tgt = sp.target;
-    if (act && tgt) ((void (*)(id, SEL, id))objc_msgSend)(tgt, act, sp);
 }
 
 - (void)refreshCellContentsWithSpecifier:(PSSpecifier *)specifier {
@@ -5399,10 +5381,13 @@ static void diwKillByComm(const char *comm) {
     [super layoutSubviews];
     CGFloat h = self.contentView.bounds.size.height;
     CGFloat w = self.contentView.bounds.size.width;
-    self.diwCheck.frame  = CGRectMake(16.0, (h - 26.0) / 2.0, 26.0, 26.0);
-    self.diwIcon.frame   = CGRectMake(54.0, (h - 30.0) / 2.0, 30.0, 30.0);
-    self.titleLabel.frame = CGRectMake(96.0, 0.0, MAX(0.0, w - 96.0 - 16.0), h);
+    self.diwIcon.frame  = CGRectMake(16.0, (h - 30.0) / 2.0, 30.0, 30.0);
+    self.diwCheck.frame = CGRectMake(MAX(0.0, w - 16.0 - 26.0), (h - 26.0) / 2.0, 26.0, 26.0);
+    CGFloat textX = 58.0;
+    CGFloat textW = MAX(0.0, self.diwCheck.frame.origin.x - 8.0 - textX);
+    self.titleLabel.frame = CGRectMake(textX, 0.0, textW, h);
     self.titleLabel.font  = [UIFont systemFontOfSize:17.0];
+    self.titleLabel.lineBreakMode = NSLineBreakByTruncatingTail;
 }
 
 @end
@@ -5427,6 +5412,21 @@ static void diwKillByComm(const char *comm) {
         _diwSearchBar.returnKeyType = UIReturnKeySearch;
     }
     self.table.tableHeaderView = _diwSearchBar;
+    self.table.keyboardDismissMode = UIScrollViewKeyboardDismissModeOnDrag;
+}
+
+/* 2.9.22: 点击统一走表格原生选中回调。
+   第一版(2.9.19)之所以"点得动", 是因为它用的是原生 PSButtonCell + 框架转发;
+   后面换了自定义 cell 类, 框架不认, 手势又和表格抢事件, 就变成"不灵敏"。
+   这里直接接管 didSelectRow(不调 super, 避免框架再转发一次导致双触发)。 */
+- (void)tableView:(UITableView *)tableView didSelectRowAtIndexPath:(NSIndexPath *)indexPath {
+    [tableView deselectRowAtIndexPath:indexPath animated:YES];
+    [self.view endEditing:YES];
+    PSSpecifier *sp = [self specifierAtIndexPath:indexPath];
+    if (!sp) return;
+    SEL act = sp.buttonAction;
+    id tgt = sp.target;
+    if (act && tgt) ((void (*)(id, SEL, id))objc_msgSend)(tgt, act, sp);
 }
 
 - (void)viewWillLayoutSubviews {
