@@ -62,7 +62,7 @@ static double expandTextY = DI_EXP_TEXT_BASE_Y;   // 上下偏移(pt, 下为正,
 static double expandTextScale = 100.0; // 文字大小(%, 100=原样)
 /* 2.8.86: 构建戳 —— 之前横幅打的是 SpringBoard 自己的 CFBundleShortVersionString(恒 1.0),
    日志里根本看不出装的是哪一版。所有诊断行都带这个戳, 下轮日志一眼定位。 */
-#define DI_BUILD_VER @"2.9.32"
+#define DI_BUILD_VER @"2.9.33"
 static BOOL gRecordingActive = NO; // 保留: 岛素材总闸条件
 static NSString *diElementId(UIView *host);
 static BOOL diMiniMusicActive(UIView *host); // 2.6.3: 前置(遮罩层使用)
@@ -5416,110 +5416,207 @@ static void applyNotifyStyle(UIView *host) {
 
 static void diForEachWindow(void (^blk)(UIWindow *w));
 
-/* ===== 2.9.32: 只给「锁屏 / 桌面 / 控制中心」做深/浅色 =====
-   2.9.31 是给几个私有容器类挂 layoutSubviews 再套 overrideUserInterfaceStyle,
-   实测那几个容器压根不回调(日志里只有控制中心模块自己打印), 整版没效果。
-   这一版不再依赖任何私有类是否回调: 每秒从窗口往下走一遍视图树,
-   整棵子树直接套 overrideUserInterfaceStyle(系统原生渲染材质/文字深浅),
-   只有「状态栏那一支」整支跳过 —— 状态栏保持系统本色,
-   浅色壁纸上仍是黑字(看得清), 跨进程小组件(chronod/WidgetRenderer)也不受影响。 */
-static NSHashTable *gThemeTouched;   /* 我们改过的视图(弱引用), 关闭时按它还原 */
-static BOOL gThemeSawApply;
-static dispatch_source_t gThemeTimer;
+/* ===== 2.9.33: 深色功能 —— 完全移植 GlobalFontSwitcher(GLFTextColorManager) =====
+   原版做法(反汇编核实):
+     · 锁屏   hook CSCoverSheetViewController viewWillAppear: → 整个锁屏 VC 套 overrideUserInterfaceStyle;
+     · 桌面   hook _UIContextMenuView / UIInterfaceActionGroupView 的 initWithFrame:+didMoveToWindow、
+              SBHIconViewContextMenuWrapperViewController 的 init+viewDidLoad → 3D 长按菜单整棵套同样式;
+     · 记账   associated object 存「原样式 + 已托管」标记, 关闭时还原原样式;
+              NSHashTable 弱引用登记, 改设置后对所有登记过的对象立即重刷。
+   模式映射: 关=跟随系统(0), 强制深色开=深色(1), 关=浅色(2) —— 与原版 interfaceStyleForMode: 一致。 */
+/* associated object 键: 用静态变量地址(NSString 串不能当 key) */
+static char kGLFLockOrigKey, kGLFLockMgdKey;
+static char kGLFMenuViewOrigKey, kGLFMenuViewMgdKey;
+static char kGLFMenuVCOrigKey, kGLFMenuVCMgdKey;
 
-static BOOL diThemeIsStatusBarNode(UIView *v) {
-    for (Class c = object_getClass(v); c && c != [UIView class]; c = class_getSuperclass(c)) {
-        const char *n = class_getName(c);
-        if (n && strstr(n, "StatusBar")) return YES;
-    }
-    return NO;
+static NSHashTable *gGLFLockControllers, *gGLFMenuViews, *gGLFMenuControllers;
+static IMP gGLFOrigCSViewWillAppear, gGLFOrigMenuViewInit, gGLFOrigMenuViewMove,
+           gGLFOrigActionGroupInit, gGLFOrigActionGroupMove, gGLFOrigMenuVCInit, gGLFOrigMenuVCViewDidLoad;
+
+/* 模式: 0=跟随系统 1=深色 2=浅色 */
+static NSInteger diGLFMode(void) {
+    if (!gThemeOn) return 0;
+    return gThemeDark ? 1 : 2;
 }
 
-static BOOL diThemeTreeHasStatusBar(UIView *v, int depth) {
-    if (!v) return NO;
-    if (diThemeIsStatusBarNode(v)) return YES;
-    if (depth >= 32) return NO;
-    NSArray *subs = v.subviews;
-    for (NSUInteger i = 0; i < subs.count; i++)
-        if (diThemeTreeHasStatusBar(subs[i], depth + 1)) return YES;
-    return NO;
+static UIUserInterfaceStyle diGLFStyleForMode(NSInteger mode) {
+    if (!gThemeOn || mode == 0) return UIUserInterfaceStyleUnspecified;
+    return mode == 1 ? UIUserInterfaceStyleDark : UIUserInterfaceStyleLight;
 }
 
-static void diThemeSet(UIView *v, UIUserInterfaceStyle want) {
+static void diGLFApplyStyleToView(UIView *v, NSInteger mode, void *oKey, void *mKey) {
     if (!v) return;
-    if (v.overrideUserInterfaceStyle == want) return;
-    v.overrideUserInterfaceStyle = want;
-    if (!gThemeTouched) gThemeTouched = [NSHashTable weakObjectsHashTable];
-    [gThemeTouched addObject:v];
-}
-
-/* 返回本轮真正套用到的根节点数 */
-static int diThemeApplyNode(UIView *v, UIUserInterfaceStyle want, int depth) {
-    if (!v || depth > 32) return 0;
-    if (diThemeIsStatusBarNode(v)) return 0;            /* 状态栏整支不动 */
-    if (!diThemeTreeHasStatusBar(v, 0)) { diThemeSet(v, want); return 1; }
-    int n = 0;
-    NSArray *subs = v.subviews;
-    for (NSUInteger i = 0; i < subs.count; i++)
-        n += diThemeApplyNode(subs[i], want, depth + 1);
-    return n;
-}
-
-/* 整窗跳过的: 状态栏(要保可读) / 灵动岛(有我们自己的发光) / 壁纸(别把状态栏底子弄黑) */
-static const char *diThemeSkipWindow(UIWindow *w) {
-    const char *n = class_getName(w.class);
-    if (!n) return NULL;
-    if (strstr(n, "StatusBar")) return "状态栏";
-    if (strstr(n, "Aperture"))  return "灵动岛";
-    if (strstr(n, "Wallpaper")) return "壁纸";
-    return NULL;
-}
-
-static void diThemeApplyAll(BOOL verbose) {
-    if (!NSThread.isMainThread) {
-        dispatch_async(dispatch_get_main_queue(), ^{ diThemeApplyAll(verbose); });
-        return;
-    }
-    if (!gThemeOn) {
-        if (gThemeTouched.count) {
-            NSUInteger cnt = gThemeTouched.count;
-            for (UIView *v in gThemeTouched.allObjects)
-                if (v) v.overrideUserInterfaceStyle = UIUserInterfaceStyleUnspecified;
-            [gThemeTouched removeAllObjects];
-            gThemeSawApply = NO;
-            DLog(@"[分区外观] 已关闭, 还原 %lu 个容器为跟随系统", (unsigned long)cnt);
+    UIUserInterfaceStyle want = diGLFStyleForMode(mode);
+    NSNumber *managed = objc_getAssociatedObject(v, mKey);
+    if (want == UIUserInterfaceStyleUnspecified) {
+        if (managed.boolValue) {                       /* 还原成接管前的原样式 */
+            NSNumber *orig = objc_getAssociatedObject(v, oKey);
+            if (orig && v.overrideUserInterfaceStyle != (UIUserInterfaceStyle)orig.integerValue)
+                v.overrideUserInterfaceStyle = (UIUserInterfaceStyle)orig.integerValue;
+            objc_setAssociatedObject(v, mKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
         }
         return;
     }
-    UIUserInterfaceStyle want = gThemeDark ? UIUserInterfaceStyleDark : UIUserInterfaceStyleLight;
-    __block int roots = 0, wins = 0;
-    NSMutableString *diag = verbose ? [NSMutableString string] : nil;
-    diForEachWindow(^(UIWindow *w){
-        if (!w) return;
-        const char *why = diThemeSkipWindow(w);
-        int n = why ? 0 : diThemeApplyNode(w, want, 0);
-        roots += n; wins++;
-        if (diag) {
-            [diag appendFormat:@"%@", NSStringFromClass(w.class)];
-            if (why) [diag appendFormat:@"(%s跳过)", why];
-            [diag appendFormat:@"[%d] ", n];
+    if (!managed.boolValue)                            /* 只在第一次接管时记原样式 */
+        objc_setAssociatedObject(v, oKey, @(v.overrideUserInterfaceStyle), OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    if (v.overrideUserInterfaceStyle != want) v.overrideUserInterfaceStyle = want;
+    objc_setAssociatedObject(v, mKey, @YES, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+}
+
+static void diGLFApplyStyleToController(UIViewController *c, NSInteger mode, void *oKey, void *mKey) {
+    if (!c) return;
+    UIUserInterfaceStyle want = diGLFStyleForMode(mode);
+    NSNumber *managed = objc_getAssociatedObject(c, mKey);
+    if (want == UIUserInterfaceStyleUnspecified) {
+        if (managed.boolValue) {
+            NSNumber *orig = objc_getAssociatedObject(c, oKey);
+            if (orig && c.overrideUserInterfaceStyle != (UIUserInterfaceStyle)orig.integerValue)
+                c.overrideUserInterfaceStyle = (UIUserInterfaceStyle)orig.integerValue;
+            objc_setAssociatedObject(c, mKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
         }
+        return;
+    }
+    if (!managed.boolValue)
+        objc_setAssociatedObject(c, oKey, @(c.overrideUserInterfaceStyle), OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    if (c.overrideUserInterfaceStyle != want) c.overrideUserInterfaceStyle = want;
+    objc_setAssociatedObject(c, mKey, @YES, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+}
+
+static void diGLFRegisterLockScreenController(UIViewController *c) {
+    if (!c) return;
+    if (!gGLFLockControllers) gGLFLockControllers = [NSHashTable weakObjectsHashTable];
+    [gGLFLockControllers addObject:c];
+    diGLFApplyStyleToController(c, diGLFMode(), &kGLFLockOrigKey, &kGLFLockMgdKey);
+}
+
+static void diGLFRegisterHomeScreenMenuRoot(UIView *v) {
+    if (!v) return;
+    if (!gGLFMenuViews) gGLFMenuViews = [NSHashTable weakObjectsHashTable];
+    [gGLFMenuViews addObject:v];
+    diGLFApplyStyleToView(v, diGLFMode(), &kGLFMenuViewOrigKey, &kGLFMenuViewMgdKey);
+}
+
+static void diGLFRegisterHomeScreenMenuController(UIViewController *c) {
+    if (!c) return;
+    if (!gGLFMenuControllers) gGLFMenuControllers = [NSHashTable weakObjectsHashTable];
+    [gGLFMenuControllers addObject:c];
+    diGLFApplyStyleToController(c, diGLFMode(), &kGLFMenuVCOrigKey, &kGLFMenuVCMgdKey);
+}
+
+/* 注销后锁屏 VC 可能早已建好(不会再走 viewWillAppear), 主动扫一遍登记 */
+static void diGLFScanLockVC(UIViewController *vc, NSMutableArray *out) {
+    if (!vc) return;
+    if ([NSStringFromClass(vc.class) isEqualToString:@"CSCoverSheetViewController"]) [out addObject:vc];
+    for (UIViewController *ch in vc.childViewControllers) diGLFScanLockVC(ch, out);
+}
+
+static void diGLFAttachExisting(void) {
+    if (!NSThread.isMainThread) { dispatch_async(dispatch_get_main_queue(), ^{ diGLFAttachExisting(); }); return; }
+    NSMutableArray *found = [NSMutableArray array];
+    diForEachWindow(^(UIWindow *w){ diGLFScanLockVC(w.rootViewController, found); });
+    for (UIViewController *c in found) diGLFRegisterLockScreenController(c);
+    if (found.count) DLog(@"[启动外观] 现存锁屏 VC 已登记 %lu 个", (unsigned long)found.count);
+}
+
+static void diGLFReloadAndReapply(void) {
+    NSInteger mode = diGLFMode();
+    for (UIViewController *c in gGLFLockControllers.allObjects)
+        diGLFApplyStyleToController(c, mode, &kGLFLockOrigKey, &kGLFLockMgdKey);
+    for (UIView *v in gGLFMenuViews.allObjects)
+        diGLFApplyStyleToView(v, mode, &kGLFMenuViewOrigKey, &kGLFMenuViewMgdKey);
+    for (UIViewController *c in gGLFMenuControllers.allObjects)
+        diGLFApplyStyleToController(c, mode, &kGLFMenuVCOrigKey, &kGLFMenuVCMgdKey);
+    DLog(@"[启动外观] 重刷 模式=%ld 锁屏VC=%lu 菜单视图=%lu 菜单VC=%lu",
+         (long)mode, (unsigned long)gGLFLockControllers.count,
+         (unsigned long)gGLFMenuViews.count, (unsigned long)gGLFMenuControllers.count);
+    diGLFAttachExisting();
+}
+
+static void h_glfCSViewWillAppear(UIViewController *self, SEL _cmd, BOOL animated) {
+    if (gGLFOrigCSViewWillAppear)
+        ((void(*)(id, SEL, BOOL))gGLFOrigCSViewWillAppear)(self, _cmd, animated);
+    diGLFRegisterLockScreenController(self);
+}
+
+static UIView *h_glfMenuViewInit(UIView *self, SEL _cmd, CGRect frame) {
+    UIView *r = gGLFOrigMenuViewInit
+        ? ((UIView *(*)(id, SEL, CGRect))gGLFOrigMenuViewInit)(self, _cmd, frame) : self;
+    diGLFRegisterHomeScreenMenuRoot(r ?: self);
+    return r;
+}
+
+static void h_glfMenuViewMove(UIView *self, SEL _cmd) {
+    if (gGLFOrigMenuViewMove)
+        ((void(*)(id, SEL))gGLFOrigMenuViewMove)(self, _cmd);
+    diGLFRegisterHomeScreenMenuRoot(self);
+}
+
+/* UIInterfaceActionGroupView 用自己的一对 trampoline(原实现各存一份, 不能共用) */
+static UIView *h_glfActionGroupInit(UIView *self, SEL _cmd, CGRect frame) {
+    UIView *r = gGLFOrigActionGroupInit
+        ? ((UIView *(*)(id, SEL, CGRect))gGLFOrigActionGroupInit)(self, _cmd, frame) : self;
+    diGLFRegisterHomeScreenMenuRoot(r ?: self);
+    return r;
+}
+
+static void h_glfActionGroupMove(UIView *self, SEL _cmd) {
+    if (gGLFOrigActionGroupMove)
+        ((void(*)(id, SEL))gGLFOrigActionGroupMove)(self, _cmd);
+    diGLFRegisterHomeScreenMenuRoot(self);
+}
+
+static id h_glfMenuVCInit(id self, SEL _cmd) {
+    id r = gGLFOrigMenuVCInit ? ((id(*)(id, SEL))gGLFOrigMenuVCInit)(self, _cmd) : self;
+    diGLFRegisterHomeScreenMenuController(r ?: self);
+    return r;
+}
+
+static void h_glfMenuVCViewDidLoad(UIViewController *self, SEL _cmd) {
+    if (gGLFOrigMenuVCViewDidLoad)
+        ((void(*)(id, SEL))gGLFOrigMenuVCViewDidLoad)(self, _cmd);
+    diGLFRegisterHomeScreenMenuController(self);
+}
+
+/* 装钩子: dispatch_once 幂等, 私有类晚加载时每次 installKnownHosts 都会再进来补装 */
+static void diGLFInstall(void) {
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        Class cs = NSClassFromString(@"CSCoverSheetViewController");
+        if (cs) {
+            Method m = class_getInstanceMethod(cs, @selector(viewWillAppear:));
+            if (m) {
+                MSHookMessageEx(cs, @selector(viewWillAppear:), (IMP)h_glfCSViewWillAppear, &gGLFOrigCSViewWillAppear);
+                DLog(@"[启动外观] hook CSCoverSheetViewController viewWillAppear:");
+            }
+        } else {
+            DLog(@"[启动外观] CSCoverSheetViewController 未加载");
+        }
+        Class mv = NSClassFromString(@"_UIContextMenuView");
+        if (mv) {
+            Method m1 = class_getInstanceMethod(mv, @selector(initWithFrame:));
+            if (m1) MSHookMessageEx(mv, @selector(initWithFrame:), (IMP)h_glfMenuViewInit, &gGLFOrigMenuViewInit);
+            Method m2 = class_getInstanceMethod(mv, @selector(didMoveToWindow));
+            if (m2) MSHookMessageEx(mv, @selector(didMoveToWindow), (IMP)h_glfMenuViewMove, &gGLFOrigMenuViewMove);
+            DLog(@"[启动外观] hook _UIContextMenuView init=%d move=%d", m1 != NULL, m2 != NULL);
+        }
+        Class ag = NSClassFromString(@"UIInterfaceActionGroupView");
+        if (ag) {
+            Method m1 = class_getInstanceMethod(ag, @selector(initWithFrame:));
+            if (m1) MSHookMessageEx(ag, @selector(initWithFrame:), (IMP)h_glfActionGroupInit, &gGLFOrigActionGroupInit);
+            Method m2 = class_getInstanceMethod(ag, @selector(didMoveToWindow));
+            if (m2) MSHookMessageEx(ag, @selector(didMoveToWindow), (IMP)h_glfActionGroupMove, &gGLFOrigActionGroupMove);
+            DLog(@"[启动外观] hook UIInterfaceActionGroupView init=%d move=%d", m1 != NULL, m2 != NULL);
+        }
+        Class mc = NSClassFromString(@"SBHIconViewContextMenuWrapperViewController");
+        if (mc) {
+            Method m1 = class_getInstanceMethod(mc, @selector(init));
+            if (m1) MSHookMessageEx(mc, @selector(init), (IMP)h_glfMenuVCInit, &gGLFOrigMenuVCInit);
+            Method m2 = class_getInstanceMethod(mc, @selector(viewDidLoad));
+            if (m2) MSHookMessageEx(mc, @selector(viewDidLoad), (IMP)h_glfMenuVCViewDidLoad, &gGLFOrigMenuVCViewDidLoad);
+            DLog(@"[启动外观] hook SBHIconViewContextMenuWrapperViewController init=%d load=%d", m1 != NULL, m2 != NULL);
+        }
+        diGLFAttachExisting();
     });
-    if (verbose || !gThemeSawApply) {
-        DLog(@"[分区外观] 目标=%@ 窗口=%d 套用根节点=%d | %@",
-             want == UIUserInterfaceStyleDark ? @"深色" : @"浅色", wins, roots, diag ?: @"");
-    }
-    gThemeSawApply = YES;
-}
-
-/* 1 秒一圈: 新窗口(控制中心)/新建的卡片都能自己跟上, 不靠任何私有类回调 */
-static void diThemeStartTimer(void) {
-    if (gThemeTimer) return;
-    gThemeTimer = dispatch_source_create(DISPATCH_SOURCE_TYPE_TIMER, 0, 0, dispatch_get_main_queue());
-    dispatch_source_set_timer(gThemeTimer, dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.0 * NSEC_PER_SEC)),
-                              (int64_t)(1.0 * NSEC_PER_SEC), (int64_t)(0.25 * NSEC_PER_SEC));
-    dispatch_source_set_event_handler(gThemeTimer, ^{ diThemeApplyAll(NO); });
-    dispatch_resume(gThemeTimer);
 }
 
 static BOOL viewHasToken(UIView *v, NSString *token) {
@@ -8960,7 +9057,7 @@ static BOOL install(NSString *name) {
 
 static void installKnownHosts(void) {
     diGainInstallHook();   /* 2.8.31: 隐藏药丸 hook(私有类晚加载时靠分阶段重试补装) */
-    diThemeStartTimer();   /* 2.9.32: 每秒扫窗, 锁屏/桌面/控制中心整树套深/浅色 */
+    diGLFInstall();   /* 2.9.33: 锁屏VC + 桌面3D长按菜单 深/浅色(移植 GlobalFontSwitcher) */
     install(@"SAUIElementView");
     installBreathKick();   /* 2.9.19: 通知到达 → 重新起呼吸 */
     /* 2.2.10: 锁屏通知宽度 —— 锁屏通知卡(short look)与通知列表容器都按 layoutSubviews 调宽度 */
@@ -11523,8 +11620,8 @@ static void diPrefsRefreshNow(void) {
         }
         /* 2.8.8: 发光开关/半径/颜色变更 → 立即重绘所有锁屏卡片 */
         diRestyleAllLockPlatters();
-        /* 2.9.32: 启动开关 / 强制深色 一改立刻生效(不用等下一圈定时) */
-        diThemeApplyAll(YES);
+        /* 2.9.33: 启动开关 / 强制深色 一改, 已登记对象立刻重刷 */
+        diGLFReloadAndReapply();
     } @catch (NSException *e) {
         RLog(@"偏好刷新异常(已吞): %@ — %@", e.name, e.reason);
     }
