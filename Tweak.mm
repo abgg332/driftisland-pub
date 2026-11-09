@@ -62,7 +62,7 @@ static double expandTextY = DI_EXP_TEXT_BASE_Y;   // 上下偏移(pt, 下为正,
 static double expandTextScale = 100.0; // 文字大小(%, 100=原样)
 /* 2.8.86: 构建戳 —— 之前横幅打的是 SpringBoard 自己的 CFBundleShortVersionString(恒 1.0),
    日志里根本看不出装的是哪一版。所有诊断行都带这个戳, 下轮日志一眼定位。 */
-#define DI_BUILD_VER @"2.9.38"
+#define DI_BUILD_VER @"2.9.39"
 static BOOL gRecordingActive = NO; // 保留: 岛素材总闸条件
 static NSString *diElementId(UIView *host);
 static BOOL diMiniMusicActive(UIView *host); // 2.6.3: 前置(遮罩层使用)
@@ -12194,27 +12194,34 @@ static void diStyleGrabber(UIView *grabber) {
    SBSystemApertureWindow(灵动岛宿主, 全屏)。覆盖层不接收触摸, 手势就永远不触发。
    本版改为: 主监听 = 屏幕边缘平移(系统在边缘区域不会把触摸交给应用/游戏),
    并同时挂到所有全屏窗口上; 再加一条兜底 —— 隐藏状态下只要有触摸落下就唤回。*/
-/* ===== 2.9.38: 横条"触摸唤醒"范围 —— 锁死 50pt 宽 =====
-   用户要求: 显示逻辑一律不动, 只把"能唤出横条"的触摸口子收窄成中间 50pt,
-   其他位置一律不触发。位置仍取横条自己的中心(没有 pill 就用屏幕底边中点),
-   只有宽度被锁死: 中心 ±25pt, 高度给 44pt 容差。 */
+/* ===== 2.9.39: 横条"触摸唤醒"范围 —— 只留底部中间那一段 =====
+   2.9.37/2.9.38 用 UITouch.window 去换算 pill 坐标, 但 SpringBoard 里那个属性经常
+   是 nil, 整条 sendEvent 主通道直接 continue 掉了 —— 用户实测"滑动一下不显示"。
+   这一版把判定恢复成 2.9.33 的取坐标方式([t locationInView:nil]), 显示/唤回/计时
+   逻辑一字不改, 只把"能唤醒的区域"从"左右两侧各 18%宽 × 中部 50%高"收窄成:
+     · 界面坐标: 屏幕底边中间 34% 宽 × 54pt 高(用户红框标的那一段);
+     · 未旋转坐标: 左右两缘各 12% 深 × 中部 1/3 长(2.9.33 判据的居中收窄版)。
+   两套任一套命中即唤回, 区域外一律不触发。 */
+static BOOL diHitBottomMiddle(CGPoint p, CGSize size) {
+    if (size.width < 1.0 || size.height < 1.0) return NO;
+    CGFloat w = size.width * 0.34;
+    CGRect hit = CGRectMake((size.width - w) * 0.5, size.height - 54.0, w, 54.0);
+    return CGRectContainsPoint(CGRectInset(hit, 0, -10.0), p);
+}
+
 static BOOL diBarHitTest(CGPoint p, UIView *coordView) {
-    CGRect bar = CGRectNull; BOOL have = NO;
-    NSArray *pills = gBarPills ? [gBarPills allObjects] : @[];
-    for (UIView *pill in pills) {
-        if (!pill || !pill.window) continue;
-        UIView *host = coordView ?: pill.window;
-        CGRect r = [pill convertRect:pill.bounds toView:host];
-        if (CGRectIsNull(r) || CGRectIsEmpty(r)) continue;
-        if (!CGRectIntersectsRect(r, CGRectInset(host.bounds, -200.0, -200.0))) continue;
-        bar = r; have = YES; break;
-    }
-    if (!have) {
-        CGRect b = coordView ? coordView.bounds : [UIScreen mainScreen].bounds;
-        bar = CGRectMake(CGRectGetMidX(b), CGRectGetMaxY(b) - 6.0, 1.0, 1.0);
-    }
-    CGRect hit = CGRectMake(CGRectGetMidX(bar) - 25.0, CGRectGetMidY(bar) - 22.0, 50.0, 44.0);
-    return CGRectContainsPoint(hit, p);
+    /* A. 界面坐标: 底边中间一段 */
+    if (coordView) { if (diHitBottomMiddle(p, coordView.bounds.size)) return YES; }
+    /* A2. 拿不到宿主窗口时, 按横屏矩形也判一次(有无旋转都能兜住) */
+    CGSize scr0 = [UIScreen mainScreen].bounds.size;
+    CGSize land = CGSizeMake(MAX(scr0.width, scr0.height), MIN(scr0.width, scr0.height));
+    if (diHitBottomMiddle(p, land)) return YES;
+    /* B. 竖屏(未旋转)坐标: 横屏时视觉底部的横条在左/右缘中部 */
+    CGSize scr = [UIScreen mainScreen].bounds.size;
+    CGFloat pw = MIN(scr.width, scr.height), ph = MAX(scr.width, scr.height);
+    BOOL inEdge = (p.x < pw * 0.12 || p.x > pw * 0.88);
+    BOOL inMid  = fabs(p.y - ph * 0.5) < ph * 0.167;   /* 中部 1/3 */
+    return inEdge && inMid;
 }
 
 @interface DIBarSwipeWatcher : NSObject <UIGestureRecognizerDelegate>
@@ -12254,9 +12261,9 @@ static void diRevealBarNow(const char *why) {
 - (void)diTouched:(UIGestureRecognizer *)g {
     if (g.state != UIGestureRecognizerStateBegan && g.state != UIGestureRecognizerStateChanged) return;
     if (!gestureProtectOn || !gLandHidden || !diLandscapeNow()) return;
-    /* 2.9.37: 只认横条自己那一小段, 屏幕其他位置不唤醒 */
+    /* 2.9.39: 只认底部中间那一段 */
     if (!diBarHitTest([g locationInView:g.view], g.view)) return;
-    diRevealBarNow("检测到触摸(横条区域)");
+    diRevealBarNow("检测到触摸(中间区域)");
 }
 - (void)diSwiped:(UIPanGestureRecognizer *)g {
     if (g.state != UIGestureRecognizerStateBegan && g.state != UIGestureRecognizerStateChanged) return;
@@ -12264,9 +12271,9 @@ static void diRevealBarNow(const char *why) {
     if (fabs(t.y) < 5 && fabs(t.x) < 5) return;
     if (!gestureProtectOn) return;
     if (!diLandscapeNow()) return;
-    /* 2.9.37: 起点不在横条那一段就不唤醒 */
+    /* 2.9.39: 起点不在底部中间那一段就不唤醒 */
     if (!diBarHitTest([g locationInView:g.view], g.view)) return;
-    diRevealBarNow("检测到滑动(横条区域)");
+    diRevealBarNow("检测到滑动(中间区域)");
 }
 @end
 
@@ -12651,15 +12658,14 @@ static void di_sendEvent(id self, SEL _cmd, UIEvent *e) {
             /* 关键事实(192 实测反推): 横屏时触摸坐标仍是竖屏(portrait)坐标系 ——
                视觉底部的 home 横条在竖屏坐标里是屏幕"左缘或右缘的中部"。
                用 statusBarOrientation 区分朝向, 只认横条真实所在的那一小块区域。 */
-            /* 2.9.37: 不再用 18%×50% 的粗框(横屏时约 70x420pt, 到处误触),
-               改为逐点比对横条 pill 的真实 frame, 跟随横条渲染长度。 */
+            /* 2.9.39: 取坐标方式回到 2.9.33([t locationInView:nil]) ——
+               UITouch.window 在 SpringBoard 里常为 nil, 2.9.38 因此整条失效。
+               只把区域换成底部中间那一小段。 */
             for (UITouch *t in e.allTouches) {
                 if (t.phase != UITouchPhaseBegan && t.phase != UITouchPhaseMoved) continue;
-                UIWindow *tw = t.window;
-                if (!tw) continue;
-                CGPoint p = [t locationInView:tw];
-                if (diBarHitTest(p, tw)) {
-                    diRevealBarNow("sendEvent 触摸(横条区域)");
+                CGPoint p = [t locationInView:nil];
+                if (diBarHitTest(p, nil)) {
+                    diRevealBarNow("sendEvent 触摸(中间区域)");
                     break;
                 }
             }
