@@ -62,7 +62,7 @@ static double expandTextY = DI_EXP_TEXT_BASE_Y;   // 上下偏移(pt, 下为正,
 static double expandTextScale = 100.0; // 文字大小(%, 100=原样)
 /* 2.8.86: 构建戳 —— 之前横幅打的是 SpringBoard 自己的 CFBundleShortVersionString(恒 1.0),
    日志里根本看不出装的是哪一版。所有诊断行都带这个戳, 下轮日志一眼定位。 */
-#define DI_BUILD_VER @"2.9.37"
+#define DI_BUILD_VER @"2.9.38"
 static BOOL gRecordingActive = NO; // 保留: 岛素材总闸条件
 static NSString *diElementId(UIView *host);
 static BOOL diMiniMusicActive(UIView *host); // 2.6.3: 前置(遮罩层使用)
@@ -3356,6 +3356,29 @@ static void diStripMaskFromCover(UIView *cover) {
      · 遮罩开启时 → 只摘 >80pt 的大层(小岛头像那 22~26pt 的保留)。 */
 static NSString *diMruSharedDir(void);   /* 实现在下方导出段 */
 
+/* ===== 2.9.38: 把小岛真实形态写给 MediaRemoteUI =====
+   369~379 的死结: iOS17 上 MRU 里那个头像视图恒 66x66, 它按 bounds 判形态永远得到
+   "展开" → ① 它自己在收缩态也铺 66pt 玻璃(被外层裁成一牙 = 用户说的"变形");
+   ② 它把 expanded=YES 写进 state.plist, SpringBoard 这边的小岛玻璃(2.8.75 那套)
+   看到"展开"就整棵退场 → 小岛专辑只剩 MRU 那块错的。
+   宿主真实尺寸只有 SpringBoard 知道(小岛 ~189x37 / 展开 407x202), 这里写给它。 */
+static void diPublishIslandState(CGSize hostSize, BOOL mini, BOOL expand) {
+    if (hostSize.width < 1.0 || hostSize.height < 1.0) return;
+    static CGFloat lw, lh; static CFAbsoluteTime lt; static int lm = -1;
+    CFAbsoluteTime now = CFAbsoluteTimeGetCurrent();
+    int m = mini ? 1 : (expand ? 2 : 0);
+    if (fabs(hostSize.width - lw) < 0.5 && fabs(hostSize.height - lh) < 0.5
+        && m == lm && now - lt < 2.0) return;
+    lw = hostSize.width; lh = hostSize.height; lm = m; lt = now;
+    NSString *dir = diMruSharedDir();
+    if (!dir.length) return;
+    NSDictionary *d = @{@"w": @(hostSize.width), @"h": @(hostSize.height),
+                        @"mini": @(mini ? 1 : 0), @"expand": @(expand ? 1 : 0),
+                        @"t": @(now), @"v": DI_BUILD_VER};
+    @try { [d writeToFile:[dir stringByAppendingPathComponent:@"island.plist"] atomically:YES]; }
+    @catch (__unused NSException *e) {}
+}
+
 /* ===== 2.8.86: 展开态由 MRU 亲口告诉我们 =====
    332/333 日志的死结: 展开后 SpringBoard 这边宿主的 bounds 一直停在 198x55
    (展开的内容是它内部那块 407x489 的跨进程 scene), 所以 2.8.84 的
@@ -3969,6 +3992,7 @@ static BOOL diApplyMaskToCover(UIView *cover, UIImage *shape) {
            充电岛虽然尺寸命中, 但下面音乐岛结构判定(diIsNowPlayingHostCached)会挡住。 */
         BOOL isExpand = (bs.height >= 120 && bs.height <= 300
                          && bs.width >= 280 && bs.width <= 440);
+        diPublishIslandState(bs, isMini, isExpand);   /* 2.9.38: 形态同步给 MRU */
         {
             static CGFloat sLastW, sLastH; static CFAbsoluteTime sSzT;
             if ((fabs(bs.width - sLastW) > 6 || fabs(bs.height - sLastH) > 6)
@@ -12170,38 +12194,27 @@ static void diStyleGrabber(UIView *grabber) {
    SBSystemApertureWindow(灵动岛宿主, 全屏)。覆盖层不接收触摸, 手势就永远不触发。
    本版改为: 主监听 = 屏幕边缘平移(系统在边缘区域不会把触摸交给应用/游戏),
    并同时挂到所有全屏窗口上; 再加一条兜底 —— 隐藏状态下只要有触摸落下就唤回。*/
-/* ===== 2.9.37: 横条"触摸唤醒"范围 —— 跟随横条真实长度 =====
-   旧实现: sendEvent 里用 竖屏宽 18% × 竖屏高中部 50% 的粗框, 横屏时是一大块
-   (约 70x420pt), 随手一碰就把横条唤出来 → 误触。窗口级 tap/pan 更是全屏都算。
-   现在统一按"横条实际渲染出来的那条"算: 取横条 pill 在窗口里的 frame,
-   长边不足 50pt 时按 50pt 居中兜底(用户说的"锁死中间底下 50"), 再给 18/24pt
-   触摸容差。框外一律不唤醒。 */
+/* ===== 2.9.38: 横条"触摸唤醒"范围 —— 锁死 50pt 宽 =====
+   用户要求: 显示逻辑一律不动, 只把"能唤出横条"的触摸口子收窄成中间 50pt,
+   其他位置一律不触发。位置仍取横条自己的中心(没有 pill 就用屏幕底边中点),
+   只有宽度被锁死: 中心 ±25pt, 高度给 44pt 容差。 */
 static BOOL diBarHitTest(CGPoint p, UIView *coordView) {
-    CGRect coordBounds = coordView ? coordView.bounds : [UIScreen mainScreen].bounds;
-    BOOL sawPill = NO;
+    CGRect bar = CGRectNull; BOOL have = NO;
     NSArray *pills = gBarPills ? [gBarPills allObjects] : @[];
     for (UIView *pill in pills) {
         if (!pill || !pill.window) continue;
-        CGRect r = pill.bounds;
-        if (r.size.width < 2 || r.size.height < 2) continue;
         UIView *host = coordView ?: pill.window;
-        /* 跨窗口也换算(UIKit 走屏幕坐标), 只要换算结果还落在宿主窗口里就认 */
-        r = [pill convertRect:r toView:host];
+        CGRect r = [pill convertRect:pill.bounds toView:host];
         if (CGRectIsNull(r) || CGRectIsEmpty(r)) continue;
-        if (!CGRectIntersectsRect(r, CGRectInset(host.bounds, -400, -400))) continue;
-        sawPill = YES;
-        if (r.size.width < 50.0) {                     /* 太短就按 50pt 居中撑开 */
-            CGFloat d = (50.0 - r.size.width) * 0.5;
-            r = CGRectInset(r, -d, 0);
-        }
-        CGRect hit = CGRectInset(r, -18.0, -24.0);     /* 触摸容差 */
-        if (CGRectContainsPoint(hit, p)) return YES;
+        if (!CGRectIntersectsRect(r, CGRectInset(host.bounds, -200.0, -200.0))) continue;
+        bar = r; have = YES; break;
     }
-    if (sawPill) return NO;
-    /* 横条还没登记到(冷启动/过渡帧): 兜底 = 屏幕底边中间 50pt */
-    CGRect fb = CGRectMake(CGRectGetMidX(coordBounds) - 25.0,
-                           CGRectGetMaxY(coordBounds) - 44.0, 50.0, 44.0);
-    return CGRectContainsPoint(fb, p);
+    if (!have) {
+        CGRect b = coordView ? coordView.bounds : [UIScreen mainScreen].bounds;
+        bar = CGRectMake(CGRectGetMidX(b), CGRectGetMaxY(b) - 6.0, 1.0, 1.0);
+    }
+    CGRect hit = CGRectMake(CGRectGetMidX(bar) - 25.0, CGRectGetMidY(bar) - 22.0, 50.0, 44.0);
+    return CGRectContainsPoint(hit, p);
 }
 
 @interface DIBarSwipeWatcher : NSObject <UIGestureRecognizerDelegate>
@@ -13211,14 +13224,49 @@ static void diMruWriteExpandState(BOOL expanded, CGSize box) {
     @try { [d writeToFile:[dir stringByAppendingPathComponent:@"state.plist"] atomically:YES]; }
     @catch (__unused NSException *e) {}
 }
+/* ===== 2.9.38: 17 上"现在是不是收缩态" =====
+   377~379 实锤: iOS17 的 MRUActivityArtworkView 恒 66x66, 收缩态也是这样, 所以
+   按 bounds 判形态永远是"展开" → 收缩态也铺 66pt 玻璃 + 告诉 SpringBoard"展开",
+   小岛那边于是整棵退场, 只剩这块错的玻璃 → 用户看到的"变形"。
+   形态以 SpringBoard 写的 island.plist 为准(宿主真实尺寸: 小岛 ~189x37 / 展开 407x202),
+   文件 3 秒没更新(或没写过)才退回祖先链尺寸兜底。 */
+static BOOL diMruIslandCompact(UIView *artwork) {
+    static CGSize sSize; static BOOL sHave; static CFAbsoluteTime sAt, sChecked;
+    CFAbsoluteTime now = CFAbsoluteTimeGetCurrent();
+    if (now - sChecked > 0.5) {
+        sChecked = now;
+        NSString *dir = diMruSelfDir();
+        NSDictionary *d = dir.length
+            ? [NSDictionary dictionaryWithContentsOfFile:[dir stringByAppendingPathComponent:@"island.plist"]]
+            : nil;
+        if ([d isKindOfClass:NSDictionary.class]) {
+            CGFloat w = [d[@"w"] doubleValue], h = [d[@"h"] doubleValue];
+            if (w > 1.0 && h > 1.0) { sSize = CGSizeMake(w, h); sHave = YES; sAt = now; }
+        }
+    }
+    if (sHave && now - sAt < 3.0)
+        return (sSize.height < 70.0 || sSize.width < 240.0);
+    /* 兜底: 祖先链上先碰到"明显小于展开宿主"的容器 → 收缩态 */
+    for (UIView *v = artwork.superview; v && v != artwork.window; v = v.superview) {
+        CGSize sz = v.bounds.size;
+        if (sz.height >= 120.0 && sz.width >= 240.0) return NO;
+        if (sz.height > 0.0 && sz.height < 55.0) return YES;
+    }
+    return NO;
+}
+
 /* 2.8.82: 自绘玻璃 —— 图 + 同一张遮罩 + 同速旋转, 系统那张层只藏起来。
    这是小岛 2.8.13 起一直在用、已验证有效的那套观感, 这里在 MediaRemoteUI 内复刻。 */
 static void diActivityApply(UIView *artwork) {
     if (!NSThread.isMainThread || ![artwork isKindOfClass:UIView.class]) return;
     DIActivityMaskState *state = objc_getAssociatedObject(artwork, &kDIActivityMaskState);
     BOOL sized = artwork.bounds.size.width > 20 && artwork.bounds.size.height > 20;
-    /* 2.9.37: 16 不做窗口推算, 形态判据沿用老规则(17 在下面按窗口判) */
-    if (!diIsIOS17Up())
+    BOOL ios17 = diIsIOS17Up();
+    BOOL compact17 = ios17 && diMruIslandCompact(artwork);
+    /* 2.9.38: 17 用 SpringBoard 给的真实形态; 16 沿用 2.9.33 的老判据 */
+    if (ios17)
+        diMruWriteExpandState(sized && !compact17, artwork.bounds.size);
+    else
         diMruWriteExpandState(sized && artwork.bounds.size.width >= 38.0 && artwork.bounds.size.height >= 38.0,
                               artwork.bounds.size);
     /* 2.8.78: 判定过程必须可观测 —— 否则"没遮上"到底是没注入、没素材、还是
@@ -13243,17 +13291,22 @@ static void diActivityApply(UIView *artwork) {
         diMruPostPayload(@"noart", NSStringFromClass(artwork.class));
         want = NO;
     }
-    if (!want) {
-        diActivityTeardown(artwork, state);
-        /* 2.9.36: 遮罩没启用时仍按老判据回传形态(17 上这个判据只能是"展开") */
-        diMruWriteExpandState(sized && artwork.bounds.size.width >= 38.0 && artwork.bounds.size.height >= 38.0,
-                              artwork.bounds.size);
+    if (!want) { diActivityTeardown(artwork, state); return; }
+
+    /* 2.9.38: 收缩态 MRU 完全不参与 —— 小岛专辑交回 SpringBoard 侧(2.8.75 那套玻璃),
+       这边把藏掉的系统子视图还原, 不再铺 66pt 玻璃(那是"变形"的来源)。展开态照旧。 */
+    if (compact17) {
+        if (state) diActivityTeardown(artwork, state);
+        static BOOL sLoggedCompact17;
+        if (!sLoggedCompact17) {
+            sLoggedCompact17 = YES;
+            diMruFileLog(@"小岛让位: 收缩态由 SpringBoard 负责, MRU 不铺玻璃");
+        }
         return;
     }
 
     /* 2.9.36: 算"窗口" —— 祖先链 bounds 求交。收缩态 = 小岛左边那颗小圆的口子,
        展开态 = 头像本身 66x66。玻璃只铺这块窗口, 不会再被外层裁成一牙。 */
-    BOOL ios17 = diIsIOS17Up();
     NSMutableString *chain = [NSMutableString string];
     CGRect box = ios17 ? diActivityVisibleRect(artwork, chain) : artwork.bounds;
     if (box.size.width < 4 || box.size.height < 4) box = artwork.bounds;
