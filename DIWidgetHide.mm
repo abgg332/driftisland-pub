@@ -16,6 +16,7 @@
 #import <UIKit/UIKit.h>
 #import <Foundation/Foundation.h>
 #import <objc/runtime.h>
+#import <notify.h>
 #import <substrate.h>
 
 static NSString *const DIW_DOMAIN = @"com.abgg332.driftisland";
@@ -43,6 +44,9 @@ static void diwReloadPrefs(void) {
     diwOn = [v isKindOfClass:NSNumber.class] ? [v boolValue] : NO;
     v = diwPref(@"widgetHideMaterialOn");
     diwMaterial = [v isKindOfClass:NSNumber.class] ? [v boolValue] : YES;
+    /* 2.9.20: 设置里删掉了「隐藏 MaterialView 背景」这一项 —— 它是隐藏底板的一部分,
+       跟着总开关走, 恒开。 */
+    diwMaterial = YES;
     v = diwPref(@"widgetHideSystemOn");
     diwSystem = [v isKindOfClass:NSNumber.class] ? [v boolValue] : YES;
     v = diwPref(@"widgetHideDarkOn");
@@ -149,6 +153,20 @@ static NSUInteger h_hostScheme(id self, SEL _cmd) {
     return o_hostScheme(self, _cmd);
 }
 
+/* 2.9.20: 修「强制深色没效果」——
+   只改 colorScheme 在某些路径上不够: 宿主 VC 自己是从 trait 环境取外观的,
+   这里在它 viewWillAppear 时把 VC 与它的 view 都强制成深色,
+   让传给渲染进程的外观参数从一开始就是 dark。 */
+static void (*o_hostVWA)(id, SEL, BOOL);
+static void h_hostVWA(id self, SEL _cmd, BOOL animated) {
+    o_hostVWA(self, _cmd, animated);
+    if (!diwOn || !diwDark) return;
+    if (![self isKindOfClass:UIViewController.class]) return;
+    UIViewController *vc = (UIViewController *)self;
+    vc.overrideUserInterfaceStyle = UIUserInterfaceStyleDark;
+    vc.view.overrideUserInterfaceStyle = UIUserInterfaceStyleDark;
+}
+
 static void (*o_hostUpdateBg)(id, SEL);
 static void h_hostUpdateBg(id self, SEL _cmd) {
     if (diwMatchWidget(diwWidgetOf(self))) return;
@@ -239,6 +257,15 @@ static NSUInteger h_sceneScheme(id self, SEL _cmd) {
     return o_sceneScheme(self, _cmd);
 }
 
+/* 2.9.20: RenderBox / SwiftUI 取"当前外观"走的这个私有值对象, 直接把它钉成 2。
+   原插件在 iOS 15 就是这么干的; iOS 16 上也存在, 一并挂上 —— 这比只改窗口
+   override 更彻底(有些小组件的内容不走 trait)。 */
+static long long (*o_uisStyle)(id, SEL);
+static long long h_uisStyle(id self, SEL _cmd) {
+    if (diwOn && diwDark) return 2;
+    return o_uisStyle(self, _cmd);
+}
+
 static long long (*o_attrScheme)(id, SEL);
 static long long h_attrScheme(id self, SEL _cmd) {
     if (diwDark) return 2;
@@ -247,10 +274,17 @@ static long long h_attrScheme(id self, SEL _cmd) {
 
 /* 原实现: chronod 里除 UIHostingView 外的所有视图背景都清成透明。
    真正把背景去掉的还是下面的 RBShape 裁剪, 这里只是兜底。 */
-static void (*o_uivLayout)(id, SEL);
+static void (*o_uivLayout)(UIView *self, SEL);
 static void h_uivLayout(UIView *self, SEL _cmd) {
     o_uivLayout(self, _cmd);
     if (!diwOn) return;
+    /* 2.9.20: 渲染进程里把承载小组件的窗口统一压成深色 —— 这是"强制深色"
+       真正生效的一环(SwiftUI 的 UIHostingController 会跟随 window 的 trait)。 */
+    if (diwDark) {
+        UIWindow *w = self.window;
+        if (w && w.overrideUserInterfaceStyle != UIUserInterfaceStyleDark)
+            w.overrideUserInterfaceStyle = UIUserInterfaceStyleDark;
+    }
     if (![NSStringFromClass([self class]) containsString:@"UIHostingView"])
         [self setBackgroundColor:UIColor.clearColor];
 }
@@ -310,6 +344,7 @@ static void diwInstallSpringBoardHooks(void) {
 
     Class host = NSClassFromString(@"CHUISWidgetHostViewController");
     diwHook(host, @"colorScheme", (IMP)h_hostScheme, (IMP *)&o_hostScheme);
+    diwHook(host, @"viewWillAppear:", (IMP)h_hostVWA, (IMP *)&o_hostVWA);
     diwHook(host, @"_updateBackgroundMaterialAndColor", (IMP)h_hostUpdateBg, (IMP *)&o_hostUpdateBg);
     diwHook(host, @"_updatePersistedSnapshotContent", (IMP)h_hostUpdateSnap, (IMP *)&o_hostUpdateSnap);
     diwHook(host, @"_updatePersistedSnapshotContentIfNecessary", (IMP)h_hostUpdateSnapIf, (IMP *)&o_hostUpdateSnapIf);
@@ -333,8 +368,24 @@ static void diwInstallChronoHooks(void) {
     diwHook(NSClassFromString(@"CHSScreenshotPresentationAttributes"),
             @"colorScheme", (IMP)h_attrScheme, (IMP *)&o_attrScheme);
     diwHook(NSClassFromString(@"UIView"), @"layoutSubviews", (IMP)h_uivLayout, (IMP *)&o_uivLayout);
+    diwHook(NSClassFromString(@"UISCurrentUserInterfaceStyleValue"),
+            @"userInterfaceStyle", (IMP)h_uisStyle, (IMP *)&o_uisStyle);
     diwHook(NSClassFromString(@"RBLayer"), @"display", (IMP)h_rbDisplay, (IMP *)&o_rbDisplay);
     diwHook(NSClassFromString(@"RBShape"), @"setRect:", (IMP)h_rbSetRect, (IMP *)&o_rbSetRect);
+}
+
+/* 2.9.20: 设置页「注销生效」不再依赖 kill 权限 —— 它只发一条 Darwin 通知,
+   哪个进程收到就自己退出, launchd 会立刻把它拉起来(等于 respring)。 */
+static void diwRegisterRespring(void) {
+    static BOOL done = NO;
+    int token = 0;
+    notify_register_dispatch("com.abgg332.driftisland.widget.respring", &token,
+                             dispatch_get_main_queue(), ^(int t) {
+        if (done) return;
+        done = YES;
+        NSLog(@"[DIW] 收到注销通知, %@ 自行退出", NSProcessInfo.processInfo.processName);
+        exit(0);
+    });
 }
 
 __attribute__((constructor)) static void diwInit(void) {
@@ -346,6 +397,8 @@ __attribute__((constructor)) static void diwInit(void) {
                || [exe isEqualToString:@"chronod"]
                || [exe hasPrefix:@"com.apple.chrono.WidgetRenderer-"];
     if (!diwIsSB && !diwIsChrono) return;
+
+    diwRegisterRespring();   /* 放在总开关判断之前: 关了开关也能被注销按钮叫醒 */
 
     diwReloadPrefs();
     if (!diwOn) { NSLog(@"[DIW] 总开关关闭, 不装 hook (%@)", bid); return; }

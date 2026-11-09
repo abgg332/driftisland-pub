@@ -62,7 +62,7 @@ static double expandTextY = DI_EXP_TEXT_BASE_Y;   // 上下偏移(pt, 下为正,
 static double expandTextScale = 100.0; // 文字大小(%, 100=原样)
 /* 2.8.86: 构建戳 —— 之前横幅打的是 SpringBoard 自己的 CFBundleShortVersionString(恒 1.0),
    日志里根本看不出装的是哪一版。所有诊断行都带这个戳, 下轮日志一眼定位。 */
-#define DI_BUILD_VER @"2.9.19"
+#define DI_BUILD_VER @"2.9.20"
 static BOOL gRecordingActive = NO; // 保留: 岛素材总闸条件
 static NSString *diElementId(UIView *host);
 static BOOL diMiniMusicActive(UIView *host); // 2.6.3: 前置(遮罩层使用)
@@ -8255,13 +8255,28 @@ static NSString *diColorHex(UIColor *c) {
    CAKeyframeAnimation 在系统重建卡片/锁屏重新出现时会丢, 丢了没人补,
    layer 就永远停在第一色; 设置里点颜色 → 签名变了 → 走完整重绘才又动。
    现在每次自愈 tick 走到早退分支时先调这里, 动画在就退, 不在就补上。 */
+/* 2.9.20: 给某一层补边框呼吸(只在它真的画着边框、且动画已丢时补) */
+static void diAddBdCycleTo(CALayer *l, NSArray<UIColor *> *cols) {
+    if (!l || l.borderWidth <= 0 || cols.count < 2) return;
+    if ([l animationForKey:@"diBdCycle"]) return;
+    CAKeyframeAnimation *a = diShadowCycle(cols, 1.6);
+    if (a) { a.keyPath = @"borderColor"; [l addAnimation:a forKey:@"diBdCycle"]; }
+}
+
 static void diEnsureBreathAnim(UIView *platter, UIView *face) {
     if (!platter || !platter.layer) return;
     CALayer *FL = platter.layer;
     CALayer *FLf = (face.layer ?: FL);
-    if (lkBdOn && lkBdW > 0 && lkBdColors.count >= 2 && ![FLf animationForKey:@"diBdCycle"]) {
-        CAKeyframeAnimation *a = diShadowCycle(lkBdColors, 1.6);
-        if (a) { a.keyPath = @"borderColor"; [FLf addAnimation:a forKey:@"diBdCycle"]; }
+    /* 2.9.20: 362 反馈"发光会呼吸了, 边框还是不会"。
+       边框实际是画在两层上的(底包 platter.layer + 内衬 face.layer), 之前只补了
+       face 那一层, 而真正外露、看得见的那条线常常在 platter.layer 上 —— 系统重建
+       卡片时它上面的动画丢了没人补, 就永远停在第一个颜色。
+       两层都补: 谁画着边框(borderWidth>0)就给谁挂动画, 同一轮挂相位也对得上。 */
+    if (lkBdOn && lkBdW > 0) {
+        NSArray<UIColor *> *bcols = lkBdColors.count ? lkBdColors
+                                   : (lkBdColor ? @[lkBdColor] : @[]);
+        diAddBdCycleTo(FL, bcols);
+        if (FLf != FL) diAddBdCycleTo(FLf, bcols);
     }
     if (lkGlowOn && lkGlowR > 0 && lkGlowColors.count >= 2 && ![FL animationForKey:@"diBreathC"]) {
         CAKeyframeAnimation *a = diShadowCycle(lkGlowColors, 1.6);
@@ -8571,8 +8586,9 @@ static void diBreathKick(UIView *v) {
     UIView *pl = diFindPlatter(v);
     if (!pl || !pl.layer) return;
     [pl.layer removeAnimationForKey:@"diBreathC"];
+    [pl.layer removeAnimationForKey:@"diBdCycle"];   /* 2.9.20: platter 上的边框也要重起 */
     UIView *face = diBorderFace(pl);
-    [(face.layer ?: pl.layer) removeAnimationForKey:@"diBdCycle"];
+    if (face && face != pl) [face.layer removeAnimationForKey:@"diBdCycle"];
     diStylePlatter(pl);   /* 签名早退分支里会用 diEnsureBreathAnim 把动画补回来 */
 }
 

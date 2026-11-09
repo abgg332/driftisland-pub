@@ -12,6 +12,7 @@
 #include <sys/sysctl.h>
 #include <signal.h>
 #include <string.h>
+#include <notify.h>
 
 /* 2.2.25: 字体颜色相关页面统一背景 —— 之前色块页/预览卡/调色页各用各的灰白,
    视觉上"分裂"。现在统一: 页面 = 分组灰底, 卡片 = 白底圆角, 输入框 = 浅灰。 */
@@ -21,7 +22,7 @@
 
 static NSString *const kDomain = @"com.abgg332.driftisland";
 /* 2.6.25: 设置页底部显示的版本号 */
-static NSString *const DI_VERSION_STR = @"2.9.19";
+static NSString *const DI_VERSION_STR = @"2.9.20";
 /* 2.6.10: 专辑光晕遮罩 —— 与 Tweak 侧 DIAlbumMask.h 保持一致 */
 static NSString *const kDIAlbumMaskKey = @"diAlbumMaskAsset";
 static NSString *const kDIMaskRoot = @"/var/mobile/灵动岛/遮罩素材";
@@ -5233,6 +5234,34 @@ static void diwWriteApps(NSArray *apps) {
     CFPreferencesAppSynchronize((__bridge CFStringRef)kDomain);
 }
 
+/* 2.9.20: App 列表扫一遍要枚举全部已装 App, 页面每次重建规格(搜索/勾选)都扫太慢,
+   这里进程内缓存一份。 */
+static NSArray<NSDictionary *> *diwCachedApps(void);
+
+/* 2.9.20: App 图标。用 UIImage 的私有接口按 bundle id 拿桌面同款圆角图标;
+   拿不到(或接口不存在)就返回 nil, cell 里退回占位符号。 */
+static UIImage *diwAppIcon(NSString *bid) {
+    static NSMutableDictionary *cache;
+    static SEL iconSel;
+    static BOOL inited = NO;
+    if (!inited) {
+        inited = YES;
+        cache = [NSMutableDictionary dictionary];
+        iconSel = NSSelectorFromString(@"_applicationIconImageForBundleIdentifier:format:scale:");
+    }
+    if (!bid.length) return nil;
+    UIImage *hit = cache[bid];
+    if (hit) return hit;
+    UIImage *img = nil;
+    if (iconSel && [UIImage respondsToSelector:iconSel]) {
+        UIImage *(*fn)(id, SEL, NSString *, int, CGFloat) = (void *)objc_msgSend;
+        @try { img = fn([UIImage class], iconSel, bid, 0, [UIScreen mainScreen].scale); }
+        @catch (__unused NSException *e) {}
+    }
+    if (img) cache[bid] = img;
+    return img;
+}
+
 /* 列出"带小组件插件"的 App(原插件用 AltList 选 App, 这里用系统 LS 私有接口自取,
    不额外依赖 AltList)。选中项写宿主 App 的 bundle id, 运行时用前缀匹配插件 id。 */
 static NSArray<NSDictionary *> *diwInstalledWidgetApps(void) {
@@ -5271,6 +5300,12 @@ static NSArray<NSDictionary *> *diwInstalledWidgetApps(void) {
     return out;
 }
 
+static NSArray<NSDictionary *> *diwCachedApps(void) {
+    static NSArray<NSDictionary *> *cache = nil;
+    if (!cache) cache = [diwInstalledWidgetApps() copy] ?: @[];
+    return cache;
+}
+
 /* 注销: 原插件在 Preferences 进程里直接给 SpringBoard/chronod 发 SIGTERM。
    同为 mobile 用户, 权限够; 这里只按 p_comm 匹配(SpringBoard/chronod 都在 16 字节内)。 */
 static void diwKillByComm(const char *comm) {
@@ -5290,24 +5325,147 @@ static void diwKillByComm(const char *comm) {
     free(procs);
 }
 
-@implementation DIWidgetAppsPage
+/* ===== 2.9.20: 「启用应用」页重做 =====
+   用户要求: ① 顶部加搜索 ② 勾选圆点放大 ③ 每个 App 名字前加图标。
+   PSButtonCell 默认是居中蓝字, 不好控; 这里自定义一个 cell:
+   左侧大圆点勾选 → 中间 App 图标 → 右侧名字。数据仍走 PSSpecifier,
+   只是通过 cellClass 换成自己的 cell。 */
+@interface DIWAppCell : PSTableCell
+@property (nonatomic, strong) UIImageView *diwCheck;
+@property (nonatomic, strong) UIImageView *diwIcon;
+@end
+
+@implementation DIWAppCell
+
+- (instancetype)initWithStyle:(UITableViewCellStyle)style reuseIdentifier:(NSString *)reuseIdentifier specifier:(PSSpecifier *)specifier {
+    self = [super initWithStyle:style reuseIdentifier:reuseIdentifier specifier:specifier];
+    if (self) {
+        self.selectionStyle = UITableViewCellSelectionStyleNone;
+        self.accessoryType = UITableViewCellAccessoryNone;
+        _diwCheck = [[UIImageView alloc] initWithFrame:CGRectZero];
+        _diwCheck.contentMode = UIViewContentModeScaleAspectFit;
+        [self.contentView addSubview:_diwCheck];
+        _diwIcon = [[UIImageView alloc] initWithFrame:CGRectZero];
+        _diwIcon.contentMode = UIViewContentModeScaleAspectFit;
+        _diwIcon.layer.cornerRadius = 7.0;
+        _diwIcon.layer.cornerCurve = kCACornerCurveContinuous;
+        _diwIcon.clipsToBounds = YES;
+        [self.contentView addSubview:_diwIcon];
+    }
+    return self;
+}
+
+- (void)refreshCellContentsWithSpecifier:(PSSpecifier *)specifier {
+    [super refreshCellContentsWithSpecifier:specifier];
+    BOOL on = [[specifier propertyForKey:@"diwSelected"] boolValue];
+    UIImageSymbolConfiguration *cfg =
+        [UIImageSymbolConfiguration configurationWithPointSize:25 weight:UIImageSymbolWeightSemibold];
+    self.diwCheck.image = [UIImage systemImageNamed:(on ? @"checkmark.circle.fill" : @"circle")
+                                  withConfiguration:cfg];
+    self.diwCheck.tintColor = on ? [UIColor systemBlueColor]
+                                 : [UIColor colorWithWhite:0.70 alpha:1.0];
+    UIImage *icon = [specifier propertyForKey:@"diwIcon"];
+    self.diwIcon.image = icon ?: [UIImage systemImageNamed:@"square.grid.2x2.fill"];
+    self.diwIcon.tintColor = [UIColor secondaryLabelColor];
+    self.titleLabel.text = specifier.name;
+    self.titleLabel.textColor = [UIColor labelColor];
+    self.titleLabel.textAlignment = NSTextAlignmentLeft;
+    [self setNeedsLayout];
+}
+
+/* 整行点击 = 勾选/取消(PSTableCell 不带 PSButtonCell 的按钮行为, 自己转发) */
+- (void)setSelected:(BOOL)selected animated:(BOOL)animated {
+    [super setSelected:selected animated:animated];
+    if (!selected) return;
+    PSSpecifier *sp = self.specifier;
+    if (sp.buttonAction && sp.target) {
+        ((void (*)(id, SEL, id))objc_msgSend)(sp.target, sp.buttonAction, sp);
+    }
+    [self setSelected:NO animated:YES];
+}
+
+- (void)layoutSubviews {
+    [super layoutSubviews];
+    CGFloat h = self.contentView.bounds.size.height;
+    CGFloat w = self.contentView.bounds.size.width;
+    self.diwCheck.frame  = CGRectMake(16.0, (h - 26.0) / 2.0, 26.0, 26.0);
+    self.diwIcon.frame   = CGRectMake(54.0, (h - 30.0) / 2.0, 30.0, 30.0);
+    self.titleLabel.frame = CGRectMake(96.0, 0.0, MAX(0.0, w - 96.0 - 16.0), h);
+    self.titleLabel.font  = [UIFont systemFontOfSize:17.0];
+}
+
+@end
+
+@interface DIWidgetAppsPage () <UISearchBarDelegate>
+@end
+
+@implementation DIWidgetAppsPage {
+    UISearchBar *_diwSearchBar;
+    NSString    *_diwQuery;
+}
+
+- (void)viewDidLoad {
+    [super viewDidLoad];
+    if (!_diwSearchBar) {
+        _diwSearchBar = [[UISearchBar alloc] initWithFrame:CGRectMake(0, 0, self.table.bounds.size.width, 52.0)];
+        _diwSearchBar.placeholder = @"搜索应用";
+        _diwSearchBar.delegate = self;
+        _diwSearchBar.searchBarStyle = UISearchBarStyleMinimal;
+        _diwSearchBar.autocorrectionType = UITextAutocorrectionTypeNo;
+        _diwSearchBar.autocapitalizationType = UITextAutocapitalizationTypeNone;
+        _diwSearchBar.returnKeyType = UIReturnKeySearch;
+    }
+    self.table.tableHeaderView = _diwSearchBar;
+}
+
+- (void)viewWillLayoutSubviews {
+    [super viewWillLayoutSubviews];
+    if (!_diwSearchBar) return;
+    if (self.table.tableHeaderView != _diwSearchBar) self.table.tableHeaderView = _diwSearchBar;
+    CGRect f = _diwSearchBar.frame;
+    f.size.width  = self.table.bounds.size.width;
+    f.size.height = 52.0;
+    _diwSearchBar.frame = f;
+}
+
+- (void)searchBar:(UISearchBar *)searchBar textDidChange:(NSString *)searchText {
+    _diwQuery = [searchText copy];
+    _specifiers = [[self buildSpecifiers] mutableCopy];
+    [self reloadSpecifiers];
+}
+
+- (void)searchBarSearchButtonClicked:(UISearchBar *)searchBar {
+    [searchBar resignFirstResponder];
+}
+
 - (NSArray *)buildSpecifiers {
     NSMutableArray *specs = [NSMutableArray array];
-    [specs addObject:[self groupSpec:@"启用应用"
-                              footer:@"只列出带小组件插件的 App。勾选后它在桌面/负一屏的小组件会隐藏背景; 系统小组件由上一页的开关控制。"]];
-    NSArray *apps = diwInstalledWidgetApps();
+    [specs addObject:[self groupSpec:nil footer:nil]];
+    NSArray *apps = diwCachedApps();
     NSSet *sel = [NSSet setWithArray:diwReadApps()];
+    NSString *q = [_diwQuery stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceCharacterSet]];
+    NSUInteger shown = 0;
     for (NSDictionary *a in apps) {
-        BOOL on = [sel containsObject:a[@"bid"]];
-        PSSpecifier *sp = [PSSpecifier preferenceSpecifierNamed:
-            [NSString stringWithFormat:@"%@  %@", on ? @"✓" : @"○", a[@"name"]]
-            target:self set:NULL get:NULL detail:nil cell:PSButtonCell edit:nil];
+        NSString *name = a[@"name"], *bid = a[@"bid"];
+        if (q.length) {
+            BOOL hit = [name rangeOfString:q options:NSCaseInsensitiveSearch].location != NSNotFound
+                    || [bid rangeOfString:q options:NSCaseInsensitiveSearch].location != NSNotFound;
+            if (!hit) continue;
+        }
+        PSSpecifier *sp = [PSSpecifier preferenceSpecifierNamed:name target:self
+            set:NULL get:NULL detail:nil cell:PSButtonCell edit:nil];
         [sp setButtonAction:@selector(toggleApp:)];
-        [sp setProperty:a[@"bid"] forKey:@"diwBid"];
+        [sp setProperty:bid forKey:@"diwBid"];
+        [sp setProperty:@([sel containsObject:bid]) forKey:@"diwSelected"];
+        UIImage *icon = diwAppIcon(bid);
+        if (icon) [sp setProperty:icon forKey:@"diwIcon"];
+        [sp setProperty:NSClassFromString(@"DIWAppCell") forKey:@"cellClass"];
         [specs addObject:sp];
+        shown++;
     }
-    if (!apps.count) {
-        [specs addObject:[self groupSpec:@"没有检测到带小组件的 App" footer:nil]];
+    if (!shown) {
+        [specs addObject:[self groupSpec:(q.length ? @"没有匹配的应用" : @"没有检测到带小组件的 App")
+                                  footer:nil]];
     }
     return specs;
 }
@@ -5318,6 +5476,7 @@ static void diwKillByComm(const char *comm) {
     NSMutableArray *cur = [diwReadApps() mutableCopy];
     if ([cur containsObject:bid]) [cur removeObject:bid]; else [cur addObject:bid];
     diwWriteApps(cur);
+    _specifiers = [[self buildSpecifiers] mutableCopy];
     [self reloadSpecifiers];
 }
 @end
@@ -5328,20 +5487,34 @@ static void diwKillByComm(const char *comm) {
 }
 
 - (void)doWidgetRespring:(PSSpecifier *)sp {
-    diwKillByComm("chronod");
-    diwKillByComm("SpringBoard");
+    /* 2.9.20: 修「点注销后卡在这个界面, 只能划掉后台」——
+       原来这里只弹了一个**没有按钮**的 alert(根本关不掉), 而且直接在设置进程里
+       kill SpringBoard; rootless 沙盒下 kill 常被拒, 于是弹窗永远留在屏幕上。
+       现在: ① 发 Darwin 通知, 由 SpringBoard / chronod 自己退出(不依赖 kill 权限)
+             ② 后台再兜底 kill 一次(允许就当加速)
+             ③ 弹窗带「好」按钮, 并且 2.5 秒后自动关闭 —— 无论成败都不会卡住界面 */
+    notify_post("com.abgg332.driftisland.widget.respring");
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.8 * NSEC_PER_SEC)),
+                   dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
+        diwKillByComm("chronod");
+        diwKillByComm("SpringBoard");
+    });
+
     UIAlertController *ac = [UIAlertController alertControllerWithTitle:@"正在注销"
         message:@"屏幕会短暂黑一下, 等桌面回来即生效。" preferredStyle:UIAlertControllerStyleAlert];
+    [ac addAction:[UIAlertAction actionWithTitle:@"好" style:UIAlertActionStyleCancel handler:nil]];
     [self presentViewController:ac animated:YES completion:nil];
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(2.5 * NSEC_PER_SEC)),
+                   dispatch_get_main_queue(), ^{
+        if (ac.presentingViewController) [ac dismissViewControllerAnimated:YES completion:nil];
+    });
 }
 
 - (NSArray *)buildSpecifiers {
     NSMutableArray *specs = [NSMutableArray array];
-    [specs addObject:[self groupSpec:@"组件隐藏"
-                              footer:@"移植自「删除小组件背景 1.7」。原理: 在渲染进程里丢弃大尺寸背景绘制指令, 只保留内容; 不是所有第三方小组件都支持。"]];
+    [specs addObject:[self groupSpec:@"组件隐藏" footer:nil]];
     [specs addObject:[self switchSpec:@"总开关" key:@"widgetHideOn" def:@NO]];
-    [specs addObject:[self switchSpec:@"隐藏 MaterialView 背景" key:@"widgetHideMaterialOn" def:@YES]];
-    [specs addObject:[self switchSpec:@"包含系统小组件" key:@"widgetHideSystemOn" def:@YES]];
+    [specs addObject:[self switchSpec:@"系统组件" key:@"widgetHideSystemOn" def:@YES]];
     [specs addObject:[self switchSpec:@"强制深色" key:@"widgetHideDarkOn" def:@YES]];
 
     [specs addObject:[self groupSpec:@"绘制阈值"
