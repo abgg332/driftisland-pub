@@ -62,7 +62,7 @@ static double expandTextY = DI_EXP_TEXT_BASE_Y;   // 上下偏移(pt, 下为正,
 static double expandTextScale = 100.0; // 文字大小(%, 100=原样)
 /* 2.8.86: 构建戳 —— 之前横幅打的是 SpringBoard 自己的 CFBundleShortVersionString(恒 1.0),
    日志里根本看不出装的是哪一版。所有诊断行都带这个戳, 下轮日志一眼定位。 */
-#define DI_BUILD_VER @"2.9.34"
+#define DI_BUILD_VER @"2.9.35"
 static BOOL gRecordingActive = NO; // 保留: 岛素材总闸条件
 static NSString *diElementId(UIView *host);
 static BOOL diMiniMusicActive(UIView *host); // 2.6.3: 前置(遮罩层使用)
@@ -13181,6 +13181,32 @@ static void diActivityApply(UIView *artwork) {
     }
     if (!want) { diActivityTeardown(artwork, state); return; }
 
+    /* 2.9.34: 先算"真正可见的那块" —— 17 上头像视图还是 66pt, 收缩态却只露出
+       小岛左边那颗小圆, 直接按 66pt 铺玻璃就会被裁成一块, 看着就是"专辑图变形"。 */
+    CGRect box = diActivityVisibleRect(artwork);
+    if (box.size.width < 6 || box.size.height < 6) box = artwork.bounds;
+    BOOL narrow = (MIN(box.size.width, box.size.height) < 36);
+    if (!narrow) {
+        for (UIView *p = artwork.superview; p; p = p.superview) {
+            BOOL clip = p.clipsToBounds || p.layer.masksToBounds
+                        || p.layer.cornerRadius > 0.5 || p.maskView != nil;
+            if (clip) { if (MIN(p.bounds.size.width, p.bounds.size.height) < 42) narrow = YES; break; }
+        }
+    }
+    if (narrow) {
+        /* 收缩态: 系统自己那颗小头像就是对的, 我们把玻璃撤掉、把系统那张还回去 */
+        if (state) diActivityTeardown(artwork, state);
+        diMruWriteExpandState(NO, box.size);   /* 收缩态别被 66pt 的 bounds 误判成展开 */
+        static BOOL loggedNarrow;
+        if (!loggedNarrow) {
+            loggedNarrow = YES;
+            diMruFileLog([NSString stringWithFormat:@"收缩态让位 bounds=%@ 可见=%@ 父=%@",
+                          NSStringFromCGRect(artwork.bounds), NSStringFromCGRect(box),
+                          NSStringFromClass(artwork.superview.class)]);
+        }
+        return;
+    }
+
     if (!state) {
         state = [DIActivityMaskState new];
         SEL shadowSel = NSSelectorFromString(@"artworkShadowView");
@@ -13238,8 +13264,6 @@ static void diActivityApply(UIView *artwork) {
         diMruFileLog([NSString stringWithFormat:@"glass 创建 bounds=%@ 系统层=%@",
             NSStringFromCGRect(artwork.bounds), state.systemLayer ? @"已找到" : @"无"]);
     }
-    CGRect box = diActivityVisibleRect(artwork);
-    if (box.size.width < 6 || box.size.height < 6) box = artwork.bounds;
     if (!CGRectEqualToRect(state.glass.frame, box)) {
         state.glass.frame = box;
         state.glass.layer.cornerRadius = 0;
