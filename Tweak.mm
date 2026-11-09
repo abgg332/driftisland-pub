@@ -62,7 +62,7 @@ static double expandTextY = DI_EXP_TEXT_BASE_Y;   // 上下偏移(pt, 下为正,
 static double expandTextScale = 100.0; // 文字大小(%, 100=原样)
 /* 2.8.86: 构建戳 —— 之前横幅打的是 SpringBoard 自己的 CFBundleShortVersionString(恒 1.0),
    日志里根本看不出装的是哪一版。所有诊断行都带这个戳, 下轮日志一眼定位。 */
-#define DI_BUILD_VER @"2.9.40"
+#define DI_BUILD_VER @"2.9.41"
 static BOOL gRecordingActive = NO; // 保留: 岛素材总闸条件
 static NSString *diElementId(UIView *host);
 static BOOL diMiniMusicActive(UIView *host); // 2.6.3: 前置(遮罩层使用)
@@ -3903,10 +3903,13 @@ static BOOL diApplyMaskToCover(UIView *cover, UIImage *shape) {
            展开期间每帧都走这里: 一旦系统又重新挂了 mask 或我们又画了玻璃,
            立刻收掉 —— 这就是"偶尔还会显示"的根本原因(总是慢半拍、抓不到)。
            不 pause link, 缩回小岛时第一帧就能恢复。 */
-        BOOL mruExpanded = diMruSaysExpanded();
-        /* 2.9.40: 17 上 MRU 按"头像恒 66pt"判展开是错的 —— 宿主说小岛就听宿主的 */
-        if (mruExpanded && diIsIOS17Up() && diIslandStateMini()) mruExpanded = NO;
-        if (mruExpanded) {
+        /* ===== 2.9.41: 展开态一律听 MRU 的 =====
+           2.9.40 用"宿主说小岛"去覆盖 MRU 的展开信号 —— 但 17 展开后宿主 bounds
+           仍停在 ~198x55(展开内容在内部 407x489 的 scene 里), 于是展开时被误判成小岛,
+           SpringBoard 又画了一块玻璃 → 用户截图一里专辑下面那块模糊斑。
+           收缩态的误报已经由 MRU 侧修掉(island.plist 判形态 + 让位时写 expanded=NO),
+           这里直接恢复 2.8.86 原判据。 */
+        if (diMruSaysExpanded()) {
             if (_glassOn || _targets.count || !self.hidden) {
                 [self diTeardown];
                 static CFAbsoluteTime sExpT;
@@ -4433,6 +4436,29 @@ static BOOL diApplyMaskToCover(UIView *cover, UIImage *shape) {
             }
             CGRect glassRect = coverRect;
             if (!CGRectIsEmpty(sqRect)) glassRect = CGRectUnion(glassRect, sqRect);
+            /* ===== 2.9.41: 17 小岛态把玻璃夹进宿主 =====
+               17 上报的封面视图常常是 66pt(跨进程 scene 的尺寸), 直接按它画玻璃会
+               在小岛上铺一大块、被岛体裁掉一角 —— 就是截图二里那块粉红模糊斑。
+               小岛态强制: 边长 ≤ 岛高(留 5%), 且整块必须落在宿主内。 */
+            if (diIsIOS17Up() && isMini) {
+                CGFloat maxSide = MIN(bs.width, bs.height) * 0.95;
+                if (glassRect.size.width > maxSide || glassRect.size.height > maxSide) {
+                    CGFloat side = MIN(MAX(glassRect.size.width, glassRect.size.height), maxSide);
+                    CGPoint gc = CGPointMake(CGRectGetMidX(glassRect), CGRectGetMidY(glassRect));
+                    glassRect = CGRectMake(gc.x - side * 0.5, gc.y - side * 0.5, side, side);
+                    static CFAbsoluteTime sClampT;
+                    if (CFAbsoluteTimeGetCurrent() - sClampT > 3.0) {
+                        sClampT = CFAbsoluteTimeGetCurrent();
+                        DLog(@"遮罩[17]: 玻璃夹紧 %.0fx%.0f → %.0fx%.0f 岛=%.0fx%.0f",
+                             coverRect.size.width, coverRect.size.height,
+                             glassRect.size.width, glassRect.size.height, bs.width, bs.height);
+                    }
+                }
+                CGFloat minX = 2.0, maxX = bs.width - glassRect.size.width - 2.0;
+                CGFloat minY = 2.0, maxY = bs.height - glassRect.size.height - 2.0;
+                if (maxX >= minX) glassRect.origin.x = MIN(MAX(glassRect.origin.x, minX), maxX);
+                if (maxY >= minY) glassRect.origin.y = MIN(MAX(glassRect.origin.y, minY), maxY);
+            }
             [self diPaintGlassAt:glassRect over:coverV art:gSharedArt];
             /* 2.8.15: 系统布局会周期性把岛内容分支 bringSubviewToFront(动画层对抗旧行为),
                玻璃一旦被压到系统专辑下面就成了"遮罩没生效"。
@@ -4467,6 +4493,21 @@ static BOOL diApplyMaskToCover(UIView *cover, UIImage *shape) {
                      bs.width, bs.height,
                      path.lastPathComponent,
                      maskRotateOn ? @"开" : @"关", maskRotateSpeed, gMaskRotDeg);
+            }
+            return;
+        }
+
+        /* ===== 2.9.41: 17 上不再走"系统层 mask 兜底" =====
+           MediaRemote 取图失败的瞬间, 老路会把封面父容器(展开态是那块模糊背景)
+           按遮罩形状裁出来 —— 用户截图一(展开)和截图二(小岛)里那块粉红模糊斑
+           就是它。17 上宁可这一帧不画, 也不挂任何系统蒙版。 */
+        if (diIsIOS17Up()) {
+            if (_glassOn || _targets.count) [self diTeardown];
+            static CFAbsoluteTime sNoArtT;
+            if (CFAbsoluteTimeGetCurrent() - sNoArtT > 3.0) {
+                sNoArtT = CFAbsoluteTimeGetCurrent();
+                DLog(@"遮罩[17]: 未拿到专辑图, 不走系统蒙版兜底(让位) 宿主=%d 小岛=%d",
+                     (int)diIslandStateMini(), (int)isMini);
             }
             return;
         }
