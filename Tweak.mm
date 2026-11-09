@@ -62,7 +62,7 @@ static double expandTextY = DI_EXP_TEXT_BASE_Y;   // 上下偏移(pt, 下为正,
 static double expandTextScale = 100.0; // 文字大小(%, 100=原样)
 /* 2.8.86: 构建戳 —— 之前横幅打的是 SpringBoard 自己的 CFBundleShortVersionString(恒 1.0),
    日志里根本看不出装的是哪一版。所有诊断行都带这个戳, 下轮日志一眼定位。 */
-#define DI_BUILD_VER @"2.9.24"
+#define DI_BUILD_VER @"2.9.25"
 static BOOL gRecordingActive = NO; // 保留: 岛素材总闸条件
 static NSString *diElementId(UIView *host);
 static BOOL diMiniMusicActive(UIView *host); // 2.6.3: 前置(遮罩层使用)
@@ -211,6 +211,7 @@ static BOOL ccLongPressOn = YES;       /* 2.7.28: 控制中心空白处长按换
 static int smallEdgeStyle = 0;         /* 2.2.67: 流光风格 0~5, 见 DIEdgeStyle */
 /* 2.2.6: 岛上通知样式 —— 文字颜色自定义 + 通知岛不使用视频背景 */
 static BOOL notifyColorOn, notifyBgOff;
+static BOOL gThemeOn, gThemeLight, gThemeDark;   /* 2.9.25: 强制浅/深色 */
 static UIColor *gNotifyColor;
 /* 2.2.8: 流光渐变 —— 多色数组, 沿文字从左到右循环流动 */
 static BOOL notifyFlowOn;
@@ -640,6 +641,11 @@ static void refreshPrefs(void) {
     notifyColorOn = pBool(@"notifyColorOn", NO);
     notifyBgOff = pBool(@"notifyBgOff", NO);
     notifyFlowOn = pBool(@"notifyFlowOn", NO);
+    /* 2.9.25: 强制外观 —— 深色优先(两个都开时以深色为准) */
+    gThemeOn = pBool(@"themeMasterOn", NO);
+    gThemeLight = pBool(@"themeForceLight", NO);
+    gThemeDark = pBool(@"themeForceDark", NO);
+    if (gThemeDark) gThemeLight = NO;
     {
         /* 2.2.8: 多色数组(diNotifColors, 逗号分隔 HEX)。
            流光关 = 取第1个颜色单色固定; 流光开 = 沿文字从左到右循环流动。 */
@@ -5410,6 +5416,100 @@ static void applyNotifyStyle(UIView *host) {
     }
 }
 
+/* ===== 2.9.25: 强制浅色/深色 —— 锁屏通知卡 + 桌面长按菜单 =====
+   做法: 在卡片子视图最底层垫一块 UIVisualEffectView(systemUltraThinMaterial
+   Dark/Light), 盖住系统原材质 → 背景直接呈现深/浅色观感; 文字按模式换成白/黑
+   (通知着色开着时尊重着色, 不碰文字)。启动开关关 → 走还原分支(摘层+还原文字)。
+   只碰两类卡片: 锁屏通知(PLPlatterView 等, 且排除播放器底板)与桌面长按菜单;
+   dock/控制中心等其它窗口不进 SBCoverSheetWindow/SBWindow 判定, 不受影响。 */
+static char kThemeLayer, kThemeMode, kThemeLblOrig;
+
+static void diThemeWalkLabels(UIView *v, int want) {
+    NSMutableArray<UIView *> *stack = [NSMutableArray arrayWithObject:v];
+    int g = 0;
+    while (stack.count && g++ < 400) {
+        UIView *cur = stack.firstObject; [stack removeObjectAtIndex:0];
+        for (UIView *s in cur.subviews) [stack addObject:s];
+        if (![cur isKindOfClass:UILabel.class]) continue;
+        UILabel *lb = (UILabel *)cur;
+        if (want == 0) {
+            UIColor *orig = objc_getAssociatedObject(lb, &kThemeLblOrig);
+            if (orig) { lb.textColor = orig;
+                        objc_setAssociatedObject(lb, &kThemeLblOrig, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC); }
+            continue;
+        }
+        if (!lb.text.length && !lb.attributedText.length) continue;
+        if (!objc_getAssociatedObject(lb, &kThemeLblOrig))
+            objc_setAssociatedObject(lb, &kThemeLblOrig, lb.textColor, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        lb.textColor = (want == 2) ? [UIColor colorWithWhite:1.0 alpha:0.92]
+                                   : [UIColor colorWithWhite:0.05 alpha:0.95];
+    }
+}
+
+static void diThemeApplyAt(UIView *card) {
+    if (!card) return;
+    UIWindow *w = card.window;
+    if (!w) return;
+    NSString *wcn = NSStringFromClass(w.class);
+    BOOL lock = [wcn isEqualToString:@"SBCoverSheetWindow"];      /* 锁屏 */
+    BOOL home = [wcn isEqualToString:@"SBWindow"]
+             || [wcn containsString:@"MainSwitcher"];             /* 桌面长按 */
+    if (!lock && !home) return;
+
+    int want = gThemeOn ? (gThemeDark ? 2 : (gThemeLight ? 1 : 0)) : 0;
+    UIVisualEffectView *ev = objc_getAssociatedObject(card, &kThemeLayer);
+    NSNumber *curMode = objc_getAssociatedObject(card, &kThemeMode);
+
+    if (want == 0 || (ev && curMode && curMode.intValue != want)) {
+        if (ev || curMode) {   /* 只处理应用过的卡, 避免每帧白跑遍历 */
+            diThemeWalkLabels(card, 0);
+            if (ev) [ev removeFromSuperview];
+            objc_setAssociatedObject(card, &kThemeLayer, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+            objc_setAssociatedObject(card, &kThemeMode, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        }
+        if (want == 0) return;
+    }
+    if (!ev) {
+        ev = [[UIVisualEffectView alloc] initWithFrame:card.bounds];
+        ev.userInteractionEnabled = NO;
+        [CATransaction begin]; [CATransaction setDisableActions:YES];
+        [card insertSubview:ev atIndex:0];
+        [CATransaction commit];
+        objc_setAssociatedObject(card, &kThemeLayer, ev, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        objc_setAssociatedObject(card, &kThemeMode, @(want), OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        diThemeWalkLabels(card, notifyColorOn ? 0 : want);
+        static int tlog; if (tlog < 6) { tlog++;
+            DLog(@"[强制外观] %@ → %@ (卡 %.0fx%.0f)", NSStringFromClass(card.class),
+                 want == 2 ? @"深色" : @"浅色", card.bounds.size.width, card.bounds.size.height); }
+    }
+    if (!CGRectEqualToRect(ev.frame, card.bounds)) ev.frame = card.bounds;
+    /* 系统会复用/重建卡片内容(label 新实例), 每秒补一次文字颜色保持一致 */
+    static CFAbsoluteTime lastWalk;
+    CFAbsoluteTime now = CFAbsoluteTimeGetCurrent();
+    if (now - lastWalk > 1.0) {
+        lastWalk = now;
+        diThemeWalkLabels(card, notifyColorOn ? 0 : want);
+    }
+}
+
+/* 长按菜单: 从转场容器向下找真正的卡片(宽>=150 且有圆角), 再应用 */
+static UIView *diThemeCtxCard(UIView *root, int depth) {
+    if (!root || depth > 6) return nil;
+    if (root.layer.cornerRadius >= 8 && root.bounds.size.width >= 150
+        && root.bounds.size.width < 500 && root.bounds.size.height >= 60) return root;
+    for (UIView *s in root.subviews) {
+        UIView *r = diThemeCtxCard(s, depth + 1);
+        if (r) return r;
+    }
+    return nil;
+}
+
+static void (*o_diThemeCtxLayout)(id, SEL);
+static void h_diThemeCtxLayout(UIView *self, SEL _cmd) {
+    ((void (*)(id, SEL))o_diThemeCtxLayout)(self, _cmd);
+    diThemeApplyAt(diThemeCtxCard(self, 0));   /* 找不到卡片就不动, 绝不拿全屏容器兜底 */
+}
+
 static BOOL viewHasToken(UIView *v, NSString *token) {
     for (Class c = v.class; c && c != [UIView class]; c = class_getSuperclass(c))
         if ([NSStringFromClass(c) containsString:token]) return YES;
@@ -8629,6 +8729,11 @@ static BOOL diInLockScreen(UIView *v) {
 
 static void applyLockStyle(UIView *v) {
     if (!NSThread.isMainThread) return;
+    /* 2.9.25: 强制浅/深色 —— 独立于发光/边框, 不能被下面的早退挡住 */
+    if (gThemeOn || objc_getAssociatedObject(v, &kLkPlatter)) {
+        UIView *tp = diFindPlatter(v);
+        diThemeApplyAt(tp);
+    }
     if (!lkBdOn && !lkShOn && !lkGlowOn) return;
     if (!diInLockScreen(v)) return;   /* 2.8.36: 控制中心等其它窗口不染色 */
     NSString *cn = NSStringFromClass(v.class);
@@ -8848,6 +8953,16 @@ static BOOL install(NSString *name) {
 
 static void installKnownHosts(void) {
     diGainInstallHook();   /* 2.8.31: 隐藏药丸 hook(私有类晚加载时靠分阶段重试补装) */
+    /* 2.9.25: 桌面长按菜单 —— 单独 hook, 与锁屏样式链无关 */
+    for (NSString *n in @[@"_UIContextMenuPlatterTransitionView", @"SBIconContextMenuPlatterView"]) {
+        Class c = NSClassFromString(n);
+        if (!c || ![c isSubclassOfClass:[UIView class]]) continue;
+        Method m = class_getInstanceMethod(c, @selector(layoutSubviews));
+        if (!m) continue;
+        IMP old = NULL;
+        MSHookMessageEx(c, @selector(layoutSubviews), (IMP)h_diThemeCtxLayout, &old);
+        if (old) DLog(@"[强制外观] 已 hook %@ (长按菜单)", n);
+    }
     install(@"SAUIElementView");
     installBreathKick();   /* 2.9.19: 通知到达 → 重新起呼吸 */
     /* 2.2.10: 锁屏通知宽度 —— 锁屏通知卡(short look)与通知列表容器都按 layoutSubviews 调宽度 */

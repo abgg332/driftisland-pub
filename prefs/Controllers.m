@@ -22,7 +22,7 @@
 
 static NSString *const kDomain = @"com.abgg332.driftisland";
 /* 2.6.25: 设置页底部显示的版本号 */
-static NSString *const DI_VERSION_STR = @"2.9.24";
+static NSString *const DI_VERSION_STR = @"2.9.25";
 /* 2.6.10: 专辑光晕遮罩 —— 与 Tweak 侧 DIAlbumMask.h 保持一致 */
 static NSString *const kDIAlbumMaskKey = @"diAlbumMaskAsset";
 static NSString *const kDIMaskRoot = @"/var/mobile/灵动岛/遮罩素材";
@@ -2378,6 +2378,14 @@ static NSCache *diThumbCache(void) {
             [specs addObject:btn];
         }
     }
+    /* 2.9.25: 强制外观 —— 模拟深/浅色模式(锁屏通知背景 + 桌面长按菜单) */
+    [specs addObject:[self switchSpec:@"启动开关" key:@"themeMasterOn" def:@NO]];
+    if ([[self readPreferenceValue:[self switchSpec:@"启动开关" key:@"themeMasterOn" def:@NO]] boolValue]) {
+        [specs addObject:[self switchSpec:@"强制浅色" key:@"themeForceLight" def:@NO]];
+        [specs addObject:[self switchSpec:@"强制深色" key:@"themeForceDark" def:@NO]];
+        [specs addObject:[self groupSpec:nil footer:@"模拟深色/浅色模式: 作用于锁屏通知卡片与桌面长按菜单的背景。关闭启动开关即恢复跟随系统; 两个都开时以深色为准。"]];
+    }
+
     /* 2.6.31: 底栏横条全部功能回归锁屏通知页(用户要求: 不要单独一页) */
     [specs addObject:[self switchSpec:@"底栏横条" key:@"homeBarOn" def:@NO]];
     if ([[self readPreferenceValue:[self switchSpec:@"底栏横条" key:@"homeBarOn" def:@NO]] boolValue]) {
