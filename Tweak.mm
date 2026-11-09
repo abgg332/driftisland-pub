@@ -62,7 +62,7 @@ static double expandTextY = DI_EXP_TEXT_BASE_Y;   // 上下偏移(pt, 下为正,
 static double expandTextScale = 100.0; // 文字大小(%, 100=原样)
 /* 2.8.86: 构建戳 —— 之前横幅打的是 SpringBoard 自己的 CFBundleShortVersionString(恒 1.0),
    日志里根本看不出装的是哪一版。所有诊断行都带这个戳, 下轮日志一眼定位。 */
-#define DI_BUILD_VER @"2.9.42"
+#define DI_BUILD_VER @"2.9.43"
 static BOOL gRecordingActive = NO; // 保留: 岛素材总闸条件
 static NSString *diElementId(UIView *host);
 static BOOL diMiniMusicActive(UIView *host); // 2.6.3: 前置(遮罩层使用)
@@ -14401,6 +14401,208 @@ static void diMruTailInstall(void) {
     [NSRunLoop.mainRunLoop addTimer:t forMode:NSRunLoopCommonModes];
     diMruTailTick();
 }
+/* ============================================================
+   2.9.43: 返回动画 —— 退出 App 时整屏缩回桌面图标
+   需求(402): "桌面 app 退出的动画, 退出缩回 app(类似回收站一样,
+   全屏动画缩回到 app 上方)"。
+   实现思路(不改系统转场, 只在旁边加一层):
+     ① hook SBApplicationSceneView 的 willMoveToWindow: —— 新窗口为 nil
+        表示 App 的画面正在离开窗口(回桌面/切换/锁屏都会走这里);
+     ② 离开前用 snapshotViewAfterScreenUpdates:NO 抓一张当前画面
+        (跨进程内容是渲染服务器给的, 只有 snapshot 抓得到, renderInContext 是黑的);
+     ③ 立刻把这张快照加到**桌面窗口**上, 从它原来的全屏位置动画缩到该 App
+        图标的位置, 同时圆角收到图标圆角、末尾淡出;
+     ④ 系统自己的转场照常跑, 我们这层只是盖在上面, 所以不影响任何原有行为。
+   开关默认关闭(设置 → 返回动画)。
+   ============================================================ */
+static BOOL diReturnAnimOn(void) { return pBool(@"returnAnimOn", NO); }
+static double diReturnAnimDur(void) {
+    NSInteger v = pInt(@"returnAnimDur", 35);
+    if (v < 15) v = 15;
+    if (v > 90) v = 90;
+    return v / 100.0;
+}
+
+/* 2.9.43: 枚举窗口(不用已废弃的 UIApplication.windows) */
+static NSArray<UIWindow *> *diReturnWindows(void) {
+    NSMutableArray<UIWindow *> *wins = [NSMutableArray array];
+    @try {
+        for (UIScene *s in UIApplication.sharedApplication.connectedScenes)
+            if ([s isKindOfClass:UIWindowScene.class])
+                [wins addObjectsFromArray:((UIWindowScene *)s).windows];
+    } @catch (__unused NSException *e) {}
+    return wins;
+}
+
+/* 桌面窗口: 优先类名带 HomeScreen 的, 否则取最底层的全屏普通窗口 */
+static UIWindow *diReturnHomeWindow(void) {
+    UIWindow *home = nil, *normal = nil;
+    for (UIWindow *w in diReturnWindows()) {
+        if (!w || w.hidden || w.alpha < 0.05) continue;
+        if (w.bounds.size.width < 200 || w.bounds.size.height < 300) continue;
+        NSString *cn = NSStringFromClass(w.class);
+        if ([cn containsString:@"HomeScreen"]) return w;
+        if (!normal && w.windowLevel <= UIWindowLevelNormal + 1) normal = w;
+        if (!home) home = w;
+    }
+    return normal ?: home;
+}
+
+/* 锁屏可见时不做(锁屏把 App 画面撤掉也会走同一条 willMove) */
+static BOOL diReturnLockVisible(void) {
+    Class c = NSClassFromString(@"SBLockScreenManager");
+    if (!c) return NO;
+    SEL sh = NSSelectorFromString(@"sharedInstance");
+    if (![c respondsToSelector:sh]) return NO;
+    id mgr = ((id (*)(id, SEL))objc_msgSend)((id)c, sh);
+    if (!mgr) return NO;
+    @try {
+        id v = [mgr valueForKey:@"isLockScreenVisible"];
+        if (v) return [v boolValue];
+    } @catch (__unused NSException *e) {}
+    return NO;
+}
+
+/* 应用切换器在屏时不做(那里面退出 App 也会走 willMove) */
+static BOOL diReturnSwitcherVisible(void) {
+    for (UIWindow *w in diReturnWindows()) {
+        NSString *cn = NSStringFromClass(w.class);
+        if (![cn containsString:@"Switcher"]) continue;
+        if (!w.hidden && w.alpha > 0.05 && w.bounds.size.height > 300) return YES;
+    }
+    return NO;
+}
+
+/* 在桌面视图树里按 bundle id 找图标, 返回图标在 root 坐标系里的矩形 */
+static UIView *diReturnFindIcon(UIView *root, NSString *bid, CGRect *outRect) {
+    if (!root || !bid.length) return nil;
+    NSMutableArray *stack = [NSMutableArray arrayWithObject:root];
+    int g = 0;
+    while (stack.count && g++ < 1500) {
+        UIView *v = [stack lastObject]; [stack removeLastObject];
+        NSString *cn = NSStringFromClass(v.class);
+        if ([cn containsString:@"SBIconView"]) {
+            NSString *b = nil;
+            @try { b = [v valueForKeyPath:@"icon.applicationBundleID"]; } @catch (__unused NSException *e) {}
+            if (![b isKindOfClass:NSString.class] || !b.length) {
+                @try { b = [v valueForKeyPath:@"icon.applicationBundleIdentifier"]; } @catch (__unused NSException *e) {}
+            }
+            if ([b isKindOfClass:NSString.class] && [b isEqualToString:bid]) {
+                if (outRect) *outRect = [v convertRect:v.bounds toView:root];
+                return v;
+            }
+        }
+        for (UIView *c in v.subviews) [stack addObject:c];
+    }
+    return nil;
+}
+
+static void diReturnLog(NSString *fmt, ...) NS_FORMAT_FUNCTION(1,2);
+static void diReturnLog(NSString *fmt, ...) {
+    va_list a; va_start(a, fmt);
+    NSString *s = [[NSString alloc] initWithFormat:fmt arguments:a];
+    va_end(a);
+    RLog(@"[返回动画] %@", s);
+}
+
+/* 真正干活: 抓快照 → 挂到桌面 → 缩小到图标 */
+static void diReturnPlay(UIView *sceneView) {
+    if (!sceneView) return;
+    if (diReturnLockVisible()) { diReturnLog(@"跳过: 锁屏可见"); return; }
+    if (diReturnSwitcherVisible()) { diReturnLog(@"跳过: 应用切换器在屏"); return; }
+    UIWindow *hw = diReturnHomeWindow();
+    if (!hw) { diReturnLog(@"跳过: 找不到桌面窗口"); return; }
+    /* 这个画面是谁的 */
+    NSString *bid = nil;
+    @try { bid = [sceneView valueForKeyPath:@"sceneHandle.application.bundleIdentifier"]; } @catch (__unused NSException *e) {}
+    if (![bid isKindOfClass:NSString.class] || !bid.length) {
+        @try { bid = [sceneView valueForKeyPath:@"application.bundleIdentifier"]; } @catch (__unused NSException *e) {}
+    }
+    if (![bid isKindOfClass:NSString.class] || !bid.length) {
+        diReturnLog(@"跳过: 取不到 App 的 bundle id (%@)", NSStringFromClass(sceneView.class));
+        return;
+    }
+    CGRect iconRect = CGRectZero;
+    UIView *icon = diReturnFindIcon(hw, bid, &iconRect);
+    if (!icon || CGRectIsEmpty(iconRect)) {
+        diReturnLog(@"跳过: 桌面当前页找不到 %@ 的图标", bid);
+        return;
+    }
+    /* 图标必须在当前这一页上(别把画面缩到屏幕外面去) */
+    if (!CGRectContainsRect(CGRectInset(hw.bounds, -30, -30), iconRect)) {
+        diReturnLog(@"跳过: 图标 %.0f,%.0f 不在当前页(桌面 %.0fx%.0f)",
+                    iconRect.origin.x, iconRect.origin.y, hw.bounds.size.width, hw.bounds.size.height);
+        return;
+    }
+    CGRect start = [sceneView convertRect:sceneView.bounds toView:hw];
+    if (CGRectIsEmpty(start) || start.size.width < 80) {
+        diReturnLog(@"跳过: 起点矩形异常 %@", NSStringFromCGRect(start));
+        return;
+    }
+    UIView *snap = [sceneView snapshotViewAfterScreenUpdates:NO];
+    if (!snap) { diReturnLog(@"跳过: 快照失败"); return; }
+
+    snap.userInteractionEnabled = NO;
+    snap.frame = start;
+    snap.alpha = 1.0;
+    snap.layer.cornerRadius = 55.0;
+    snap.layer.cornerCurve = kCACornerCurveContinuous;
+    snap.clipsToBounds = YES;
+    snap.layer.allowsEdgeAntialiasing = YES;
+    [hw addSubview:snap];
+
+    double dur = diReturnAnimDur();
+    CGRect target = iconRect;
+    CGFloat endR = MAX(7.0, target.size.width * 0.2237);
+    diReturnLog(@"播放: %@ 起点 %.0fx%.0f@(%.0f,%.0f) → 图标 %.0fx%.0f@(%.0f,%.0f) 时长%.2fs",
+                bid, start.size.width, start.size.height, start.origin.x, start.origin.y,
+                target.size.width, target.size.height, target.origin.x, target.origin.y, dur);
+    [UIView animateWithDuration:dur delay:0
+                        options:(UIViewAnimationOptionCurveEaseInOut | UIViewAnimationOptionBeginFromCurrentState)
+                     animations:^{
+        snap.frame = target;
+        snap.layer.cornerRadius = endR;
+    } completion:^(BOOL finished) {
+        [snap removeFromSuperview];
+    }];
+    /* 末尾淡出: 收进图标的那一下不该是一块硬卡片 */
+    CGFloat fade = MIN(0.16, dur * 0.4);
+    [UIView animateWithDuration:fade delay:MAX(0.0, dur - fade)
+                        options:UIViewAnimationOptionCurveEaseIn
+                     animations:^{ snap.alpha = 0.0; } completion:nil];
+}
+
+static void (*diOrigSceneWillMove)(UIView *, SEL, UIWindow *);
+static void diHookSceneWillMove(UIView *self, SEL _cmd, UIWindow *newWindow) {
+    @try {
+        if (!newWindow && self.window && diReturnAnimOn()) {
+            CGSize s = self.bounds.size;
+            if (s.height > 380.0 && s.width > 280.0) {
+                static CFAbsoluteTime lastT;
+                CFAbsoluteTime now = CFAbsoluteTimeGetCurrent();
+                if (now - lastT > 0.6) {
+                    lastT = now;
+                    diReturnPlay(self);
+                }
+            }
+        }
+    } @catch (__unused NSException *e) {}
+    if (diOrigSceneWillMove) diOrigSceneWillMove(self, _cmd, newWindow);
+}
+
+static void diReturnAnimInstall(void) {
+    static BOOL done = NO;
+    if (done) return;
+    Class c = NSClassFromString(@"SBApplicationSceneView");
+    if (!c) { diReturnLog(@"未找到 SBApplicationSceneView, 稍后重试"); return; }
+    SEL sel = @selector(willMoveToWindow:);
+    Method m = class_getInstanceMethod(c, sel);
+    if (!m) { diReturnLog(@"SBApplicationSceneView 没有 willMoveToWindow:"); return; }
+    diOrigSceneWillMove = (void (*)(UIView *, SEL, UIWindow *))method_getImplementation(m);
+    MSHookMessageEx(c, sel, (IMP)diHookSceneWillMove, (IMP *)&diOrigSceneWillMove);
+    done = YES;
+    diReturnLog(@"已 hook %@ willMoveToWindow: (装 %@)", NSStringFromClass(c), DI_BUILD_VER);
+}
 __attribute__((constructor)) static void init(void) {
     @autoreleasepool {
         /* 2.7.15: 版本标记写死在这里, 不依赖 CFBundleShortVersionString ——
@@ -14438,6 +14640,11 @@ __attribute__((constructor)) static void init(void) {
         /* 2.8.78: 接收 MediaRemoteUI 的打点 + 把遮罩素材导出给那个进程 */
         diMruObserve();
         diMruTailInstall();
+        /* 2.9.43: 返回动画 —— 私有类(SBApplicationSceneView)可能加载较晚, 分阶段重试 */
+        diReturnAnimInstall();
+        for (int s : {2, 6, 15, 30, 60})
+            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)s * NSEC_PER_SEC),
+                           dispatch_get_main_queue(), ^{ diReturnAnimInstall(); });
         dispatch_async(dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{ diExportMaskForMRU(); });
         /* 2.7.15: 组名 hook **必须在主队列 block 之外、且在最前面** 装 ——
            2.7.14 把它放在 dispatch_async 里, 前面还排了 refreshAll/installKnownHosts/
