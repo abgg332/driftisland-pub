@@ -62,7 +62,7 @@ static double expandTextY = DI_EXP_TEXT_BASE_Y;   // 上下偏移(pt, 下为正,
 static double expandTextScale = 100.0; // 文字大小(%, 100=原样)
 /* 2.8.86: 构建戳 —— 之前横幅打的是 SpringBoard 自己的 CFBundleShortVersionString(恒 1.0),
    日志里根本看不出装的是哪一版。所有诊断行都带这个戳, 下轮日志一眼定位。 */
-#define DI_BUILD_VER @"2.9.31"
+#define DI_BUILD_VER @"2.9.32"
 static BOOL gRecordingActive = NO; // 保留: 岛素材总闸条件
 static NSString *diElementId(UIView *host);
 static BOOL diMiniMusicActive(UIView *host); // 2.6.3: 前置(遮罩层使用)
@@ -5414,74 +5414,112 @@ static void applyNotifyStyle(UIView *host) {
     }
 }
 
-/* ===== 2.9.31: 只给「锁屏 / 桌面 / 控制中心」三个容器做深/浅色 =====
-   2.9.28/30 改全局外观取值, 连锁屏时钟/小组件都变白字, 状态栏又很难单点豁免。
-   现在改成给三个容器视图设 overrideUserInterfaceStyle:
-     · 锁屏      CSCoverSheetView
-     · 桌面      SBRootFolderView / SBIconContentView / SBDockView
-     · 控制中心  CCUIContentModuleContainerView
-   由系统在这些子树内原生渲染深/浅色材质与文字; 状态栏、跨进程小组件
-   (chronod/WidgetRenderer 渲染) 不在这些子树里, 一点都不会被改到。 */
-static NSArray<NSString *> *diThemeScopeClasses(void) {
-    static NSArray *a;
-    if (!a) a = @[@"CSCoverSheetView", @"SBRootFolderView", @"SBIconContentView",
-                  @"SBDockView", @"CCUIContentModuleContainerView",
-                  @"CCUIContentModuleContainerViewController"];
-    return a;
+static void diForEachWindow(void (^blk)(UIWindow *w));
+
+/* ===== 2.9.32: 只给「锁屏 / 桌面 / 控制中心」做深/浅色 =====
+   2.9.31 是给几个私有容器类挂 layoutSubviews 再套 overrideUserInterfaceStyle,
+   实测那几个容器压根不回调(日志里只有控制中心模块自己打印), 整版没效果。
+   这一版不再依赖任何私有类是否回调: 每秒从窗口往下走一遍视图树,
+   整棵子树直接套 overrideUserInterfaceStyle(系统原生渲染材质/文字深浅),
+   只有「状态栏那一支」整支跳过 —— 状态栏保持系统本色,
+   浅色壁纸上仍是黑字(看得清), 跨进程小组件(chronod/WidgetRenderer)也不受影响。 */
+static NSHashTable *gThemeTouched;   /* 我们改过的视图(弱引用), 关闭时按它还原 */
+static BOOL gThemeSawApply;
+static dispatch_source_t gThemeTimer;
+
+static BOOL diThemeIsStatusBarNode(UIView *v) {
+    for (Class c = object_getClass(v); c && c != [UIView class]; c = class_getSuperclass(c)) {
+        const char *n = class_getName(c);
+        if (n && strstr(n, "StatusBar")) return YES;
+    }
+    return NO;
 }
 
-static void diThemeApplyScoped(UIView *v) {
+static BOOL diThemeTreeHasStatusBar(UIView *v, int depth) {
+    if (!v) return NO;
+    if (diThemeIsStatusBarNode(v)) return YES;
+    if (depth >= 32) return NO;
+    NSArray *subs = v.subviews;
+    for (NSUInteger i = 0; i < subs.count; i++)
+        if (diThemeTreeHasStatusBar(subs[i], depth + 1)) return YES;
+    return NO;
+}
+
+static void diThemeSet(UIView *v, UIUserInterfaceStyle want) {
     if (!v) return;
-    NSString *cn = NSStringFromClass(v.class);
-    BOOL hit = NO;
-    for (NSString *k in diThemeScopeClasses()) {
-        if ([cn isEqualToString:k]) { hit = YES; break; }
-    }
-    if (!hit) return;
-    UIUserInterfaceStyle want = gThemeDark ? UIUserInterfaceStyleDark : UIUserInterfaceStyleLight;
-    if (!gThemeOn) want = UIUserInterfaceStyleUnspecified;
     if (v.overrideUserInterfaceStyle == want) return;
     v.overrideUserInterfaceStyle = want;
-    static int tlog;
-    if (gThemeOn && tlog < 12) { tlog++;
-        DLog(@"[分区外观] %@ → %@ (%.0fx%.0f)", cn, gThemeDark ? @"深色" : @"浅色",
-             v.bounds.size.width, v.bounds.size.height);
-    }
+    if (!gThemeTouched) gThemeTouched = [NSHashTable weakObjectsHashTable];
+    [gThemeTouched addObject:v];
 }
 
-/* 每个被 hook 的类各存一份原实现(共用一个全局会互相覆盖 → 递归崩溃) */
-struct DIThemeHook { Class cls; IMP orig; };
-static std::vector<DIThemeHook> gThemeHooks;
+/* 返回本轮真正套用到的根节点数 */
+static int diThemeApplyNode(UIView *v, UIUserInterfaceStyle want, int depth) {
+    if (!v || depth > 32) return 0;
+    if (diThemeIsStatusBarNode(v)) return 0;            /* 状态栏整支不动 */
+    if (!diThemeTreeHasStatusBar(v, 0)) { diThemeSet(v, want); return 1; }
+    int n = 0;
+    NSArray *subs = v.subviews;
+    for (NSUInteger i = 0; i < subs.count; i++)
+        n += diThemeApplyNode(subs[i], want, depth + 1);
+    return n;
+}
 
-static IMP diThemeOrigFor(Class c) {
-    for (Class k = c; k; k = class_getSuperclass(k))
-        for (size_t i = 0; i < gThemeHooks.size(); i++)
-            if (gThemeHooks[i].cls == k) return gThemeHooks[i].orig;
+/* 整窗跳过的: 状态栏(要保可读) / 灵动岛(有我们自己的发光) / 壁纸(别把状态栏底子弄黑) */
+static const char *diThemeSkipWindow(UIWindow *w) {
+    const char *n = class_getName(w.class);
+    if (!n) return NULL;
+    if (strstr(n, "StatusBar")) return "状态栏";
+    if (strstr(n, "Aperture"))  return "灵动岛";
+    if (strstr(n, "Wallpaper")) return "壁纸";
     return NULL;
 }
 
-static void h_themeScopeLayout(UIView *self, SEL _cmd) {
-    IMP o = diThemeOrigFor(object_getClass(self));
-    if (o) ((void (*)(id, SEL))o)(self, _cmd);
-    @try { diThemeApplyScoped(self); } @catch (__unused NSException *e) {}
+static void diThemeApplyAll(BOOL verbose) {
+    if (!NSThread.isMainThread) {
+        dispatch_async(dispatch_get_main_queue(), ^{ diThemeApplyAll(verbose); });
+        return;
+    }
+    if (!gThemeOn) {
+        if (gThemeTouched.count) {
+            NSUInteger cnt = gThemeTouched.count;
+            for (UIView *v in gThemeTouched.allObjects)
+                if (v) v.overrideUserInterfaceStyle = UIUserInterfaceStyleUnspecified;
+            [gThemeTouched removeAllObjects];
+            gThemeSawApply = NO;
+            DLog(@"[分区外观] 已关闭, 还原 %lu 个容器为跟随系统", (unsigned long)cnt);
+        }
+        return;
+    }
+    UIUserInterfaceStyle want = gThemeDark ? UIUserInterfaceStyleDark : UIUserInterfaceStyleLight;
+    __block int roots = 0, wins = 0;
+    NSMutableString *diag = verbose ? [NSMutableString string] : nil;
+    diForEachWindow(^(UIWindow *w){
+        if (!w) return;
+        const char *why = diThemeSkipWindow(w);
+        int n = why ? 0 : diThemeApplyNode(w, want, 0);
+        roots += n; wins++;
+        if (diag) {
+            [diag appendFormat:@"%@", NSStringFromClass(w.class)];
+            if (why) [diag appendFormat:@"(%s跳过)", why];
+            [diag appendFormat:@"[%d] ", n];
+        }
+    });
+    if (verbose || !gThemeSawApply) {
+        DLog(@"[分区外观] 目标=%@ 窗口=%d 套用根节点=%d | %@",
+             want == UIUserInterfaceStyleDark ? @"深色" : @"浅色", wins, roots, diag ?: @"");
+    }
+    gThemeSawApply = YES;
 }
 
-/* 可重复调用: 只补装还没装过的类(控制中心等私有类可能晚加载) */
-static void diInstallThemeHooks(void) {
-    int added = 0;
-    for (NSString *name in diThemeScopeClasses()) {
-        Class c = NSClassFromString(name);
-        if (!c || ![c isSubclassOfClass:[UIView class]]) continue;
-        BOOL done = NO;
-        for (size_t i = 0; i < gThemeHooks.size(); i++) if (gThemeHooks[i].cls == c) { done = YES; break; }
-        if (done) continue;
-        Method m = class_getInstanceMethod(c, @selector(layoutSubviews));
-        if (!m) continue;
-        IMP old = NULL;
-        MSHookMessageEx(c, @selector(layoutSubviews), (IMP)h_themeScopeLayout, &old);
-        if (old) { gThemeHooks.push_back({c, old}); added++; }
-    }
-    if (added) DLog(@"[分区外观] 新挂 %d 个容器, 共 %lu 个", added, (unsigned long)gThemeHooks.size());
+/* 1 秒一圈: 新窗口(控制中心)/新建的卡片都能自己跟上, 不靠任何私有类回调 */
+static void diThemeStartTimer(void) {
+    if (gThemeTimer) return;
+    gThemeTimer = dispatch_source_create(DISPATCH_SOURCE_TYPE_TIMER, 0, 0, dispatch_get_main_queue());
+    dispatch_source_set_timer(gThemeTimer, dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.0 * NSEC_PER_SEC)),
+                              (int64_t)(1.0 * NSEC_PER_SEC), (int64_t)(0.25 * NSEC_PER_SEC));
+    dispatch_source_set_event_handler(gThemeTimer, ^{ diThemeApplyAll(NO); });
+    dispatch_resume(gThemeTimer);
 }
 
 static BOOL viewHasToken(UIView *v, NSString *token) {
@@ -8783,7 +8821,6 @@ static void diRestyleWalk(UIView *root) {
 static void diRestyleAllPlatters(UIView *root) {
     if (!root) return;
     NSString *cn = NSStringFromClass(root.class);
-    diThemeApplyScoped(root);   /* 2.9.31: 开关切换后立刻刷新锁屏/桌面/控制中心 */
     /* 2.8.10: 播放器没有 PlatterView, 把媒体控制底板也纳入, 否则路径 B 也漏它 */
     if (([cn containsString:@"PlatterView"] || [cn isEqualToString:@"PLPlatterView"]
          || [cn containsString:@"MediaControlsBackground"] || [cn containsString:@"ControlsBackgroundView"])
@@ -8923,7 +8960,7 @@ static BOOL install(NSString *name) {
 
 static void installKnownHosts(void) {
     diGainInstallHook();   /* 2.8.31: 隐藏药丸 hook(私有类晚加载时靠分阶段重试补装) */
-    diInstallThemeHooks(); /* 2.9.31: 只看锁屏/桌面/控制中心三个容器 */
+    diThemeStartTimer();   /* 2.9.32: 每秒扫窗, 锁屏/桌面/控制中心整树套深/浅色 */
     install(@"SAUIElementView");
     installBreathKick();   /* 2.9.19: 通知到达 → 重新起呼吸 */
     /* 2.2.10: 锁屏通知宽度 —— 锁屏通知卡(short look)与通知列表容器都按 layoutSubviews 调宽度 */
@@ -11486,6 +11523,8 @@ static void diPrefsRefreshNow(void) {
         }
         /* 2.8.8: 发光开关/半径/颜色变更 → 立即重绘所有锁屏卡片 */
         diRestyleAllLockPlatters();
+        /* 2.9.32: 启动开关 / 强制深色 一改立刻生效(不用等下一圈定时) */
+        diThemeApplyAll(YES);
     } @catch (NSException *e) {
         RLog(@"偏好刷新异常(已吞): %@ — %@", e.name, e.reason);
     }
