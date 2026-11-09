@@ -62,7 +62,7 @@ static double expandTextY = DI_EXP_TEXT_BASE_Y;   // 上下偏移(pt, 下为正,
 static double expandTextScale = 100.0; // 文字大小(%, 100=原样)
 /* 2.8.86: 构建戳 —— 之前横幅打的是 SpringBoard 自己的 CFBundleShortVersionString(恒 1.0),
    日志里根本看不出装的是哪一版。所有诊断行都带这个戳, 下轮日志一眼定位。 */
-#define DI_BUILD_VER @"2.9.43"
+#define DI_BUILD_VER @"2.9.44"
 static BOOL gRecordingActive = NO; // 保留: 岛素材总闸条件
 static NSString *diElementId(UIView *host);
 static BOOL diMiniMusicActive(UIView *host); // 2.6.3: 前置(遮罩层使用)
@@ -14417,10 +14417,25 @@ static void diMruTailInstall(void) {
    ============================================================ */
 static BOOL diReturnAnimOn(void) { return pBool(@"returnAnimOn", NO); }
 static double diReturnAnimDur(void) {
-    NSInteger v = pInt(@"returnAnimDur", 35);
-    if (v < 15) v = 15;
+    NSInteger v = pInt(@"returnAnimDur", 38);
+    if (v < 25) v = 25;
     if (v > 90) v = 90;
     return v / 100.0;
+}
+
+/* 屏幕圆角(起点用), 取不到就用 55 */
+static CGFloat diReturnCornerRadius(void) {
+    static CGFloat r = -1;
+    if (r > 0) return r;
+    r = 55.0;
+    @try {
+        id v = [UIScreen.mainScreen valueForKey:@"_displayCornerRadius"];
+        if (v) {
+            CGFloat x = (CGFloat)[v doubleValue];
+            if (x > 20.0 && x < 90.0) r = x;
+        }
+    } @catch (__unused NSException *e) {}
+    return r;
 }
 
 /* 2.9.43: 枚举窗口(不用已废弃的 UIApplication.windows) */
@@ -14505,6 +14520,40 @@ static void diReturnLog(NSString *fmt, ...) {
     RLog(@"[返回动画] %@", s);
 }
 
+/* 2.9.44: 动画层必须盖在 App 窗口**上面**。
+   2.9.43 把快照加进桌面窗口, 桌面在 App 下面 —— 整个动画被 App 挡死, 所以"没变化"。
+   这里自建一个置顶透明窗口专门播这一层: 不碰桌面、不碰 App 窗口、不接管触摸。 */
+static UIWindow *gReturnOverlay = nil;
+static UIWindow *diReturnOverlay(UIWindow *refWin) {
+    UIWindowScene *ws = refWin.windowScene;
+    if (!ws) {
+        for (UIScene *s in UIApplication.sharedApplication.connectedScenes) {
+            if ([s isKindOfClass:UIWindowScene.class]) { ws = (UIWindowScene *)s; break; }
+        }
+    }
+    if (!ws) return nil;
+    if (gReturnOverlay && gReturnOverlay.windowScene == ws) {
+        gReturnOverlay.frame = ws.coordinateSpace.bounds;
+        gReturnOverlay.hidden = NO;
+        return gReturnOverlay;
+    }
+    UIWindow *w = [[UIWindow alloc] initWithWindowScene:ws];
+    w.frame = ws.coordinateSpace.bounds;
+    w.windowLevel = UIWindowLevelAlert + 1.0;
+    w.backgroundColor = UIColor.clearColor;
+    w.userInteractionEnabled = NO;
+    w.opaque = NO;
+    UIViewController *vc = [[UIViewController alloc] init];
+    vc.view.backgroundColor = UIColor.clearColor;
+    vc.view.userInteractionEnabled = NO;
+    w.rootViewController = vc;
+    w.hidden = NO;
+    gReturnOverlay = w;
+    diReturnLog(@"置顶动画层就绪 %.0fx%.0f level=%.0f",
+                w.bounds.size.width, w.bounds.size.height, w.windowLevel);
+    return w;
+}
+
 /* 真正干活: 抓快照 → 挂到桌面 → 缩小到图标 */
 static void diReturnPlay(UIView *sceneView) {
     if (!sceneView) return;
@@ -14534,36 +14583,67 @@ static void diReturnPlay(UIView *sceneView) {
                     iconRect.origin.x, iconRect.origin.y, hw.bounds.size.width, hw.bounds.size.height);
         return;
     }
-    CGRect start = [sceneView convertRect:sceneView.bounds toView:hw];
+    /* 2.9.44: 起点不用 sceneView 的转换坐标 —— SpringBoard 里 App 场景窗口常常被摆在
+       x=-454 这种屏幕外的卡位, 转出来就是负坐标(2.9.43 的动画全在屏幕外播放)。
+       这里直接按"整屏"起, 内容就是那一整页。 */
+    UIWindow *ow = diReturnOverlay(sceneView.window ?: hw);
+    UIView *host = ow.rootViewController.view ?: ow;
+    if (!host) { host = hw; ow = hw; }
+    CGRect start = host.bounds;
+    /* 图标矩形从桌面坐标系搬到动画层坐标系(两层都是整屏窗口, 一般就是原值) */
+    CGRect target = iconRect;
+    if (!CGSizeEqualToSize(hw.bounds.size, host.bounds.size) || ow != hw) {
+        CGRect r = [hw convertRect:iconRect toView:host];
+        if (!CGRectIsEmpty(r) && CGRectContainsRect(CGRectInset(host.bounds, -60, -60), r)) target = r;
+    }
     if (CGRectIsEmpty(start) || start.size.width < 80) {
         diReturnLog(@"跳过: 起点矩形异常 %@", NSStringFromCGRect(start));
         return;
     }
     UIView *snap = [sceneView snapshotViewAfterScreenUpdates:NO];
+    /* 场景视图是跨进程内容, 偶尔抓到的是空壳 —— 换整窗快照兜底 */
+    if (!snap || (!snap.layer.contents && snap.subviews.count == 0))
+        snap = [sceneView.window snapshotViewAfterScreenUpdates:NO] ?: snap;
     if (!snap) { diReturnLog(@"跳过: 快照失败"); return; }
+    if (!snap.layer.contents && snap.subviews.count == 0)
+        diReturnLog(@"警告: 快照内容为空(可能整层是透明的)");
 
     snap.userInteractionEnabled = NO;
-    snap.frame = start;
     snap.alpha = 1.0;
-    snap.layer.cornerRadius = 55.0;
+    snap.layer.cornerRadius = diReturnCornerRadius();
     snap.layer.cornerCurve = kCACornerCurveContinuous;
     snap.clipsToBounds = YES;
     snap.layer.allowsEdgeAntialiasing = YES;
-    [hw addSubview:snap];
+    /* 用 bounds+center 摆位, 之后只动 transform —— 直接改 frame 会把画面拉变形 */
+    snap.bounds = CGRectMake(0, 0, start.size.width, start.size.height);
+    snap.center = CGPointMake(CGRectGetMidX(start), CGRectGetMidY(start));
+    [host addSubview:snap];
 
     double dur = diReturnAnimDur();
-    CGRect target = iconRect;
-    CGFloat endR = MAX(7.0, target.size.width * 0.2237);
-    diReturnLog(@"播放: %@ 起点 %.0fx%.0f@(%.0f,%.0f) → 图标 %.0fx%.0f@(%.0f,%.0f) 时长%.2fs",
-                bid, start.size.width, start.size.height, start.origin.x, start.origin.y,
-                target.size.width, target.size.height, target.origin.x, target.origin.y, dur);
+    /* 只缩到图标本体(方形), 不连下面的名字 */
+    CGRect iconBody = target;
+    iconBody.size.height = target.size.width;
+    CGFloat scale = (start.size.width > 1.0) ? (iconBody.size.width / start.size.width) : 0.15;
+    if (scale < 0.05) scale = 0.05;
+    diReturnLog(@"播放: %@ 起点 %.0fx%.0f → 图标 %.0fx%.0f@(%.0f,%.0f) 缩放%.3f 时长%.2fs",
+                bid, start.size.width, start.size.height,
+                iconBody.size.width, iconBody.size.height,
+                iconBody.origin.x, iconBody.origin.y, scale, dur);
     [UIView animateWithDuration:dur delay:0
                         options:(UIViewAnimationOptionCurveEaseInOut | UIViewAnimationOptionBeginFromCurrentState)
                      animations:^{
-        snap.frame = target;
-        snap.layer.cornerRadius = endR;
+        snap.transform = CGAffineTransformMakeScale(scale, scale);
+        snap.center = CGPointMake(CGRectGetMidX(iconBody), CGRectGetMidY(iconBody));
     } completion:^(BOOL finished) {
         [snap removeFromSuperview];
+        /* 播完把空窗口藏起来, 下次要播再打开, 免得长期压在 SpringBoard 最上层 */
+        if (gReturnOverlay && gReturnOverlay == ow) {
+            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)0.25 * NSEC_PER_SEC),
+                           dispatch_get_main_queue(), ^{
+                if (gReturnOverlay && gReturnOverlay.rootViewController.view.subviews.count == 0)
+                    gReturnOverlay.hidden = YES;
+            });
+        }
     }];
     /* 末尾淡出: 收进图标的那一下不该是一块硬卡片 */
     CGFloat fade = MIN(0.16, dur * 0.4);

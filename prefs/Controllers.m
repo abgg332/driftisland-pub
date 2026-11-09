@@ -22,7 +22,7 @@
 
 static NSString *const kDomain = @"com.abgg332.driftisland";
 /* 2.6.25: 设置页底部显示的版本号 */
-static NSString *const DI_VERSION_STR = @"2.9.43";
+static NSString *const DI_VERSION_STR = @"2.9.44";
 /* 2.6.10: 专辑光晕遮罩 —— 与 Tweak 侧 DIAlbumMask.h 保持一致 */
 static NSString *const kDIAlbumMaskKey = @"diAlbumMaskAsset";
 static NSString *const kDIMaskRoot = @"/var/mobile/灵动岛/遮罩素材";
@@ -5592,7 +5592,7 @@ static void diwKillByComm(const char *comm) {
     [specs addObject:[self groupSpec:@"返回动画"
         footer:@"退出 App 时，当前画面会像一张卡片一样缩小、收进桌面上的 App 图标里。\n只在该 App 的图标就在当前桌面页时生效；锁屏、应用切换器不触发。"]];
     [specs addObject:[self switchSpec:@"总开关" key:@"returnAnimOn" def:@NO]];
-    [specs addObject:[self numSlider:@"动画时长(0.01s)" key:@"returnAnimDur" def:35 mn:15 mx:80]];
+    [specs addObject:[self numSlider:@"动画时长(0.01s)" key:@"returnAnimDur" def:38 mn:25 mx:90]];
 
     [specs addObject:[self groupSpec:nil footer:nil]];
     [specs addObject:[self buttonSpec:@"注销生效" action:@selector(doReturnRespring:)]];
