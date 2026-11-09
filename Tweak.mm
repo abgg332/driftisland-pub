@@ -62,7 +62,7 @@ static double expandTextY = DI_EXP_TEXT_BASE_Y;   // 上下偏移(pt, 下为正,
 static double expandTextScale = 100.0; // 文字大小(%, 100=原样)
 /* 2.8.86: 构建戳 —— 之前横幅打的是 SpringBoard 自己的 CFBundleShortVersionString(恒 1.0),
    日志里根本看不出装的是哪一版。所有诊断行都带这个戳, 下轮日志一眼定位。 */
-#define DI_BUILD_VER @"2.9.25"
+#define DI_BUILD_VER @"2.9.26"
 static BOOL gRecordingActive = NO; // 保留: 岛素材总闸条件
 static NSString *diElementId(UIView *host);
 static BOOL diMiniMusicActive(UIView *host); // 2.6.3: 前置(遮罩层使用)
@@ -641,11 +641,10 @@ static void refreshPrefs(void) {
     notifyColorOn = pBool(@"notifyColorOn", NO);
     notifyBgOff = pBool(@"notifyBgOff", NO);
     notifyFlowOn = pBool(@"notifyFlowOn", NO);
-    /* 2.9.25: 强制外观 —— 深色优先(两个都开时以深色为准) */
+    /* 2.9.26: 强制外观 —— 单开关: 开=深色, 关=浅色; 总开关关=跟随系统 */
     gThemeOn = pBool(@"themeMasterOn", NO);
-    gThemeLight = pBool(@"themeForceLight", NO);
     gThemeDark = pBool(@"themeForceDark", NO);
-    if (gThemeDark) gThemeLight = NO;
+    gThemeLight = gThemeOn && !gThemeDark;
     {
         /* 2.2.8: 多色数组(diNotifColors, 逗号分隔 HEX)。
            流光关 = 取第1个颜色单色固定; 流光开 = 沿文字从左到右循环流动。 */
@@ -5446,7 +5445,17 @@ static void diThemeWalkLabels(UIView *v, int want) {
     }
 }
 
+static void diThemeApplyAtInner(UIView *card);
+
 static void diThemeApplyAt(UIView *card) {
+    if (!card) return;
+    /* 2.9.26: 任何异常都不能把 SpringBoard 拖进安全模式(369 教训) */
+    @try { diThemeApplyAtInner(card); } @catch (__unused NSException *e) {
+        DLog(@"[强制外观] 异常已拦截: %@", e);
+    }
+}
+
+static void diThemeApplyAtInner(UIView *card) {
     if (!card) return;
     UIWindow *w = card.window;
     if (!w) return;
@@ -5507,7 +5516,13 @@ static UIView *diThemeCtxCard(UIView *root, int depth) {
 static void (*o_diThemeCtxLayout)(id, SEL);
 static void h_diThemeCtxLayout(UIView *self, SEL _cmd) {
     ((void (*)(id, SEL))o_diThemeCtxLayout)(self, _cmd);
-    diThemeApplyAt(diThemeCtxCard(self, 0));   /* 找不到卡片就不动, 绝不拿全屏容器兜底 */
+    /* 2.9.26: 布局过程中插入/移除子视图是 369 安全模式的最可疑来源 ——
+       一律推迟到本轮布局结束之后(下一轮主循环)再动视图树。 */
+    __weak UIView *wself = self;
+    dispatch_async(dispatch_get_main_queue(), ^{
+        UIView *sv = wself; if (!sv || !sv.window) return;
+        @try { diThemeApplyAt(diThemeCtxCard(sv, 0)); } @catch (__unused NSException *e) {}
+    });
 }
 
 static BOOL viewHasToken(UIView *v, NSString *token) {
@@ -8729,10 +8744,14 @@ static BOOL diInLockScreen(UIView *v) {
 
 static void applyLockStyle(UIView *v) {
     if (!NSThread.isMainThread) return;
-    /* 2.9.25: 强制浅/深色 —— 独立于发光/边框, 不能被下面的早退挡住 */
+    /* 2.9.25: 强制浅/深色 —— 独立于发光/边框, 不能被下面的早退挡住;
+       2.9.26: 改异步执行, 不在布局/转场中途动视图树 */
     if (gThemeOn || objc_getAssociatedObject(v, &kLkPlatter)) {
-        UIView *tp = diFindPlatter(v);
-        diThemeApplyAt(tp);
+        __weak UIView *wv = v;
+        dispatch_async(dispatch_get_main_queue(), ^{
+            UIView *sv = wv; if (!sv) return;
+            @try { diThemeApplyAt(diFindPlatter(sv)); } @catch (__unused NSException *e) {}
+        });
     }
     if (!lkBdOn && !lkShOn && !lkGlowOn) return;
     if (!diInLockScreen(v)) return;   /* 2.8.36: 控制中心等其它窗口不染色 */
@@ -8953,16 +8972,21 @@ static BOOL install(NSString *name) {
 
 static void installKnownHosts(void) {
     diGainInstallHook();   /* 2.8.31: 隐藏药丸 hook(私有类晚加载时靠分阶段重试补装) */
-    /* 2.9.25: 桌面长按菜单 —— 单独 hook, 与锁屏样式链无关 */
-    for (NSString *n in @[@"_UIContextMenuPlatterTransitionView", @"SBIconContextMenuPlatterView"]) {
-        Class c = NSClassFromString(n);
-        if (!c || ![c isSubclassOfClass:[UIView class]]) continue;
-        Method m = class_getInstanceMethod(c, @selector(layoutSubviews));
-        if (!m) continue;
-        IMP old = NULL;
-        MSHookMessageEx(c, @selector(layoutSubviews), (IMP)h_diThemeCtxLayout, &old);
-        if (old) DLog(@"[强制外观] 已 hook %@ (长按菜单)", n);
-    }
+    /* 2.9.25: 桌面长按菜单 —— 单独 hook, 与锁屏样式链无关;
+       2.9.26: dispatch_once 只装一次(installKnownHosts 会被重复调用,
+       369 日志里同一个类被 hook 了 10 遍) */
+    static dispatch_once_t ctxOnce;
+    dispatch_once(&ctxOnce, ^{
+        for (NSString *n in @[@"_UIContextMenuPlatterTransitionView", @"SBIconContextMenuPlatterView"]) {
+            Class c = NSClassFromString(n);
+            if (!c || ![c isSubclassOfClass:[UIView class]]) continue;
+            Method m = class_getInstanceMethod(c, @selector(layoutSubviews));
+            if (!m) continue;
+            IMP old = NULL;
+            MSHookMessageEx(c, @selector(layoutSubviews), (IMP)h_diThemeCtxLayout, &old);
+            if (old) DLog(@"[强制外观] 已 hook %@ (长按菜单)", n);
+        }
+    });
     install(@"SAUIElementView");
     installBreathKick();   /* 2.9.19: 通知到达 → 重新起呼吸 */
     /* 2.2.10: 锁屏通知宽度 —— 锁屏通知卡(short look)与通知列表容器都按 layoutSubviews 调宽度 */
