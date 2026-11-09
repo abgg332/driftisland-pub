@@ -62,7 +62,7 @@ static double expandTextY = DI_EXP_TEXT_BASE_Y;   // 上下偏移(pt, 下为正,
 static double expandTextScale = 100.0; // 文字大小(%, 100=原样)
 /* 2.8.86: 构建戳 —— 之前横幅打的是 SpringBoard 自己的 CFBundleShortVersionString(恒 1.0),
    日志里根本看不出装的是哪一版。所有诊断行都带这个戳, 下轮日志一眼定位。 */
-#define DI_BUILD_VER @"2.9.29"
+#define DI_BUILD_VER @"2.9.30"
 static BOOL gRecordingActive = NO; // 保留: 岛素材总闸条件
 static NSString *diElementId(UIView *host);
 static BOOL diMiniMusicActive(UIView *host); // 2.6.3: 前置(遮罩层使用)
@@ -5414,35 +5414,62 @@ static void applyNotifyStyle(UIView *host) {
     }
 }
 
-/* ===== 2.9.29: 锁屏通知卡深/浅色 —— 用系统自己的 overrideUserInterfaceStyle =====
-   2.9.28 直接改全局外观取值, 结果状态栏被判成深色(白字)而系统底色仍是浅色,
-   白字看不清。现在只给**通知卡自身及其宿主**设 overrideUserInterfaceStyle,
-   由系统按该 trait 自行渲染材质与文字 —— 状态栏、桌面、控制中心完全不受影响;
-   开关关闭时还原为 Unspecified。播放器等其他锁屏卡片不在此列。 */
-static char kThemeOvTag;
-
-static BOOL diIsNotifViewClass(NSString *cn) {
-    return [cn containsString:@"NCNotification"]
-        || [cn containsString:@"CSNotificationViewController"]
-        || [cn containsString:@"NotificationShortLook"];
+/* ===== 2.9.30: 模拟系统深色/浅色(仅排除状态栏) =====
+   2.9.28 全局模拟是用户想要的效果, 唯一副作用是状态栏: 系统底色仍浅色,
+   状态栏却按假深色转白字 → 看不清。现在全局 trait 照旧模拟(2.9.28),
+   额外 hook 状态栏样式: 读它时暂时摘掉模拟、取真实系统值 —— 状态栏永远
+   跟随真实外观, 其余界面全部深/浅。 */
+static NSInteger (*o_uisCurStyle)(id, SEL);
+static NSInteger h_uisCurStyle(id self, SEL _cmd) {
+    if (gThemeOn) return gThemeDark ? 2 : 1;   /* UIUserInterfaceStyle Dark/Light */
+    return o_uisCurStyle(self, _cmd);
 }
 
-/* 给单个视图设/撤外观覆盖; 记账避免每帧重复写 */
-static void diThemeSetOverride(UIView *t, BOOL on, BOOL dark, const char *tag) {
-    if (!t) return;
-    if (on) {
-        UIUserInterfaceStyle want = dark ? UIUserInterfaceStyleDark : UIUserInterfaceStyleLight;
-        if (t.overrideUserInterfaceStyle != want) {
-            t.overrideUserInterfaceStyle = want;
-            objc_setAssociatedObject(t, &kThemeOvTag, @YES, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-            static int tlog; if (tlog < 10 && tag) { tlog++;
-                DLog(@"[通知外观] %s %@ → %@ (%.0fx%.0f)", tag, NSStringFromClass(t.class),
-                     dark ? @"深色" : @"浅色", t.bounds.size.width, t.bounds.size.height); }
+static NSInteger (*o_tcStyle)(id, SEL);
+static NSInteger h_tcStyle(id self, SEL _cmd) {
+    if (gThemeOn) return gThemeDark ? 2 : 1;
+    return o_tcStyle(self, _cmd);
+}
+
+static NSInteger (*o_sbStyle)(id, SEL);
+static NSInteger h_sbStyle(id self, SEL _cmd) {
+    if (!gThemeOn) return o_sbStyle(self, _cmd);
+    BOOL saved = gThemeOn; gThemeOn = NO;      /* 暂时摘掉模拟取真实值 */
+    NSInteger real = o_sbStyle(self, _cmd);
+    gThemeOn = saved;
+    return real;                               /* 状态栏: 永远跟随真实系统外观 */
+}
+
+static void diInstallThemeHooks(void) {
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        Class uis = NSClassFromString(@"UISCurrentUserInterfaceStyleValue");
+        if (uis) {
+            Method m = class_getClassMethod(uis, @selector(userInterfaceStyle));
+            if (m) {
+                IMP old = NULL;
+                MSHookMessageEx(object_getClass(uis), @selector(userInterfaceStyle), (IMP)h_uisCurStyle, &old);
+                o_uisCurStyle = (NSInteger (*)(id, SEL))old;
+                DLog(@"[模拟外观] 已挂 UISCurrentUserInterfaceStyleValue");
+            }
         }
-    } else if ([objc_getAssociatedObject(t, &kThemeOvTag) boolValue]) {
-        t.overrideUserInterfaceStyle = UIUserInterfaceStyleUnspecified;
-        objc_setAssociatedObject(t, &kThemeOvTag, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-    }
+        Method tm = class_getInstanceMethod([UITraitCollection class], @selector(userInterfaceStyle));
+        if (tm) {
+            IMP old = NULL;
+            MSHookMessageEx([UITraitCollection class], @selector(userInterfaceStyle), (IMP)h_tcStyle, &old);
+            o_tcStyle = (NSInteger (*)(id, SEL))old;
+            DLog(@"[模拟外观] 已挂 UITraitCollection");
+        }
+        Method sm = class_getInstanceMethod([UIStatusBarManager class], @selector(statusBarStyle));
+        if (sm) {
+            IMP old = NULL;
+            MSHookMessageEx([UIStatusBarManager class], @selector(statusBarStyle), (IMP)h_sbStyle, &old);
+            o_sbStyle = (NSInteger (*)(id, SEL))old;
+            DLog(@"[模拟外观] 状态栏豁免已挂 UIStatusBarManager");
+        } else {
+            DLog(@"[模拟外观] 未找到 UIStatusBarManager.statusBarStyle");
+        }
+    });
 }
 
 static BOOL viewHasToken(UIView *v, NSString *token) {
@@ -8664,15 +8691,9 @@ static BOOL diInLockScreen(UIView *v) {
 
 static void applyLockStyle(UIView *v) {
     if (!NSThread.isMainThread) return;
+    if (!lkBdOn && !lkShOn && !lkGlowOn) return;
     if (!diInLockScreen(v)) return;   /* 2.8.36: 控制中心等其它窗口不染色 */
     NSString *cn = NSStringFromClass(v.class);
-    /* 2.9.29: 锁屏通知卡的深/浅外观 —— 即使没开边框/发光也要生效 */
-    if (diIsNotifViewClass(cn)) {
-        UIView *tp0 = diFindPlatter(v);
-        diThemeSetOverride(tp0, gThemeOn, gThemeDark, "卡");
-        diThemeSetOverride(v, gThemeOn, gThemeDark, "宿主");
-    }
-    if (!lkBdOn && !lkShOn && !lkGlowOn) return;
     if (!diIsNoticeOrPlayerView(cn)) return;
     UIView *platter = diFindPlatter(v);
     if (!platter) return;
@@ -8755,7 +8776,6 @@ static void diRestyleAllPlatters(UIView *root) {
          || [cn containsString:@"MediaControlsBackground"] || [cn containsString:@"ControlsBackgroundView"])
         && root.window && root.bounds.size.width > 120
         && diIsLockScreenWindow(root.window)) {   /* 2.8.36: 只锁屏 */
-        if (!gThemeOn) diThemeSetOverride(root, NO, NO, NULL);   /* 2.9.29: 关开关即还原 */
         diStylePlatter(root);
     }
     for (UIView *sub in root.subviews) diRestyleAllPlatters(sub);
@@ -8890,7 +8910,7 @@ static BOOL install(NSString *name) {
 
 static void installKnownHosts(void) {
     diGainInstallHook();   /* 2.8.31: 隐藏药丸 hook(私有类晚加载时靠分阶段重试补装) */
-    /* 2.9.29: 不再改全局外观(状态栏会白字看不清), 改为锁屏通知卡局部覆盖 */
+    diInstallThemeHooks(); /* 2.9.30: 模拟系统深/浅色, 状态栏豁免 */
     install(@"SAUIElementView");
     installBreathKick();   /* 2.9.19: 通知到达 → 重新起呼吸 */
     /* 2.2.10: 锁屏通知宽度 —— 锁屏通知卡(short look)与通知列表容器都按 layoutSubviews 调宽度 */
