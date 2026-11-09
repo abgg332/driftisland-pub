@@ -22,7 +22,7 @@
 
 static NSString *const kDomain = @"com.abgg332.driftisland";
 /* 2.6.25: 设置页底部显示的版本号 */
-static NSString *const DI_VERSION_STR = @"2.9.45";
+static NSString *const DI_VERSION_STR = @"2.9.46";
 /* 2.6.10: 专辑光晕遮罩 —— 与 Tweak 侧 DIAlbumMask.h 保持一致 */
 static NSString *const kDIAlbumMaskKey = @"diAlbumMaskAsset";
 static NSString *const kDIMaskRoot = @"/var/mobile/灵动岛/遮罩素材";
@@ -761,8 +761,6 @@ static Class diStepSliderClass(void) {
 /* 2.9.19: 组件隐藏(移植 RemoveWidgetBackground 1.7) */
 @interface DIWidgetHidePage : DIMiniBaseController @end
 @interface DIWidgetAppsPage : DIMiniBaseController @end
-/* 2.9.43: 返回动画 —— 退出 App 时整屏缩回桌面图标 */
-@interface DIReturnAnimPage : DIMiniBaseController @end
 @interface DIFrameFoldersMask : DIFrameFolders @end /* 2.6.3: 遮罩素材选择(键 maskAnimFolder) */
 @interface DIFrameFoldersMini : DIFrameFolders @end  /* 左侧(mini)帧率素材选择(键 smallAnimFolder) */
 @interface DIFrameFoldersAudio : DIFrameFolders @end /* 右侧音频素材(键 miniAudioFolder) */
@@ -1443,8 +1441,6 @@ static void diWriteColors(NSArray<NSString *> *colors) {
         DI_ADD([self linkSpec:@"控制中心" detail:[DICCSettings class]]);
         /* 2.9.19: 组件隐藏 —— 按用户要求在「控制中心」下面新增入口 */
         DI_ADD([self linkSpec:@"组件隐藏" detail:[DIWidgetHidePage class]]);
-        /* 2.9.43: 返回动画 —— 按用户要求放在「组件隐藏」下方 */
-        DI_ADD([self linkSpec:@"返回动画" detail:[DIReturnAnimPage class]]);
 
         _smallRow = _expandRow = -1;
         {
@@ -5564,38 +5560,3 @@ static void diwKillByComm(const char *comm) {
 @end
 
 
-/* ============================================================
-   2.9.43: 返回动画 —— 退出 App 时整屏缩回桌面图标
-   (Tweak 侧: hook SBApplicationSceneView willMoveToWindow:, 抓快照 → 桌面窗口 →
-    动画缩到该 App 图标的位置; 这里只给开关和时长)
-   ============================================================ */
-@implementation DIReturnAnimPage
-- (void)doReturnRespring:(PSSpecifier *)sp {
-    notify_post("com.abgg332.driftisland.widget.respring");
-    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.8 * NSEC_PER_SEC)),
-                   dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
-        diwKillByComm("chronod");
-        diwKillByComm("SpringBoard");
-    });
-    UIAlertController *ac = [UIAlertController alertControllerWithTitle:@"正在注销"
-        message:@"注销后返回动画才会挂上，屏幕会短暂黑一下。" preferredStyle:UIAlertControllerStyleAlert];
-    [ac addAction:[UIAlertAction actionWithTitle:@"好" style:UIAlertActionStyleCancel handler:nil]];
-    [self presentViewController:ac animated:YES completion:nil];
-    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(2.5 * NSEC_PER_SEC)),
-                   dispatch_get_main_queue(), ^{
-        if (ac.presentingViewController) [ac dismissViewControllerAnimated:YES completion:nil];
-    });
-}
-
-- (NSArray *)buildSpecifiers {
-    NSMutableArray *specs = [NSMutableArray array];
-    [specs addObject:[self groupSpec:@"返回动画"
-        footer:@"退出 App 时，当前画面会像一张卡片一样缩小、收进桌面上的 App 图标里。\n只在该 App 的图标就在当前桌面页时生效；锁屏、应用切换器不触发。"]];
-    [specs addObject:[self switchSpec:@"总开关" key:@"returnAnimOn" def:@NO]];
-    [specs addObject:[self numSlider:@"动画时长(0.01s)" key:@"returnAnimDur" def:38 mn:25 mx:90]];
-
-    [specs addObject:[self groupSpec:nil footer:nil]];
-    [specs addObject:[self buttonSpec:@"注销生效" action:@selector(doReturnRespring:)]];
-    return specs;
-}
-@end
