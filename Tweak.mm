@@ -62,7 +62,7 @@ static double expandTextY = DI_EXP_TEXT_BASE_Y;   // 上下偏移(pt, 下为正,
 static double expandTextScale = 100.0; // 文字大小(%, 100=原样)
 /* 2.8.86: 构建戳 —— 之前横幅打的是 SpringBoard 自己的 CFBundleShortVersionString(恒 1.0),
    日志里根本看不出装的是哪一版。所有诊断行都带这个戳, 下轮日志一眼定位。 */
-#define DI_BUILD_VER @"2.9.39"
+#define DI_BUILD_VER @"2.9.40"
 static BOOL gRecordingActive = NO; // 保留: 岛素材总闸条件
 static NSString *diElementId(UIView *host);
 static BOOL diMiniMusicActive(UIView *host); // 2.6.3: 前置(遮罩层使用)
@@ -3356,6 +3356,8 @@ static void diStripMaskFromCover(UIView *cover) {
      · 遮罩开启时 → 只摘 >80pt 的大层(小岛头像那 22~26pt 的保留)。 */
 static NSString *diMruSharedDir(void);   /* 实现在下方导出段 */
 
+static BOOL diIsIOS17Up(void);   /* 定义在 2.9.37 段(下方), 这里先用 */
+
 /* ===== 2.9.38: 把小岛真实形态写给 MediaRemoteUI =====
    369~379 的死结: iOS17 上 MRU 里那个头像视图恒 66x66, 它按 bounds 判形态永远得到
    "展开" → ① 它自己在收缩态也铺 66pt 玻璃(被外层裁成一牙 = 用户说的"变形");
@@ -3377,6 +3379,22 @@ static void diPublishIslandState(CGSize hostSize, BOOL mini, BOOL expand) {
                         @"t": @(now), @"v": DI_BUILD_VER};
     @try { [d writeToFile:[dir stringByAppendingPathComponent:@"island.plist"] atomically:YES]; }
     @catch (__unused NSException *e) {}
+}
+
+/* 2.9.40: 宿主自己写的形态(3 秒内有效) —— SpringBoard 侧判断用 */
+static BOOL diIslandStateMini(void) {
+    static CFAbsoluteTime lastCheck; static BOOL cached;
+    CFAbsoluteTime now = CFAbsoluteTimeGetCurrent();
+    if (now - lastCheck < 0.4) return cached;
+    lastCheck = now;
+    NSString *dir = diMruSharedDir();
+    if (!dir.length) { cached = NO; return NO; }
+    NSDictionary *d = [NSDictionary dictionaryWithContentsOfFile:
+                       [dir stringByAppendingPathComponent:@"island.plist"]];
+    if (![d isKindOfClass:NSDictionary.class]) { cached = NO; return NO; }
+    if (now - [d[@"t"] doubleValue] > 3.0) { cached = NO; return NO; }
+    cached = [d[@"mini"] boolValue] && ![d[@"expand"] boolValue];
+    return cached;
 }
 
 /* ===== 2.8.86: 展开态由 MRU 亲口告诉我们 =====
@@ -3865,12 +3883,30 @@ static BOOL diApplyMaskToCover(UIView *cover, UIImage *shape) {
         UIView *host = self.superview;
         if (!host || host.window == nil) { [self diTeardown]; if (++_miss > 20) _link.paused = YES; return; }
 
+        /* ===== 2.9.40: 形态必须先播报, 而且必须在"展开就退场"之前 =====
+           2.9.38 把写 island.plist 放在了所有闸门之后, 结果死锁:
+           SpringBoard 一进来就被 diMruSaysExpanded() 挡住退场 → 永远走不到写盘,
+           MRU 读不到真实形态 → 继续按 66pt 判成展开 → 又写 expanded=1。
+           现在把播报提到最前面, 环就解开了(宿主尺寸只有这边知道)。 */
+        if (diIsIOS17Up()) {
+            CGSize hs = host.bounds.size;
+            BOOL miniNow = (hs.height >= 24 && hs.height <= 62
+                            && hs.width >= 100 && hs.width <= 208
+                            && hs.width > hs.height * 1.55);
+            BOOL expNow = (hs.height >= 120 && hs.height <= 300
+                           && hs.width >= 280 && hs.width <= 440);
+            diPublishIslandState(hs, miniNow, expNow);
+        }
+
         /* ===== 2.8.86: 展开态一律由 MRU 负责, 这边整棵退场 =====
            判据不再看宿主尺寸(展开时宿主还是 198x55), 而是听 MRU 的 state.plist。
            展开期间每帧都走这里: 一旦系统又重新挂了 mask 或我们又画了玻璃,
            立刻收掉 —— 这就是"偶尔还会显示"的根本原因(总是慢半拍、抓不到)。
            不 pause link, 缩回小岛时第一帧就能恢复。 */
-        if (diMruSaysExpanded()) {
+        BOOL mruExpanded = diMruSaysExpanded();
+        /* 2.9.40: 17 上 MRU 按"头像恒 66pt"判展开是错的 —— 宿主说小岛就听宿主的 */
+        if (mruExpanded && diIsIOS17Up() && diIslandStateMini()) mruExpanded = NO;
+        if (mruExpanded) {
             if (_glassOn || _targets.count || !self.hidden) {
                 [self diTeardown];
                 static CFAbsoluteTime sExpT;
@@ -3992,7 +4028,6 @@ static BOOL diApplyMaskToCover(UIView *cover, UIImage *shape) {
            充电岛虽然尺寸命中, 但下面音乐岛结构判定(diIsNowPlayingHostCached)会挡住。 */
         BOOL isExpand = (bs.height >= 120 && bs.height <= 300
                          && bs.width >= 280 && bs.width <= 440);
-        diPublishIslandState(bs, isMini, isExpand);   /* 2.9.38: 形态同步给 MRU */
         {
             static CGFloat sLastW, sLastH; static CFAbsoluteTime sSzT;
             if ((fabs(bs.width - sLastW) > 6 || fabs(bs.height - sLastH) > 6)
@@ -4004,6 +4039,15 @@ static BOOL diApplyMaskToCover(UIView *cover, UIImage *shape) {
             }
         }
         BOOL gate = enabled && maskOn && !gRecordingActive && (isMini || isExpand);
+        if (diIsIOS17Up()) {
+            static CFAbsoluteTime sGT; static int sLastGate = -1; static CGFloat sGW, sGH;
+            CFAbsoluteTime gn = CFAbsoluteTimeGetCurrent();
+            if ((int)gate != sLastGate || fabs(bs.width - sGW) > 3 || fabs(bs.height - sGH) > 3 || gn - sGT > 3.0) {
+                sGT = gn; sLastGate = (int)gate; sGW = bs.width; sGH = bs.height;
+                DLog(@"遮罩[17]: 宿主=%.0fx%.0f 小岛=%d 展开=%d 开=%d 掩码=%d 录屏=%d gate=%d",
+                     bs.width, bs.height, isMini, isExpand, enabled, maskOn, gRecordingActive, gate);
+            }
+        }
         /* ===== 2.8.84: 展开态彻底交给 MediaRemoteUI，SpringBoard 侧全部退出 =====
            331 反馈: 头像下方多出一个心形模糊光斑（用户圈出来的"多出来的蒙版"）。
            根因: 展开后宿主尺寸判定仍停在"小岛"（全部日志里从来没有 展开=1），
@@ -4035,7 +4079,35 @@ static BOOL diApplyMaskToCover(UIView *cover, UIImage *shape) {
         }
         /* 2.8.15: 音乐岛关卡 —— 只有"正在放歌"的岛才继续(通知岛/头像一律不遮)。 */
         if (gate && !diIsNowPlayingHostCached(host)) {
-            gate = NO;
+            /* ===== 2.9.40: 17 的结构兜底 =====
+               379 日志实锤: 17 上小岛宿主是 SBSystemApertureContainerView 166x37,
+               子视图全是 MRUActivity* —— 旧判据要找的 _SAUIProvidedViewContainerView
+               一个都没有, 于是"音乐岛=否"恒成立、gate 永远关着,
+               2.8.75 那套玻璃在 17 上从来没画过(这才是"改回去也不行"）。
+               这里用一个几何兜底: 在播 + 宿主左侧能找到 14~50pt 的专辑封面视图 → 放行。 */
+            BOOL ok17 = NO;
+            if (diIsIOS17Up()) {
+                BOOL playing17 = mrQueryOK ? musicPlaying
+                                           : AVAudioSession.sharedInstance.isOtherAudioPlaying;
+                if (playing17) {
+                    CGRect cr17 = CGRectZero;
+                    UIView *cv17 = diFindAlbumCoverView(host, &cr17);
+                    CGFloat mn = MIN(cr17.size.width, cr17.size.height);
+                    CGFloat mx = MAX(cr17.size.width, cr17.size.height);
+                    if (cv17 && mn >= 14.0 && mx <= 50.0) {
+                        ok17 = YES;
+                        static CFAbsoluteTime sOkT;
+                        if (CFAbsoluteTimeGetCurrent() - sOkT > 5.0) {
+                            sOkT = CFAbsoluteTimeGetCurrent();
+                            DLog(@"[17] 音乐岛兜底放行: 封面=%@ %.0fx%.0f 宿主=%.0fx%.0f",
+                                 NSStringFromClass(cv17.class), cr17.size.width, cr17.size.height,
+                                 bs.width, bs.height);
+                        }
+                    }
+                }
+            }
+            gate = ok17 ? gate : NO;
+            if (!ok17) {
             static CFAbsoluteTime sNotT;
             if (CFAbsoluteTimeGetCurrent() - sNotT > 5.0) {
                 sNotT = CFAbsoluteTimeGetCurrent();
@@ -4049,6 +4121,7 @@ static BOOL diApplyMaskToCover(UIView *cover, UIImage *shape) {
             if (lockMask) return;
             BOOL playing = mrQueryOK ? musicPlaying : AVAudioSession.sharedInstance.isOtherAudioPlaying;
             if (playing && self.glassOn && CFAbsoluteTimeGetCurrent() - self.paintT < 1.0) return;
+            }
         }
         if (!gate) {
             /* 2.8.18: 分两种情况下岗 ——
@@ -13250,7 +13323,7 @@ static BOOL diMruIslandCompact(UIView *artwork) {
             if (w > 1.0 && h > 1.0) { sSize = CGSizeMake(w, h); sHave = YES; sAt = now; }
         }
     }
-    if (sHave && now - sAt < 3.0)
+    if (sHave && now - sAt < 6.0)
         return (sSize.height < 70.0 || sSize.width < 240.0);
     /* 兜底: 祖先链上先碰到"明显小于展开宿主"的容器 → 收缩态 */
     for (UIView *v = artwork.superview; v && v != artwork.window; v = v.superview) {
@@ -13303,6 +13376,7 @@ static void diActivityApply(UIView *artwork) {
        这边把藏掉的系统子视图还原, 不再铺 66pt 玻璃(那是"变形"的来源)。展开态照旧。 */
     if (compact17) {
         if (state) diActivityTeardown(artwork, state);
+        diMruWriteExpandState(NO, artwork.bounds.size);   /* 2.9.40: 别让旧 YES 续期 */
         static BOOL sLoggedCompact17;
         if (!sLoggedCompact17) {
             sLoggedCompact17 = YES;
