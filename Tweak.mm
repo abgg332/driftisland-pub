@@ -62,7 +62,7 @@ static double expandTextY = DI_EXP_TEXT_BASE_Y;   // 上下偏移(pt, 下为正,
 static double expandTextScale = 100.0; // 文字大小(%, 100=原样)
 /* 2.8.86: 构建戳 —— 之前横幅打的是 SpringBoard 自己的 CFBundleShortVersionString(恒 1.0),
    日志里根本看不出装的是哪一版。所有诊断行都带这个戳, 下轮日志一眼定位。 */
-#define DI_BUILD_VER @"2.9.23"
+#define DI_BUILD_VER @"2.9.24"
 static BOOL gRecordingActive = NO; // 保留: 岛素材总闸条件
 static NSString *diElementId(UIView *host);
 static BOOL diMiniMusicActive(UIView *host); // 2.6.3: 前置(遮罩层使用)
@@ -7203,10 +7203,43 @@ static void diFitSceneHost(UIView *host, CGFloat cardW, CGFloat *outVisH) {
         host.layer.position = CGPointMake(0, 0);
         [CATransaction commit];
     }
-    host.clipsToBounds = NO;         /* 不裁: 裁了就点不到了(用户明确否过) */
+    host.clipsToBounds = NO;         /* 外层不裁: 裁了就点不到了(用户明确否过) */
+
+    /* 2.9.24: 直角修复 —— 内容按 s 等比缩小后正好铺满整张卡, 四角是直角,
+       而外层又为了点击不裁, 于是实时活动(美团配送)卡片的角戳出系统圆角外面。
+       这里只给**场景宿主自身**补圆角遮罩:
+         · 半径按 s 换算回宿主本地坐标(rr/s), 缩放后视觉半径正好 = 卡片圆角;
+         · layer.masksToBounds 只影响绘制, 不参与 hitTest, 点击区域一个像素都不变;
+         · 只作用于走这条路的卡片(_UIScenePresentationView/RemoteView),
+           普通通知根本不进这个函数, 不会动到其他通知。 */
+    CGFloat visH = bh * s;
+    static char kSceneClipped;
+    if (s < 0.999) {
+        CGFloat rr = visH * 0.5;
+        if (rr > 23.5) rr = 23.5;        /* iOS16 通知卡圆角 23.5 */
+        CGFloat lr = rr / s;
+        if (fabs(host.layer.cornerRadius - lr) > 0.2 || !host.layer.masksToBounds) {
+            [CATransaction begin]; [CATransaction setDisableActions:YES];
+            host.layer.cornerRadius = lr;
+            host.layer.cornerCurve = kCACornerCurveContinuous;
+            host.layer.masksToBounds = YES;
+            [CATransaction commit];
+            objc_setAssociatedObject(host, &kSceneClipped, @YES, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+            static int clipLog;
+            if (clipLog < 6) { clipLog++; DLog(@"场景圆角: %@ 视觉 %.0fx%.0f → 圆角 %.1f (本地 %.1f)",
+                                               hcn, cardW, visH, rr, lr); }
+        }
+    } else if ([objc_getAssociatedObject(host, &kSceneClipped) boolValue]) {
+        /* 卡片够宽(没缩放)时还原, 避免残留圆角 */
+        [CATransaction begin]; [CATransaction setDisableActions:YES];
+        host.layer.cornerRadius = 0;
+        host.layer.masksToBounds = NO;
+        [CATransaction commit];
+        objc_setAssociatedObject(host, &kSceneClipped, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    }
 
     /* 视觉高 = 原生高 × s */
-    if (outVisH) *outVisH = bh * s;
+    if (outVisH) *outVisH = visH;
 
     static int fitLog = 0;
     if (fitLog < 40 && (changed || fitLog < 3)) {
