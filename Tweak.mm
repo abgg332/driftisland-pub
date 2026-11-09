@@ -62,7 +62,7 @@ static double expandTextY = DI_EXP_TEXT_BASE_Y;   // 上下偏移(pt, 下为正,
 static double expandTextScale = 100.0; // 文字大小(%, 100=原样)
 /* 2.8.86: 构建戳 —— 之前横幅打的是 SpringBoard 自己的 CFBundleShortVersionString(恒 1.0),
    日志里根本看不出装的是哪一版。所有诊断行都带这个戳, 下轮日志一眼定位。 */
-#define DI_BUILD_VER @"2.9.33"
+#define DI_BUILD_VER @"2.9.34"
 static BOOL gRecordingActive = NO; // 保留: 岛素材总闸条件
 static NSString *diElementId(UIView *host);
 static BOOL diMiniMusicActive(UIView *host); // 2.6.3: 前置(遮罩层使用)
@@ -13042,6 +13042,31 @@ static UIImage *diActivityArtworkImage(UIView *view) {
     }
     return nil;
 }
+/* ===== 2.9.34: iOS 17 专辑图变形修复 =====
+   17 上 MRUActivityArtworkView 的 bounds 是 66x66, 但真正露出来的区域被祖先容器
+   裁得比它小(小岛收缩态只有 ~26pt 的圆)。我们还按 bounds 铺 66x66 的玻璃,
+   玻璃被外层圆一裁, 就只剩中间一块 → 看着"变形/偏移/被撕开"。
+   这里把祖先链上所有会裁剪的容器(clipsToBounds / masksToBounds / 圆角 / maskView)
+   换算到专辑视图坐标里求交, 得到"真正可见的那块", 玻璃就按它铺。 */
+static CGRect diActivityVisibleRect(UIView *artwork) {
+    if (!artwork) return CGRectZero;
+    CGRect rect = artwork.bounds;
+    UIView *v = artwork.superview;
+    int guard = 0;
+    while (v && guard++ < 8) {
+        BOOL clip = v.clipsToBounds || v.layer.masksToBounds
+                    || v.layer.cornerRadius > 0.5 || v.maskView != nil;
+        if (clip) {
+            CGRect r = [artwork convertRect:v.bounds fromView:v];
+            CGRect i = CGRectIntersection(rect, r);
+            if (!CGRectIsNull(i) && i.size.width > 4 && i.size.height > 4) rect = i;
+        }
+        v = v.superview;
+    }
+    if (CGRectIsNull(rect) || rect.size.width < 6 || rect.size.height < 6) return artwork.bounds;
+    return rect;
+}
+
 static void diActivityTeardown(UIView *artwork, DIActivityMaskState *state) {
     if (!state) return;
     [state.glass.layer removeAllAnimations];
@@ -13213,8 +13238,19 @@ static void diActivityApply(UIView *artwork) {
         diMruFileLog([NSString stringWithFormat:@"glass 创建 bounds=%@ 系统层=%@",
             NSStringFromCGRect(artwork.bounds), state.systemLayer ? @"已找到" : @"无"]);
     }
-    CGRect box = artwork.bounds;
-    if (!CGRectEqualToRect(state.glass.frame, box)) state.glass.frame = box;
+    CGRect box = diActivityVisibleRect(artwork);
+    if (box.size.width < 6 || box.size.height < 6) box = artwork.bounds;
+    if (!CGRectEqualToRect(state.glass.frame, box)) {
+        state.glass.frame = box;
+        state.glass.layer.cornerRadius = 0;
+        static CGFloat lastW, lastH; static NSString *lastCN;
+        NSString *cn = NSStringFromClass(artwork.superview.class);
+        if (fabs(lastW - box.size.width) > 0.5 || fabs(lastH - box.size.height) > 0.5 || ![lastCN isEqualToString:cn]) {
+            lastW = box.size.width; lastH = box.size.height; lastCN = cn;
+            diMruFileLog([NSString stringWithFormat:@"可见区域 bounds=%@ 玻璃=%@ 父=%@",
+                          NSStringFromCGRect(artwork.bounds), NSStringFromCGRect(box), cn]);
+        }
+    }
     if (!CGRectEqualToRect(state.glassImage.frame, state.glass.bounds)) state.glassImage.frame = state.glass.bounds;
     if (!CGRectEqualToRect(state.glassMask.frame, state.glassImage.bounds)) state.glassMask.frame = state.glassImage.bounds;
     if (art && state.glassImage.image != art) { state.glassImage.image = art; state.lastArt = art; }
