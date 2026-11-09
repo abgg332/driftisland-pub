@@ -62,7 +62,7 @@ static double expandTextY = DI_EXP_TEXT_BASE_Y;   // 上下偏移(pt, 下为正,
 static double expandTextScale = 100.0; // 文字大小(%, 100=原样)
 /* 2.8.86: 构建戳 —— 之前横幅打的是 SpringBoard 自己的 CFBundleShortVersionString(恒 1.0),
    日志里根本看不出装的是哪一版。所有诊断行都带这个戳, 下轮日志一眼定位。 */
-#define DI_BUILD_VER @"2.9.41"
+#define DI_BUILD_VER @"2.9.42"
 static BOOL gRecordingActive = NO; // 保留: 岛素材总闸条件
 static NSString *diElementId(UIView *host);
 static BOOL diMiniMusicActive(UIView *host); // 2.6.3: 前置(遮罩层使用)
@@ -3929,9 +3929,57 @@ static BOOL diApplyMaskToCover(UIView *cover, UIImage *shape) {
         BOOL playingX = mrQueryOK ? musicPlaying : AVAudioSession.sharedInstance.isOtherAudioPlaying;
         if (playingX) self.lastPlayT = nowX;
         BOOL lockMask = self.glassOn && (nowX - self.lastPlayT < 30.0);
+        /* ===== 2.9.42: 17 上取消"锁死玻璃" =====
+           401 反馈: 展开时那块多出来的蒙版"偶尔还会出现", 要求彻底删掉。
+           锁死(2.8.39)的本意是切歌/展开过渡时别闪一下方形, 但它让玻璃在宿主
+           已经变成展开卡片后还要多停 0.3~1 秒 —— 那 0.3 秒就是用户看到的那块。
+           17 上一律即时让位: 一旦判定不是小岛/正在形变, 立刻还原 + 收玻璃。
+           16 保持原样(用户确认 16 正常, 不动)。 */
+        if (diIsIOS17Up()) lockMask = NO;
 
         CALayer *pl = host.layer.presentationLayer;
         CGSize bs = pl ? pl.bounds.size : host.bounds.size;
+        /* ===== 2.9.42: 17 岛上"正在做形变动画"时全程让位 =====
+           401 录屏实锤: 收起时岛会先被放大成一大块黑圆角矩形(里面专辑还是小尺寸
+           快照), 停一下才缩回原位 —— 系统在形变期间拿"带着我们玻璃/被我们藏掉
+           专辑层的岛"做了快照, 所以空了一块。
+           判据: 模型层与呈现层尺寸有 1pt 以上差值 = CA 动画正在跑。
+           这段时间我们什么都不做(还原被藏的专辑层 + 收玻璃), 让系统拿原生内容做
+           快照; 动画结束、尺寸稳定后(2 帧)再按小岛流程画回来。 */
+        if (diIsIOS17Up()) {
+            CGSize model = host.bounds.size;
+            if (fabs(model.width - bs.width) > 1.0 || fabs(model.height - bs.height) > 1.0) {
+                if (self.glassOn || _targets.count || !self.hidden || self.hiddenViews.count) {
+                    [self diTeardown];
+                    static CFAbsoluteTime sAniT;
+                    if (CFAbsoluteTimeGetCurrent() - sAniT > 2.0) {
+                        sAniT = CFAbsoluteTimeGetCurrent();
+                        DLog(@"遮罩[17]: 岛在形变中(模型%.0fx%.0f 呈现%.0fx%.0f) → 全程让位",
+                             model.width, model.height, bs.width, bs.height);
+                    }
+                }
+                self.stableFrm = 0;
+                return;
+            }
+        }
+        /* ===== 2.9.42: 17 展开态宿主 = 198x55, 小岛 = 166x37 =====
+           401 反馈: 展开时那块多出来的蒙版"偶尔还会出现"。17 上展开后宿主 bounds
+           停在小岛样的 198x55(展开内容在内部 scene 里), 2.9.41 只靠 MRU 的
+           state.plist 判形态, 而 MRU 那边写盘有延迟/被 66pt 判据干扰 —— 于是展开
+           的前几百毫秒这边照样画了一块玻璃。
+           这里补一条**本地**判据: 17 上宿主高 >=46 且宽 >=180 就是展开宿主
+           (实测小岛恒为 166x37~189x37, 展开恒为 198x55), 立即整棵退场。 */
+        if (diIsIOS17Up() && bs.height >= 46.0 && bs.width >= 180.0) {
+            if (_glassOn || _targets.count || !self.hidden) {
+                [self diTeardown];
+                static CFAbsoluteTime sExp2T;
+                if (CFAbsoluteTimeGetCurrent() - sExp2T > 3.0) {
+                    sExp2T = CFAbsoluteTimeGetCurrent();
+                    DLog(@"遮罩[17]: 宿主 %.0fx%.0f 判为展开(>=180x46) → 整棵退场", bs.width, bs.height);
+                }
+            }
+            return;
+        }
         /* 展开大专辑在跨进程内容中；当前探针只有小门户坐标。
            即使小岛的玻璃被播放锁定，也不能在展开宿主上重显 25pt 的副本。 */
         if (bs.width >= 280.0 && bs.height >= 120.0) {
@@ -3989,9 +4037,25 @@ static BOOL diApplyMaskToCover(UIView *cover, UIImage *shape) {
            "展开岛偶尔还会显示那个蒙版"), 变大即立即收玻璃, 不等稳定。 */
         BOOL growing = (bs.width - self.lastBW > 2.0) || (bs.height - self.lastBH > 1.5);
         BOOL sizeChanged = (fabs(bs.width - self.lastBW) > 1.2 || fabs(bs.height - self.lastBH) > 1.2);
+        /* 2.9.42: 17 上"明显缩小"= 收起形变起手, 立即让位(见下方用法) */
+        BOOL shrink17 = diIsIOS17Up()
+            && (self.lastBW - bs.width > 8.0 || self.lastBH - bs.height > 8.0);
         self.lastBW = bs.width; self.lastBH = bs.height;
         if (sizeChanged) self.stableFrm = 0;
         else if (self.stableFrm < 2) self.stableFrm++;
+        if (shrink17) {
+            /* 401 反馈: 收起时会先看到一大块再回原位。收起起手就把玻璃和被藏的
+               系统专辑层全部还原, 让系统按它自己的内容做形变。 */
+            if (self.glassOn || !self.hidden || self.hiddenViews.count) {
+                [self diTeardown];
+                static CFAbsoluteTime sShT;
+                if (CFAbsoluteTimeGetCurrent() - sShT > 2.0) {
+                    sShT = CFAbsoluteTimeGetCurrent();
+                    DLog(@"遮罩[17]: 岛在收起(%.0fx%.0f) → 立即让位", bs.width, bs.height);
+                }
+            }
+            return;
+        }
         if (growing && (self.glassOn || !self.hidden)) {
             /* 2.8.39: 锁死时展开起手也不拆 —— 玻璃保持在原位(展开动画结束后
                由展开态挂载路径重定位到展开方块层), 用户看到遮罩从头到尾不断。 */
@@ -12323,7 +12387,36 @@ static BOOL diHitBottomMiddle(CGPoint p, CGSize size) {
     return CGRectContainsPoint(CGRectInset(hit, 0, -10.0), p);
 }
 
+/* ===== 2.9.42: 17 上直接锁死"横条本体那一块" =====
+   401 反馈: 16 上锁死正常了, 17 上还是到处误触。原因是 17 的触摸坐标空间与 16
+   不同(横屏时有的窗口已经转过, 有的没转), 2.9.39 那两套"按屏幕比例猜"的矩形在 17
+   上会大面积命中(底边 34% 宽那套在转过的坐标系里能框住左下/右下整片)。
+   这一版在 17 上改成**不猜**: 拿横条(pill)自己的真实 frame 换算到当前坐标系,
+   只有落在横条本体 + 少量容差里才唤醒, 其他一律不触发。找不到 pill 才退回老判据。 */
+static BOOL diHitBarPillRect(CGPoint p, UIView *coordView, BOOL *sawPill) {
+    if (sawPill) *sawPill = NO;
+    if (!gBarPills) return NO;
+    BOOL anyPill = NO;
+    for (UIView *pill in [gBarPills allObjects]) {
+        if (!pill.window) continue;
+        CGRect r = [pill convertRect:pill.bounds toView:coordView];
+        if (r.size.width < 24.0 || r.size.height < 1.5) continue;
+        if (r.size.width > 520.0) continue;          /* 异常全宽层, 不参与 */
+        anyPill = YES;
+        CGRect hit = CGRectInset(r, -10.0, -18.0);
+        if (CGRectContainsPoint(hit, p)) { if (sawPill) *sawPill = YES; return YES; }
+    }
+    if (sawPill) *sawPill = anyPill;
+    return NO;
+}
+
 static BOOL diBarHitTest(CGPoint p, UIView *coordView) {
+    /* 0. 2.9.42: 17 上只认横条本体 */
+    if (diIsIOS17Up()) {
+        BOOL saw = NO;
+        if (diHitBarPillRect(p, coordView, &saw)) return YES;
+        if (saw) return NO;      /* 有 pill 却没命中 = 明确不在横条上 → 锁死 */
+    }
     /* A. 界面坐标: 底边中间一段 */
     if (coordView) { if (diHitBottomMiddle(p, coordView.bounds.size)) return YES; }
     /* A2. 拿不到宿主窗口时, 按横屏矩形也判一次(有无旋转都能兜住) */
