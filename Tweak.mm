@@ -62,7 +62,7 @@ static double expandTextY = DI_EXP_TEXT_BASE_Y;   // 上下偏移(pt, 下为正,
 static double expandTextScale = 100.0; // 文字大小(%, 100=原样)
 /* 2.8.86: 构建戳 —— 之前横幅打的是 SpringBoard 自己的 CFBundleShortVersionString(恒 1.0),
    日志里根本看不出装的是哪一版。所有诊断行都带这个戳, 下轮日志一眼定位。 */
-#define DI_BUILD_VER @"2.9.30"
+#define DI_BUILD_VER @"2.9.31"
 static BOOL gRecordingActive = NO; // 保留: 岛素材总闸条件
 static NSString *diElementId(UIView *host);
 static BOOL diMiniMusicActive(UIView *host); // 2.6.3: 前置(遮罩层使用)
@@ -5414,62 +5414,74 @@ static void applyNotifyStyle(UIView *host) {
     }
 }
 
-/* ===== 2.9.30: 模拟系统深色/浅色(仅排除状态栏) =====
-   2.9.28 全局模拟是用户想要的效果, 唯一副作用是状态栏: 系统底色仍浅色,
-   状态栏却按假深色转白字 → 看不清。现在全局 trait 照旧模拟(2.9.28),
-   额外 hook 状态栏样式: 读它时暂时摘掉模拟、取真实系统值 —— 状态栏永远
-   跟随真实外观, 其余界面全部深/浅。 */
-static NSInteger (*o_uisCurStyle)(id, SEL);
-static NSInteger h_uisCurStyle(id self, SEL _cmd) {
-    if (gThemeOn) return gThemeDark ? 2 : 1;   /* UIUserInterfaceStyle Dark/Light */
-    return o_uisCurStyle(self, _cmd);
+/* ===== 2.9.31: 只给「锁屏 / 桌面 / 控制中心」三个容器做深/浅色 =====
+   2.9.28/30 改全局外观取值, 连锁屏时钟/小组件都变白字, 状态栏又很难单点豁免。
+   现在改成给三个容器视图设 overrideUserInterfaceStyle:
+     · 锁屏      CSCoverSheetView
+     · 桌面      SBRootFolderView / SBIconContentView / SBDockView
+     · 控制中心  CCUIContentModuleContainerView
+   由系统在这些子树内原生渲染深/浅色材质与文字; 状态栏、跨进程小组件
+   (chronod/WidgetRenderer 渲染) 不在这些子树里, 一点都不会被改到。 */
+static NSArray<NSString *> *diThemeScopeClasses(void) {
+    static NSArray *a;
+    if (!a) a = @[@"CSCoverSheetView", @"SBRootFolderView", @"SBIconContentView",
+                  @"SBDockView", @"CCUIContentModuleContainerView",
+                  @"CCUIContentModuleContainerViewController"];
+    return a;
 }
 
-static NSInteger (*o_tcStyle)(id, SEL);
-static NSInteger h_tcStyle(id self, SEL _cmd) {
-    if (gThemeOn) return gThemeDark ? 2 : 1;
-    return o_tcStyle(self, _cmd);
+static void diThemeApplyScoped(UIView *v) {
+    if (!v) return;
+    NSString *cn = NSStringFromClass(v.class);
+    BOOL hit = NO;
+    for (NSString *k in diThemeScopeClasses()) {
+        if ([cn isEqualToString:k]) { hit = YES; break; }
+    }
+    if (!hit) return;
+    UIUserInterfaceStyle want = gThemeDark ? UIUserInterfaceStyleDark : UIUserInterfaceStyleLight;
+    if (!gThemeOn) want = UIUserInterfaceStyleUnspecified;
+    if (v.overrideUserInterfaceStyle == want) return;
+    v.overrideUserInterfaceStyle = want;
+    static int tlog;
+    if (gThemeOn && tlog < 12) { tlog++;
+        DLog(@"[分区外观] %@ → %@ (%.0fx%.0f)", cn, gThemeDark ? @"深色" : @"浅色",
+             v.bounds.size.width, v.bounds.size.height);
+    }
 }
 
-static NSInteger (*o_sbStyle)(id, SEL);
-static NSInteger h_sbStyle(id self, SEL _cmd) {
-    if (!gThemeOn) return o_sbStyle(self, _cmd);
-    BOOL saved = gThemeOn; gThemeOn = NO;      /* 暂时摘掉模拟取真实值 */
-    NSInteger real = o_sbStyle(self, _cmd);
-    gThemeOn = saved;
-    return real;                               /* 状态栏: 永远跟随真实系统外观 */
+/* 每个被 hook 的类各存一份原实现(共用一个全局会互相覆盖 → 递归崩溃) */
+struct DIThemeHook { Class cls; IMP orig; };
+static std::vector<DIThemeHook> gThemeHooks;
+
+static IMP diThemeOrigFor(Class c) {
+    for (Class k = c; k; k = class_getSuperclass(k))
+        for (size_t i = 0; i < gThemeHooks.size(); i++)
+            if (gThemeHooks[i].cls == k) return gThemeHooks[i].orig;
+    return NULL;
 }
 
+static void h_themeScopeLayout(UIView *self, SEL _cmd) {
+    IMP o = diThemeOrigFor(object_getClass(self));
+    if (o) ((void (*)(id, SEL))o)(self, _cmd);
+    @try { diThemeApplyScoped(self); } @catch (__unused NSException *e) {}
+}
+
+/* 可重复调用: 只补装还没装过的类(控制中心等私有类可能晚加载) */
 static void diInstallThemeHooks(void) {
-    static dispatch_once_t once;
-    dispatch_once(&once, ^{
-        Class uis = NSClassFromString(@"UISCurrentUserInterfaceStyleValue");
-        if (uis) {
-            Method m = class_getClassMethod(uis, @selector(userInterfaceStyle));
-            if (m) {
-                IMP old = NULL;
-                MSHookMessageEx(object_getClass(uis), @selector(userInterfaceStyle), (IMP)h_uisCurStyle, &old);
-                o_uisCurStyle = (NSInteger (*)(id, SEL))old;
-                DLog(@"[模拟外观] 已挂 UISCurrentUserInterfaceStyleValue");
-            }
-        }
-        Method tm = class_getInstanceMethod([UITraitCollection class], @selector(userInterfaceStyle));
-        if (tm) {
-            IMP old = NULL;
-            MSHookMessageEx([UITraitCollection class], @selector(userInterfaceStyle), (IMP)h_tcStyle, &old);
-            o_tcStyle = (NSInteger (*)(id, SEL))old;
-            DLog(@"[模拟外观] 已挂 UITraitCollection");
-        }
-        Method sm = class_getInstanceMethod([UIStatusBarManager class], @selector(statusBarStyle));
-        if (sm) {
-            IMP old = NULL;
-            MSHookMessageEx([UIStatusBarManager class], @selector(statusBarStyle), (IMP)h_sbStyle, &old);
-            o_sbStyle = (NSInteger (*)(id, SEL))old;
-            DLog(@"[模拟外观] 状态栏豁免已挂 UIStatusBarManager");
-        } else {
-            DLog(@"[模拟外观] 未找到 UIStatusBarManager.statusBarStyle");
-        }
-    });
+    int added = 0;
+    for (NSString *name in diThemeScopeClasses()) {
+        Class c = NSClassFromString(name);
+        if (!c || ![c isSubclassOfClass:[UIView class]]) continue;
+        BOOL done = NO;
+        for (size_t i = 0; i < gThemeHooks.size(); i++) if (gThemeHooks[i].cls == c) { done = YES; break; }
+        if (done) continue;
+        Method m = class_getInstanceMethod(c, @selector(layoutSubviews));
+        if (!m) continue;
+        IMP old = NULL;
+        MSHookMessageEx(c, @selector(layoutSubviews), (IMP)h_themeScopeLayout, &old);
+        if (old) { gThemeHooks.push_back({c, old}); added++; }
+    }
+    if (added) DLog(@"[分区外观] 新挂 %d 个容器, 共 %lu 个", added, (unsigned long)gThemeHooks.size());
 }
 
 static BOOL viewHasToken(UIView *v, NSString *token) {
@@ -8771,6 +8783,7 @@ static void diRestyleWalk(UIView *root) {
 static void diRestyleAllPlatters(UIView *root) {
     if (!root) return;
     NSString *cn = NSStringFromClass(root.class);
+    diThemeApplyScoped(root);   /* 2.9.31: 开关切换后立刻刷新锁屏/桌面/控制中心 */
     /* 2.8.10: 播放器没有 PlatterView, 把媒体控制底板也纳入, 否则路径 B 也漏它 */
     if (([cn containsString:@"PlatterView"] || [cn isEqualToString:@"PLPlatterView"]
          || [cn containsString:@"MediaControlsBackground"] || [cn containsString:@"ControlsBackgroundView"])
@@ -8910,7 +8923,7 @@ static BOOL install(NSString *name) {
 
 static void installKnownHosts(void) {
     diGainInstallHook();   /* 2.8.31: 隐藏药丸 hook(私有类晚加载时靠分阶段重试补装) */
-    diInstallThemeHooks(); /* 2.9.30: 模拟系统深/浅色, 状态栏豁免 */
+    diInstallThemeHooks(); /* 2.9.31: 只看锁屏/桌面/控制中心三个容器 */
     install(@"SAUIElementView");
     installBreathKick();   /* 2.9.19: 通知到达 → 重新起呼吸 */
     /* 2.2.10: 锁屏通知宽度 —— 锁屏通知卡(short look)与通知列表容器都按 layoutSubviews 调宽度 */
