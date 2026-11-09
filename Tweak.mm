@@ -62,7 +62,7 @@ static double expandTextY = DI_EXP_TEXT_BASE_Y;   // 上下偏移(pt, 下为正,
 static double expandTextScale = 100.0; // 文字大小(%, 100=原样)
 /* 2.8.86: 构建戳 —— 之前横幅打的是 SpringBoard 自己的 CFBundleShortVersionString(恒 1.0),
    日志里根本看不出装的是哪一版。所有诊断行都带这个戳, 下轮日志一眼定位。 */
-#define DI_BUILD_VER @"2.9.35"
+#define DI_BUILD_VER @"2.9.36"
 static BOOL gRecordingActive = NO; // 保留: 岛素材总闸条件
 static NSString *diElementId(UIView *host);
 static BOOL diMiniMusicActive(UIView *host); // 2.6.3: 前置(遮罩层使用)
@@ -13042,28 +13042,47 @@ static UIImage *diActivityArtworkImage(UIView *view) {
     }
     return nil;
 }
-/* ===== 2.9.34: iOS 17 专辑图变形修复 =====
-   17 上 MRUActivityArtworkView 的 bounds 是 66x66, 但真正露出来的区域被祖先容器
-   裁得比它小(小岛收缩态只有 ~26pt 的圆)。我们还按 bounds 铺 66x66 的玻璃,
-   玻璃被外层圆一裁, 就只剩中间一块 → 看着"变形/偏移/被撕开"。
-   这里把祖先链上所有会裁剪的容器(clipsToBounds / masksToBounds / 圆角 / maskView)
-   换算到专辑视图坐标里求交, 得到"真正可见的那块", 玻璃就按它铺。 */
-static CGRect diActivityVisibleRect(UIView *artwork) {
+/* ===== 2.9.36: iOS 17 专辑图变形修复(第三版) =====
+   377/378 的日志实锤: `hit MRUActivityArtworkView {{0,0},{66,66}}` + `glass 创建
+   bounds=66x66` —— 17 上无论收缩还是展开, 这个头像视图的 bounds 永远是 66x66,
+   真正把它裁成小圆的是上面某一层容器, 而那一层既没有 clipsToBounds 也没有圆角,
+   2.9.34/2.9.35 按"裁剪标志"去找, 一个都没找到(所以 可见区域 那行日志一次没打过)。
+   这一版不再看标志, 直接把祖先链每一层的 bounds 换算进头像坐标系求交:
+   收缩态自然收敛成那颗小圆所在的窗口(约 26x34), 展开态交出来还是 66x66, 不受影响。
+   玻璃按这块窗口铺, 形状图按比例居中缩放(不再拉伸填满), 小圆就不会被压成椭圆。 */
+static CGRect diAspectFitRect(CGSize src, CGRect box) {
+    if (src.width <= 0.5 || src.height <= 0.5 || box.size.width <= 0.5 || box.size.height <= 0.5)
+        return box;
+    CGFloat k = MIN(box.size.width / src.width, box.size.height / src.height);
+    CGFloat w = src.width * k, h = src.height * k;
+    return CGRectMake(box.origin.x + (box.size.width - w) * 0.5,
+                      box.origin.y + (box.size.height - h) * 0.5, w, h);
+}
+
+static CGRect diActivityVisibleRect(UIView *artwork, NSMutableString *diag) {
     if (!artwork) return CGRectZero;
     CGRect rect = artwork.bounds;
     UIView *v = artwork.superview;
     int guard = 0;
-    while (v && guard++ < 8) {
-        BOOL clip = v.clipsToBounds || v.layer.masksToBounds
-                    || v.layer.cornerRadius > 0.5 || v.maskView != nil;
-        if (clip) {
-            CGRect r = [artwork convertRect:v.bounds fromView:v];
-            CGRect i = CGRectIntersection(rect, r);
-            if (!CGRectIsNull(i) && i.size.width > 4 && i.size.height > 4) rect = i;
+    while (v && guard++ < 12) {
+        if (v == artwork.window) break;
+        CGRect r = [artwork convertRect:v.bounds fromView:v];
+        CGRect i = CGRectIntersection(rect, r);
+        BOOL ok = !CGRectIsNull(i) && !CGRectIsEmpty(i)
+                  && i.size.width > 2 && i.size.height > 2;
+        BOOL shrunk = ok && (rect.size.width - i.size.width > 1.0 || rect.size.height - i.size.height > 1.0);
+        if (diag) {
+            [diag appendFormat:@"%@[%.0fx%.0f%@%@]", NSStringFromClass(v.class),
+             v.bounds.size.width, v.bounds.size.height,
+             (v.clipsToBounds || v.layer.masksToBounds) ? @"C" : @"",
+             v.layer.mask ? @"M" : @""];
+            if (shrunk) [diag appendFormat:@"→%.0fx%.0f", i.size.width, i.size.height];
+            [diag appendString:@" "];
         }
+        if (shrunk) rect = i;
         v = v.superview;
     }
-    if (CGRectIsNull(rect) || rect.size.width < 6 || rect.size.height < 6) return artwork.bounds;
+    if (CGRectIsNull(rect) || rect.size.width < 4 || rect.size.height < 4) return artwork.bounds;
     return rect;
 }
 
@@ -13154,9 +13173,6 @@ static void diActivityApply(UIView *artwork) {
     if (!NSThread.isMainThread || ![artwork isKindOfClass:UIView.class]) return;
     DIActivityMaskState *state = objc_getAssociatedObject(artwork, &kDIActivityMaskState);
     BOOL sized = artwork.bounds.size.width > 20 && artwork.bounds.size.height > 20;
-    /* 2.8.86: 每次布局都把"我是不是展开态"告诉 SpringBoard */
-    diMruWriteExpandState(sized && artwork.bounds.size.width >= 38.0 && artwork.bounds.size.height >= 38.0,
-                          artwork.bounds.size);
     /* 2.8.78: 判定过程必须可观测 —— 否则"没遮上"到底是没注入、没素材、还是
        上下文校验挡掉, 全靠猜(325 日志已经吃过这个亏)。
        2.8.79: 上下文校验保留退让档(类不存在时放行并把真实祖先打出来)。 */
@@ -13179,32 +13195,32 @@ static void diActivityApply(UIView *artwork) {
         diMruPostPayload(@"noart", NSStringFromClass(artwork.class));
         want = NO;
     }
-    if (!want) { diActivityTeardown(artwork, state); return; }
-
-    /* 2.9.34: 先算"真正可见的那块" —— 17 上头像视图还是 66pt, 收缩态却只露出
-       小岛左边那颗小圆, 直接按 66pt 铺玻璃就会被裁成一块, 看着就是"专辑图变形"。 */
-    CGRect box = diActivityVisibleRect(artwork);
-    if (box.size.width < 6 || box.size.height < 6) box = artwork.bounds;
-    BOOL narrow = (MIN(box.size.width, box.size.height) < 36);
-    if (!narrow) {
-        for (UIView *p = artwork.superview; p; p = p.superview) {
-            BOOL clip = p.clipsToBounds || p.layer.masksToBounds
-                        || p.layer.cornerRadius > 0.5 || p.maskView != nil;
-            if (clip) { if (MIN(p.bounds.size.width, p.bounds.size.height) < 42) narrow = YES; break; }
-        }
-    }
-    if (narrow) {
-        /* 收缩态: 系统自己那颗小头像就是对的, 我们把玻璃撤掉、把系统那张还回去 */
-        if (state) diActivityTeardown(artwork, state);
-        diMruWriteExpandState(NO, box.size);   /* 收缩态别被 66pt 的 bounds 误判成展开 */
-        static BOOL loggedNarrow;
-        if (!loggedNarrow) {
-            loggedNarrow = YES;
-            diMruFileLog([NSString stringWithFormat:@"收缩态让位 bounds=%@ 可见=%@ 父=%@",
-                          NSStringFromCGRect(artwork.bounds), NSStringFromCGRect(box),
-                          NSStringFromClass(artwork.superview.class)]);
-        }
+    if (!want) {
+        diActivityTeardown(artwork, state);
+        /* 2.9.36: 遮罩没启用时仍按老判据回传形态(17 上这个判据只能是"展开") */
+        diMruWriteExpandState(sized && artwork.bounds.size.width >= 38.0 && artwork.bounds.size.height >= 38.0,
+                              artwork.bounds.size);
         return;
+    }
+
+    /* 2.9.36: 算"窗口" —— 祖先链 bounds 求交。收缩态 = 小岛左边那颗小圆的口子,
+       展开态 = 头像本身 66x66。玻璃只铺这块窗口, 不会再被外层裁成一牙。 */
+    NSMutableString *chain = [NSMutableString string];
+    CGRect box = diActivityVisibleRect(artwork, chain);
+    if (box.size.width < 4 || box.size.height < 4) box = artwork.bounds;
+    BOOL collapsed = (MIN(box.size.width, box.size.height) < 42);
+    diMruWriteExpandState(!collapsed, box.size);
+    if (collapsed && MIN(box.size.width, box.size.height) < 12) {
+        /* 口子小到没法画(过渡帧) —— 这一帧撤掉, 免得留一条碎边 */
+        if (state) diActivityTeardown(artwork, state);
+        return;
+    }
+    static NSString *lastChain; static CGRect lastBox;
+    if (!CGRectEqualToRect(lastBox, box) || ![lastChain isEqualToString:chain]) {
+        lastBox = box; lastChain = [chain copy];
+        diMruFileLog([NSString stringWithFormat:@"窗口 bounds=%@ 可见=%@ 收缩=%d | %@",
+                      NSStringFromCGRect(artwork.bounds), NSStringFromCGRect(box),
+                      (int)collapsed, chain.length ? chain : @"(无收缩祖先)"]);
     }
 
     if (!state) {
@@ -13271,12 +13287,17 @@ static void diActivityApply(UIView *artwork) {
         NSString *cn = NSStringFromClass(artwork.superview.class);
         if (fabs(lastW - box.size.width) > 0.5 || fabs(lastH - box.size.height) > 0.5 || ![lastCN isEqualToString:cn]) {
             lastW = box.size.width; lastH = box.size.height; lastCN = cn;
-            diMruFileLog([NSString stringWithFormat:@"可见区域 bounds=%@ 玻璃=%@ 父=%@",
+            diMruFileLog([NSString stringWithFormat:@"玻璃铺到 bounds=%@ 玻璃=%@ 父=%@",
                           NSStringFromCGRect(artwork.bounds), NSStringFromCGRect(box), cn]);
         }
     }
     if (!CGRectEqualToRect(state.glassImage.frame, state.glass.bounds)) state.glassImage.frame = state.glass.bounds;
-    if (!CGRectEqualToRect(state.glassMask.frame, state.glassImage.bounds)) state.glassMask.frame = state.glassImage.bounds;
+    /* 2.9.36: 收缩态窗口是竖长条(约 26x34), 形状按比例居中缩放, 不把圆压成椭圆;
+       展开态窗口就是正方形, 维持原来的铺满行为, 不动 16 上已经调好的观感。 */
+    CGRect mf = state.glassImage.bounds;
+    if (collapsed) mf = diAspectFitRect(state.glassMask.image ? state.glassMask.image.size : CGSizeZero,
+                                        state.glassImage.bounds);
+    if (!CGRectEqualToRect(state.glassMask.frame, mf)) state.glassMask.frame = mf;
     if (art && state.glassImage.image != art) { state.glassImage.image = art; state.lastArt = art; }
     if (state.glassMask.image != gDIActivityShape) state.glassMask.image = gDIActivityShape;
     if (artwork.subviews.lastObject != state.glass) [artwork bringSubviewToFront:state.glass];
