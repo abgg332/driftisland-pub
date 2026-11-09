@@ -22,7 +22,7 @@
 
 static NSString *const kDomain = @"com.abgg332.driftisland";
 /* 2.6.25: 设置页底部显示的版本号 */
-static NSString *const DI_VERSION_STR = @"2.9.20";
+static NSString *const DI_VERSION_STR = @"2.9.21";
 /* 2.6.10: 专辑光晕遮罩 —— 与 Tweak 侧 DIAlbumMask.h 保持一致 */
 static NSString *const kDIAlbumMaskKey = @"diAlbumMaskAsset";
 static NSString *const kDIMaskRoot = @"/var/mobile/灵动岛/遮罩素材";
@@ -5351,8 +5351,28 @@ static void diwKillByComm(const char *comm) {
         _diwIcon.layer.cornerCurve = kCACornerCurveContinuous;
         _diwIcon.clipsToBounds = YES;
         [self.contentView addSubview:_diwIcon];
+        /* 2.9.21: 这一行不靠 tableView 的选中回调 —— PSListController 对
+           非 PSButtonCell 类的自定义 cell 不会转发 buttonAction, 点上去没反应。
+           直接给自己挂手势, 点哪儿都算, 跟表格选中逻辑完全解耦。 */
+        UITapGestureRecognizer *tap =
+            [[UITapGestureRecognizer alloc] initWithTarget:self action:@selector(diwTapped)];
+        tap.cancelsTouchesInView = NO;
+        [self.contentView addGestureRecognizer:tap];
     }
     return self;
+}
+
+- (void)diwTapped {
+    PSSpecifier *sp = self.specifier;
+    if (!sp) return;
+    /* 先给一下按压反馈; 勾选后页面会 rebuild(cell 可能被回收), 所以后面一律用 weak */
+    self.highlighted = YES;
+    __weak DIWAppCell *weakSelf = self;
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.12 * NSEC_PER_SEC)),
+                   dispatch_get_main_queue(), ^{ weakSelf.highlighted = NO; });
+    SEL act = sp.buttonAction;
+    id tgt = sp.target;
+    if (act && tgt) ((void (*)(id, SEL, id))objc_msgSend)(tgt, act, sp);
 }
 
 - (void)refreshCellContentsWithSpecifier:(PSSpecifier *)specifier {
@@ -5373,16 +5393,7 @@ static void diwKillByComm(const char *comm) {
     [self setNeedsLayout];
 }
 
-/* 整行点击 = 勾选/取消(PSTableCell 不带 PSButtonCell 的按钮行为, 自己转发) */
-- (void)setSelected:(BOOL)selected animated:(BOOL)animated {
-    [super setSelected:selected animated:animated];
-    if (!selected) return;
-    PSSpecifier *sp = self.specifier;
-    if (sp.buttonAction && sp.target) {
-        ((void (*)(id, SEL, id))objc_msgSend)(sp.target, sp.buttonAction, sp);
-    }
-    [self setSelected:NO animated:YES];
-}
+
 
 - (void)layoutSubviews {
     [super layoutSubviews];
@@ -5473,15 +5484,23 @@ static void diwKillByComm(const char *comm) {
 - (void)toggleApp:(PSSpecifier *)sp {
     NSString *bid = [sp propertyForKey:@"diwBid"];
     if (!bid.length) return;
+    BOOL was = [[sp propertyForKey:@"diwSelected"] boolValue];
     NSMutableArray *cur = [diwReadApps() mutableCopy];
-    if ([cur containsObject:bid]) [cur removeObject:bid]; else [cur addObject:bid];
+    if (was) [cur removeObject:bid]; else if (![cur containsObject:bid]) [cur addObject:bid];
     diwWriteApps(cur);
-    _specifiers = [[self buildSpecifiers] mutableCopy];
-    [self reloadSpecifiers];
+    /* 2.9.21: 只刷新这一行(整页 rebuild 会让滚动位置跳, 长列表里很难受) */
+    [sp setProperty:@(!was) forKey:@"diwSelected"];
+    [self reloadSpecifier:sp animated:NO];
 }
 @end
 
 @implementation DIWidgetHidePage
+/* 2.9.21: 从「启用应用」返回时把「已选 N 个」刷新一下 */
+- (void)viewWillAppear:(BOOL)animated {
+    [super viewWillAppear:animated];
+    [self reloadSpecifiers];
+}
+
 - (id)readAppCount:(PSSpecifier *)sp {
     return [NSString stringWithFormat:@"已选 %lu 个", (unsigned long)diwReadApps().count];
 }
