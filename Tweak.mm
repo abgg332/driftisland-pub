@@ -62,7 +62,7 @@ static double expandTextY = DI_EXP_TEXT_BASE_Y;   // 上下偏移(pt, 下为正,
 static double expandTextScale = 100.0; // 文字大小(%, 100=原样)
 /* 2.8.86: 构建戳 —— 之前横幅打的是 SpringBoard 自己的 CFBundleShortVersionString(恒 1.0),
    日志里根本看不出装的是哪一版。所有诊断行都带这个戳, 下轮日志一眼定位。 */
-#define DI_BUILD_VER @"2.9.18"
+#define DI_BUILD_VER @"2.9.19"
 static BOOL gRecordingActive = NO; // 保留: 岛素材总闸条件
 static NSString *diElementId(UIView *host);
 static BOOL diMiniMusicActive(UIView *host); // 2.6.3: 前置(遮罩层使用)
@@ -8250,6 +8250,29 @@ static NSString *diColorHex(UIColor *c) {
             (int)(r * 255 + 0.5), (int)(g * 255 + 0.5), (int)(b * 255 + 0.5)];
 }
 
+/* 2.9.19: 只补"丢了的"呼吸动画, 一个属性都不重写 —— 361 反馈"注销后不呼吸,
+   要进设置点一下颜色才动"。根因: 整块配置签名没变就早退, 而层上的
+   CAKeyframeAnimation 在系统重建卡片/锁屏重新出现时会丢, 丢了没人补,
+   layer 就永远停在第一色; 设置里点颜色 → 签名变了 → 走完整重绘才又动。
+   现在每次自愈 tick 走到早退分支时先调这里, 动画在就退, 不在就补上。 */
+static void diEnsureBreathAnim(UIView *platter, UIView *face) {
+    if (!platter || !platter.layer) return;
+    CALayer *FL = platter.layer;
+    CALayer *FLf = (face.layer ?: FL);
+    if (lkBdOn && lkBdW > 0 && lkBdColors.count >= 2 && ![FLf animationForKey:@"diBdCycle"]) {
+        CAKeyframeAnimation *a = diShadowCycle(lkBdColors, 1.6);
+        if (a) { a.keyPath = @"borderColor"; [FLf addAnimation:a forKey:@"diBdCycle"]; }
+    }
+    if (lkGlowOn && lkGlowR > 0 && lkGlowColors.count >= 2 && ![FL animationForKey:@"diBreathC"]) {
+        CAKeyframeAnimation *a = diShadowCycle(lkGlowColors, 1.6);
+        if (a) { [FL addAnimation:a forKey:@"diBreathC"]; }
+    }
+    if (lkShOn && lkShR > 0 && lkShColors.count >= 2 && ![FL animationForKey:@"diBreathC"]) {
+        CAKeyframeAnimation *a = diShadowCycle(lkShColors, 1.6);
+        if (a) { [FL addAnimation:a forKey:@"diBreathC"]; }
+    }
+}
+
 static void diStylePlatter(UIView *platter) {
     if (!platter) return;
     /* 2.5.3: 2.3.2 的媒体卡跳过已移除(恢复原版 2.3.0)。 */
@@ -8313,7 +8336,10 @@ static void diStylePlatter(UIView *platter) {
                          lkBdOn, lkShOn, lkGlowOn, lkBdW, lkShR, lkGlowR,
                          brect.origin.x, brect.origin.y, brect.size.width, brect.size.height, br, cs];
         NSString *prev = objc_getAssociatedObject(platter, &kStyleSig);
-        if ([sig isEqualToString:prev]) { [CATransaction commit]; return; }
+        if ([sig isEqualToString:prev]) {
+            diEnsureBreathAnim(platter, diBorderFace(platter));   /* 2.9.19: 动画丢了就补 */
+            [CATransaction commit]; return;
+        }
         objc_setAssociatedObject(platter, &kStyleSig, sig, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
     }
     static char kLastLog;
@@ -8530,6 +8556,50 @@ static void applyLockStyle(UIView *v) {
     diStylePlatter(platter);
 }
 
+/* ===== 2.9.19: 通知到达 → 立即重新起一次呼吸 =====
+   361 要求"有通知了不管什么时候都自动呼吸动态效果"。新卡片虽然会走 layoutHook
+   上样式, 但卡片是复用池里的, 层上残留的动画可能已停/已丢, 这时整块签名早退
+   不会重建。这里在卡片进窗口(didMoveToWindow)时先把两条呼吸动画摘掉再让
+   diStylePlatter 补回去 —— 等于强制从第一帧重新呼吸。 */
+struct DIBreathHook { Class cls; IMP original; };
+static std::vector<DIBreathHook> gBreathHooks;
+
+static void diBreathKick(UIView *v) {
+    if (!v || !v.window) return;
+    if (!(lkGlowOn || lkShOn || lkBdOn)) return;
+    if (!diInLockScreen(v)) return;
+    UIView *pl = diFindPlatter(v);
+    if (!pl || !pl.layer) return;
+    [pl.layer removeAnimationForKey:@"diBreathC"];
+    UIView *face = diBorderFace(pl);
+    [(face.layer ?: pl.layer) removeAnimationForKey:@"diBdCycle"];
+    diStylePlatter(pl);   /* 签名早退分支里会用 diEnsureBreathAnim 把动画补回来 */
+}
+
+static void diBreathHookIMP(UIView *self, SEL _cmd) {
+    for (Class c = object_getClass(self); c; c = class_getSuperclass(c)) {
+        BOOL found = NO;
+        for (const DIBreathHook &h : gBreathHooks) {
+            if (h.cls == c) { ((void(*)(id, SEL))h.original)(self, _cmd); found = YES; break; }
+        }
+        if (found) break;
+    }
+    diBreathKick(self);
+}
+
+static void installBreathKick(void) {
+    for (NSString *n in @[@"NCNotificationShortLookView", @"NCNotificationListCell"]) {
+        Class c = NSClassFromString(n);
+        if (!c) continue;
+        BOOL dup = NO;
+        for (const DIBreathHook &h : gBreathHooks) if (h.cls == c) dup = YES;
+        if (dup) continue;
+        IMP old = NULL;
+        MSHookMessageEx(c, @selector(didMoveToWindow), (IMP)diBreathHookIMP, &old);
+        if (old) { gBreathHooks.push_back({c, old}); DLog(@"呼吸: 已挂通知到达钩子 %@", n); }
+    }
+}
+
 /* 遍历窗口 */
 static void diForEachWindow(void (^blk)(UIWindow *w)) {
     for (UIScene *sc in UIApplication.sharedApplication.connectedScenes) {
@@ -8695,6 +8765,7 @@ static BOOL install(NSString *name) {
 static void installKnownHosts(void) {
     diGainInstallHook();   /* 2.8.31: 隐藏药丸 hook(私有类晚加载时靠分阶段重试补装) */
     install(@"SAUIElementView");
+    installBreathKick();   /* 2.9.19: 通知到达 → 重新起呼吸 */
     /* 2.2.10: 锁屏通知宽度 —— 锁屏通知卡(short look)与通知列表容器都按 layoutSubviews 调宽度 */
     install(@"NCNotificationShortLookView");
     install(@"NCNotificationListCell");

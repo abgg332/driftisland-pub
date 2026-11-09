@@ -9,6 +9,9 @@
 #import <PhotosUI/PhotosUI.h>
 #import <spawn.h>
 #include <dlfcn.h>
+#include <sys/sysctl.h>
+#include <signal.h>
+#include <string.h>
 
 /* 2.2.25: 字体颜色相关页面统一背景 —— 之前色块页/预览卡/调色页各用各的灰白,
    视觉上"分裂"。现在统一: 页面 = 分组灰底, 卡片 = 白底圆角, 输入框 = 浅灰。 */
@@ -18,7 +21,7 @@
 
 static NSString *const kDomain = @"com.abgg332.driftisland";
 /* 2.6.25: 设置页底部显示的版本号 */
-static NSString *const DI_VERSION_STR = @"2.9.16";
+static NSString *const DI_VERSION_STR = @"2.9.19";
 /* 2.6.10: 专辑光晕遮罩 —— 与 Tweak 侧 DIAlbumMask.h 保持一致 */
 static NSString *const kDIAlbumMaskKey = @"diAlbumMaskAsset";
 static NSString *const kDIMaskRoot = @"/var/mobile/灵动岛/遮罩素材";
@@ -754,6 +757,9 @@ static Class diStepSliderClass(void) {
 @interface DICCSettings : DIMiniBaseController @end
 /* 2.8.87: 展开定义 —— 遮罩素材下面的二级页(位置/大小/颜色) */
 @interface DIExpandDefinePage : DIMiniBaseController @end
+/* 2.9.19: 组件隐藏(移植 RemoveWidgetBackground 1.7) */
+@interface DIWidgetHidePage : DIMiniBaseController @end
+@interface DIWidgetAppsPage : DIMiniBaseController @end
 @interface DIFrameFoldersMask : DIFrameFolders @end /* 2.6.3: 遮罩素材选择(键 maskAnimFolder) */
 @interface DIFrameFoldersMini : DIFrameFolders @end  /* 左侧(mini)帧率素材选择(键 smallAnimFolder) */
 @interface DIFrameFoldersAudio : DIFrameFolders @end /* 右侧音频素材(键 miniAudioFolder) */
@@ -1432,6 +1438,8 @@ static void diWriteColors(NSArray<NSString *> *colors) {
         DI_ADD([self linkSpec:@"歌词位置" detail:[DIExpandDefinePage class]]);
         /* 2.8.41: 控制中心入口回归 */
         DI_ADD([self linkSpec:@"控制中心" detail:[DICCSettings class]]);
+        /* 2.9.19: 组件隐藏 —— 按用户要求在「控制中心」下面新增入口 */
+        DI_ADD([self linkSpec:@"组件隐藏" detail:[DIWidgetHidePage class]]);
 
         _smallRow = _expandRow = -1;
         {
@@ -5202,3 +5210,152 @@ static void diOpenHomeBarPickWindow(void) {
 @end
 
 
+
+/* ============================================================
+   2.9.19: 组件隐藏 —— 移植 RemoveWidgetBackground 1.7
+   设置项与原插件一一对应:
+     总开关 / MaterialView 开关 / 系统小组件开关 / 强制深色 /
+     最大元素宽高 / 启用应用(多选) / 注销生效
+   ============================================================ */
+#define DIW_DEFAULT_APPS (@[@"com.growing.topwidgetsplus", @"dk.simonbs.Scriptable", @"wiki.qaq.trapp.LaunchPad"])
+
+static NSArray<NSString *> *diwReadApps(void) {
+    CFPreferencesAppSynchronize((__bridge CFStringRef)kDomain);
+    id v = CFBridgingRelease(CFPreferencesCopyAppValue(CFSTR("widgetHideApps"),
+                                                       (__bridge CFStringRef)kDomain));
+    if ([v isKindOfClass:NSArray.class] && [(NSArray *)v count]) return v;
+    return DIW_DEFAULT_APPS;
+}
+
+static void diwWriteApps(NSArray *apps) {
+    CFPreferencesSetAppValue(CFSTR("widgetHideApps"), (__bridge CFPropertyListRef)apps,
+                             (__bridge CFStringRef)kDomain);
+    CFPreferencesAppSynchronize((__bridge CFStringRef)kDomain);
+}
+
+/* 列出"带小组件插件"的 App(原插件用 AltList 选 App, 这里用系统 LS 私有接口自取,
+   不额外依赖 AltList)。选中项写宿主 App 的 bundle id, 运行时用前缀匹配插件 id。 */
+static NSArray<NSDictionary *> *diwInstalledWidgetApps(void) {
+    NSMutableArray *out = [NSMutableArray array];
+    Class wsCls = NSClassFromString(@"LSApplicationWorkspace");
+    id ws = nil;
+    id (*msgSendId)(id, SEL) = (id (*)(id, SEL))objc_msgSend;
+    if ([wsCls respondsToSelector:NSSelectorFromString(@"defaultWorkspace")])
+        ws = msgSendId((id)wsCls, NSSelectorFromString(@"defaultWorkspace"));
+    NSArray *all = nil;
+    if ([ws respondsToSelector:NSSelectorFromString(@"allInstalledApplications")])
+        all = msgSendId(ws, NSSelectorFromString(@"allInstalledApplications"));
+    for (id app in all) {
+        NSString *bid = nil, *name = nil;
+        @try {
+            bid = [app valueForKey:@"bundleIdentifier"];
+            name = [app valueForKey:@"localizedName"];
+        } @catch (__unused NSException *e) {}
+        if (![bid isKindOfClass:NSString.class] || !bid.length) continue;
+        BOOL hasWidget = NO;
+        @try {
+            NSArray *plugins = [app valueForKey:@"plugInKitPlugins"];
+            for (id p in plugins) {
+                NSString *pid = [p valueForKey:@"pluginIdentifier"];
+                if (![pid isKindOfClass:NSString.class]) continue;
+                if ([pid.lowercaseString containsString:@"widget"]) { hasWidget = YES; break; }
+            }
+        } @catch (__unused NSException *e) {}
+        if (!hasWidget) continue;
+        [out addObject:@{@"bid": bid,
+                         @"name": ([name isKindOfClass:NSString.class] && name.length) ? name : bid}];
+    }
+    [out sortUsingComparator:^NSComparisonResult(NSDictionary *a, NSDictionary *b) {
+        return [a[@"name"] compare:b[@"name"] options:NSCaseInsensitiveSearch];
+    }];
+    return out;
+}
+
+/* 注销: 原插件在 Preferences 进程里直接给 SpringBoard/chronod 发 SIGTERM。
+   同为 mobile 用户, 权限够; 这里只按 p_comm 匹配(SpringBoard/chronod 都在 16 字节内)。 */
+static void diwKillByComm(const char *comm) {
+    int mib[4] = {CTL_KERN, KERN_PROC, KERN_PROC_ALL, 0};
+    size_t len = 0;
+    if (sysctl(mib, 4, NULL, &len, NULL, 0) < 0 || len == 0) return;
+    struct kinfo_proc *procs = malloc(len + sizeof(struct kinfo_proc));
+    if (!procs) return;
+    if (sysctl(mib, 4, procs, &len, NULL, 0) == 0) {
+        int n = (int)(len / sizeof(struct kinfo_proc));
+        for (int i = 0; i < n; i++) {
+            pid_t pid = procs[i].kp_proc.p_pid;
+            if (pid <= 1) continue;
+            if (strncmp(procs[i].kp_proc.p_comm, comm, MAXCOMLEN) == 0) kill(pid, SIGTERM);
+        }
+    }
+    free(procs);
+}
+
+@implementation DIWidgetAppsPage
+- (NSArray *)buildSpecifiers {
+    NSMutableArray *specs = [NSMutableArray array];
+    [specs addObject:[self groupSpec:@"启用应用"
+                              footer:@"只列出带小组件插件的 App。勾选后它在桌面/负一屏的小组件会隐藏背景; 系统小组件由上一页的开关控制。"]];
+    NSArray *apps = diwInstalledWidgetApps();
+    NSSet *sel = [NSSet setWithArray:diwReadApps()];
+    for (NSDictionary *a in apps) {
+        BOOL on = [sel containsObject:a[@"bid"]];
+        PSSpecifier *sp = [PSSpecifier preferenceSpecifierNamed:
+            [NSString stringWithFormat:@"%@  %@", on ? @"✓" : @"○", a[@"name"]]
+            target:self set:NULL get:NULL detail:nil cell:PSButtonCell edit:nil];
+        [sp setButtonAction:@selector(toggleApp:)];
+        [sp setProperty:a[@"bid"] forKey:@"diwBid"];
+        [specs addObject:sp];
+    }
+    if (!apps.count) {
+        [specs addObject:[self groupSpec:@"没有检测到带小组件的 App" footer:nil]];
+    }
+    return specs;
+}
+
+- (void)toggleApp:(PSSpecifier *)sp {
+    NSString *bid = [sp propertyForKey:@"diwBid"];
+    if (!bid.length) return;
+    NSMutableArray *cur = [diwReadApps() mutableCopy];
+    if ([cur containsObject:bid]) [cur removeObject:bid]; else [cur addObject:bid];
+    diwWriteApps(cur);
+    [self reloadSpecifiers];
+}
+@end
+
+@implementation DIWidgetHidePage
+- (id)readAppCount:(PSSpecifier *)sp {
+    return [NSString stringWithFormat:@"已选 %lu 个", (unsigned long)diwReadApps().count];
+}
+
+- (void)doWidgetRespring:(PSSpecifier *)sp {
+    diwKillByComm("chronod");
+    diwKillByComm("SpringBoard");
+    UIAlertController *ac = [UIAlertController alertControllerWithTitle:@"正在注销"
+        message:@"屏幕会短暂黑一下, 等桌面回来即生效。" preferredStyle:UIAlertControllerStyleAlert];
+    [self presentViewController:ac animated:YES completion:nil];
+}
+
+- (NSArray *)buildSpecifiers {
+    NSMutableArray *specs = [NSMutableArray array];
+    [specs addObject:[self groupSpec:@"组件隐藏"
+                              footer:@"移植自「删除小组件背景 1.7」。原理: 在渲染进程里丢弃大尺寸背景绘制指令, 只保留内容; 不是所有第三方小组件都支持。"]];
+    [specs addObject:[self switchSpec:@"总开关" key:@"widgetHideOn" def:@NO]];
+    [specs addObject:[self switchSpec:@"隐藏 MaterialView 背景" key:@"widgetHideMaterialOn" def:@YES]];
+    [specs addObject:[self switchSpec:@"包含系统小组件" key:@"widgetHideSystemOn" def:@YES]];
+    [specs addObject:[self switchSpec:@"强制深色" key:@"widgetHideDarkOn" def:@YES]];
+
+    [specs addObject:[self groupSpec:@"绘制阈值"
+                             footer:@"超过这个尺寸的矩形会被当成背景丢弃。默认 150; 调小更激进(可能误伤内容), 调大更保守。"]];
+    [specs addObject:[self numSlider:@"最大元素宽" key:@"widgetHideMaxW" def:150 mn:50 mx:300]];
+    [specs addObject:[self numSlider:@"最大元素高" key:@"widgetHideMaxH" def:150 mn:50 mx:300]];
+
+    [specs addObject:[self groupSpec:@"应用" footer:nil]];
+    PSSpecifier *appsRow = [PSSpecifier preferenceSpecifierNamed:@"启用应用" target:self
+        set:NULL get:@selector(readAppCount:) detail:[DIWidgetAppsPage class] cell:PSLinkCell edit:nil];
+    [specs addObject:appsRow];
+
+    [specs addObject:[self groupSpec:nil footer:nil]];
+    [specs addObject:[self buttonSpec:@"注销生效" action:@selector(doWidgetRespring:)]];
+    return specs;
+}
+@end
