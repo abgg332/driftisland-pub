@@ -62,7 +62,7 @@ static double expandTextY = DI_EXP_TEXT_BASE_Y;   // 上下偏移(pt, 下为正,
 static double expandTextScale = 100.0; // 文字大小(%, 100=原样)
 /* 2.8.86: 构建戳 —— 之前横幅打的是 SpringBoard 自己的 CFBundleShortVersionString(恒 1.0),
    日志里根本看不出装的是哪一版。所有诊断行都带这个戳, 下轮日志一眼定位。 */
-#define DI_BUILD_VER @"2.9.73"
+#define DI_BUILD_VER @"2.9.74"
 static BOOL gRecordingActive = NO; // 保留: 岛素材总闸条件
 static NSString *diElementId(UIView *host);
 static BOOL diMiniMusicActive(UIView *host); // 2.6.3: 前置(遮罩层使用)
@@ -3215,6 +3215,16 @@ static UIImage *diInvertMaskImage(UIImage *m);
 /* 2.8.39: 上次确认"正在播放"的时间 —— 遮罩锁死用(308 反馈: 切歌/门户重建时
    判定瞬断就拆玻璃, 用户看到"先方形后遮罩"; 播放中或 30s 内播放过就永不拆)。 */
 @property (nonatomic, assign) CFAbsoluteTime lastPlayT;
+/* ===== 2.9.74: 交接给 MRU 之后的"闭嘴期" =====
+   404 日志+视频实锤: 展开那一下这边确实按"MRU 已确认展开"让位了, 但**下一个
+   layout 又把玻璃挂回来**了 —— 日志里"立即让位"之后还跟着四十多条
+   "遮罩挂上(玻璃) … 旋转=开 角度-336°→-59°"。这颗 25pt 的圆还带着旋转动画,
+   而它所在的小岛容器在展开时被系统淡出/放大 —— 用户看到的就是
+   "展开大岛里有个小专辑在环绕转圈, 过一下才正常"。
+   所以让位要记时间: 交接窗口内(mruHoldT>0)一律不再新挂, 直到 MRU 那边
+   连续 0.3 秒都说"不是展开态"才放开。 */
+@property (nonatomic, assign) CFAbsoluteTime mruHoldT;
+@property (nonatomic, assign) CFAbsoluteTime mruClearT;
 /* 2.7.45: 素材指纹状态改成实例属性 ——
    2.7.42~2.7.44 用函数内 static, 而小岛/展开岛各有一个 DIMaskView 实例,
    两个实例抢同一组 static: A 刚记录完指纹, B 立刻判"变了"→ 又重建,
@@ -4080,19 +4090,37 @@ static BOOL diApplyMaskToCover(UIView *cover, UIImage *shape) {
            MRU 一旦确认头像变成 66 就会把 expanded 写进 state.plist —— 这是"岛
            真的展开了"最快的信号, 直接照它让位, 不再等宿主尺寸。
            暂停时播放位为 NO, 不走这条(pauseMorph 要继续保住小岛玻璃)。 */
-        if (diIsIOS17Up() && _glassOn && playingX && diMruSaysExpanded()) {
-            static CFAbsoluteTime sMrueT;
-            if (CFAbsoluteTimeGetCurrent() - sMrueT > 1.0) {
-                sMrueT = CFAbsoluteTimeGetCurrent();
-                DLog(@"遮罩[17]: MRU 已确认展开(宿主 %.0fx%.0f 还未跟上) → 立即让位", bs.width, bs.height);
+        if (diIsIOS17Up() && playingX && diMruSaysExpanded()) {
+            /* 2.9.74: 不再要求 _glassOn —— 让位之后下一个 layout 会把玻璃重新挂上,
+               402/404 日志里"立即让位"后面紧跟四十多条"遮罩挂上(玻璃)"就是这么来的。
+               这里每次都记 mruHoldT, 交接窗口内挂载守卫一律不放行。 */
+            self.mruHoldT = CFAbsoluteTimeGetCurrent();
+            self.mruClearT = 0;
+            if (_glassOn || _targets.count || !self.hidden) {
+                static CFAbsoluteTime sMrueT;
+                if (CFAbsoluteTimeGetCurrent() - sMrueT > 1.0) {
+                    sMrueT = CFAbsoluteTimeGetCurrent();
+                    DLog(@"遮罩[17]: MRU 已确认展开(宿主 %.0fx%.0f 还未跟上) → 立即让位", bs.width, bs.height);
+                }
+                [self diRestorePainted];
+                self.glassOn = NO;
+                if (gDISBGlassOn) { gDISBGlassOn = 0; diWriteIslandPlist(); }
+                self.loggedShow = NO;
+                self.bigT = CFAbsoluteTimeGetCurrent();
+                self.stableFrm = 0;
             }
-            [self diRestorePainted];
-            self.glassOn = NO;
-            if (gDISBGlassOn) { gDISBGlassOn = 0; diWriteIslandPlist(); }
-            self.loggedShow = NO;
-            self.bigT = CFAbsoluteTimeGetCurrent();
-            self.stableFrm = 0;
             return;
+        }
+        /* MRU 说"不是展开"要连续 0.3 秒才算数 —— 展开起手那一两拍它自己也会写 NO,
+           单拍采信会把玻璃又挂回去(就是那颗转圈的小专辑)。 */
+        if (self.mruHoldT > 0) {
+            if (!diMruSaysExpanded()) {
+                CFAbsoluteTime nw = CFAbsoluteTimeGetCurrent();
+                if (self.mruClearT <= 0) self.mruClearT = nw;
+                if (nw - self.mruClearT >= 0.3) { self.mruHoldT = 0; self.mruClearT = 0; }
+            } else {
+                self.mruClearT = 0;
+            }
         }
         /* ===== 2.9.46: 删掉 2.9.42 的"形变中全程让位" =====
            那条判据是"模型层 vs 呈现层差 1pt 就算在形变", 但 17 的小岛**本身**一直在
@@ -4326,6 +4354,11 @@ static BOOL diApplyMaskToCover(UIView *cover, UIImage *shape) {
                      bs.width, bs.height, isMini, isExpand, enabled, maskOn, gRecordingActive, gate);
             }
         }
+        /* ===== 2.9.74: 已交接给 MRU → 这个实例闭嘴 =====
+           展开/收起动画期间 SpringBoard 的小岛容器会被系统淡出并放大, 我们的玻璃
+           是它的兄弟视图, 不会跟着淡 —— 留在原地就是"展开大岛里那颗环绕转圈的小专辑"。
+           交接窗口内直接返回: 不新挂、不重画、不校准。 */
+        if (diIsIOS17Up() && self.mruHoldT > 0) return;
         /* ===== 2.9.65: 过渡帧锁住玻璃边长(修"从小岛展开时专辑抖一下") =====
            396 日志实锤: 展开起手 + 波形进出时宿主会在 127x37 / 137x42 / 191x41 /
            193x37 之间来回跳, 每一跳封面候选都变(边长 25.3 ↔ 30.4, 圆心上下 3pt),
@@ -13474,6 +13507,10 @@ static void diHookHomeBarGrabberRetry(void) { diHookHomeGrabber(); }
 @property(nonatomic,strong) UIImage *lastArt;
 @property(nonatomic,assign) CGFloat spinSpeed;
 @property(nonatomic,assign) BOOL spinRev;
+/* 2.9.74: 这颗玻璃是否经历过"小岛↔展开"的半途(过渡区)。
+   经历过 → 它已经淡到 0, 收缩态里就**保持隐藏**, 不走 teardown
+   (还原系统层就是那块"多出来的蒙版"); 没经历过(冷启动/切歌残留) → 照旧拆。 */
+@property(nonatomic,assign) BOOL wasMid;
 @end
 @implementation DIActivityMaskState @end
 static char kDIActivityMaskState;
@@ -13966,18 +14003,17 @@ static BOOL diMruCompactSiblingExists(UIView *artwork) {
 
 /* 2.8.82: 自绘玻璃 —— 图 + 同一张遮罩 + 同速旋转, 系统那张层只藏起来。
    这是小岛 2.8.13 起一直在用、已验证有效的那套观感, 这里在 MediaRemoteUI 内复刻。 */
-/* ===== 2.9.73: 宿主是否正处在"小岛↔展开"的半途 =====
-   展开态宿主恒 ≥190 高, 小岛态 ≤45 高; 中间这段(45~170)只出现在动画途中。
-   动画途中绝不能让位/拆玻璃 —— 一拆就还原系统那层, 而系统那层是按旧尺寸摆的,
-   用户看到的就是"专辑显示大的在下面, 然后才正常"。 */
-static BOOL diActivityHostMid(UIView *artwork) {
+/* ===== 2.9.74: 宿主(NowPlaying 容器)当前高度 =====
+   展开态宿主恒 ≥190 高, 小岛态 ≤45 高; 中间 48~172 只出现在"小岛↔展开"的
+   动画途中, 过渡区的淡入淡出全部按这个高度算系数。 */
+static CGFloat diActivityHostHeight(UIView *artwork) {
     for (UIView *a = artwork.superview; a && a != artwork.window; a = a.superview) {
         if ([NSStringFromClass(a.class) containsString:@"NowPlaying"]) {
-            CGFloat h = a.bounds.size.height;
-            return (h > 45.0 && h < 170.0);
+            CALayer *pl = a.layer.presentationLayer;
+            return pl ? pl.bounds.size.height : a.bounds.size.height;
         }
     }
-    return NO;
+    return 0;
 }
 static void diActivityApply(UIView *artwork) {
     if (!NSThread.isMainThread || ![artwork isKindOfClass:UIView.class]) return;
@@ -14131,6 +14167,27 @@ static void diActivityApply(UIView *artwork) {
         if (holdBig) { compact = NO; keepBig = YES; }
     }
     BOOL expConfirmed = (formNow == 0);
+    /* ===== 2.9.74: 半途区(小岛 ↔ 展开) —— 只让"一颗圆"淡入淡出 =====
+       404 反馈三连: "切回小岛多了一个图层""展开大岛有个小专辑环绕转圈"
+       "那个多出来的蒙版又显示出来了"。逐帧看下来都是同一条:
+       这段 0.2~0.4 秒里两边的玻璃各画各的 ——
+         · 展开: 小岛容器的玻璃不跟着系统淡出, 停在原地转圈(旋转开着);
+         · 收回: 66 那颗玻璃被"先别拆"留住, 岛已经缩成小胶囊, 它还挂在里面。
+       现在按宿主高度算一个 0→1 的系数: 宿主还在小岛尺寸时圆不可见, 长到展开尺寸
+       才完全显现; 收回时反过来。整段不拆、不还原系统层(还原出来的就是那块
+       "多出来的蒙版"), 也就不存在"从别处飞过来"。 */
+    CGFloat hostH74 = ios17 ? diActivityHostHeight(artwork) : 0;
+    BOOL mid74 = (ios17 && !smallArt && hostH74 > 48.0 && hostH74 < 172.0);
+    BOOL grow74 = NO;
+    {
+        static CGFloat sPrevH74 = 0;
+        if (mid74) grow74 = (sPrevH74 > 1.0 && hostH74 > sPrevH74 + 4.0);
+        sPrevH74 = hostH74;
+    }
+    if (mid74) {
+        compact = !grow74;      /* 变大半途当展开(写 YES, SB 闭嘴), 变小半途当收缩 */
+        keepBig = grow74;
+    }
     if (ios17)
         /* 2.9.60: 只有"确认过的展开"才向 SB 报展开 —— 切歌瞬间 66 残留被判
            非收缩但还没过确认期, 这时若报 YES, SB 16 侧刚恢复的小岛玻璃会被
@@ -14173,26 +14230,21 @@ static void diActivityApply(UIView *artwork) {
     if (compact) {
         diMruWriteExpandState(NO, artwork.bounds.size);   /* 别让旧 YES 续期 */
         if (!smallArt) {
-            /* ===== 2.9.73: 收缩半途"先别拆" =====
-               403 视频逐帧: 展开→小岛那 0.2 秒里, 玻璃一拆就 `diActivityTeardown`
-               还原系统那几层, 而系统那层还按 407x197 摆着 —— 岛上露出一块又大又偏下的
-               专辑(用户: "专辑显示大的在下面, 然后才正常"), 随后才被重扫纠正。
-               过渡途中(宿主 45~170 高)只把玻璃尺寸跟住头像, 不动系统层、不拆;
-               0.7 秒还没落定就照旧拆, 不会永久挂着。 */
-            static CFAbsoluteTime sMidT = 0;
-            static __weak UIView *sMidV = nil;
-            if (state && diIsIOS17Up() && diActivityHostMid(artwork)) {
-                if (sMidV != artwork) { sMidV = artwork; sMidT = CFAbsoluteTimeGetCurrent(); }
-                if (CFAbsoluteTimeGetCurrent() - sMidT < 0.7) {
-                    CGRect hb = artwork.bounds;
-                    if (state.glass && !CGRectEqualToRect(state.glass.frame, hb)) {
-                        state.glass.frame = hb;
-                        state.glassImage.frame = state.glass.bounds;
-                        state.glassMask.frame = state.glassImage.bounds;
-                    }
-                    return;
-                }
-            } else { sMidV = nil; sMidT = 0; }
+            /* ===== 2.9.74: 收缩半途 —— 让这颗圆跟着缩、跟着淡 =====
+               2.9.73 的"先别拆"是把它整颗 66 留在原地(用户: "多了一个图层/蒙版");
+               直接拆又会还原系统层(那块按展开尺寸摆, "大的在下面")。
+               现在折中: 不拆、不还原, 只按宿主高度把 alpha 从 1 淡到 0,
+               岛缩到小胶囊时这颗大玻璃已经看不见了, 剩下的交给小岛那颗。 */
+            if (state && state.glass && ios17 && (mid74 || state.wasMid)) {
+                CGFloat t = 0.0;
+                if (mid74) t = (hostH74 - 48.0) / (172.0 - 48.0);
+                t = MIN(MAX(t, 0.0), 1.0);
+                if (fabs(state.glass.alpha - t) > 0.02) state.glass.alpha = t;
+                if (state.systemLayer && !state.systemLayer.hidden) state.systemLayer.hidden = YES;
+                if (state.shadow && !state.shadow.hidden) state.shadow.hidden = YES;
+                if (mid74) state.wasMid = YES;
+                return;      /* 不拆、不还原 —— 一还原就是那块"多出来的蒙版" */
+            }
             /* 2.9.59: 回到"拆掉"(2.9.58 的"就地画 23"会错位 —— 391 日志
                可见={{21.5,21.5},{23,23}}, 那是 66 残留框的居中点, 不是原生专辑位置)。
                小岛的遮罩由那颗 23 头像负责, 这颗大头像没有确认过的展开证据就还原。 */
@@ -14403,6 +14455,18 @@ static void diActivityApply(UIView *artwork) {
         [state.glass.layer addAnimation:a forKey:@"di.spin"];
         state.spinSpeed = speed; state.spinRev = rev;
         diMruFileLog([NSString stringWithFormat:@"spin 开=%@ 速度=%.0f°/s 反转=%d", rotOn ? @"是" : @"否", speed, rev]);
+    }
+    /* ===== 2.9.74: 半途区按宿主高度淡入 —— 小岛尺寸时不可见, 长满了才全显 =====
+       这样"展开"看到的是同一颗圆在卡片里渐渐长出来, 而不是一颗 66 的专辑
+       先贴在还很小的卡片上(视频里那块"大到溢出左边"的模糊块)。 */
+    if (mid74) {
+        CGFloat t = (hostH74 - 48.0) / (172.0 - 48.0);
+        t = MIN(MAX(t, 0.0), 1.0);
+        if (fabs(state.glass.alpha - t) > 0.02) state.glass.alpha = t;
+        state.wasMid = YES;
+    } else {
+        if (state.glass.alpha < 0.999) state.glass.alpha = 1.0;
+        state.wasMid = NO;
     }
     diMruReport(@"apply", [NSString stringWithFormat:@"%@ 旋转=%@", NSStringFromCGRect(box),
         rotOn ? [NSString stringWithFormat:@"%.0f°/s", speed] : @"关"]);
