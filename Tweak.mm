@@ -62,7 +62,7 @@ static double expandTextY = DI_EXP_TEXT_BASE_Y;   // 上下偏移(pt, 下为正,
 static double expandTextScale = 100.0; // 文字大小(%, 100=原样)
 /* 2.8.86: 构建戳 —— 之前横幅打的是 SpringBoard 自己的 CFBundleShortVersionString(恒 1.0),
    日志里根本看不出装的是哪一版。所有诊断行都带这个戳, 下轮日志一眼定位。 */
-#define DI_BUILD_VER @"2.9.56"
+#define DI_BUILD_VER @"2.9.57"
 static BOOL gRecordingActive = NO; // 保留: 岛素材总闸条件
 static NSString *diElementId(UIView *host);
 static BOOL diMiniMusicActive(UIView *host); // 2.6.3: 前置(遮罩层使用)
@@ -3369,10 +3369,12 @@ static void diPublishIslandState(CGSize hostSize, BOOL mini, BOOL expand) {
     static CGFloat lw, lh; static CFAbsoluteTime lt; static int lm = -1;
     CFAbsoluteTime now = CFAbsoluteTimeGetCurrent();
     int m = mini ? 1 : (expand ? 2 : 0);
-    /* 2.9.55: 岛容器布局 hook 每帧都会调进来, 写盘压到 5Hz, 免得展开动画期间狂写 */
+    /* 2.9.57: 写盘节流 2 秒 → 0.5 秒。389 定案: 一条错的"展开"写入能霸占文件
+       2 秒, MediaRemoteUI 每 0.5 秒读一次, 正好整段读到的都是错值。
+       现在真值最多 0.5 秒就能盖回去; 同值同形态时 0.5 秒内不重复写。 */
     if (lt > 0 && now - lt < 0.2) return;
     if (fabs(hostSize.width - lw) < 0.5 && fabs(hostSize.height - lh) < 0.5
-        && m == lm && now - lt < 2.0) return;
+        && m == lm && now - lt < 0.5) return;
     lw = hostSize.width; lh = hostSize.height; lm = m; lt = now;
     NSString *dir = diMruSharedDir();
     if (!dir.length) return;
@@ -3383,38 +3385,13 @@ static void diPublishIslandState(CGSize hostSize, BOOL mini, BOOL expand) {
     @catch (__unused NSException *e) {}
 }
 
-/* ===== 2.9.55: 17 专用 —— 岛容器布局即播报真实尺寸 =====
-   17 上 SpringBoard 侧遮罩整体让位(2.9.47), 小岛专辑改由 MediaRemoteUI 自绘。
-   但 MRU 只看得到头像自己的 bounds: 展开态那颗 66x66 在岛收回后还会被 layout 到,
-   它就会以为"还在展开" → 玻璃一直按 66pt 铺 → 用户说的"切换下一首放大就回不去"。
-   这里直接在岛容器布局时把真实尺寸写过去, 不依赖小岛视频/遮罩探针是否在跑。
-   16 完全不装这个 hook(一个字节都不影响 16)。 */
-static void (*gDIHostPubOrig)(id, SEL);
-static void diHostPubLayout(id self, SEL _cmd) {
-    if (gDIHostPubOrig) gDIHostPubOrig(self, _cmd);
-    @try {
-        UIView *v = (UIView *)self;
-        CGSize s = v.bounds.size;
-        if (s.width < 1.0 || s.height < 1.0) return;
-        BOOL mini = (s.height >= 24 && s.height <= 62
-                     && s.width >= 100 && s.width <= 208
-                     && s.width > s.height * 1.55);
-        BOOL exp = (s.height >= 120 && s.height <= 300
-                    && s.width >= 280 && s.width <= 440);
-        diPublishIslandState(s, mini, exp);
-    } @catch (__unused NSException *e) {}
-}
-static void diHostPubInstall(void) {
-    if (!diIsIOS17Up()) return;
-    static BOOL done;
-    if (done) return;
-    Class c = NSClassFromString(@"SBSystemApertureContainerView");
-    if (!c) return;
-    gDIHostPubOrig = NULL;
-    MSHookMessageEx(c, @selector(layoutSubviews), (IMP)diHostPubLayout, (IMP *)&gDIHostPubOrig);
-    done = YES;
-    RLog(@"[形态播报] iOS17 岛容器 layout hook 已装(orig=%@)", gDIHostPubOrig ? @"有" : @"无");
-}
+/* ===== 2.9.57: 撤掉"岛容器 layout 即播报"的 hook =====
+   389 日志定案: 这条 hook 对**每一块**岛容器都播报 —— 展开态残留的 407x198
+   离屏容器每 10~20 秒 layout 一阵(每次 1~3 帧), 每一阵都把 island.plist 翻成
+   "展开"并因 2 秒节流霸占文件最多 2 秒; MediaRemoteUI 每 0.5 秒读一次, 于是
+   收缩态里那颗 66x66 残留头像被反复放出来铺 66pt 玻璃 —— 用户看到的
+   "缩回去就回不去, 显示比较大"。真正知道"现在哪块岛在显示"的是下方
+   宿主扫描循环里的 musicRoot(音乐岛宿主), 播报只保留那一条通道。 */
 
 /* 2.9.40: 宿主自己写的形态(3 秒内有效) —— SpringBoard 侧判断用 */
 static BOOL diIslandStateMini(void) {
@@ -6581,15 +6558,23 @@ static void updateSingleVideo(UIWindow *win) {
        用户看到的就是"切换下一首放大就回不去"。
        这里借已经常驻的宿主扫描把真实尺寸写过去(只 17 执行, 16 一行不加)。 */
     if (diIsIOS17Up()) {
-        UIView *pubHost = musicRoot ?: bestRoot;
-        if (pubHost) {
-            CGSize ps = pubHost.bounds.size;
+        /* 2.9.57: 只信音乐岛宿主(musicRoot), 不再退回 bestRoot —— bestRoot 会
+           漂到展开残留的 407x198 离屏容器上, 一漂就把"收缩"写成"展开"。
+           musicRoot 瞬断的瞬间宁可不写(MRU 端 3 秒内沿用旧值), 也不写错值。 */
+        if (musicRoot) {
+            CGSize ps = musicRoot.bounds.size;
             BOOL pMini = (ps.height >= 24 && ps.height <= 62
                           && ps.width >= 100 && ps.width <= 208
                           && ps.width > ps.height * 1.55);
             BOOL pExp = (ps.height >= 120 && ps.height <= 300
                          && ps.width >= 280 && ps.width <= 440);
             diPublishIslandState(ps, pMini, pExp);
+            static CFAbsoluteTime sPubLogT;
+            if (CFAbsoluteTimeGetCurrent() - sPubLogT > 5.0) {
+                sPubLogT = CFAbsoluteTimeGetCurrent();
+                DLog(@"[形态播报] 音乐岛宿主 %.0fx%.0f mini=%d exp=%d",
+                     ps.width, ps.height, (int)pMini, (int)pExp);
+            }
         }
     }
     /* 2.9.23 诊断: 宿主切换打一条, 下一份日志能直接确认人脸/充电岛有没有拿到层 */
@@ -13620,8 +13605,34 @@ static void diActivityApply(UIView *artwork) {
     int formNow = ios17 ? diMruFormFromIsland() : -1;
     BOOL smallArt = (artSide <= 30.0);
     BOOL sibling = (ios17 && !smallArt) ? diMruCompactSiblingExists(artwork) : NO;
-    BOOL compact = ios17 && (smallArt || sibling || formNow == 1
-                             || (formNow < 0 && diMruIslandCompact(artwork)));
+    /* 2.9.57: 大头像(66pt)的"展开"必须**持续成立**才放行 ——
+       389 定案: island.plist 里一条零星的"展开"写入(残留容器偶尔 layout 一阵)
+       就能把 66pt 玻璃放出来 1~2 秒, 这就是"缩回去回不去, 显示比较大"。
+       现在的规则: 收缩证据(文件说收缩 / 小头像活着)立即生效;
+       "展开"要连续成立 ≥0.8s 且最近 1.0s 内没有任何收缩证据;
+       文件读不到(过期/形态中)就沿用上一次的决定, 不翻面。 */
+    static CFAbsoluteTime sExpAt = 0, sMiniAt = 0;
+    static int sRawLast = -9; static BOOL sLastCompact = YES, sHaveLast = NO;
+    CFAbsoluteTime nowTs = CFAbsoluteTimeGetCurrent();
+    if (formNow != sRawLast) {
+        sRawLast = formNow;
+        if (formNow == 0) sExpAt = nowTs;
+    }
+    if (smallArt || sibling || formNow == 1) sMiniAt = nowTs;
+    BOOL expOK = (formNow == 0 && sExpAt > 0
+                  && nowTs - sExpAt >= 0.8 && nowTs - sMiniAt >= 1.0);
+    BOOL compact;
+    if (!ios17) {
+        compact = NO;
+    } else if (smallArt || sibling || formNow == 1) {
+        compact = YES;
+    } else if (formNow == 0) {
+        compact = !expOK;
+    } else {
+        /* 文件没给答案(过期/形态中): 沿用上次; 从没判定过就退回祖先链兜底 */
+        compact = sHaveLast ? sLastCompact : diMruIslandCompact(artwork);
+    }
+    if (ios17) { sLastCompact = compact; sHaveLast = YES; }
     if (ios17)
         diMruWriteExpandState(sized && !compact, artwork.bounds.size);
     else
@@ -14618,9 +14629,7 @@ __attribute__((constructor)) static void init(void) {
             @try {
                 refreshAll(); installKnownHosts();
                 /* 2.9.55: 17 专用形态播报(16 不装) */
-                diHostPubInstall();
-                dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(3.0 * NSEC_PER_SEC)),
-                               dispatch_get_main_queue(), ^{ @try { diHostPubInstall(); } @catch (...) {} });
+                /* 2.9.57: 岛容器 layout 播报已撤(见 2.9.57 注释), 形态只由宿主扫描播报 */
                 diStartFlowTicker(); // 流光常驻驱动(岛静止时也能流动)
                 diStartBarFlowTicker(); // 2.5.11: 横条流光心跳(与文字同一套相位驱动)
             } @catch (NSException *e) {
