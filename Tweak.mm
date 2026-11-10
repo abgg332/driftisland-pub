@@ -62,7 +62,7 @@ static double expandTextY = DI_EXP_TEXT_BASE_Y;   // 上下偏移(pt, 下为正,
 static double expandTextScale = 100.0; // 文字大小(%, 100=原样)
 /* 2.8.86: 构建戳 —— 之前横幅打的是 SpringBoard 自己的 CFBundleShortVersionString(恒 1.0),
    日志里根本看不出装的是哪一版。所有诊断行都带这个戳, 下轮日志一眼定位。 */
-#define DI_BUILD_VER @"2.9.61"
+#define DI_BUILD_VER @"2.9.62"
 static BOOL gRecordingActive = NO; // 保留: 岛素材总闸条件
 static NSString *diElementId(UIView *host);
 static BOOL diMiniMusicActive(UIView *host); // 2.6.3: 前置(遮罩层使用)
@@ -13570,7 +13570,15 @@ static int diMruFormFromIsland(void) {
     double t = [d[@"t"] doubleValue];
     CGFloat w = [d[@"w"] doubleValue], h = [d[@"h"] doubleValue];
     if (w < 1.0 || h < 1.0 || fabs(now - t) > 3.0) { cForm = -1; return cForm; }
-    cForm = (h < 70.0 || w < 240.0) ? 1 : 0;
+    /* ===== 2.9.62: 认播报的形态位, 不再按 w/h 反推 =====
+       393 日志实锤: 展开动画中间帧(227x44 之类)按 w/h 反推会被判成"小岛",
+       展开确认期被清零 → 玻璃要等动画结束再 +1.2 秒才铺(用户: "展开先显示
+       一下方形的, 一会才显示圆的")。播报端本来就写了 mini/expand 两位:
+       展开动画中间帧两位都是 0 → 返回 -1(未知), 不清确认期也不确认。 */
+    int mini = [d[@"mini"] intValue], exp = [d[@"expand"] intValue];
+    if (exp == 1 && (h >= 70.0 && w >= 240.0)) { cForm = 0; return cForm; }
+    if (mini == 1 && (h < 70.0 || w < 240.0))  { cForm = 1; return cForm; }
+    cForm = -1;
     return cForm;
 }
 
@@ -13645,17 +13653,20 @@ static void diActivityApply(UIView *artwork) {
     BOOL sibling = (ios17 && !smallArt && formNow != 0) ? diMruCompactSiblingExists(artwork) : NO;
     BOOL compact = ios17 && (smallArt || sibling || formNow == 1
                              || (formNow < 0 && diMruIslandCompact(artwork)));
-    /* 2.9.59: 展开确认期 —— island.plist 连续 ≥1.2 秒说"展开"才认。
-       收缩立即生效(切歌后残留立刻收掉), 真展开只晚 1.2 秒出大玻璃。 */
+    /* 2.9.59: 展开确认期 —— island.plist 连续说"展开"才认。
+       收缩立即生效(切歌后残留立刻收掉), 真展开晚一小会出大玻璃。
+       2.9.62: 1.2 秒 → 0.3 秒。确认期防的是"残留容器把文件写成展开"的假信号,
+       2.9.61 起播报只认可见容器, 这个源头已经没了; 393 日志里 1.2 秒确认期
+       就是用户看到的"展开先显示一下方形专辑, 一会才变圆"。 */
     static CFAbsoluteTime sExpSince = 0;
     CFAbsoluteTime nowTs = CFAbsoluteTimeGetCurrent();
     if (formNow == 0) { if (!sExpSince) sExpSince = nowTs; }
     else if (formNow == 1) sExpSince = 0;
-    BOOL expConfirmed = (formNow == 0 && sExpSince > 0 && nowTs - sExpSince >= 1.2);
+    BOOL expConfirmed = (formNow == 0 && sExpSince > 0 && nowTs - sExpSince >= 0.3);
     if (ios17)
         /* 2.9.60: 只有"确认过的展开"才向 SB 报展开 —— 切歌瞬间 66 残留被判
-           非收缩(文件被写成展开)但还没过确认期, 这时若报 YES, SB 侧刚恢复的
-           小岛玻璃会被 2.9.41 的退场 + 1.5 秒迟滞压住 1~2 秒(表现为切歌没遮罩)。 */
+           非收缩但还没过确认期, 这时若报 YES, SB 16 侧刚恢复的小岛玻璃会被
+           退场 + 1.5 秒迟滞压住(表现为切歌没遮罩)。17 侧已不读这个标志。 */
         diMruWriteExpandState(sized && !compact && expConfirmed, artwork.bounds.size);
     else
         diMruWriteExpandState(sized && artwork.bounds.size.width >= 38.0 && artwork.bounds.size.height >= 38.0,
@@ -13730,7 +13741,7 @@ static void diActivityApply(UIView *artwork) {
         if (CFAbsoluteTimeGetCurrent() - sHoldT > 5.0) {
             sHoldT = CFAbsoluteTimeGetCurrent();
             diMruFileLog([NSString stringWithFormat:
-                          @"小岛态: 展开未确认(连续 %.1f 秒 <1.2), 先拆大玻璃 头像 %.0fx%.0f",
+                          @"小岛态: 展开未确认(连续 %.1f 秒 <0.3), 先拆大玻璃 头像 %.0fx%.0f",
                           sExpSince > 0 ? CFAbsoluteTimeGetCurrent() - sExpSince : 0.0,
                           artwork.bounds.size.width, artwork.bounds.size.height]);
         }
