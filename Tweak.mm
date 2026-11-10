@@ -62,7 +62,7 @@ static double expandTextY = DI_EXP_TEXT_BASE_Y;   // 上下偏移(pt, 下为正,
 static double expandTextScale = 100.0; // 文字大小(%, 100=原样)
 /* 2.8.86: 构建戳 —— 之前横幅打的是 SpringBoard 自己的 CFBundleShortVersionString(恒 1.0),
    日志里根本看不出装的是哪一版。所有诊断行都带这个戳, 下轮日志一眼定位。 */
-#define DI_BUILD_VER @"2.9.57"
+#define DI_BUILD_VER @"2.9.58"
 static BOOL gRecordingActive = NO; // 保留: 岛素材总闸条件
 static NSString *diElementId(UIView *host);
 static BOOL diMiniMusicActive(UIView *host); // 2.6.3: 前置(遮罩层使用)
@@ -3369,12 +3369,10 @@ static void diPublishIslandState(CGSize hostSize, BOOL mini, BOOL expand) {
     static CGFloat lw, lh; static CFAbsoluteTime lt; static int lm = -1;
     CFAbsoluteTime now = CFAbsoluteTimeGetCurrent();
     int m = mini ? 1 : (expand ? 2 : 0);
-    /* 2.9.57: 写盘节流 2 秒 → 0.5 秒。389 定案: 一条错的"展开"写入能霸占文件
-       2 秒, MediaRemoteUI 每 0.5 秒读一次, 正好整段读到的都是错值。
-       现在真值最多 0.5 秒就能盖回去; 同值同形态时 0.5 秒内不重复写。 */
+    /* 2.9.55: 岛容器布局 hook 每帧都会调进来, 写盘压到 5Hz, 免得展开动画期间狂写 */
     if (lt > 0 && now - lt < 0.2) return;
     if (fabs(hostSize.width - lw) < 0.5 && fabs(hostSize.height - lh) < 0.5
-        && m == lm && now - lt < 0.5) return;
+        && m == lm && now - lt < 2.0) return;
     lw = hostSize.width; lh = hostSize.height; lm = m; lt = now;
     NSString *dir = diMruSharedDir();
     if (!dir.length) return;
@@ -3385,13 +3383,38 @@ static void diPublishIslandState(CGSize hostSize, BOOL mini, BOOL expand) {
     @catch (__unused NSException *e) {}
 }
 
-/* ===== 2.9.57: 撤掉"岛容器 layout 即播报"的 hook =====
-   389 日志定案: 这条 hook 对**每一块**岛容器都播报 —— 展开态残留的 407x198
-   离屏容器每 10~20 秒 layout 一阵(每次 1~3 帧), 每一阵都把 island.plist 翻成
-   "展开"并因 2 秒节流霸占文件最多 2 秒; MediaRemoteUI 每 0.5 秒读一次, 于是
-   收缩态里那颗 66x66 残留头像被反复放出来铺 66pt 玻璃 —— 用户看到的
-   "缩回去就回不去, 显示比较大"。真正知道"现在哪块岛在显示"的是下方
-   宿主扫描循环里的 musicRoot(音乐岛宿主), 播报只保留那一条通道。 */
+/* ===== 2.9.55: 17 专用 —— 岛容器布局即播报真实尺寸 =====
+   17 上 SpringBoard 侧遮罩整体让位(2.9.47), 小岛专辑改由 MediaRemoteUI 自绘。
+   但 MRU 只看得到头像自己的 bounds: 展开态那颗 66x66 在岛收回后还会被 layout 到,
+   它就会以为"还在展开" → 玻璃一直按 66pt 铺 → 用户说的"切换下一首放大就回不去"。
+   这里直接在岛容器布局时把真实尺寸写过去, 不依赖小岛视频/遮罩探针是否在跑。
+   16 完全不装这个 hook(一个字节都不影响 16)。 */
+static void (*gDIHostPubOrig)(id, SEL);
+static void diHostPubLayout(id self, SEL _cmd) {
+    if (gDIHostPubOrig) gDIHostPubOrig(self, _cmd);
+    @try {
+        UIView *v = (UIView *)self;
+        CGSize s = v.bounds.size;
+        if (s.width < 1.0 || s.height < 1.0) return;
+        BOOL mini = (s.height >= 24 && s.height <= 62
+                     && s.width >= 100 && s.width <= 208
+                     && s.width > s.height * 1.55);
+        BOOL exp = (s.height >= 120 && s.height <= 300
+                    && s.width >= 280 && s.width <= 440);
+        diPublishIslandState(s, mini, exp);
+    } @catch (__unused NSException *e) {}
+}
+static void diHostPubInstall(void) {
+    if (!diIsIOS17Up()) return;
+    static BOOL done;
+    if (done) return;
+    Class c = NSClassFromString(@"SBSystemApertureContainerView");
+    if (!c) return;
+    gDIHostPubOrig = NULL;
+    MSHookMessageEx(c, @selector(layoutSubviews), (IMP)diHostPubLayout, (IMP *)&gDIHostPubOrig);
+    done = YES;
+    RLog(@"[形态播报] iOS17 岛容器 layout hook 已装(orig=%@)", gDIHostPubOrig ? @"有" : @"无");
+}
 
 /* 2.9.40: 宿主自己写的形态(3 秒内有效) —— SpringBoard 侧判断用 */
 static BOOL diIslandStateMini(void) {
@@ -6558,23 +6581,15 @@ static void updateSingleVideo(UIWindow *win) {
        用户看到的就是"切换下一首放大就回不去"。
        这里借已经常驻的宿主扫描把真实尺寸写过去(只 17 执行, 16 一行不加)。 */
     if (diIsIOS17Up()) {
-        /* 2.9.57: 只信音乐岛宿主(musicRoot), 不再退回 bestRoot —— bestRoot 会
-           漂到展开残留的 407x198 离屏容器上, 一漂就把"收缩"写成"展开"。
-           musicRoot 瞬断的瞬间宁可不写(MRU 端 3 秒内沿用旧值), 也不写错值。 */
-        if (musicRoot) {
-            CGSize ps = musicRoot.bounds.size;
+        UIView *pubHost = musicRoot ?: bestRoot;
+        if (pubHost) {
+            CGSize ps = pubHost.bounds.size;
             BOOL pMini = (ps.height >= 24 && ps.height <= 62
                           && ps.width >= 100 && ps.width <= 208
                           && ps.width > ps.height * 1.55);
             BOOL pExp = (ps.height >= 120 && ps.height <= 300
                          && ps.width >= 280 && ps.width <= 440);
             diPublishIslandState(ps, pMini, pExp);
-            static CFAbsoluteTime sPubLogT;
-            if (CFAbsoluteTimeGetCurrent() - sPubLogT > 5.0) {
-                sPubLogT = CFAbsoluteTimeGetCurrent();
-                DLog(@"[形态播报] 音乐岛宿主 %.0fx%.0f mini=%d exp=%d",
-                     ps.width, ps.height, (int)pMini, (int)pExp);
-            }
         }
     }
     /* 2.9.23 诊断: 宿主切换打一条, 下一份日志能直接确认人脸/充电岛有没有拿到层 */
@@ -13566,16 +13581,50 @@ static BOOL diMruCompactSiblingExists(UIView *artwork) {
     }
     return NO;
 }
-/* 收缩态确认后, 立刻把其它"大玻璃"拆掉, 不留一帧大的 */
-static void diMruTearDownBigArtworks(UIView *except) {
-    if (!gDIActivityArtworks) return;
-    for (UIView *v in gDIActivityArtworks.allObjects) {
-        if (v == except || ![v isKindOfClass:UIView.class]) continue;
-        if (MIN(v.bounds.size.width, v.bounds.size.height) <= 30.0) continue;
-        DIActivityMaskState *st = objc_getAssociatedObject(v, &kDIActivityMaskState);
-        if (st) diActivityTeardown(v, st);
+/* ===== 2.9.58: 收缩态的"现场"硬证据 =====
+
+   388~390 三份日志里那颗 66x66 的展开残留头像, 祖先链永远挂着 407x198 的
+   NowPlayingView, 单看它自己分不出收缩/展开; 而 diMruCompactSiblingExists 依赖
+   "23 那颗已经被我们接管", 日志里却常常是 小头像=0 → 判据落空 → 66 被当展开铺满,
+   这就是"切换下一首放大回不去"。
+
+   这里换成现场扫窗口树: 屏上还挂着一块"收缩宿主"(NowPlaying 视图, 高 24~70、
+   宽 90~300, 可见) 就说明岛是收起的 —— 展开态系统会把 189x37 那块撤掉, 只剩
+   407x198, 有日志实锤。纯本地, 不读跨进程文件(那个会被多块岛容器写乱)。 */
+static BOOL diMruCompactHostVisible(UIView *artwork) {
+    UIWindow *win = artwork.window;
+    if (!win) return NO;
+    static BOOL cVal; static CFAbsoluteTime cAt;
+    CFAbsoluteTime now = CFAbsoluteTimeGetCurrent();
+    if (now - cAt < 0.15) return cVal;
+    cAt = now; cVal = NO;
+    NSMutableArray *roots = [NSMutableArray array];
+    UIWindowScene *ws = win.windowScene;
+    if (ws) { for (UIWindow *w in ws.windows) [roots addObject:w]; }
+    if (!roots.count) [roots addObject:win];
+    CGRect winBox = win.bounds;
+    NSMutableArray *stack = [roots mutableCopy];
+    NSInteger guard = 0;
+    while (stack.count && guard++ < 3000) {
+        UIView *v = stack.lastObject;
+        [stack removeLastObject];
+        if (v.hidden || v.alpha < 0.05) continue;
+        NSString *cn = NSStringFromClass(v.class);
+        if ([cn containsString:@"NowPlaying"]) {
+            CGSize s = v.bounds.size;
+            if (s.height >= 24.0 && s.height <= 70.0 && s.width >= 90.0 && s.width <= 300.0) {
+                CGRect r = [v convertRect:v.bounds toView:win];
+                if (CGRectGetWidth(r) >= 40.0 && CGRectGetHeight(r) >= 10.0
+                    && CGRectIntersectsRect(r, winBox)) { cVal = YES; break; }
+            }
+        }
+        for (UIView *sub in v.subviews) [stack addObject:sub];
     }
+    return cVal;
 }
+
+/* 2.9.58: 2.9.56 的 diMruTearDownBigArtworks 已删除 —— 收缩态的大残留头像不再靠
+   "拆"来消灭, 而是就地按 23pt 画(见 diActivityApply 里的 box 夹取), 拆了又重画只会闪。 */
 
 /* 2.8.82: 自绘玻璃 —— 图 + 同一张遮罩 + 同速旋转, 系统那张层只藏起来。
    这是小岛 2.8.13 起一直在用、已验证有效的那套观感, 这里在 MediaRemoteUI 内复刻。 */
@@ -13605,34 +13654,12 @@ static void diActivityApply(UIView *artwork) {
     int formNow = ios17 ? diMruFormFromIsland() : -1;
     BOOL smallArt = (artSide <= 30.0);
     BOOL sibling = (ios17 && !smallArt) ? diMruCompactSiblingExists(artwork) : NO;
-    /* 2.9.57: 大头像(66pt)的"展开"必须**持续成立**才放行 ——
-       389 定案: island.plist 里一条零星的"展开"写入(残留容器偶尔 layout 一阵)
-       就能把 66pt 玻璃放出来 1~2 秒, 这就是"缩回去回不去, 显示比较大"。
-       现在的规则: 收缩证据(文件说收缩 / 小头像活着)立即生效;
-       "展开"要连续成立 ≥0.8s 且最近 1.0s 内没有任何收缩证据;
-       文件读不到(过期/形态中)就沿用上一次的决定, 不翻面。 */
-    static CFAbsoluteTime sExpAt = 0, sMiniAt = 0;
-    static int sRawLast = -9; static BOOL sLastCompact = YES, sHaveLast = NO;
-    CFAbsoluteTime nowTs = CFAbsoluteTimeGetCurrent();
-    if (formNow != sRawLast) {
-        sRawLast = formNow;
-        if (formNow == 0) sExpAt = nowTs;
-    }
-    if (smallArt || sibling || formNow == 1) sMiniAt = nowTs;
-    BOOL expOK = (formNow == 0 && sExpAt > 0
-                  && nowTs - sExpAt >= 0.8 && nowTs - sMiniAt >= 1.0);
-    BOOL compact;
-    if (!ios17) {
-        compact = NO;
-    } else if (smallArt || sibling || formNow == 1) {
-        compact = YES;
-    } else if (formNow == 0) {
-        compact = !expOK;
-    } else {
-        /* 文件没给答案(过期/形态中): 沿用上次; 从没判定过就退回祖先链兜底 */
-        compact = sHaveLast ? sLastCompact : diMruIslandCompact(artwork);
-    }
-    if (ios17) { sLastCompact = compact; sHaveLast = YES; }
+    /* 2.9.58: 补一条现场判据。这颗 66 的残留头像出错时, 文件往往正好读到"展开"
+       (切歌瞬间系统确实放过 407x198), 而屏上那块 189x37 的收缩宿主还在 —— 现场证据
+       比文件可靠, 所以它有否决权: 只要收缩宿主在屏可见, 就按小岛处理。 */
+    BOOL hostMini = (ios17 && !smallArt && !sibling) ? diMruCompactHostVisible(artwork) : NO;
+    BOOL compact = ios17 && (smallArt || sibling || hostMini || formNow == 1
+                             || (formNow < 0 && diMruIslandCompact(artwork)));
     if (ios17)
         diMruWriteExpandState(sized && !compact, artwork.bounds.size);
     else
@@ -13672,22 +13699,33 @@ static void diActivityApply(UIView *artwork) {
     if (compact) {
         diMruWriteExpandState(NO, artwork.bounds.size);   /* 别让旧 YES 续期 */
         if (!smallArt) {
-            if (state) diActivityTeardown(artwork, state);
-            static CFAbsoluteTime sBig17T;
-            if (CFAbsoluteTimeGetCurrent() - sBig17T > 5.0) {
-                sBig17T = CFAbsoluteTimeGetCurrent();
-                CGRect inWin = artwork.window
-                    ? [artwork convertRect:artwork.bounds toView:artwork.window] : CGRectZero;
-                diMruFileLog([NSString stringWithFormat:
-                              @"小岛态: 拆掉展开残留的大头像 头像 %.0fx%.0f 屏幕%@ (文件=%d 小头像=%d)",
-                              artwork.bounds.size.width, artwork.bounds.size.height,
-                              NSStringFromCGRect(inWin), formNow, (int)sibling]);
+            /* 2.9.58: 以前这里整颗拆掉 —— 但 390 日志里 23 那颗常常还没被接管
+               (小头像=0), 一拆就"直接都没了"。现在只要现场确认岛是收起的(hostMini),
+               就不拆, 改成按小岛尺寸继续画(下面的 box 会夹到 23); 没有现场证据时才拆。 */
+            if (!hostMini) {
+                if (state) diActivityTeardown(artwork, state);
+                static CFAbsoluteTime sBig17T;
+                if (CFAbsoluteTimeGetCurrent() - sBig17T > 5.0) {
+                    sBig17T = CFAbsoluteTimeGetCurrent();
+                    CGRect inWin = artwork.window
+                        ? [artwork convertRect:artwork.bounds toView:artwork.window] : CGRectZero;
+                    diMruFileLog([NSString stringWithFormat:
+                                  @"小岛态: 拆掉展开残留的大头像 头像 %.0fx%.0f 屏幕%@ (文件=%d 小头像=%d)",
+                                  artwork.bounds.size.width, artwork.bounds.size.height,
+                                  NSStringFromCGRect(inWin), formNow, (int)sibling]);
+                }
+                return;
             }
-            return;
+            static CFAbsoluteTime sSmall17T;
+            if (CFAbsoluteTimeGetCurrent() - sSmall17T > 5.0) {
+                sSmall17T = CFAbsoluteTimeGetCurrent();
+                diMruFileLog([NSString stringWithFormat:
+                              @"小岛态: 大残留头像按小岛尺寸画 头像 %.0fx%.0f (文件=%d 现场收缩宿主=1)",
+                              artwork.bounds.size.width, artwork.bounds.size.height, formNow]);
+            }
         }
-        /* 2.9.56: 收缩态那颗一确认, 立刻把别的"大玻璃"全部拆掉 —— 不等它们自己
-           layout。展开那颗 66x66 每秒都会被扫描器重新接管一次, 慢一拍就留一块大的。 */
-        diMruTearDownBigArtworks(artwork);
+        /* 2.9.58: 不再"拆别人的大玻璃" —— 那颗 66 现在也按 23 画, 拆了又会被重画,
+           只会造成一帧闪烁。各自按小岛尺寸画即可。 */
         static CFAbsoluteTime sCmp17T; static CGSize sCmp17Sz;
         if (CFAbsoluteTimeGetCurrent() - sCmp17T > 8.0 || !CGSizeEqualToSize(sCmp17Sz, artwork.bounds.size)) {
             sCmp17T = CFAbsoluteTimeGetCurrent(); sCmp17Sz = artwork.bounds.size;
@@ -13702,6 +13740,14 @@ static void diActivityApply(UIView *artwork) {
     NSMutableString *chain = [NSMutableString string];
     CGRect box = ios17 ? diActivityVisibleRect(artwork, chain) : artwork.bounds;
     if (box.size.width < 4 || box.size.height < 4) box = artwork.bounds;
+    /* 2.9.58: 收缩态一律按"小岛那颗"的 23pt 画 —— 展开残留的 66 头像即使被系统
+       layout 到, 也只铺一颗小圆, 不会再出现"缩回去留一块大玻璃/放大回不去"。
+       居中收缩, 形状与原来 23 那颗完全一致。 */
+    if (ios17 && compact && MIN(box.size.width, box.size.height) > 30.0) {
+        CGFloat side = 23.0;
+        box = CGRectMake(box.origin.x + (box.size.width - side) * 0.5,
+                         box.origin.y + (box.size.height - side) * 0.5, side, side);
+    }
     BOOL collapsed = ios17 && (MIN(box.size.width, box.size.height) < 42);
     /* 16 保持 2.9.33 的老判据(按 bounds), 不用窗口 */
     if (ios17) diMruWriteExpandState(!collapsed, box.size);
@@ -14629,7 +14675,9 @@ __attribute__((constructor)) static void init(void) {
             @try {
                 refreshAll(); installKnownHosts();
                 /* 2.9.55: 17 专用形态播报(16 不装) */
-                /* 2.9.57: 岛容器 layout 播报已撤(见 2.9.57 注释), 形态只由宿主扫描播报 */
+                diHostPubInstall();
+                dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(3.0 * NSEC_PER_SEC)),
+                               dispatch_get_main_queue(), ^{ @try { diHostPubInstall(); } @catch (...) {} });
                 diStartFlowTicker(); // 流光常驻驱动(岛静止时也能流动)
                 diStartBarFlowTicker(); // 2.5.11: 横条流光心跳(与文字同一套相位驱动)
             } @catch (NSException *e) {
