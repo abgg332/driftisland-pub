@@ -62,7 +62,7 @@ static double expandTextY = DI_EXP_TEXT_BASE_Y;   // 上下偏移(pt, 下为正,
 static double expandTextScale = 100.0; // 文字大小(%, 100=原样)
 /* 2.8.86: 构建戳 —— 之前横幅打的是 SpringBoard 自己的 CFBundleShortVersionString(恒 1.0),
    日志里根本看不出装的是哪一版。所有诊断行都带这个戳, 下轮日志一眼定位。 */
-#define DI_BUILD_VER @"2.9.72"
+#define DI_BUILD_VER @"2.9.73"
 static BOOL gRecordingActive = NO; // 保留: 岛素材总闸条件
 static NSString *diElementId(UIView *host);
 static BOOL diMiniMusicActive(UIView *host); // 2.6.3: 前置(遮罩层使用)
@@ -4070,6 +4070,30 @@ static BOOL diApplyMaskToCover(UIView *cover, UIImage *shape) {
 
         CALayer *pl = host.layer.presentationLayer;
         CGSize bs = pl ? pl.bounds.size : host.bounds.size;
+        /* ===== 2.9.73: "MRU 已经展开"这一条比宿主尺寸快得多 =====
+           403 日志 + 视频逐帧实锤: 展开那一下我们探的这个宿主实例一直是 189x37
+           (屏幕上的岛其实已经 407x197 了, 那是另一个容器实例), 它要等 0.5~1 秒后
+           自己变成 407x197 才整棵退场。这中间小岛那颗 24.9pt 的玻璃一直画在
+           左上角 —— 逐帧量过: 圆心 (17.5,19.5)、边长 18pt, 正好是小岛槽位
+           (8,7)/22pt 的位置, 而展开态封面在 (17,26)/66pt。所以"展开时专辑小了
+           一下然后变大"里那颗小圆就是它。
+           MRU 一旦确认头像变成 66 就会把 expanded 写进 state.plist —— 这是"岛
+           真的展开了"最快的信号, 直接照它让位, 不再等宿主尺寸。
+           暂停时播放位为 NO, 不走这条(pauseMorph 要继续保住小岛玻璃)。 */
+        if (diIsIOS17Up() && _glassOn && playingX && diMruSaysExpanded()) {
+            static CFAbsoluteTime sMrueT;
+            if (CFAbsoluteTimeGetCurrent() - sMrueT > 1.0) {
+                sMrueT = CFAbsoluteTimeGetCurrent();
+                DLog(@"遮罩[17]: MRU 已确认展开(宿主 %.0fx%.0f 还未跟上) → 立即让位", bs.width, bs.height);
+            }
+            [self diRestorePainted];
+            self.glassOn = NO;
+            if (gDISBGlassOn) { gDISBGlassOn = 0; diWriteIslandPlist(); }
+            self.loggedShow = NO;
+            self.bigT = CFAbsoluteTimeGetCurrent();
+            self.stableFrm = 0;
+            return;
+        }
         /* ===== 2.9.46: 删掉 2.9.42 的"形变中全程让位" =====
            那条判据是"模型层 vs 呈现层差 1pt 就算在形变", 但 17 的小岛**本身**一直在
            做宽度动画: 日志里 127x37 ↔ 179/189x37 每几秒一轮(波形/配件进出), 于是
@@ -4637,8 +4661,19 @@ static BOOL diApplyMaskToCover(UIView *cover, UIImage *shape) {
             BOOL sane = (mnc >= 10.0 && mxc <= 56.0
                          && cc0.x >= 2.0 && cc0.y >= 2.0
                          && cc0.x <= bs.width - 2.0 && cc0.y <= bs.height - 2.0);
-            if (sane) {
+            /* ===== 2.9.73: 过渡帧"原位不动" =====
+               403 视频逐帧实锤(第一次收回, 1.57~1.73 秒): 岛在 407x197 → 189x37 之间
+               缩的那几帧里, 这里会按**当前还在半大的宿主高度**重算槽位
+               (h=61 时 y=(61-30)/2=15, h=97 时 y=33), 玻璃就被摆到岛的偏下方、
+               边长也按 30 取 —— 用户看到的"专辑显示大的在下面, 然后才正常"。
+               系统的小岛槽位是固定的(左槽 x=8、垂直居中), 收缩过程中它并不会移动;
+               所以尺寸还在变的帧一律沿用上次确认过的槽位, 只有稳定 2 帧后才接受新扫描。 */
+            BOOL slotSettled = (!sizeChanged && self.stableFrm >= 2);
+            if (sane && slotSettled) {
                 self.miniCoverRect = coverRect;
+            } else if (!CGRectIsEmpty(self.miniCoverRect)) {
+                coverRect = self.miniCoverRect;
+                self.cacheCoverRect = coverRect;
             } else {
                 CGRect keep = self.miniCoverRect;
                 if (CGRectIsEmpty(keep)) {
@@ -13931,6 +13966,19 @@ static BOOL diMruCompactSiblingExists(UIView *artwork) {
 
 /* 2.8.82: 自绘玻璃 —— 图 + 同一张遮罩 + 同速旋转, 系统那张层只藏起来。
    这是小岛 2.8.13 起一直在用、已验证有效的那套观感, 这里在 MediaRemoteUI 内复刻。 */
+/* ===== 2.9.73: 宿主是否正处在"小岛↔展开"的半途 =====
+   展开态宿主恒 ≥190 高, 小岛态 ≤45 高; 中间这段(45~170)只出现在动画途中。
+   动画途中绝不能让位/拆玻璃 —— 一拆就还原系统那层, 而系统那层是按旧尺寸摆的,
+   用户看到的就是"专辑显示大的在下面, 然后才正常"。 */
+static BOOL diActivityHostMid(UIView *artwork) {
+    for (UIView *a = artwork.superview; a && a != artwork.window; a = a.superview) {
+        if ([NSStringFromClass(a.class) containsString:@"NowPlaying"]) {
+            CGFloat h = a.bounds.size.height;
+            return (h > 45.0 && h < 170.0);
+        }
+    }
+    return NO;
+}
 static void diActivityApply(UIView *artwork) {
     if (!NSThread.isMainThread || ![artwork isKindOfClass:UIView.class]) return;
     DIActivityMaskState *state = objc_getAssociatedObject(artwork, &kDIActivityMaskState);
@@ -14087,7 +14135,7 @@ static void diActivityApply(UIView *artwork) {
         /* 2.9.60: 只有"确认过的展开"才向 SB 报展开 —— 切歌瞬间 66 残留被判
            非收缩但还没过确认期, 这时若报 YES, SB 16 侧刚恢复的小岛玻璃会被
            退场 + 1.5 秒迟滞压住(表现为切歌没遮罩)。17 侧已不读这个标志。 */
-        diMruWriteExpandState(sized && !compact && expConfirmed, artwork.bounds.size);
+        diMruWriteExpandState(sized && !compact && (expConfirmed || artSide >= 56.0), artwork.bounds.size);
     else
         diMruWriteExpandState(sized && artwork.bounds.size.width >= 38.0 && artwork.bounds.size.height >= 38.0,
                               artwork.bounds.size);
@@ -14125,6 +14173,26 @@ static void diActivityApply(UIView *artwork) {
     if (compact) {
         diMruWriteExpandState(NO, artwork.bounds.size);   /* 别让旧 YES 续期 */
         if (!smallArt) {
+            /* ===== 2.9.73: 收缩半途"先别拆" =====
+               403 视频逐帧: 展开→小岛那 0.2 秒里, 玻璃一拆就 `diActivityTeardown`
+               还原系统那几层, 而系统那层还按 407x197 摆着 —— 岛上露出一块又大又偏下的
+               专辑(用户: "专辑显示大的在下面, 然后才正常"), 随后才被重扫纠正。
+               过渡途中(宿主 45~170 高)只把玻璃尺寸跟住头像, 不动系统层、不拆;
+               0.7 秒还没落定就照旧拆, 不会永久挂着。 */
+            static CFAbsoluteTime sMidT = 0;
+            static __weak UIView *sMidV = nil;
+            if (state && diIsIOS17Up() && diActivityHostMid(artwork)) {
+                if (sMidV != artwork) { sMidV = artwork; sMidT = CFAbsoluteTimeGetCurrent(); }
+                if (CFAbsoluteTimeGetCurrent() - sMidT < 0.7) {
+                    CGRect hb = artwork.bounds;
+                    if (state.glass && !CGRectEqualToRect(state.glass.frame, hb)) {
+                        state.glass.frame = hb;
+                        state.glassImage.frame = state.glass.bounds;
+                        state.glassMask.frame = state.glassImage.bounds;
+                    }
+                    return;
+                }
+            } else { sMidV = nil; sMidT = 0; }
             /* 2.9.59: 回到"拆掉"(2.9.58 的"就地画 23"会错位 —— 391 日志
                可见={{21.5,21.5},{23,23}}, 那是 66 残留框的居中点, 不是原生专辑位置)。
                小岛的遮罩由那颗 23 头像负责, 这颗大头像没有确认过的展开证据就还原。 */
@@ -14247,13 +14315,22 @@ static void diActivityApply(UIView *artwork) {
         glass.backgroundColor = UIColor.clearColor;
         glass.clipsToBounds = YES;
         glass.layer.allowsEdgeAntialiasing = YES;
+        /* ===== 2.9.73: 玻璃"粘"在头像上, 跟着头像自己的 bounds 一起长/缩 =====
+           403 视频逐帧: 展开时头像(和它的父容器 MRUActivityAccessoryView)是 22 → 66
+           连续变大的, 但玻璃 frame 只在我们 0.1 秒一拍的扫描里改 —— 岛已经长满了,
+           玻璃还停在 23, 下一拍才跳到 66: 用户看到的"专辑小了一下然后变大"。
+           打开 autoresizing 后, 头像 bounds 每一帧变, UIKit 就在**同一次布局**里
+           把玻璃一起缩放(和系统自己那些子视图一模一样), 玻璃再也不会慢半拍。 */
+        glass.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
         UIImageView *img = [UIImageView new];
         img.userInteractionEnabled = NO;
         img.contentMode = UIViewContentModeScaleAspectFill;
         img.clipsToBounds = YES;
+        img.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
         UIImageView *shape = [UIImageView new];
         shape.userInteractionEnabled = NO;
         shape.contentMode = UIViewContentModeScaleToFill;
+        shape.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
         img.maskView = shape;               /* 遮罩挂在图上: 转玻璃时图与形状一起转 */
         [glass addSubview:img];
         state.glass = glass; state.glassImage = img; state.glassMask = shape;
