@@ -62,7 +62,7 @@ static double expandTextY = DI_EXP_TEXT_BASE_Y;   // 上下偏移(pt, 下为正,
 static double expandTextScale = 100.0; // 文字大小(%, 100=原样)
 /* 2.8.86: 构建戳 —— 之前横幅打的是 SpringBoard 自己的 CFBundleShortVersionString(恒 1.0),
    日志里根本看不出装的是哪一版。所有诊断行都带这个戳, 下轮日志一眼定位。 */
-#define DI_BUILD_VER @"2.9.69"
+#define DI_BUILD_VER @"2.9.70"
 static BOOL gRecordingActive = NO; // 保留: 岛素材总闸条件
 static NSString *diElementId(UIView *host);
 static BOOL diMiniMusicActive(UIView *host); // 2.6.3: 前置(遮罩层使用)
@@ -3196,6 +3196,10 @@ static UIImage *diInvertMaskImage(UIImage *m);
 @property (nonatomic, weak) UIView *cacheCoverV;
 @property (nonatomic, weak) UIView *cacheSqView;
 @property (nonatomic, assign) CGRect cacheCoverRect;
+/* 2.9.70: 小岛态确认过的封面槽位 —— 收缩瞬间缓存里还是展开态的大框,
+   照它画会把小圆铺到偏右 30pt 处(用户: "小岛专辑从其他地方显示再显示正常")。
+   小岛态只接受"尺寸合理且在宿主内"的候选, 其余一律沿用这个槽位。 */
+@property (nonatomic, assign) CGRect miniCoverRect;
 @property (nonatomic, assign) CGRect cacheSqRect;
 @property (nonatomic, assign) CGFloat cacheBW, cacheBH;
 @property (nonatomic, assign) BOOL rotInstalled;    /* 旋转 CA 动画已装 */
@@ -4583,6 +4587,41 @@ static BOOL diApplyMaskToCover(UIView *cover, UIImage *shape) {
             }
             if (!coverV) coverV = self.cacheCoverV;
             if (CGRectIsEmpty(coverRect)) coverRect = self.cacheCoverRect;
+        }
+        /* 2.9.70: 小岛态几何守卫 —— 修"小岛专辑从别的地方先显示一下再回正常"。
+           收缩(展开→小岛)的第一帧, cacheCoverRect 里存的还是展开态那一大块
+           (或者展开途中 MRU 的 66 框), 按它取中心画 24pt 小圆, 圆心会落在偏右
+           二三十点的地方, 稳定 1~2 帧后才重扫校正 —— 用户看到的就是"小岛专辑
+           从其他地方冒出来再跳回原位"。这里只在小岛态做廉价校验:
+           短边 10~56、长边 ≤56、圆心在宿主内 → 接受并记为"小岛槽位";
+           否则一律沿用上次合法槽位(没有就用左槽默认 8pt 内边距、垂直居中)。
+           注意: 不拦 isExpand/过渡帧, 展开态走 MRU, 不受影响。 */
+        if (diIsIOS17Up() && isMini && !CGRectIsEmpty(coverRect)) {
+            CGFloat mnc = MIN(coverRect.size.width, coverRect.size.height);
+            CGFloat mxc = MAX(coverRect.size.width, coverRect.size.height);
+            CGPoint cc0 = CGPointMake(CGRectGetMidX(coverRect), CGRectGetMidY(coverRect));
+            BOOL sane = (mnc >= 10.0 && mxc <= 56.0
+                         && cc0.x >= 2.0 && cc0.y >= 2.0
+                         && cc0.x <= bs.width - 2.0 && cc0.y <= bs.height - 2.0);
+            if (sane) {
+                self.miniCoverRect = coverRect;
+            } else {
+                CGRect keep = self.miniCoverRect;
+                if (CGRectIsEmpty(keep)) {
+                    CGFloat d = MIN(bs.height - 10.0, 30.0);
+                    if (d < 14.0) d = 14.0;
+                    keep = CGRectMake(8.0, (bs.height - d) * 0.5, d, d);
+                }
+                static CFAbsoluteTime sKeepT;
+                if (CFAbsoluteTimeGetCurrent() - sKeepT > 3.0) {
+                    sKeepT = CFAbsoluteTimeGetCurrent();
+                    DLog(@"遮罩[17]: 小岛候选不合理 %@ 岛=%.0fx%.0f → 沿用槽位 %@",
+                         NSStringFromCGRect(coverRect), bs.width, bs.height,
+                         NSStringFromCGRect(keep));
+                }
+                coverRect = keep;
+                self.cacheCoverRect = keep;
+            }
         }
         /* 2.9.63: 小岛态封面候选漂移守卫 —— 用户报"小岛暂停了会变大偏移"。
            小岛稳定后封面门户位置是固定的(左槽 26x22@8,7); 暂停/系统重建会触发
@@ -13760,6 +13799,8 @@ static BOOL diMruIslandCompact(UIView *artwork) {
    SpringBoard, 小岛玻璃刚画上就被整棵收掉。宿主真实尺寸只有 SpringBoard 知道,
    它每 2 秒写一次 island.plist, 3 秒内有效就采信。 */
 static CGFloat gDIFormW = 0, gDIFormH = 0;   /* 2.9.67: 播报的宿主尺寸(过渡帧判向用) */
+/* 2.9.70: 上一次的播报尺寸 —— 用来判"这一拍是在缩小", 收缩途中立刻让位 */
+static CGFloat gDIFormPW = 0, gDIFormPH = 0;
 static int gDIFormSB = 0;                    /* 2.9.68: SpringBoard 是否正画着小岛玻璃 */
 static int diMruFormFromIsland(void) {
     static int cForm = -2; static CFAbsoluteTime cChecked;
@@ -13779,6 +13820,7 @@ static int diMruFormFromIsland(void) {
     double t = [d[@"t"] doubleValue];
     CGFloat w = [d[@"w"] doubleValue], h = [d[@"h"] doubleValue];
     if (w < 1.0 || h < 1.0 || fabs(now - t) > 3.0) { cForm = -2; gDIFormW = gDIFormH = 0; gDIFormSB = 0; return cForm; }
+    gDIFormPW = gDIFormW; gDIFormPH = gDIFormH;
     gDIFormW = w; gDIFormH = h;
     gDIFormSB = [d[@"sb"] intValue] ? 1 : 0;
     /* ===== 2.9.62: 认播报的形态位, 不再按 w/h 反推 =====
@@ -13865,7 +13907,14 @@ static void diActivityApply(UIView *artwork) {
     /* 2.9.59: 文件明确说展开时, "小头像在不在"不可采信(391: 展开前后 23 那颗仍在
        列表里), 否则展开态的 66 会被 sibling 判成收缩拆掉。 */
     BOOL sibling = (ios17 && !smallArt && formNow != 0) ? diMruCompactSiblingExists(artwork) : NO;
-    BOOL compact = ios17 && (smallArt || sibling || formNow == 1
+    /* ===== 2.9.70: 过渡帧先判方向, 再决定让不让位 =====
+       展开只会变大, 收缩只会变小 —— 用"播报尺寸相对上一拍的变化"判向,
+       比任何形态阈值都稳(小岛自己弹一下只有几个点, 不会误判)。 */
+    BOOL growingForm = (gDIFormPW > 1.0 && gDIFormPH > 1.0 && gDIFormW > 1.0
+                        && (gDIFormW - gDIFormPW > 24.0 || gDIFormH - gDIFormPH > 12.0));
+    BOOL shrinkingForm = (gDIFormPW > 1.0 && gDIFormPH > 1.0 && gDIFormW > 1.0
+                          && (gDIFormPW - gDIFormW > 24.0 || gDIFormPH - gDIFormH > 12.0));
+    BOOL compact = ios17 && (smallArt || sibling || (formNow == 1 && !growingForm)
                              || (formNow < 0 && diMruIslandCompact(artwork)));
     /* ===== 2.9.66: 播报停摆 + 现场收缩 → 按收缩处理(修"暂停专辑变大") =====
        397 日志实锤: 暂停后 SpringBoard 的形态播报停摆(音乐岛结构判定断开,
@@ -13875,7 +13924,7 @@ static void diActivityApply(UIView *artwork) {
        现场证据比跨进程文件硬: 头像最近的 NowPlaying 宿主高度 <120 就是小岛
        (展开态恒 407x201)。真展开不会误伤 —— 只有"文件说展开、现场却说小岛"
        这种自相矛盾的情况才改判。 */
-    if (ios17 && !smallArt && formNow == 0) {
+    if (ios17 && !smallArt && formNow == 0 && !growingForm) {
         for (UIView *a = artwork.superview; a && a != artwork.window; a = a.superview) {
             if ([NSStringFromClass(a.class) containsString:@"NowPlaying"]) {
                 if (a.bounds.size.height > 0.5 && a.bounds.size.height < 120.0) compact = YES;
@@ -13892,8 +13941,15 @@ static void diActivityApply(UIView *artwork) {
        h<70, 岛还停在"小岛尺寸"上, 这颗 66 就不该铺 —— 按收缩处理, 交回小岛那颗
        23 头像 / SpringBoard 玻璃。只有宿主真的长到 ≥240x70(正在变大)才继续保留 66,
        2.9.65 修的"先小后大"不受影响。 */
+    /* ===== 2.9.70: 过渡帧按方向决定让不让位 ===== */
     if (ios17 && !smallArt && formNow == -1 && gDIFormW > 1 && gDIFormH > 1
-        && gDIFormW < 240.0 && gDIFormH < 70.0) {
+        && gDIFormW < 320.0 && gDIFormH < 90.0 && !growingForm) {
+        /* 2.9.70: 240x70 → 320x90。400 日志里收缩中间帧是 268x60, 落在旧阈值外面
+           → 66 大玻璃被 keepBig 留住 1.2 秒, 而它挂在展开态那颗残留头像上,
+           位置在屏幕中间 —— 用户看到"小岛专辑从其他地方显示一下再回正常"。
+           反过来, 正在变大(growingForm)时绝不能让位: 第一次展开时 SpringBoard
+           的掩码可能还没加载(maskOn=0, gate 恒 0), 这边一让位就两边都没画,
+           露出的就是系统那颗小专辑 —— 用户反复说的"第一次展开显示小专辑"。 */
         compact = YES;
     }
     /* ===== 2.9.68: 与 SpringBoard 的"谁在画"交接 —— 彻底分离, 互不干扰 =====
@@ -13941,6 +13997,17 @@ static void diActivityApply(UIView *artwork) {
         } else { sNoSBSince = 0; sMiniSince = 0; }
     } else { sNoSBSince = 0; sMiniSince = 0; }
     if (keepBig) compact = NO;
+    /* ===== 2.9.70: 收缩途中的"让位硬判据" =====
+       400 日志实锤: 展开→小岛这段播报按 268x60 → 231x52 → 189x37 递减,
+       而 2.9.69 的交接逻辑在 sb=0 时会给 66 最多 1.2 秒宽限, 这颗 66 挂在
+       展开态残留头像上、位置在屏幕中间 —— 用户看到的就是"返回小岛时专辑
+       先从别的地方显示, 过一下才回到正常位置"。
+       判据: 播报尺寸比上一拍明显变小(宽 -24 或 高 -12) 且不是"确认展开" →
+       立刻按收缩处理, 不让 keepBig 保留大玻璃。展开动画只会变大, 不会误伤。 */
+    if (ios17 && !smallArt && formNow != 0 && shrinkingForm) {
+        compact = YES;
+        keepBig = NO;
+    }
     BOOL expConfirmed = (formNow == 0);
     if (ios17)
         /* 2.9.60: 只有"确认过的展开"才向 SB 报展开 —— 切歌瞬间 66 残留被判
@@ -14047,6 +14114,16 @@ static void diActivityApply(UIView *artwork) {
        直接按头像自己的 bounds 铺(展开态恒 66x66), 玻璃跟岛体一起缩放, 不再重铺。 */
     if (ios17 && (formNow == 0 || formNow == -1 || keepBig)) box = artwork.bounds;
     BOOL collapsed = ios17 && (MIN(box.size.width, box.size.height) < 42);
+    /* ===== 2.9.70: 收缩态直接铺头像自己(修"返回小岛时专辑先从别处显示") =====
+       400 日志里收缩过渡帧的祖先窗口会在 189x37 ↔ 268x60 之间跳动, 求交出来的
+       box 原点是偏的, 玻璃就先画在偏右/偏上的位置, 稳定后才被系统布局拉回原位。
+       收缩态真正显示专辑的就是这颗 23pt 头像本身, 它的 bounds 就是最终位置 ——
+       直接满铺, 系统怎么动画都跟着走, 不再自己算窗口。 */
+    if (ios17 && collapsed
+        && artwork.bounds.size.width > 4.0 && artwork.bounds.size.height > 4.0
+        && MIN(artwork.bounds.size.width, artwork.bounds.size.height) < 42.0) {
+        box = artwork.bounds;
+    }
     /* 16 保持 2.9.33 的老判据(按 bounds), 不用窗口 */
     if (ios17) diMruWriteExpandState(!collapsed, box.size);
     if (collapsed && MIN(box.size.width, box.size.height) < 12) {
@@ -14833,6 +14910,45 @@ static void diActivityStartScanner(void) {
     }];
     [NSRunLoop.mainRunLoop addTimer:gDIActivityScanTimer forMode:NSRunLoopCommonModes];
 }
+/* ===== 2.9.70: 形态变化即时触发扫描 =====
+   兜底扫描是 1 秒一拍, 而小岛↔展开的动画只有 0.3~0.4 秒 —— 400 日志里
+   "第一次展开"从小岛(23 小圆)切到展开(66)整整差了 2 秒, 用户看到的就是
+   "展开先显示一下小专辑, 一会儿才变正常"; 收缩方向同理, 小岛头像已经回来了
+   但玻璃还在按上一拍的位置画, 看着像"从别的地方显示再回原位"。
+   这里加一个 0.1 秒的轻量监听: 只读 island.plist(几百字节, 不做全树遍历),
+   形态位翻转或尺寸跳变 >40pt 时才真正跑一次完整扫描(0.08 秒节流)。
+   平时零布局遍历, 开销可以忽略。 */
+static void diActivityStartFormWatch(void) {
+    static BOOL started;
+    if (started) return;
+    started = YES;
+    dispatch_source_t t = dispatch_source_create(DISPATCH_SOURCE_TYPE_TIMER, 0, 0, dispatch_get_main_queue());
+    dispatch_source_set_timer(t, dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.1 * NSEC_PER_SEC)),
+                              (int64_t)(0.1 * NSEC_PER_SEC), (int64_t)(0.02 * NSEC_PER_SEC));
+    dispatch_source_set_event_handler(t, ^{ @autoreleasepool {
+        static int lf = -9; static CGFloat lw, lh; static CFAbsoluteTime ls;
+        NSString *dir = diMruSelfDir();
+        if (!dir.length) return;
+        NSDictionary *d = [NSDictionary dictionaryWithContentsOfFile:
+                           [dir stringByAppendingPathComponent:@"island.plist"]];
+        if (![d isKindOfClass:NSDictionary.class]) return;
+        CFAbsoluteTime now = CFAbsoluteTimeGetCurrent();
+        double ts = [d[@"t"] doubleValue];
+        CGFloat w = [d[@"w"] doubleValue], h = [d[@"h"] doubleValue];
+        if (w < 1.0 || h < 1.0 || fabs(now - ts) > 3.0) return;
+        int f = [d[@"expand"] boolValue] ? 2 : ([d[@"mini"] boolValue] ? 1 : 0);
+        BOOL flip = (f != lf && f > 0 && lf > 0);
+        BOOL jump = (lw > 1.0 && lh > 1.0
+                     && (fabs(w - lw) > 40.0 || fabs(h - lh) > 40.0));
+        BOOL fire = ((flip || jump) && now - ls > 0.08);
+        lf = f; lw = w; lh = h;
+        if (fire) {
+            ls = now;
+            @try { diActivityScan(); } @catch (__unused NSException *e) {}
+        }
+    }});
+    dispatch_resume(t);
+}
 static void diActivityStart(void) {
     dispatch_async(dispatch_get_main_queue(), ^{
         diMruPostPayload(@"start", @"enter");
@@ -14843,6 +14959,7 @@ static void diActivityStart(void) {
             diMruPostPayload(@"err.install", e.reason ?: e.name);
         }
         diActivityStartScanner();
+        diActivityStartFormWatch();
         diMruPostPayload(@"start", [NSString stringWithFormat:@"done_hook%d", (int)(gDIActivityOrigLayout != NULL)]);
         for (NSString *notification in @[kNotifyStr, @"com.abgg332.driftisland/prefsChanged"]) {
             CFNotificationCenterAddObserver(CFNotificationCenterGetDarwinNotifyCenter(), NULL,
