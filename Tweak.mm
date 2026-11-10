@@ -62,7 +62,7 @@ static double expandTextY = DI_EXP_TEXT_BASE_Y;   // 上下偏移(pt, 下为正,
 static double expandTextScale = 100.0; // 文字大小(%, 100=原样)
 /* 2.8.86: 构建戳 —— 之前横幅打的是 SpringBoard 自己的 CFBundleShortVersionString(恒 1.0),
    日志里根本看不出装的是哪一版。所有诊断行都带这个戳, 下轮日志一眼定位。 */
-#define DI_BUILD_VER @"2.9.50"
+#define DI_BUILD_VER @"2.9.51"
 static BOOL gRecordingActive = NO; // 保留: 岛素材总闸条件
 static NSString *diElementId(UIView *host);
 static BOOL diMiniMusicActive(UIView *host); // 2.6.3: 前置(遮罩层使用)
@@ -14425,23 +14425,28 @@ static void diMruTailInstall(void) {
     diMruTailTick();
 }
 /* ============================================================
-   2.9.49: 播放器 —— 自定义原生(控制中心)播放器尺寸/布局 (4x1 / 3x2)
-   手法借鉴 com.yechen.bofangqi(NativePlayerOriginal 0.3):
+   2.9.49: 播放器 —— 自定义原生(控制中心)播放器尺寸/布局
+   2.9.51: 三套布局(4x1 / 3x2 / 4x2)按参考包 NativePlayerOriginal 的
+   参数化手法整体移植: 每个尺寸只做四件事 —— 封面(边长/中心 x,y)、
+   文案(宽度/中心 x,y)、按键(宽度/中心 y)、音量条(可选)。参考包里
+   每个尺寸都有一组 Artwork / Metadata / Transport / AirPlay 参数
+   (NowPlaying3x2V1 / NowPlaying4x2V1 / NowPlaying4x2NativeV2 三组),
+   这里用同样的模型, 默认值按各尺寸实际像素写死, 不再用"猜比例+硬挪"。
    ① hook 控制中心 C 函数 CCFAllowedSizesForModuleIdentifier, 给
-      nowplaying 模块额外放行 4x1 / 3x2(原生只放行 2x2/4x2 这类),
-      CC 编辑模式里就能把播放器拖成这两种尺寸;
+      nowplaying 模块额外放行 4x1 / 3x2(原生只放行 2x2/4x2),
+      CC 编辑模式里就能把播放器拖成这三种尺寸;
    ② hook CCUIModuleSettingsManager, 系统对未知尺寸答不出设置时,
       借原生 wide(4x2) 的模块设置喂回去, 避免模块空白;
-   ③ hook MRUNowPlayingView layoutSubviews, 按"宽/高比"识别 4x1(≥3.2)
-      与 3x2(1.3~1.8), 手动排布: 专辑居左成方, 歌名居上, 按键居右下,
-      音量/时间/头部隐藏(参考包 Ratio 方案的简化版)。
-   仅 iOS18(存在 CCUIModuleInstance)生效; 16/17 锁屏播放器既没有
-   这些类、宽高比也落不进两个区间, 双保险, 一行不动。 */
+   ③ hook MRUNowPlayingView layoutSubviews, 按容器宽高判定当前是
+      哪一档, 再按该档的像素表摆封面/文案/按键/音量(参考包同款:
+      时间控件、头部一律收起, 只留封面+文案+按键(+4x2 音量))。
+   仅 iOS18(存在 CCUIModuleInstance)生效; 16/17 一个 hook 都不装。 */
 static BOOL diNPOn(void) { return pBool(@"playerOn", NO); }
-static NSString *diNPSizeKey(void) {
-    NSString *s = pString(@"playerSize");
-    return (s.length ? s : @"4x1");
-}
+/* 尺寸放行开关(在控制中心编辑模式里能拖成哪些格子) */
+static BOOL diNPAllow4x1(void) { return pBool(@"player4x1", YES); }
+static BOOL diNPAllow3x2(void) { return pBool(@"player3x2", YES); }
+/* 4x2 是系统原生就有的尺寸, 这个开关只决定要不要用我们的排版盖过去 */
+static BOOL diNPAllow4x2(void) { return pBool(@"player4x2", YES); }
 /* 2.9.50: 硬闸门 —— 必须 iOS18 才允许碰播放器这套。
    2.9.49 只靠"类是否存在"软判据, 结果 16 上 dlopen/dlsym/hook 依然会跑,
    用户直接进安全模式循环。现在版本不对就一个 hook 都不装, 加载路径与
@@ -14468,21 +14473,29 @@ static id diNPMakeModuleSize(CGSize grid) {
     @try { return msg([c alloc], sel, grid, grid); } @catch (...) { return nil; }
 }
 
-/* ---- ① 放行尺寸 ---- */
+/* ---- ① 放行尺寸(4x1 / 3x2 一次性都给) ---- */
 static NSArray *(*gNPOrigAllowedSizes)(NSString *);
 static NSArray *diNPAllowedSizesHook(NSString *identifier) {
     NSArray *orig = gNPOrigAllowedSizes(identifier);
     @try {
         if (!diNPOn() || !diNPHasCC()) return orig;
         if (![identifier isEqualToString:diNPModuleId]) return orig;
-        NSString *want = diNPSizeKey();
-        CGSize g = [want isEqualToString:@"3x2"] ? CGSizeMake(3, 2) : CGSizeMake(4, 1);
-        id s = diNPMakeModuleSize(g);
-        if (!s) return orig;
         NSMutableArray *out = orig ? [orig mutableCopy] : [NSMutableArray array];
-        [out addObject:s];
+        NSMutableArray *added = [NSMutableArray array];
+        if (diNPAllow4x1()) {
+            id s = diNPMakeModuleSize(CGSizeMake(4, 1));
+            if (s) { [out addObject:s]; [added addObject:@"4x1"]; }
+        }
+        if (diNPAllow3x2()) {
+            id s = diNPMakeModuleSize(CGSizeMake(3, 2));
+            if (s) { [out addObject:s]; [added addObject:@"3x2"]; }
+        }
         static BOOL logged;
-        if (!logged) { logged = YES; RLog(@"[播放器] 已放行 %@ (原生给 %lu 个尺寸)", want, (unsigned long)(orig ? orig.count : 0)); }
+        if (!logged && added.count) {
+            logged = YES;
+            RLog(@"[播放器] 已放行 %@ (原生给 %lu 个尺寸)", [added componentsJoinedByString:@"+"],
+                 (unsigned long)(orig ? orig.count : 0));
+        }
         return out;
     } @catch (NSException *e) {
         RLog(@"[播放器] allowedSizes 异常: %@ — %@", e.name, e.reason);
@@ -14509,77 +14522,123 @@ static id diNPSettingsHook(id self, SEL _cmd, NSString *identifier, id size) {
     }
 }
 
-/* ---- ③ 播放器视图按宽高比重排 ---- */
-static void diNPLayoutPlayer(UIView *v, BOOL four) {
+/* ---- ③ 三套布局: 4x1 / 3x2 / 4x2 ----
+   参考包把每个尺寸拆成 封面(边长/中心x,y) + 文案(宽/中心x,y) +
+   按键(宽/中心y) + 音量 四组参数, 这里照同一模型逐档写死像素,
+   只动这四块, 系统自己的其它装饰一律不碰。 */
+static UIView *diNPFindView(UIView *root, NSString *frag, NSInteger depth) {
+    if (!root || depth > 5) return nil;
+    for (UIView *s in root.subviews) {
+        if ([NSStringFromClass(s.class) containsString:frag]) return s;
+        UIView *r = diNPFindView(s, frag, depth + 1);
+        if (r) return r;
+    }
+    return nil;
+}
+static BOOL diNPFrame(UIView *v, CGRect f) {
+    if (!v) return NO;
+    if (CGRectEqualToRect(v.frame, f)) return NO;
+    v.frame = f;
+    return YES;
+}
+/* 文案视图靠 preferredMaxLayoutWidth 决定换行宽度, 只设 frame 不一定重排 */
+static void diNPWrapWidth(UIView *v, CGFloat w) {
+    SEL sel = NSSelectorFromString(@"setPreferredMaxLayoutWidth:");
+    if (!v || w <= 1 || ![v respondsToSelector:sel]) return;
+    @try { ((void (*)(id, SEL, CGFloat))objc_msgSend)(v, sel, w); } @catch (...) {}
+}
+static NSString *diNPClasses(UIView *v) {
+    NSMutableArray *a = [NSMutableArray array];
+    for (UIView *s in v.subviews) [a addObject:NSStringFromClass(s.class)];
+    return [a componentsJoinedByString:@","];
+}
+
+/* kind: 1=4x1  2=3x2  3=4x2 */
+static void diNPLayoutKind(UIView *v, NSInteger kind) {
     CGRect b = v.bounds;
-    CGFloat pad = 12.0;
-    UIView *art = nil, *transport = nil, *volume = nil, *header = nil, *time = nil;
-    NSMutableArray<UIView *> *labels = [NSMutableArray array];
-    for (UIView *s in v.subviews) {
-        if (s.hidden || s.alpha < 0.05) continue;
-        NSString *cn = NSStringFromClass(s.class);
-        if (!art && [cn containsString:@"Artwork"]) art = s;
-        else if ([cn containsString:@"Transport"]) transport = s;
-        else if ([cn containsString:@"Volume"]) volume = s;
-        else if ([cn containsString:@"Header"]) header = s;
-        else if ([cn containsString:@"TimeControls"]) time = s;
-        else if ([cn containsString:@"Label"] || [cn containsString:@"Metadata"]) [labels addObject:s];
-    }
-    /* 两种布局都隐藏 音量/时间/头部(4x1 放不下, 3x2 简化版同) */
-    for (UIView *h in [NSArray arrayWithObjects:volume, time, header, nil])
-        if (h && !h.hidden) h.hidden = YES;
-    BOOL changed = NO;
-    if (four) {
-        /* 4x1: 专辑左(正方形占满高), 文案中上, 按键右下 */
-        CGFloat side = b.size.height - 2 * pad;
-        if (art && side > 20) {
-            CGRect f = CGRectMake(pad, pad, side, side);
-            if (!CGRectEqualToRect(f, art.frame)) { art.frame = f; changed = YES; }
-        }
-        CGFloat tx = transport ? MAX(b.size.width * 0.55, b.size.width - side * 1.6) : b.size.width;
-        CGFloat tw = b.size.width - tx - pad;
-        if (transport && tw > 40) {
-            CGFloat th = MIN(side * 0.52, b.size.height * 0.5);
-            CGRect f = CGRectMake(tx, b.size.height - th - pad, tw, MAX(28.0, th));
-            if (!CGRectEqualToRect(f, transport.frame)) { transport.frame = f; changed = YES; }
-        }
-        CGFloat lx = art ? CGRectGetMaxX(art.frame) + 12 : pad;
-        CGFloat lw = (transport ? tx - 12 : b.size.width - pad) - lx;
-        if (lw > 30) {
-            CGRect lf = CGRectMake(lx, pad + 2, lw, MAX(20.0, b.size.height * 0.45));
-            for (UIView *l in labels) {
-                CGRect f = l.frame;
-                f.origin.x = lf.origin.x; f.origin.y = lf.origin.y; f.size.width = lf.size.width;
-                if (!CGRectEqualToRect(f, l.frame)) { l.frame = f; changed = YES; }
-            }
-        }
+    CGFloat W = b.size.width, H = b.size.height;
+    UIView *art   = diNPFindView(v, @"Artwork", 0);
+    UIView *meta  = diNPFindView(v, @"LabelView", 0);
+    if (!meta) meta = diNPFindView(v, @"Metadata", 0);
+    UIView *trans = diNPFindView(v, @"Transport", 0);
+    UIView *vol   = diNPFindView(v, @"Volume", 0);
+    UIView *time  = diNPFindView(v, @"TimeControls", 0);
+    UIView *head  = diNPFindView(v, @"Header", 0);
+    UIView *route = diNPFindView(v, @"Route", 0);
+    /* 头部若装着封面/文案/按键, 就绝不收起(收起等于整块消失) */
+    BOOL headHolds = NO;
+    for (UIView *k in @[art ?: v, meta ?: v, trans ?: v])
+        if (head && k != v && [k isDescendantOfView:head]) headHolds = YES;
+    if (head && !headHolds) head.hidden = YES;
+    if (time) time.hidden = YES;
+    if (route && !headHolds) route.hidden = YES;
+    if (art) art.hidden = NO;
+
+    CGFloat pad = 10.0;
+    CGRect fa = CGRectZero, fm = CGRectZero, ft = CGRectZero, fv = CGRectZero;
+    BOOL showVol = NO;
+    if (kind == 1) {
+        /* 4x1 一行: 正方形封面 | 歌名歌手 | 三个按键 */
+        pad = 8.0;
+        CGFloat side = MAX(40.0, MIN(H - 2 * pad, W * 0.20));
+        fa = CGRectMake(pad, (H - side) / 2.0, side, side);
+        CGFloat tw = MIN(MAX(W * 0.40, 132.0), 196.0);
+        CGFloat th = MIN(52.0, MAX(32.0, H - 2 * pad));
+        ft = CGRectMake(W - pad - tw, (H - th) / 2.0, tw, th);
+        CGFloat mx = CGRectGetMaxX(fa) + 12.0;
+        fm = CGRectMake(mx, 6.0, MAX(48.0, CGRectGetMinX(ft) - 10.0 - mx), MAX(24.0, H - 12.0));
+    } else if (kind == 2) {
+        /* 3x2: 封面居左(近方), 文案右上, 按键右下, 音量条贴底 */
+        CGFloat side = MIN(H * 0.58, W * 0.42);
+        fa = CGRectMake(pad, (H - side) / 2.0, side, side);
+        CGFloat mx = CGRectGetMaxX(fa) + 12.0;
+        fm = CGRectMake(mx, 12.0, MAX(64.0, W - mx - pad), 46.0);
+        BOOL hasVol = (vol != nil);
+        CGFloat volH = hasVol ? 24.0 : 0.0;
+        CGFloat transH = 50.0;
+        CGFloat volY = H - 12.0 - volH;
+        ft = CGRectMake(mx - 4.0, volY - 6.0 - transH, MAX(76.0, W - (mx - 4.0) - pad), transH);
+        fv = CGRectMake(mx, volY, MAX(64.0, W - mx - pad), volH);
+        showVol = hasVol;
     } else {
-        /* 3x2: 专辑左下大块, 文案右上, 按键右下 */
-        CGFloat side = MIN(b.size.height * 0.62, b.size.width * 0.45);
-        if (art && side > 20) {
-            CGRect f = CGRectMake(pad, b.size.height - side - pad, side, side);
-            if (!CGRectEqualToRect(f, art.frame)) { art.frame = f; changed = YES; }
-        }
-        CGFloat rx = art ? CGRectGetMaxX(art.frame) + 12 : b.size.width * 0.45;
-        CGFloat rw = b.size.width - rx - pad;
-        if (transport && rw > 40) {
-            CGFloat th = b.size.height * 0.38;
-            CGRect f = CGRectMake(rx, b.size.height - th - pad, rw, MAX(28.0, th));
-            if (!CGRectEqualToRect(f, transport.frame)) { transport.frame = f; changed = YES; }
-        }
-        if (rw > 30) {
-            CGRect lf = CGRectMake(rx, pad + 2, rw, MAX(20.0, b.size.height * 0.4));
-            for (UIView *l in labels) {
-                CGRect f = l.frame;
-                f.origin.x = lf.origin.x; f.origin.y = lf.origin.y; f.size.width = lf.size.width;
-                if (!CGRectEqualToRect(f, l.frame)) { l.frame = f; changed = YES; }
-            }
-        }
+        /* 4x2: 大封面 + 文案 + 按键 + 音量条(内容最全的一档) */
+        CGFloat side = MIN(H * 0.72, W * 0.40);
+        fa = CGRectMake(12.0, (H - side) / 2.0, side, side);
+        CGFloat mx = CGRectGetMaxX(fa) + 16.0;
+        CGFloat mw = MAX(90.0, W - mx - 14.0);
+        BOOL hasVol = (vol != nil);
+        fm = CGRectMake(mx, 16.0, mw, 48.0);
+        ft = CGRectMake(mx, 72.0, mw, 52.0);
+        fv = CGRectMake(mx, hasVol ? (H - 14.0 - 26.0) : 0.0, hasVol ? mw : 0.0, 26.0);
+        showVol = hasVol;
     }
-    static BOOL logged;
-    if (changed && !logged) {
-        logged = YES;
-        RLog(@"[播放器] 布局已应用(%@) 宿主 %.0fx%.0f", four ? @"4x1" : @"3x2", b.size.width, b.size.height);
+
+    BOOL chg = NO;
+    chg |= diNPFrame(art, fa);
+    if (meta) { chg |= diNPFrame(meta, fm); diNPWrapWidth(meta, fm.size.width - 4.0); }
+    chg |= diNPFrame(trans, ft);
+    if (vol) {
+        vol.hidden = !showVol;
+        if (showVol) chg |= diNPFrame(vol, fv);
+    }
+
+    static NSInteger loggedKind = -1;
+    static NSInteger missCount = 0;
+    if (loggedKind != kind) {
+        loggedKind = kind;
+        RLog(@"[播放器] 布局%ld 容器%.0fx%.0f | 封面[%@ %.0fx%.0f] 文案[%@ %.0fx%.0f] 按键[%@ %.0fx%.0f] 音量[%@]%@",
+             (long)kind, W, H,
+             art ? NSStringFromClass(art.class) : @"无", fa.size.width, fa.size.height,
+             meta ? NSStringFromClass(meta.class) : @"无", fm.size.width, fm.size.height,
+             trans ? NSStringFromClass(trans.class) : @"无", ft.size.width, ft.size.height,
+             vol ? (showVol ? @"显" : @"藏") : @"无",
+             chg ? @"" : @"(尺寸未变)");
+    }
+    /* 找不到某一块时把顶层子视图类名列一次, 方便下一版对着补 */
+    if ((!art || !meta || !trans) && missCount < 3) {
+        missCount++;
+        RLog(@"[播放器] 布局%ld 缺件(封面%@ 文案%@ 按键%@), 顶层子视图: %@",
+             (long)kind, art ? @"有" : @"无", meta ? @"有" : @"无", trans ? @"有" : @"无", diNPClasses(v));
     }
 }
 static IMP gNPOrigNPLayout = NULL;
@@ -14588,12 +14647,18 @@ static void diNPLayoutHook(UIView *self, SEL _cmd) {
     @try {
         if (!diNPOn() || !diNPHasCC()) return;
         CGRect b = self.bounds;
-        if (b.size.width < 60 || b.size.height < 30) return;
-        CGFloat ratio = b.size.width / b.size.height;
-        BOOL four = (ratio >= 3.2 && ratio <= 5.5);   /* 4x1 */
-        BOOL three = (ratio >= 1.3 && ratio <= 1.8);  /* 3x2 */
-        if (!four && !three) return;
-        diNPLayoutPlayer(self, four);
+        CGFloat W = b.size.width, H = b.size.height;
+        if (W < 80.0 || H < 30.0) return;
+        CGFloat ratio = W / H;
+        NSInteger kind = 0;
+        if (H <= 100.0 && ratio >= 2.8) kind = 1;                         /* 4x1 */
+        else if (H >= 110.0 && ratio >= 1.28 && ratio <= 1.78) kind = 2;  /* 3x2 */
+        else if (H >= 110.0 && ratio >= 1.85 && ratio <= 2.40) kind = 3;  /* 4x2 */
+        if (!kind) return;
+        if (kind == 1 && !diNPAllow4x1()) return;
+        if (kind == 2 && !diNPAllow3x2()) return;
+        if (kind == 3 && !diNPAllow4x2()) return;
+        diNPLayoutKind(self, kind);
     } @catch (...) {}
 }
 

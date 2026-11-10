@@ -22,7 +22,7 @@
 
 static NSString *const kDomain = @"com.abgg332.driftisland";
 /* 2.6.25: 设置页底部显示的版本号 */
-static NSString *const DI_VERSION_STR = @"2.9.50";
+static NSString *const DI_VERSION_STR = @"2.9.51";
 /* 2.6.10: 专辑光晕遮罩 —— 与 Tweak 侧 DIAlbumMask.h 保持一致 */
 static NSString *const kDIAlbumMaskKey = @"diAlbumMaskAsset";
 static NSString *const kDIMaskRoot = @"/var/mobile/灵动岛/遮罩素材";
@@ -5606,10 +5606,12 @@ static void diwKillByComm(const char *comm) {
 - (NSArray *)buildSpecifiers {
     NSMutableArray *specs = [NSMutableArray array];
     [specs addObject:[self groupSpec:@"播放器"
-        footer:@"自定义控制中心原生播放器的尺寸与布局。开启后在控制中心编辑模式里, 把播放器模块拖成 4×1 或 3×2; 仅 iOS18 控制中心生效。"]];
+        footer:@"自定义控制中心原生播放器。开启后进控制中心编辑模式, 把播放器模块拖成 4×1 / 3×2 / 4×2, 模块内部会按该尺寸重排封面、歌名歌手、播放按键与音量。仅 iOS18 控制中心生效。"]];
     [specs addObject:[self switchSpec:@"总开关" key:@"playerOn" def:@NO]];
-    [specs addObject:[self segmentedSpec:@"布局" key:@"playerSize"
-        titles:@[@"4×1", @"3×2"] values:@[@"4x1", @"3x2"] def:@"4x1"]];
+    [specs addObject:[self groupSpec:@"可用尺寸" footer:@"4×1 与 3×2 是原生没有的格子, 打开后才能在编辑模式里拖出来; 4×2 系统原生就有, 这里的开关只决定要不要用我们的排版覆盖它。"]];
+    [specs addObject:[self switchSpec:@"允许 4×1" key:@"player4x1" def:@YES]];
+    [specs addObject:[self switchSpec:@"允许 3×2" key:@"player3x2" def:@YES]];
+    [specs addObject:[self switchSpec:@"4×2 重排布局" key:@"player4x2" def:@YES]];
     [specs addObject:[self groupSpec:nil footer:nil]];
     [specs addObject:[self buttonSpec:@"注销生效" action:@selector(doRespring:)]];
     return specs;
