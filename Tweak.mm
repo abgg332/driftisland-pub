@@ -62,7 +62,7 @@ static double expandTextY = DI_EXP_TEXT_BASE_Y;   // 上下偏移(pt, 下为正,
 static double expandTextScale = 100.0; // 文字大小(%, 100=原样)
 /* 2.8.86: 构建戳 —— 之前横幅打的是 SpringBoard 自己的 CFBundleShortVersionString(恒 1.0),
    日志里根本看不出装的是哪一版。所有诊断行都带这个戳, 下轮日志一眼定位。 */
-#define DI_BUILD_VER @"2.9.59"
+#define DI_BUILD_VER @"2.9.60"
 static BOOL gRecordingActive = NO; // 保留: 岛素材总闸条件
 static NSString *diElementId(UIView *host);
 static BOOL diMiniMusicActive(UIView *host); // 2.6.3: 前置(遮罩层使用)
@@ -3934,29 +3934,14 @@ static BOOL diApplyMaskToCover(UIView *cover, UIImage *shape) {
             BOOL expNow = (hs.height >= 120 && hs.height <= 300
                            && hs.width >= 280 && hs.width <= 440);
             diPublishIslandState(hs, miniNow, expNow);
-
-            /* ===== 2.9.47: iOS 17 的 SpringBoard 侧彻底回到 2.8.40 的状态 =====
-               2.8.40 在 17 上音乐岛判据本来就不成立(gate 恒关), 小岛显示的是系统
-               原生专辑 —— 用户确认那才是"完全没问题"的画面。9.34~9.46 为了让它
-               "能画"而加的自绘玻璃/夹紧/几何兜底, 在 17 上只会造成三种症状:
-                 ① 66pt 的跨进程封面被按小岛高度夹紧 → 变形;
-                 ② 尺寸闸门反复拆装玻璃 → 闪回系统原图 / 两份叠在一起;
-                 ③ 取图失败时父容器被裁成遮罩形状 → 一块粉色模糊斑。
-               所以 17 上除了上面的形态播报(给 MRU 判收缩态)之外一律让位:
-               不画玻璃、不挂系统蒙版、不动系统专辑层, 小岛交还系统自己显示。
-               展开态依旧由 MRU 负责(它自己那套没有改动), 横条触摸判定也不在这里。
-               16 完全不进这条分支, 8.40 之后为 16 做的修复一行没删。 */
-            if (_glassOn || _targets.count || !self.hidden || self.hiddenViews.count) {
-                static CFAbsoluteTime sY17T;
-                if (CFAbsoluteTimeGetCurrent() - sY17T > 3.0) {
-                    sY17T = CFAbsoluteTimeGetCurrent();
-                    DLog(@"遮罩[17]: 回到 2.8.40(不自绘/不挂蒙版) 宿主=%.0fx%.0f 玻璃=%d 蒙版=%lu",
-                         host.bounds.size.width, host.bounds.size.height,
-                         (int)_glassOn, (unsigned long)_targets.count);
-                }
-                [self diTeardown];
-            }
-            return;
+            /* ===== 2.9.60: 撤掉 2.9.47 的"17 上整棵让位" =====
+               用户定案: 2.8.40 只有 SpringBoard 侧的小岛遮罩, 怎么切换都正常;
+               后面为了加"展开遮罩"(MRU 自绘)一步步把 SB 侧撤掉(2.8.84 展开退出、
+               2.9.47 在 17 上整个退出), 17 的小岛遮罩被迫改由 MRU 画 —— 而 MRU 里
+               躺着两颗头像(23 收缩 + 66 展开残留), 分不清收缩/展开, 这才有了
+               "没遮罩/变大/错位"轮番出现。现在小岛遮罩恢复走 2.8.40 这条 SB 路
+               (下面的 17 兜底放行是 2.9.40 就加好的); 展开态由两道本地闸门
+               (>=180x46 / >70 高)加"MRU 确认过的展开信号"交给 MRU。 */
         }
 
         /* ===== 2.9.41: 展开态一律听 MRU 的 =====
@@ -13632,7 +13617,10 @@ static void diActivityApply(UIView *artwork) {
     else if (formNow == 1) sExpSince = 0;
     BOOL expConfirmed = (formNow == 0 && sExpSince > 0 && nowTs - sExpSince >= 1.2);
     if (ios17)
-        diMruWriteExpandState(sized && !compact, artwork.bounds.size);
+        /* 2.9.60: 只有"确认过的展开"才向 SB 报展开 —— 切歌瞬间 66 残留被判
+           非收缩(文件被写成展开)但还没过确认期, 这时若报 YES, SB 侧刚恢复的
+           小岛玻璃会被 2.9.41 的退场 + 1.5 秒迟滞压住 1~2 秒(表现为切歌没遮罩)。 */
+        diMruWriteExpandState(sized && !compact && expConfirmed, artwork.bounds.size);
     else
         diMruWriteExpandState(sized && artwork.bounds.size.width >= 38.0 && artwork.bounds.size.height >= 38.0,
                               artwork.bounds.size);
