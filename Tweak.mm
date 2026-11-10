@@ -62,7 +62,7 @@ static double expandTextY = DI_EXP_TEXT_BASE_Y;   // 上下偏移(pt, 下为正,
 static double expandTextScale = 100.0; // 文字大小(%, 100=原样)
 /* 2.8.86: 构建戳 —— 之前横幅打的是 SpringBoard 自己的 CFBundleShortVersionString(恒 1.0),
    日志里根本看不出装的是哪一版。所有诊断行都带这个戳, 下轮日志一眼定位。 */
-#define DI_BUILD_VER @"2.9.74"
+#define DI_BUILD_VER @"2.9.75"
 static BOOL gRecordingActive = NO; // 保留: 岛素材总闸条件
 static NSString *diElementId(UIView *host);
 static BOOL diMiniMusicActive(UIView *host); // 2.6.3: 前置(遮罩层使用)
@@ -3200,6 +3200,9 @@ static UIImage *diInvertMaskImage(UIImage *m);
    照它画会把小圆铺到偏右 30pt 处(用户: "小岛专辑从其他地方显示再显示正常")。
    小岛态只接受"尺寸合理且在宿主内"的候选, 其余一律沿用这个槽位。 */
 @property (nonatomic, assign) CGRect miniCoverRect;
+/* 2.9.75: 小岛"稳定态"的宿主高度 —— 过渡帧(岛体还在动画)里算默认槽位时用它,
+   不再拿当前那个半大的高度算, 否则圆会先摆在岛的下方再跳回原位。 */
+@property (nonatomic, assign) CGFloat miniSlotHostH;
 @property (nonatomic, assign) CGRect cacheSqRect;
 @property (nonatomic, assign) CGFloat cacheBW, cacheBH;
 @property (nonatomic, assign) BOOL rotInstalled;    /* 旋转 CA 动画已装 */
@@ -4704,15 +4707,23 @@ static BOOL diApplyMaskToCover(UIView *cover, UIImage *shape) {
             BOOL slotSettled = (!sizeChanged && self.stableFrm >= 2);
             if (sane && slotSettled) {
                 self.miniCoverRect = coverRect;
+                self.miniSlotHostH = bs.height;      /* 2.9.75: 记下稳定态高度 */
             } else if (!CGRectIsEmpty(self.miniCoverRect)) {
                 coverRect = self.miniCoverRect;
                 self.cacheCoverRect = coverRect;
             } else {
                 CGRect keep = self.miniCoverRect;
                 if (CGRectIsEmpty(keep)) {
-                    CGFloat d = MIN(bs.height - 10.0, 30.0);
+                    /* 2.9.75: 冷启动/注销后第一次收缩时还没有确认过的槽位 ——
+                       以前用**当前**宿主高度算(收缩半途 h=51/45/40 各算一次),
+                       圆就跟着一帧一帧往下挪, 用户看到"小岛先偏移一下才正常"。
+                       现在: 宿主还明显高于小岛(>42)就用上次学到的稳定高度,
+                       没学到就用 37(实测小岛高度), 全程只算一次, 不再抖动。 */
+                    CGFloat hh = bs.height;
+                    if (hh > 42.0) hh = (self.miniSlotHostH > 20.0) ? self.miniSlotHostH : 37.0;
+                    CGFloat d = MIN(hh - 10.0, 30.0);
                     if (d < 14.0) d = 14.0;
-                    keep = CGRectMake(8.0, (bs.height - d) * 0.5, d, d);
+                    keep = CGRectMake(8.0, (hh - d) * 0.5, d, d);
                 }
                 static CFAbsoluteTime sKeepT;
                 if (CFAbsoluteTimeGetCurrent() - sKeepT > 3.0) {
@@ -4911,11 +4922,19 @@ static BOOL diApplyMaskToCover(UIView *cover, UIImage *shape) {
                 CGFloat prog = (bs.width - 208.0) / (400.0 - 208.0);
                 prog = MIN(MAX(prog, 0.0), 1.0);
                 CGFloat mside = 25.3 + (66.0 - 25.3) * prog;
-                /* 垂直锚点: 小岛槽位 y=7, 展开封面 y≈7~13 —— 都贴岛顶。
-                   槽位回退分支会把 y 算成"垂直居中"((h-d)/2), 宿主一变高就跑到
-                   中间去, 这里夹到顶部。 */
-                CGFloat my = MIN(glassRect.origin.y, 14.0);
-                glassRect = CGRectMake(glassRect.origin.x, my, mside, mside);
+                /* 2.9.75: 左上角用**确定值**插值, 不再跟 coverRect 走。
+                   coverRect 是系统门户这一帧的实时 frame, 变形过程中它会轻微漂移
+                   (405 视频: 每次切换完小岛的圆都比最终位置偏 3~7px 再归位)。
+                   实测两端: 小岛槽位 (8,7) / 展开封面 (17,26), 中间线性过渡,
+                   全程只有一条平滑轨迹, 落定即原位。 */
+                CGFloat sx = 8.0, sy = 7.0;
+                if (!CGRectIsEmpty(self.miniCoverRect)) {
+                    sx = self.miniCoverRect.origin.x;
+                    sy = self.miniCoverRect.origin.y;
+                }
+                CGFloat mx = sx + (17.0 - sx) * prog;
+                CGFloat my = sy + (26.0 - sy) * prog;
+                glassRect = CGRectMake(mx, my, mside, mside);
             }
             [self diPaintGlassAt:glassRect over:coverV art:gSharedArt];
             /* 2.8.15: 系统布局会周期性把岛内容分支 bringSubviewToFront(动画层对抗旧行为),
@@ -14178,15 +14197,32 @@ static void diActivityApply(UIView *artwork) {
        "多出来的蒙版"), 也就不存在"从别处飞过来"。 */
     CGFloat hostH74 = ios17 ? diActivityHostHeight(artwork) : 0;
     BOOL mid74 = (ios17 && !smallArt && hostH74 > 48.0 && hostH74 < 172.0);
-    BOOL grow74 = NO;
+    /* ===== 2.9.75: 方向按"这个头像自己"的宿主高度算 =====
+       2.9.74 用的是进程级 static, 小头像/大头像两个实例互相覆盖, 方向经常判反
+       (展开被判成收起 → 玻璃被淡成 0 → 岛上空白)。改成每个头像各记一份。 */
+    BOOL grow74 = NO, shrink74 = NO;
     {
-        static CGFloat sPrevH74 = 0;
-        if (mid74) grow74 = (sPrevH74 > 1.0 && hostH74 > sPrevH74 + 4.0);
-        sPrevH74 = hostH74;
+        static NSMapTable *sPrevHMap;
+        if (!sPrevHMap) sPrevHMap = [NSMapTable mapTableWithKeyOptions:NSPointerFunctionsWeakMemory
+                                                         valueOptions:NSPointerFunctionsStrongMemory];
+        NSNumber *pv = [sPrevHMap objectForKey:artwork];
+        CGFloat prevH = pv ? pv.doubleValue : 0;
+        if (hostH74 > 1.0) {
+            if (prevH > 1.0) {
+                grow74   = (hostH74 > prevH + 2.0);
+                shrink74 = (hostH74 < prevH - 2.0);
+            }
+            [sPrevHMap setObject:@(hostH74) forKey:artwork];
+        }
     }
     /* 小岛那颗(23)也要跟着交班: 宿主在过渡区时它的 alpha 从 1 降到 0 ——
        两颗圆交错淡入淡出, 就不会出现"大岛里还挂着一颗小的在转"。 */
     BOOL midZone74 = (ios17 && hostH74 > 48.0 && hostH74 < 172.0);
+    /* ===== 2.9.75: 宿主已经长到展开尺寸时, 不管文件还写着什么, 都按展开处理 =====
+       405 视频逐帧: 岛已经撑满、内容却在模糊里空着(左上角一块黑) 0.1 秒。
+       那一刻 compact 还是上一拍"小岛"的旧值, 这颗 66 的玻璃被当作残留淡成 0;
+       等文件翻成展开才重新显现 —— 用户看到的就是"展开先空白再正常"。 */
+    if (ios17 && !smallArt && hostH74 >= 172.0) compact = NO;
     if (mid74) {
         compact = !grow74;      /* 变大半途当展开(写 YES, SB 闭嘴), 变小半途当收缩 */
         keepBig = grow74;
@@ -14238,10 +14274,20 @@ static void diActivityApply(UIView *artwork) {
                直接拆又会还原系统层(那块按展开尺寸摆, "大的在下面")。
                现在折中: 不拆、不还原, 只按宿主高度把 alpha 从 1 淡到 0,
                岛缩到小胶囊时这颗大玻璃已经看不见了, 剩下的交给小岛那颗。 */
-            if (state && state.glass && ios17 && (mid74 || state.wasMid)) {
+            if (state && state.glass && ios17) {
+                /* ===== 2.9.75: 只有"确实在收缩"才淡; 展开方向恒全显 =====
+                   405 逐帧: 收起末端岛只有 40 高, 这颗 66 却还半透明挂着,
+                   和小岛那颗叠在一起 —— 用户说的"小岛偏移一点才正常"。
+                   现在: 宿主人还在长大(展开起手) → alpha 保持 1, 直接交给 MRU;
+                   只有宿主在往小缩时才按高度淡出, 而且窗口收紧到 150→70,
+                   胶囊变小之前就彻底看不见。 ---- */
                 CGFloat t = 0.0;
-                if (mid74) t = (hostH74 - 48.0) / (172.0 - 48.0);
-                t = MIN(MAX(t, 0.0), 1.0);
+                if (mid74 && !grow74) {
+                    t = (hostH74 - 70.0) / (150.0 - 70.0);
+                    t = MIN(MAX(t, 0.0), 1.0);
+                } else if (mid74 && grow74) {
+                    t = 1.0;
+                }
                 if (fabs(state.glass.alpha - t) > 0.02) state.glass.alpha = t;
                 if (state.systemLayer && !state.systemLayer.hidden) state.systemLayer.hidden = YES;
                 if (state.shadow && !state.shadow.hidden) state.shadow.hidden = YES;
@@ -14462,15 +14508,20 @@ static void diActivityApply(UIView *artwork) {
     /* ===== 2.9.74: 半途区按宿主高度淡入 —— 小岛尺寸时不可见, 长满了才全显 =====
        这样"展开"看到的是同一颗圆在卡片里渐渐长出来, 而不是一颗 66 的专辑
        先贴在还很小的卡片上(视频里那块"大到溢出左边"的模糊块)。 */
-    if (midZone74) {
-        CGFloat t = (hostH74 - 48.0) / (172.0 - 48.0);
+    /* ===== 2.9.75: 展开方向一律全显, 只有收起方向才淡出 =====
+       405 逐帧: 展开头两帧岛已经撑满, 左上角却是一块空白 —— 2.9.74 在这里把
+       66 的玻璃按宿主高度从 0 淡上来, 宿主还没长大的那几帧 alpha≈0, 视频里就是
+       "展开先空白再出现专辑"。展开方向不需要淡: 系统自己会给整块内容做交叉淡入,
+       玻璃跟着走就是正常的; 只有收起时 66 会留在小胶囊里当第二层, 那才需要淡掉。
+       小岛那颗(23)任何时候都不淡 —— 它就是小岛唯一可见的专辑, 淡了就成了"偏移/发灰"。 */
+    if (midZone74 && !smallArt && shrink74) {
+        CGFloat t = (hostH74 - 70.0) / (150.0 - 70.0);
         t = MIN(MAX(t, 0.0), 1.0);
-        CGFloat a = smallArt ? (1.0 - t) : t;
-        if (fabs(state.glass.alpha - a) > 0.02) state.glass.alpha = a;
-        if (!smallArt) state.wasMid = YES;
+        if (fabs(state.glass.alpha - t) > 0.02) state.glass.alpha = t;
+        state.wasMid = YES;
     } else {
         if (state.glass.alpha < 0.999) state.glass.alpha = 1.0;
-        if (!smallArt) state.wasMid = NO;
+        if (!midZone74) state.wasMid = NO;
     }
     diMruReport(@"apply", [NSString stringWithFormat:@"%@ 旋转=%@", NSStringFromCGRect(box),
         rotOn ? [NSString stringWithFormat:@"%.0f°/s", speed] : @"关"]);
