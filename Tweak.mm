@@ -14597,7 +14597,7 @@ static void diNPLayoutKind(UIView *v, NSInteger kind) {
         CGFloat volH = hasVol ? 24.0 : 0.0;
         CGFloat transH = 50.0;
         CGFloat volY = H - 12.0 - volH;
-        ft = CGRectMake(mx - 4.0, volY - 6.0 - transH, MAX(76.0, W - (mx - 4.0) - pad), transH);
+        ft = CGRectMake(mx, volY - 6.0 - transH, MAX(76.0, W - mx - pad), transH);
         fv = CGRectMake(mx, volY, MAX(64.0, W - mx - pad), volH);
         showVol = hasVol;
     } else {
