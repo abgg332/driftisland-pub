@@ -14184,6 +14184,9 @@ static void diActivityApply(UIView *artwork) {
         if (mid74) grow74 = (sPrevH74 > 1.0 && hostH74 > sPrevH74 + 4.0);
         sPrevH74 = hostH74;
     }
+    /* 小岛那颗(23)也要跟着交班: 宿主在过渡区时它的 alpha 从 1 降到 0 ——
+       两颗圆交错淡入淡出, 就不会出现"大岛里还挂着一颗小的在转"。 */
+    BOOL midZone74 = (ios17 && hostH74 > 48.0 && hostH74 < 172.0);
     if (mid74) {
         compact = !grow74;      /* 变大半途当展开(写 YES, SB 闭嘴), 变小半途当收缩 */
         keepBig = grow74;
@@ -14459,14 +14462,15 @@ static void diActivityApply(UIView *artwork) {
     /* ===== 2.9.74: 半途区按宿主高度淡入 —— 小岛尺寸时不可见, 长满了才全显 =====
        这样"展开"看到的是同一颗圆在卡片里渐渐长出来, 而不是一颗 66 的专辑
        先贴在还很小的卡片上(视频里那块"大到溢出左边"的模糊块)。 */
-    if (mid74) {
+    if (midZone74) {
         CGFloat t = (hostH74 - 48.0) / (172.0 - 48.0);
         t = MIN(MAX(t, 0.0), 1.0);
-        if (fabs(state.glass.alpha - t) > 0.02) state.glass.alpha = t;
-        state.wasMid = YES;
+        CGFloat a = smallArt ? (1.0 - t) : t;
+        if (fabs(state.glass.alpha - a) > 0.02) state.glass.alpha = a;
+        if (!smallArt) state.wasMid = YES;
     } else {
         if (state.glass.alpha < 0.999) state.glass.alpha = 1.0;
-        state.wasMid = NO;
+        if (!smallArt) state.wasMid = NO;
     }
     diMruReport(@"apply", [NSString stringWithFormat:@"%@ 旋转=%@", NSStringFromCGRect(box),
         rotOn ? [NSString stringWithFormat:@"%.0f°/s", speed] : @"关"]);
