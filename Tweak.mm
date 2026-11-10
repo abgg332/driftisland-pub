@@ -62,7 +62,7 @@ static double expandTextY = DI_EXP_TEXT_BASE_Y;   // 上下偏移(pt, 下为正,
 static double expandTextScale = 100.0; // 文字大小(%, 100=原样)
 /* 2.8.86: 构建戳 —— 之前横幅打的是 SpringBoard 自己的 CFBundleShortVersionString(恒 1.0),
    日志里根本看不出装的是哪一版。所有诊断行都带这个戳, 下轮日志一眼定位。 */
-#define DI_BUILD_VER @"2.9.51"
+#define DI_BUILD_VER @"2.9.52"
 static BOOL gRecordingActive = NO; // 保留: 岛素材总闸条件
 static NSString *diElementId(UIView *host);
 static BOOL diMiniMusicActive(UIView *host); // 2.6.3: 前置(遮罩层使用)
@@ -14442,60 +14442,90 @@ static void diMruTailInstall(void) {
       时间控件、头部一律收起, 只留封面+文案+按键(+4x2 音量))。
    仅 iOS18(存在 CCUIModuleInstance)生效; 16/17 一个 hook 都不装。 */
 static BOOL diNPOn(void) { return pBool(@"playerOn", NO); }
-/* 尺寸放行开关(在控制中心编辑模式里能拖成哪些格子) */
-static BOOL diNPAllow4x1(void) { return pBool(@"player4x1", YES); }
-static BOOL diNPAllow3x2(void) { return pBool(@"player3x2", YES); }
-/* 4x2 是系统原生就有的尺寸, 这个开关只决定要不要用我们的排版盖过去 */
-static BOOL diNPAllow4x2(void) { return pBool(@"player4x2", YES); }
-/* 2.9.50: 硬闸门 —— 必须 iOS18 才允许碰播放器这套。
-   2.9.49 只靠"类是否存在"软判据, 结果 16 上 dlopen/dlsym/hook 依然会跑,
-   用户直接进安全模式循环。现在版本不对就一个 hook 都不装, 加载路径与
-   2.9.48 完全一致。 */
-static BOOL diNPIsOS18(void) {
-    static BOOL v; static dispatch_once_t once;
+/* 选中的尺寸(参考包同款: 设置里选一档, 模块自己变成这个尺寸) */
+static NSString *diNPSizeName(void) {
+    NSString *s = pString(@"playerSize");
+    if ([s isEqualToString:@"4x1"] || [s isEqualToString:@"4x2"]) return s;
+    return @"3x2";
+}
+static CGSize diNPGrid(void) {
+    NSString *s = diNPSizeName();
+    if ([s isEqualToString:@"4x1"]) return CGSizeMake(4, 1);
+    if ([s isEqualToString:@"4x2"]) return CGSizeMake(4, 2);
+    return CGSizeMake(3, 2);
+}
+/* 2.9.52: 闸门从"必须 iOS18"放宽到"iOS16 以上" —— 参考包在 16 上同样能改
+   控制中心播放器, 而用户主用机就是 16。C 函数 hook(dlopen + MSHookFunction)
+   仍然只在 18+ 做(2.9.49 在 16 上一进安全模式就是那一步); 16/17 只做 ObjC
+   类 hook, 且全部推迟到 SpringBoard 起来之后、只在总开关打开时才装。 */
+static NSInteger diNPOSMajor(void) {
+    static NSInteger v; static dispatch_once_t once;
     dispatch_once(&once, ^{
-        @try { v = [NSProcessInfo.processInfo operatingSystemVersion].majorVersion >= 18; }
-        @catch (...) { v = NO; }
+        @try { v = [NSProcessInfo.processInfo operatingSystemVersion].majorVersion; }
+        @catch (...) { v = 0; }
     });
     return v;
 }
+static BOOL diNPIsIOS16Up(void) { return diNPOSMajor() >= 16; }
+static BOOL diNPIsIOS18Up(void) { return diNPOSMajor() >= 18; }
 static BOOL diNPHasCC(void) {
-    return diNPIsOS18() && NSClassFromString(@"CCUIModuleInstance") != nil;
+    if (!diNPIsIOS16Up()) return NO;
+    static BOOL v; static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        @try { v = NSClassFromString(@"CCUIModuleInstance") != nil; } @catch (...) { v = NO; }
+    });
+    return v;
 }
-static NSString *const diNPModuleId = @"com.apple.mediaremote.controlcenter.nowplaying";
+/* 播放器模块 id: com.apple.mediaremote.controlcenter.nowplaying
+   2.9.52: 不同系统版本/机型上这个模块 id 的写法不完全一样, 统一按"含 nowplaying"
+   认, 免得 id 常量差一个字符就整条链路失效(上一版"没效果"的可能原因之一)。 */
+static BOOL diNPIsOurModule(NSString *mid) {
+    if (![mid isKindOfClass:[NSString class]] || !mid.length) return NO;
+    NSString *l = mid.lowercaseString;
+    return ([l containsString:@"nowplaying"] || [l containsString:@"now-playing"]);
+}
 
 /* 造一个 CCFModuleSize(网格单位, 如 4x1); 类/初始化器不存在时返回 nil */
 static id diNPMakeModuleSize(CGSize grid) {
     Class c = NSClassFromString(@"CCFModuleSize");
     SEL sel = NSSelectorFromString(@"initWithPortraitLayoutSize:landscapeLayoutSize:");
-    if (!c || ![(id)c instancesRespondToSelector:sel]) return nil;
+    if (!c) {
+        static BOOL l1; if (!l1) { l1 = YES; RLog(@"[播放器] 没有 CCFModuleSize 类"); }
+        return nil;
+    }
+    if (![(id)c instancesRespondToSelector:sel]) {
+        static BOOL l2;
+        if (!l2) {
+            l2 = YES;
+            NSMutableArray *inits = [NSMutableArray array];
+            unsigned int n = 0;
+            Method *ms = class_copyMethodList(object_getClass(c), &n);
+            for (unsigned int i = 0; ms && i < n; i++) {
+                NSString *sn = NSStringFromSelector(method_getName(ms[i]));
+                if ([sn hasPrefix:@"init"] || [sn hasPrefix:@"moduleSize"]) [inits addObject:sn];
+            }
+            if (ms) free(ms);
+            RLog(@"[播放器] CCFModuleSize 没有 portrait/landscape 初始化器, 可用: %@",
+                 inits.count ? [inits componentsJoinedByString:@", "] : @"(无)");
+        }
+        return nil;
+    }
     id (*msg)(id, SEL, CGSize, CGSize) = (id (*)(id, SEL, CGSize, CGSize))objc_msgSend;
     @try { return msg([c alloc], sel, grid, grid); } @catch (...) { return nil; }
 }
 
-/* ---- ① 放行尺寸(4x1 / 3x2 一次性都给) ---- */
+/* ---- ① 放行尺寸(仅 18+ 需要; 16/17 的 CCF 没有这个 C 函数) ---- */
 static NSArray *(*gNPOrigAllowedSizes)(NSString *);
 static NSArray *diNPAllowedSizesHook(NSString *identifier) {
     NSArray *orig = gNPOrigAllowedSizes(identifier);
     @try {
-        if (!diNPOn() || !diNPHasCC()) return orig;
-        if (![identifier isEqualToString:diNPModuleId]) return orig;
+        if (!diNPOn() || !diNPIsOurModule(identifier)) return orig;
+        id s = diNPMakeModuleSize(diNPGrid());
+        if (!s) return orig;
         NSMutableArray *out = orig ? [orig mutableCopy] : [NSMutableArray array];
-        NSMutableArray *added = [NSMutableArray array];
-        if (diNPAllow4x1()) {
-            id s = diNPMakeModuleSize(CGSizeMake(4, 1));
-            if (s) { [out addObject:s]; [added addObject:@"4x1"]; }
-        }
-        if (diNPAllow3x2()) {
-            id s = diNPMakeModuleSize(CGSizeMake(3, 2));
-            if (s) { [out addObject:s]; [added addObject:@"3x2"]; }
-        }
+        [out addObject:s];
         static BOOL logged;
-        if (!logged && added.count) {
-            logged = YES;
-            RLog(@"[播放器] 已放行 %@ (原生给 %lu 个尺寸)", [added componentsJoinedByString:@"+"],
-                 (unsigned long)(orig ? orig.count : 0));
-        }
+        if (!logged) { logged = YES; RLog(@"[播放器] 已放行 %@", diNPSizeName()); }
         return out;
     } @catch (NSException *e) {
         RLog(@"[播放器] allowedSizes 异常: %@ — %@", e.name, e.reason);
@@ -14503,23 +14533,83 @@ static NSArray *diNPAllowedSizesHook(NSString *identifier) {
     }
 }
 
-/* ---- ② 未知尺寸时借 wide(4x2) 的模块设置 ---- */
+/* ---- ② 模块设置: 永远按我们选的尺寸去问系统要设置 ----
+   系统按 prototypeSize 缓存每个尺寸的模块设置; 只要它问的是 nowplaying,
+   就先拿"选中尺寸"那份, 拿不到再退回原尺寸/wide(4x2), 免得模块空白。 */
 static IMP gNPOrigSettingsFn = NULL;
 static id diNPSettingsHook(id self, SEL _cmd, NSString *identifier, id size) {
+    @try {
+        if (diNPOn() && diNPIsOurModule(identifier)) {
+            id want = diNPMakeModuleSize(diNPGrid());
+            if (want) {
+                id r = ((id (*)(id, SEL, NSString *, id))gNPOrigSettingsFn)(self, _cmd, identifier, want);
+                if (r) {
+                    static BOOL logged;
+                    if (!logged) { logged = YES; RLog(@"[播放器] 模块设置: 按 %@ 取到", diNPSizeName()); }
+                    return r;
+                }
+            }
+        }
+    } @catch (...) {}
     id r = ((id (*)(id, SEL, NSString *, id))gNPOrigSettingsFn)(self, _cmd, identifier, size);
     @try {
-        if (!diNPOn() || !diNPHasCC()) return r;
-        if (![identifier isEqualToString:diNPModuleId] || r) return r;
+        if (r || !diNPOn() || !diNPIsOurModule(identifier)) return r;
         id wide = diNPMakeModuleSize(CGSizeMake(4, 2));
         if (!wide) return r;
         id r2 = ((id (*)(id, SEL, NSString *, id))gNPOrigSettingsFn)(self, _cmd, identifier, wide);
-        static BOOL logged;
-        if (!logged) { logged = YES; RLog(@"[播放器] 设置答不出 → 借 wide(4x2) 的模块设置"); }
+        static BOOL logged2;
+        if (!logged2) { logged2 = YES; RLog(@"[播放器] 设置答不出 → 借 wide(4x2) 的模块设置"); }
         return r2 ?: r;
     } @catch (NSException *e) {
         RLog(@"[播放器] settings 异常: %@ — %@", e.name, e.reason);
         return r;
     }
+}
+
+/* ---- ②b 接入点: 模块创建时直接把 prototypeSize 换成我们选的格子 ----
+   参考包就是在这里接入的(它二进制里就这一个尺寸选择器:
+   initWithMetadata:module:prototypeModuleSize:), 模块一创建就是 3x2/4x1/4x2,
+   控制中心随后按该尺寸排版, 不需要用户去编辑模式里拖。 */
+static NSString *diNPIdentifierOf(id obj) {
+    if (!obj) return nil;
+    for (NSString *k in @[@"moduleIdentifier", @"identifier", @"bundleIdentifier"]) {
+        @try {
+            SEL g = NSSelectorFromString(k);
+            id v = nil;
+            if ([obj respondsToSelector:g]) v = ((id (*)(id, SEL))objc_msgSend)(obj, g);
+            else v = [obj valueForKey:k];
+            if ([v isKindOfClass:[NSString class]] && [v length]) return v;
+        } @catch (...) {}
+    }
+    return nil;
+}
+static id (*gNPOrigModuleInit)(id, SEL, id, id, id) = NULL;
+static id diNPModuleInitHook(id self, SEL _cmd, id metadata, id module, id prototypeSize) {
+    id sz = prototypeSize;
+    @try {
+        NSString *mid = diNPIdentifierOf(module);
+        if (!mid) mid = diNPIdentifierOf(metadata);
+        /* 诊断: 头 24 个模块报一次标识符, 万一我们的 id 常量跟系统对不上, 一眼可见 */
+        static NSInteger seenModules;
+        if (seenModules < 24) {
+            seenModules++;
+            RLog(@"[播放器] 模块创建 #%ld id=%@ 尺寸=%@", (long)seenModules, mid ?: @"?",
+                 NSStringFromClass([prototypeSize class]));
+        }
+        if (diNPOn() && diNPIsOurModule(mid)) {
+            id want = diNPMakeModuleSize(diNPGrid());
+            if (want) {
+                sz = want;
+                static NSInteger forced;
+                if (forced < 6) {
+                    forced++;
+                    RLog(@"[播放器] 尺寸强制 %@ (第 %ld 次, 原 %@)", diNPSizeName(), (long)forced,
+                         NSStringFromClass([prototypeSize class]));
+                }
+            }
+        }
+    } @catch (...) {}
+    return gNPOrigModuleInit(self, _cmd, metadata, module, sz);
 }
 
 /* ---- ③ 三套布局: 4x1 / 3x2 / 4x2 ----
@@ -14642,68 +14732,146 @@ static void diNPLayoutKind(UIView *v, NSInteger kind) {
     }
 }
 static IMP gNPOrigNPLayout = NULL;
-static void diNPLayoutHook(UIView *self, SEL _cmd) {
-    ((void (*)(id, SEL))gNPOrigNPLayout)(self, _cmd);
+static IMP gNPOrigNPLayoutCC = NULL;
+/* 排版判定核心: 按容器实际宽高认尺寸, 认不出就只记一笔日志.
+   2.9.52: 第一次见到某个尺寸时无条件打日志 —— 上一版"没效果"就是
+   连视图有没有被我们碰到都不知道, 现在日志会明确写出来. */
+static void diNPTryLayout(UIView *self, const char *who, BOOL apply) {
     @try {
         if (!diNPOn() || !diNPHasCC()) return;
         CGRect b = self.bounds;
         CGFloat W = b.size.width, H = b.size.height;
-        if (W < 80.0 || H < 30.0) return;
+        if (W < 60.0 || H < 24.0) return;
+        static CGFloat seen[24]; static int seenN;
+        BOOL dup = NO;
+        for (int i = 0; i < seenN; i += 2)
+            if (fabs(seen[i] - W) < 1.0 && fabs(seen[i + 1] - H) < 1.0) { dup = YES; break; }
+        if (!dup && seenN < 24) {
+            seen[seenN++] = W; seen[seenN++] = H;
+            RLog(@"[播放器] 见到播放器 %s %@ %.0fx%.0f (比例 %.2f)",
+                 who, NSStringFromClass(self.class), W, H, W / H);
+        }
+        if (!apply) return;   /* CC 外层只做探测, 排版只由 MRUNowPlayingView 那一层做, 免得两层互相打架 */
         CGFloat ratio = W / H;
         NSInteger kind = 0;
-        if (H <= 100.0 && ratio >= 2.8) kind = 1;                         /* 4x1 */
-        else if (H >= 110.0 && ratio >= 1.28 && ratio <= 1.78) kind = 2;  /* 3x2 */
-        else if (H >= 110.0 && ratio >= 1.85 && ratio <= 2.40) kind = 3;  /* 4x2 */
+        if (H <= 120.0 && ratio >= 2.2) kind = 1;                         /* 4x1 */
+        else if (H >= 100.0 && ratio >= 1.15 && ratio <= 1.80) kind = 2;  /* 3x2 */
+        else if (H >= 100.0 && ratio >= 1.80 && ratio <= 2.80) kind = 3;  /* 4x2 */
         if (!kind) return;
-        if (kind == 1 && !diNPAllow4x1()) return;
-        if (kind == 2 && !diNPAllow3x2()) return;
-        if (kind == 3 && !diNPAllow4x2()) return;
         diNPLayoutKind(self, kind);
     } @catch (...) {}
 }
+static void diNPLayoutHook(UIView *self, SEL _cmd) {
+    ((void (*)(id, SEL))gNPOrigNPLayout)(self, _cmd);
+    diNPTryLayout(self, "NP", YES);
+}
+static void diNPLayoutHookCC(UIView *self, SEL _cmd) {
+    ((void (*)(id, SEL))gNPOrigNPLayoutCC)(self, _cmd);
+    diNPTryLayout(self, "CC", NO);
+}
 
+/* 2.9.52: 类 hook 全部推迟、且只在总开关打开时装; 16/17 与 18 走同一条路径,
+   只有 C 函数 hook 在 18 以下不装。每个 hook 独立 @try, 装不上只留日志。 */
 static void diNPInstallClassHooks(void) {
-    if (!diNPIsOS18()) return;   /* 2.9.50: 16/17 一个类 hook 都不装 */
-    static BOOL smTried, nvTried;
+    if (!diNPOn()) return;
+    if (!diNPHasCC()) return;
+    static BOOL miTried, smTried, nvTried, cvTried;
+
+    if (!miTried) {
+        Class c = NSClassFromString(@"CCUIModuleInstance");
+        SEL sel = NSSelectorFromString(@"initWithMetadata:module:prototypeModuleSize:");
+        Method m = c ? class_getInstanceMethod(c, sel) : NULL;
+        if (m) {
+            @try {
+                MSHookMessageEx(c, sel, (IMP)diNPModuleInitHook, (IMP *)&gNPOrigModuleInit);
+                miTried = (gNPOrigModuleInit != NULL);
+                RLog(@"[播放器] hook 就位: 模块创建(尺寸强制)%@", miTried ? @"" : @" 失败");
+            } @catch (NSException *e) { RLog(@"[播放器] 模块创建 hook 异常: %@", e.reason); }
+        } else if (!miTried) {
+            RLog(@"[播放器] CCUIModuleInstance 没有 initWithMetadata:module:prototypeModuleSize: (类=%@)", c ? @"有" : @"无");
+            miTried = YES;   /* 不再重试, 只报一次 */
+        }
+    }
+
     if (!smTried) {
         Class sm = NSClassFromString(@"CCUIModuleSettingsManager");
         SEL sel = NSSelectorFromString(@"moduleSettingsForModuleIdentifier:prototypeSize:");
         Method m = sm ? class_getInstanceMethod(sm, sel) : NULL;
         if (m) { MSHookMessageEx(sm, sel, (IMP)diNPSettingsHook, &gNPOrigSettingsFn); smTried = YES; }
+        else if (sm) { RLog(@"[播放器] CCUIModuleSettingsManager 没有 prototypeSize 选择器"); smTried = YES; }
     }
+
     if (!nvTried) {
         Class nv = NSClassFromString(@"MRUNowPlayingView");
         Method m = nv ? class_getInstanceMethod(nv, @selector(layoutSubviews)) : NULL;
-        if (m) { MSHookMessageEx(nv, @selector(layoutSubviews), (IMP)diNPLayoutHook, &gNPOrigNPLayout); nvTried = YES; }
+        if (m) {
+            MSHookMessageEx(nv, @selector(layoutSubviews), (IMP)diNPLayoutHook, &gNPOrigNPLayout);
+            nvTried = YES;
+            RLog(@"[播放器] hook 就位: MRUNowPlayingView 排版");
+        } else if (nv) { RLog(@"[播放器] MRUNowPlayingView 没找到 layoutSubviews"); nvTried = YES; }
     }
+
+    if (!cvTried) {
+        Class cv = NSClassFromString(@"MRUControlCenterView");
+        Method m = cv ? class_getInstanceMethod(cv, @selector(layoutSubviews)) : NULL;
+        if (m) {
+            MSHookMessageEx(cv, @selector(layoutSubviews), (IMP)diNPLayoutHookCC, &gNPOrigNPLayoutCC);
+            cvTried = YES;
+            RLog(@"[播放器] hook 就位: MRUControlCenterView 排版");
+        } else if (cv) { cvTried = YES; }
+    }
+
     static BOOL logged;
-    if ((gNPOrigSettingsFn && gNPOrigNPLayout) && !logged) {
+    if (!logged && (gNPOrigNPLayout || gNPOrigNPLayoutCC) && gNPOrigModuleInit) {
         logged = YES;
-        RLog(@"[播放器] 类 hook 就绪(设置管理/播放视图)");
+        RLog(@"[播放器] 类 hook 全部就绪");
     }
 }
 
-/* C 函数 hook: ControlCenter 框架在 SpringBoard 里常驻, dlopen 只是保险 */
-static void diNPInstall(void) {
-    static BOOL checked = NO;
-    if (!checked) {
-        checked = YES;
-        if (!diNPIsOS18()) {
-            RLog(@"[播放器] 系统 < iOS18 → 功能整体休眠, 不加载框架不装 hook");
-            return;
-        }
+/* C 函数 hook: 只有 18+ 才有 CCFAllowedSizesForModuleIdentifier,
+   16/17 走到这里直接跳过(dlopen/MSHookFunction 是 2.9.49 在 16 崩掉的那一步) */
+static void diNPInstallCFunction(void) {
+    static BOOL done;
+    if (done) return;
+    done = YES;
+    if (!diNPIsIOS18Up()) {
+        RLog(@"[播放器] iOS%ld: 跳过 C 函数 hook(只在 18+ 需要)", (long)diNPOSMajor());
+        return;
+    }
+    @try {
         void *h = dlopen("/System/Library/PrivateFrameworks/ControlCenter.framework/ControlCenter", RTLD_LAZY);
         void *fn = h ? dlsym(h, "CCFAllowedSizesForModuleIdentifier") : NULL;
         if (fn) {
             MSHookFunction(fn, (void *)diNPAllowedSizesHook, (void **)&gNPOrigAllowedSizes);
             RLog(@"[播放器] CCFAllowedSizesForModuleIdentifier 已 hook");
         } else {
-            RLog(@"[播放器] 找不到 CCFAllowedSizesForModuleIdentifier(dlsym=%p h=%p)", fn, h);
+            RLog(@"[播放器] 找不到 CCFAllowedSizesForModuleIdentifier(h=%p)", h);
         }
-        RLog(@"[播放器] 环境探测: iOS18CC=%@ 播放器开关=%@",
-             diNPHasCC() ? @"是" : @"否", diNPOn() ? @"开" : @"关");
+    } @catch (NSException *e) { RLog(@"[播放器] C 函数 hook 异常: %@", e.reason); }
+}
+
+static void diNPInstall(void) {
+    static BOOL scheduled;
+    if (scheduled) return;
+    scheduled = YES;
+    if (!diNPOn()) {
+        RLog(@"[播放器] 总开关关闭 → 一个 hook 都不装(打开后注销生效)");
+        return;
     }
-    diNPInstallClassHooks();
+    if (!diNPIsIOS16Up()) {
+        RLog(@"[播放器] 系统 < iOS16 → 不启用");
+        return;
+    }
+    RLog(@"[播放器] 开始安装: iOS%ld 尺寸=%@ CC类=%@ MRUNowPlaying=%@ CCView=%@",
+         (long)diNPOSMajor(), diNPSizeName(),
+         NSClassFromString(@"CCUIModuleInstance") ? @"有" : @"无",
+         NSClassFromString(@"MRUNowPlayingView") ? @"有" : @"无",
+         NSClassFromString(@"MRUControlCenterView") ? @"有" : @"无");
+    /* 推迟到 SpringBoard 起来之后(2.9.49 在构造器里直接跑, 16 上循环安全模式) */
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(2.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+        @try { diNPInstallCFunction(); diNPInstallClassHooks(); }
+        @catch (NSException *e) { RLog(@"[播放器] 安装异常: %@ — %@", e.name, e.reason); }
+    });
 }
 
 __attribute__((constructor)) static void init(void) {
