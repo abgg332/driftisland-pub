@@ -62,7 +62,7 @@ static double expandTextY = DI_EXP_TEXT_BASE_Y;   // 上下偏移(pt, 下为正,
 static double expandTextScale = 100.0; // 文字大小(%, 100=原样)
 /* 2.8.86: 构建戳 —— 之前横幅打的是 SpringBoard 自己的 CFBundleShortVersionString(恒 1.0),
    日志里根本看不出装的是哪一版。所有诊断行都带这个戳, 下轮日志一眼定位。 */
-#define DI_BUILD_VER @"2.9.60"
+#define DI_BUILD_VER @"2.9.61"
 static BOOL gRecordingActive = NO; // 保留: 岛素材总闸条件
 static NSString *diElementId(UIView *host);
 static BOOL diMiniMusicActive(UIView *host); // 2.6.3: 前置(遮罩层使用)
@@ -3364,6 +3364,19 @@ static BOOL diIsIOS17Up(void);   /* 定义在 2.9.37 段(下方), 这里先用 *
    ② 它把 expanded=YES 写进 state.plist, SpringBoard 这边的小岛玻璃(2.8.75 那套)
    看到"展开"就整棵退场 → 小岛专辑只剩 MRU 那块错的。
    宿主真实尺寸只有 SpringBoard 知道(小岛 ~189x37 / 展开 407x202), 这里写给它。 */
+/* ===== 2.9.61: 容器可见性 —— 形态播报的准入门槛 =====
+   392 日志实锤: MRU 读到的 island.plist 在"小岛 189x37"与"展开 407x197"之间
+   每隔 10~20 秒被翻一次面 —— 写"展开"的是那块**离屏残留**的 407x198 NowPlaying
+   容器(躺在 alpha=0 的 portal 里), 它也会 layout、也会被 diIsNowPlayingHostCached
+   命中。后果: MRU 的展开确认期(连续 1.2 秒说展开)被打断 → 展开遮罩有时生效
+   有时不生效; 小岛态被写成"展开" → 大玻璃迟迟不拆。 */
+static BOOL diContainerVisiblyShown(UIView *v) {
+    if (!v || !v.window || v.isHidden) return NO;
+    for (UIView *a = v; a && a != v.window; a = a.superview)
+        if (a.isHidden || a.alpha < 0.01) return NO;
+    return YES;
+}
+
 static void diPublishIslandState(CGSize hostSize, BOOL mini, BOOL expand) {
     if (hostSize.width < 1.0 || hostSize.height < 1.0) return;
     static CGFloat lw, lh; static CFAbsoluteTime lt; static int lm = -1;
@@ -3394,6 +3407,9 @@ static void diHostPubLayout(id self, SEL _cmd) {
     if (gDIHostPubOrig) gDIHostPubOrig(self, _cmd);
     @try {
         UIView *v = (UIView *)self;
+        /* 2.9.61: 离屏残留容器(alpha=0 的 portal 里那块 407x198)不许播报 ——
+           它就是 island.plist 每 10~20 秒被翻成"展开"的污染源(392 日志)。 */
+        if (!diContainerVisiblyShown(v)) return;
         CGSize s = v.bounds.size;
         if (s.width < 1.0 || s.height < 1.0) return;
         BOOL mini = (s.height >= 24 && s.height <= 62
@@ -3950,7 +3966,14 @@ static BOOL diApplyMaskToCover(UIView *cover, UIImage *shape) {
            SpringBoard 又画了一块玻璃 → 用户截图一里专辑下面那块模糊斑。
            收缩态的误报已经由 MRU 侧修掉(island.plist 判形态 + 让位时写 expanded=NO),
            这里直接恢复 2.8.86 原判据。 */
-        if (diMruSaysExpanded()) {
+        /* ===== 2.9.61: 17 上不再读这个标志 —— 彻底分离两通道 =====
+           392 日志实锤死法: 展开确认后 MRU 写 expanded=1 → 这边收掉小岛玻璃;
+           用户缩回岛后, 那颗 66 大头像不再被 layout, MRU 的 apply 不跑 →
+           expanded=1 没人清、心跳还在续期 → 这边被压住 10~20 秒不画玻璃
+           (表现就是"展开生效时缩回来就变大; 展开没生效时缩回来正常")。
+           17 上本地下闸门已齐: 宿主 ≥180x46(198x55 展开宿主)/高>70/宽>240
+           全是本地判定, 不需要跨进程信号。 expanded 标志从此只给 16 用。 */
+        if (!diIsIOS17Up() && diMruSaysExpanded()) {
             if (_glassOn || _targets.count || !self.hidden) {
                 [self diTeardown];
                 static CFAbsoluteTime sExpT;
@@ -6510,6 +6533,7 @@ static void updateSingleVideo(UIWindow *win) {
        现在: 音乐岛管素材(matRoot), 小岛视频层按"最新出现的岛"挑(bestRoot),
        人脸/充电/来电/通知都能拿到背景; 通知可用设置里的"通知背景"开关关掉。 */
     UIView *musicRoot = nil, *newestRoot = nil, *bigRoot = nil, *stickyAlive = nil;
+    UIView *musicRootVis = nil;   /* 2.9.61: 可见的音乐岛(形态播报专用) */
     static __weak UIView *sStickyRoot;
     CFAbsoluteTime newestT = 0;
     CGFloat bestA = 0;
@@ -6524,7 +6548,13 @@ static void updateSingleVideo(UIWindow *win) {
         }
         UIView *root = islandRoot(h);
         if (!root) continue;
-        if (!musicRoot && diIsNowPlayingHostCached(root)) musicRoot = root;
+        if (diIsNowPlayingHostCached(root)) {
+            if (!musicRoot) musicRoot = root;
+            /* 2.9.61: 同一窗口里可能有两组音乐岛容器 —— 可见的那块 + 离屏残留
+               (alpha=0 portal 里的 407x198)。播报只认可见那块, 否则 island.plist
+               随枚举顺序在 189x37 与 407x197 之间翻面。 */
+            if (!musicRootVis && diContainerVisiblyShown(root)) musicRootVis = root;
+        }
         if (root == sStickyRoot) stickyAlive = root;
         NSNumber *seen = objc_getAssociatedObject(h, &kHostSeenT);
         CFAbsoluteTime t = seen ? [seen doubleValue] : 0;
@@ -6566,7 +6596,11 @@ static void updateSingleVideo(UIWindow *win) {
        用户看到的就是"切换下一首放大就回不去"。
        这里借已经常驻的宿主扫描把真实尺寸写过去(只 17 执行, 16 一行不加)。 */
     if (diIsIOS17Up()) {
-        UIView *pubHost = musicRoot ?: bestRoot;
+        /* 2.9.61: 播报只认"可见的音乐岛"。旧代码 musicRoot ?: bestRoot 会命中
+           离屏残留容器(hostTable 枚举顺序不定), 把 island.plist 翻成"展开":
+           展开确认期被打断(展开有时生效)、小岛态被写成展开(缩回变大)。
+           找不到可见音乐岛就干脆不写盘, 让旧值自然过期(3 秒) → MRU 按无信号处理。 */
+        UIView *pubHost = musicRootVis;
         if (pubHost) {
             CGSize ps = pubHost.bounds.size;
             BOOL pMini = (ps.height >= 24 && ps.height <= 62
@@ -11653,7 +11687,9 @@ static void visibilityTick(void) {
        SpringBoard 侧的形状层都会变成"多出来的心形", 一律不许留。 */
     {
         static CFAbsoluteTime tSweep;
-        BOOL exp = diMruSaysExpanded();
+        /* 2.9.61: 17 不再读 MRU 展开标志(可能与实际状态脱节) —— 17 展开期
+           SB 侧玻璃已由本地闸门(≥180x46 等)收干净, 没有需要高频扫的残留。 */
+        BOOL exp = diIsIOS17Up() ? NO : diMruSaysExpanded();
         CFAbsoluteTime gap = exp ? 0.25 : ((enabled && maskOn) ? 5.0 : 2.0);
         if (now - tSweep > gap) {
             tSweep = now;
@@ -14446,12 +14482,34 @@ static void diActivityScan(void) {
             }
         }
     } @catch (__unused NSException *e) {}
+    /* ===== 2.9.61: 收缩清理兜底 —— 岛收回后那颗 66 大头像常常不再被 layout,
+       它自己的 apply 不会跑, 玻璃就一直留在原地(用户: "缩回来就变大")。
+       文件明确说"小岛"(formNow==1, 已经过可见性过滤)时, 由 1 秒一拍的扫描器
+       强制拆掉所有大头像上的玻璃。真展开时文件说"展开", 不进这条。 */
+    @try {
+        if (diIsIOS17Up() && diMruFormFromIsland() == 1 && gDIActivityArtworks) {
+            for (UIView *a in gDIActivityArtworks.allObjects) {
+                if (![a isKindOfClass:UIView.class] || !a.window) continue;
+                CGFloat side = MIN(a.bounds.size.width, a.bounds.size.height);
+                if (side <= 30.0) continue;   /* 23 那颗收缩头像的玻璃不动 */
+                DIActivityMaskState *st = objc_getAssociatedObject(a, &kDIActivityMaskState);
+                if (st) diActivityTeardown(a, st);
+            }
+        }
+    } @catch (__unused NSException *e) {}
     /* 2.8.86: 一个活着的头像都没有(音乐停了/岛收了) → 明确告诉 SpringBoard"非展开",
        否则 state.plist 会一直停在 expanded=1, 小岛回来时那 4 秒没有遮罩。 */
     {
         BOOL anyLive = NO;
         for (UIView *a in gDIActivityArtworks.allObjects) if (a.window) { anyLive = YES; break; }
-        if (anyLive) diMruWriteExpandState(gDIMruExpandedFlag, gDIMruLastBox);  /* 心跳续期 */
+        if (anyLive) {
+            /* 2.9.61: 文件明确说收缩时不再给旧 YES 续期 —— 否则展开标志一直停 1,
+               SB 16 侧玻璃被压住(17 侧已不读这个标志)。 */
+            if (diIsIOS17Up() && gDIMruExpandedFlag && diMruFormFromIsland() == 1)
+                diMruWriteExpandState(NO, CGSizeZero);
+            else
+                diMruWriteExpandState(gDIMruExpandedFlag, gDIMruLastBox);
+        }
         else diMruWriteExpandState(NO, CGSizeZero);
     }
     if (now - lastReport > 5.0) {
