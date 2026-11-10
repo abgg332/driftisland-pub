@@ -62,7 +62,7 @@ static double expandTextY = DI_EXP_TEXT_BASE_Y;   // 上下偏移(pt, 下为正,
 static double expandTextScale = 100.0; // 文字大小(%, 100=原样)
 /* 2.8.86: 构建戳 —— 之前横幅打的是 SpringBoard 自己的 CFBundleShortVersionString(恒 1.0),
    日志里根本看不出装的是哪一版。所有诊断行都带这个戳, 下轮日志一眼定位。 */
-#define DI_BUILD_VER @"2.9.63"
+#define DI_BUILD_VER @"2.9.64"
 static BOOL gRecordingActive = NO; // 保留: 岛素材总闸条件
 static NSString *diElementId(UIView *host);
 static BOOL diMiniMusicActive(UIView *host); // 2.6.3: 前置(遮罩层使用)
@@ -3448,6 +3448,24 @@ static BOOL diIslandStateMini(void) {
     return cached;
 }
 
+/* 2.9.64: 播报新鲜(≤1 秒)且明确说"展开"、而宿主尺寸还够着小岛窗口 = 正在展开过渡。
+   注意与 diIslandStateMini 的区别: 那个 3 秒新鲜度(暂停时播报过期也返回 NO),
+   这个只认 1 秒内的明确 expand —— 暂停时播报过期, 这里返回 NO, 不影响暂停遮罩。 */
+static BOOL diIslandFreshExpand(void) {
+    static CFAbsoluteTime lastCheck; static BOOL cached;
+    CFAbsoluteTime now = CFAbsoluteTimeGetCurrent();
+    if (now - lastCheck < 0.3) return cached;
+    lastCheck = now;
+    NSString *dir = diMruSharedDir();
+    if (!dir.length) { cached = NO; return NO; }
+    NSDictionary *d = [NSDictionary dictionaryWithContentsOfFile:
+                       [dir stringByAppendingPathComponent:@"island.plist"]];
+    if (![d isKindOfClass:NSDictionary.class]) { cached = NO; return NO; }
+    if (now - [d[@"t"] doubleValue] > 1.0) { cached = NO; return NO; }
+    cached = [d[@"expand"] boolValue] && ![d[@"mini"] boolValue];
+    return cached;
+}
+
 /* ===== 2.8.86: 展开态由 MRU 亲口告诉我们 =====
    332/333 日志的死结: 展开后 SpringBoard 这边宿主的 bounds 一直停在 198x55
    (展开的内容是它内部那块 407x489 的跨进程 scene), 所以 2.8.84 的
@@ -4198,6 +4216,10 @@ static BOOL diApplyMaskToCover(UIView *cover, UIImage *shape) {
             if (_link.preferredFramesPerSecond != 30) _link.preferredFramesPerSecond = 30;
             return;
         }
+        /* 2.9.64: 展开过渡期不再新挂小号玻璃 —— 395: 长按展开偶发"专辑很小然后正常":
+           过渡中宿主还够着 isMini 窗口, 按 26x22 门户缓存画出一颗 25pt 小圆。
+           展开态由 MRU 接管, 播报新鲜且说展开时 SB 别再新挂(已挂的玻璃照旧跟随)。 */
+        if (diIsIOS17Up() && isMini && !self.glassOn && diIslandFreshExpand()) return;
         /* 2.8.15: 音乐岛关卡 —— 只有"正在放歌"的岛才继续(通知岛/头像一律不遮)。 */
         if (gate && !diIsNowPlayingHostCached(host)) {
             /* ===== 2.9.40: 17 的结构兜底 =====
@@ -4224,6 +4246,20 @@ static BOOL diApplyMaskToCover(UIView *cover, UIImage *shape) {
                                  NSStringFromClass(cv17.class), cr17.size.width, cr17.size.height,
                                  bs.width, bs.height);
                         }
+                    }
+                } else if (self.glassOn) {
+                    /* 2.9.64: 暂停/切歌瞬断保持遮罩 —— 395 实锤: 16:30:11 与 16:30:42
+                       暂停时 playing17=NO → 老逻辑 teardown: SB 玻璃拆掉 + 系统门户层
+                       还原, 而 MRU 那颗 23 玻璃还挂着 → 两层专辑叠出"暂停变大偏移";
+                       切歌瞬间播放态短暂为 NO → "切换先变回原来的"。
+                       已经画着玻璃说明这块岛就是音乐岛, 继续走正常遮罩流程;
+                       若岛真被通知替换, 封面层消失 → 下面 glassMiss 自然收掉。 */
+                    ok17 = YES;
+                    static CFAbsoluteTime sPzT;
+                    if (CFAbsoluteTimeGetCurrent() - sPzT > 5.0) {
+                        sPzT = CFAbsoluteTimeGetCurrent();
+                        DLog(@"[17] 暂停/瞬断: 已有玻璃, 保持遮罩 宿主=%.0fx%.0f",
+                             bs.width, bs.height);
                     }
                 }
             }
@@ -13592,7 +13628,9 @@ static BOOL diMruIslandCompact(UIView *artwork) {
 static int diMruFormFromIsland(void) {
     static int cForm = -1; static CFAbsoluteTime cChecked;
     CFAbsoluteTime now = CFAbsoluteTimeGetCurrent();
-    if (now - cChecked < 0.5) return cForm;
+    /* 2.9.64: 读盘缓存 0.5 → 0.15 秒 —— 395: 展开第一帧可能还读到 0.5 秒前的
+       "收缩", 白白拆一次玻璃("偶尔先方再圆"的残党)。0.15 秒内仍去重, 读盘不频繁。 */
+    if (now - cChecked < 0.15) return cForm;
     cChecked = now;
     NSString *dir = diMruSelfDir();
     NSDictionary *d = dir.length
