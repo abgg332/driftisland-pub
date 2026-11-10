@@ -62,7 +62,7 @@ static double expandTextY = DI_EXP_TEXT_BASE_Y;   // 上下偏移(pt, 下为正,
 static double expandTextScale = 100.0; // 文字大小(%, 100=原样)
 /* 2.8.86: 构建戳 —— 之前横幅打的是 SpringBoard 自己的 CFBundleShortVersionString(恒 1.0),
    日志里根本看不出装的是哪一版。所有诊断行都带这个戳, 下轮日志一眼定位。 */
-#define DI_BUILD_VER @"2.9.68"
+#define DI_BUILD_VER @"2.9.69"
 static BOOL gRecordingActive = NO; // 保留: 岛素材总闸条件
 static NSString *diElementId(UIView *host);
 static BOOL diMiniMusicActive(UIView *host); // 2.6.3: 前置(遮罩层使用)
@@ -3391,6 +3391,26 @@ static BOOL diContainerVisiblyShown(UIView *v) {
    这个标志每帧随岛容器布局一起写, 变化时绕过节流立即落盘。 */
 static volatile int gDISBGlassOn = 0;
 
+/* 2.9.69: 交接信号必须零延迟送达 —— 展开起手时宿主 bounds 可能只跳一两帧,
+   之后就不再 layout, 单靠 layout hook 写盘的话 MRU 会读到"上一帧的 sb=1",
+   于是它一直让位(空窗)。这里把最近一次播报的宿主尺寸记下来, sb 一变就用它
+   立刻重写一份, 不依赖宿主是否还在 layout。 */
+static CGFloat gDISBPubW = 0, gDISBPubH = 0;
+static int gDISBPubM = -1;      /* 1=小岛 2=展开 0=过渡 */
+
+static void diWriteIslandPlist(void) {
+    if (gDISBPubW < 1.0 || gDISBPubH < 1.0) return;
+    NSString *dir = diMruSharedDir();
+    if (!dir.length) return;
+    NSDictionary *d = @{@"w": @(gDISBPubW), @"h": @(gDISBPubH),
+                        @"mini": @(gDISBPubM == 1 ? 1 : 0),
+                        @"expand": @(gDISBPubM == 2 ? 1 : 0),
+                        @"sb": @(gDISBGlassOn ? 1 : 0),
+                        @"t": @(CFAbsoluteTimeGetCurrent()), @"v": DI_BUILD_VER};
+    @try { [d writeToFile:[dir stringByAppendingPathComponent:@"island.plist"] atomically:YES]; }
+    @catch (__unused NSException *e) {}
+}
+
 static void diPublishIslandState(CGSize hostSize, BOOL mini, BOOL expand) {
     if (hostSize.width < 1.0 || hostSize.height < 1.0) return;
     static CGFloat lw, lh; static CFAbsoluteTime lt; static int lm = -1; static int lsb = -1;
@@ -3407,14 +3427,8 @@ static void diPublishIslandState(CGSize hostSize, BOOL mini, BOOL expand) {
     if (fabs(hostSize.width - lw) < 0.5 && fabs(hostSize.height - lh) < 0.5
         && m == lm && now - lt < 2.0) return;
     lw = hostSize.width; lh = hostSize.height; lm = m; lt = now; lsb = sbNow;
-    NSString *dir = diMruSharedDir();
-    if (!dir.length) return;
-    NSDictionary *d = @{@"w": @(hostSize.width), @"h": @(hostSize.height),
-                        @"mini": @(mini ? 1 : 0), @"expand": @(expand ? 1 : 0),
-                        @"sb": @(sbNow),
-                        @"t": @(now), @"v": DI_BUILD_VER};
-    @try { [d writeToFile:[dir stringByAppendingPathComponent:@"island.plist"] atomically:YES]; }
-    @catch (__unused NSException *e) {}
+    gDISBPubW = hostSize.width; gDISBPubH = hostSize.height; gDISBPubM = m;
+    diWriteIslandPlist();
 }
 
 /* ===== 2.9.55: 17 专用 —— 岛容器布局即播报真实尺寸 =====
@@ -3737,7 +3751,7 @@ static BOOL diApplyMaskToCover(UIView *cover, UIImage *shape) {
        (比如岛刚收回) 会把展开实例正在用的角度清零, 表现就是"旋转一卡一卡 / 突然不转"。
        角度只在"旋转开关关掉"时由 step 统一归零。 */
     /* 2.8.13: 玻璃模式标志一并清掉, 下次进来重新判定 */
-    if (self.glassOn) gDISBGlassOn = 0;   /* 2.9.68: 我这边放手了, MRU 该接手 */
+    if (self.glassOn) { gDISBGlassOn = 0; diWriteIslandPlist(); }   /* 2.9.68: 我这边放手了, MRU 该接手 */
     _glassOn = NO;
     _glassMiss = 0;
     _freezeSide = 0;   /* 2.9.65: 边长锁一起清, 下次重新锁 */
@@ -4109,7 +4123,7 @@ static BOOL diApplyMaskToCover(UIView *cover, UIImage *shape) {
                 }
                 if (self.glassOn || !self.hidden) {
                     [self diRestorePainted];
-                    if (self.glassOn) gDISBGlassOn = 0;   /* 2.9.68: 收玻璃也算放手, MRU 该接手 */
+                    if (self.glassOn) { gDISBGlassOn = 0; diWriteIslandPlist(); }   /* 2.9.68: 收玻璃也算放手, MRU 该接手 */
                     self.glassOn = NO;
                     if (!self.hidden) self.hidden = YES;
                     self.stableFrm = 0;
@@ -4186,7 +4200,7 @@ static BOOL diApplyMaskToCover(UIView *cover, UIImage *shape) {
             }
             /* 展开起手: 立即收玻璃 + 还原系统专辑, 并记住"不再参与"直到缩回 */
             [self diRestorePainted];
-            if (self.glassOn) gDISBGlassOn = 0;   /* 2.9.68: 展开起手放手 → MRU 必须立刻接手 */
+            if (self.glassOn) { gDISBGlassOn = 0; diWriteIslandPlist(); }   /* 2.9.68: 展开起手放手 → MRU 必须立刻接手 */
             self.glassOn = NO;
             self.loggedShow = NO;
             if (!self.hidden) self.hidden = YES;
@@ -4395,7 +4409,7 @@ static BOOL diApplyMaskToCover(UIView *cover, UIImage *shape) {
                 if (lockMask) return;
                 if (self.glassOn || !self.hidden) {
                     [self diRestorePainted];
-                    if (self.glassOn) gDISBGlassOn = 0;   /* 2.9.68: 收玻璃也算放手, MRU 该接手 */
+                    if (self.glassOn) { gDISBGlassOn = 0; diWriteIslandPlist(); }   /* 2.9.68: 收玻璃也算放手, MRU 该接手 */
                     self.glassOn = NO;
                     self.loggedShow = NO;
                     self.hidden = YES;
@@ -4769,7 +4783,8 @@ static BOOL diApplyMaskToCover(UIView *cover, UIImage *shape) {
             }
             _coverV = coverV;
             _glassOn = YES;
-            gDISBGlassOn = 1;   /* 2.9.68: 告诉 MRU"小岛这块我画着, 你别插手" */
+            /* 2.9.68: 告诉 MRU"小岛这块我画着, 你别插手"; 2.9.69: 立即送达 */
+            if (!gDISBGlassOn) { gDISBGlassOn = 1; diWriteIslandPlist(); }
             if (!self.loggedShow) {
                 self.loggedShow = YES;
                 DLog(@"遮罩挂上(玻璃): 封面=%@ %.0fx%.0f@(%.0f,%.0f) 方块=%@ %.0fx%.0f 岛=%.0fx%.0f 素材=%@ 旋转=%@(%.0f°/s 角度%.0f°)",
@@ -4805,6 +4820,7 @@ static BOOL diApplyMaskToCover(UIView *cover, UIImage *shape) {
             self.transform = CGAffineTransformIdentity;
             _glassOn = NO;
             gDISBGlassOn = 0;          /* 2.9.68: 没图让位 → MRU 接手 */
+            diWriteIslandPlist();
             self.loggedShow = NO;      /* 让下面重新打一条系统 mask 的挂上日志 */
         }
 
@@ -13893,7 +13909,10 @@ static void diActivityApply(UIView *artwork) {
     static CFAbsoluteTime sNoSBSince = 0;
     static CFAbsoluteTime sMiniSince = 0;
     BOOL keepBig = NO;
-    if (ios17 && !smallArt && formNow >= -1) {
+    /* 2.9.69: 去掉 formNow>=-1 的限制 —— 399 里"展开先空白一下"最容易出现在
+       播报还没写过的时刻(刚注销/刚重开屏), 那时 formNow=-2, 2.9.68 的交接逻辑
+       整段被跳过, 66 照样被老规则拆掉。现在没播报也照样听 sb 的。 */
+    if (ios17 && !smallArt) {
         if (gDIFormSB) {
             sNoSBSince = 0; sMiniSince = 0;
             if (formNow != 0) compact = YES;   /* SpringBoard 在画 → MRU 让位 */
@@ -13902,11 +13921,13 @@ static void diActivityApply(UIView *artwork) {
             BOOL stillMini = (formNow == 1 && fw > 1 && fh > 1 && fw < 200.0 && fh < 45.0);
             CFAbsoluteTime t68 = CFAbsoluteTimeGetCurrent();
             if (stillMini) {
-                /* 2.9.68: 还停在小岛原尺寸也要"连续 0.25 秒"才算数 ——
-                   展开起手的第一帧播报还没来得及变大, 一帧就拆会重演"小专辑"。 */
+                /* 2.9.68: 还停在小岛原尺寸也要"连续"才算数 —— 展开起手的第一帧
+                   播报还没来得及变大, 一帧就拆会重演"小专辑"。
+                   2.9.69: 0.25 → 1.0 秒。播报对"尺寸没变"是去重的, 展开起手的
+                   头 0.2~0.3 秒文件可能一直写着 189x37, 0.25 秒根本不够。 */
                 if (!sMiniSince) sMiniSince = t68;
                 sNoSBSince = 0;
-                if (t68 - sMiniSince >= 0.25) {
+                if (t68 - sMiniSince >= 1.0) {
                     compact = YES;             /* 真还停在小岛原尺寸: 让位 */
                 } else {
                     keepBig = YES;
@@ -14036,9 +14057,10 @@ static void diActivityApply(UIView *artwork) {
     static NSString *lastChain; static CGRect lastBox;
     if (ios17 && (!CGRectEqualToRect(lastBox, box) || ![lastChain isEqualToString:chain])) {
         lastBox = box; lastChain = [chain copy];
-        diMruFileLog([NSString stringWithFormat:@"窗口 bounds=%@ 可见=%@ 收缩=%d | %@",
+        diMruFileLog([NSString stringWithFormat:@"窗口 bounds=%@ 可见=%@ 收缩=%d 形=%d sb=%d 保大=%d 宿主=%.0fx%.0f | %@",
                       NSStringFromCGRect(artwork.bounds), NSStringFromCGRect(box),
-                      (int)collapsed, chain.length ? chain : @"(无收缩祖先)"]);
+                      (int)collapsed, formNow, gDIFormSB, (int)keepBig,
+                      gDIFormW, gDIFormH, chain.length ? chain : @"(无收缩祖先)"]);
     }
 
     if (!state) {
