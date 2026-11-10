@@ -2352,54 +2352,47 @@ static NSCache *diThumbCache(void) {
     /* 2.8.12: 整页统一为一个"锁屏通知"组 —— 原"通知/播放器发光"整组并入,
        开关改名"背景发光", 所有功能排在锁屏定义之下, 显示统一 */
     [specs addObject:[self groupSpec:@"锁屏通知" footer:nil]];
+    /* 2.9.71: 用户要求"每个功能直接全部显示, 不要折叠" —— 去掉所有
+       "开关打开才插入子项"的条件。开关只控制功能生效与否, 不再控制这一行的
+       显隐; 排列顺序/键值/默认值全部不变, 也不影响其它页面。 */
     [specs addObject:[self switchSpec:@"锁屏定义" key:@"lockWOn" def:@NO]];
-    if ([[self readPreferenceValue:[self switchSpec:@"锁屏定义" key:@"lockWOn" def:@NO]] boolValue]) {
-        [specs addObject:[self numSlider:@"宽度" key:@"lockWPercent" def:100 mn:50 mx:100]];
-    }
+    [specs addObject:[self numSlider:@"宽度" key:@"lockWPercent" def:100 mn:50 mx:100]];
     /* 2.8.12: 背景发光(原 2.8.8"通知/播放器发光", 整组并入锁屏通知组) */
     [specs addObject:[self switchSpec:@"背景发光" key:@"lkGlowOn" def:@NO]];
-    if ([[self readPreferenceValue:[self switchSpec:@"背景发光" key:@"lkGlowOn" def:@NO]] boolValue]) {
-        [specs addObject:[self numSlider:@"发光半径" key:@"lkGlowR" def:8 mn:0 mx:24]];
-        {
-            PSSpecifier *btn = [PSSpecifier preferenceSpecifierNamed:@"发光颜色" target:self
-                set:NULL get:NULL detail:nil cell:PSButtonCell edit:nil];
-            [btn setButtonAction:@selector(diOpenGlowPick:)];
-            [specs addObject:btn];
-        }
+    [specs addObject:[self numSlider:@"发光半径" key:@"lkGlowR" def:8 mn:0 mx:24]];
+    {
+        PSSpecifier *btn = [PSSpecifier preferenceSpecifierNamed:@"发光颜色" target:self
+            set:NULL get:NULL detail:nil cell:PSButtonCell edit:nil];
+        [btn setButtonAction:@selector(diOpenGlowPick:)];
+        [specs addObject:btn];
     }
     /* 2.8.35: 背景边框(锁屏所有通知加一圈边框, 宽度/颜色自定义) */
     [specs addObject:[self switchSpec:@"背景边框" key:@"lkFrameOn" def:@NO]];
-    if ([[self readPreferenceValue:[self switchSpec:@"背景边框" key:@"lkFrameOn" def:@NO]] boolValue]) {
-        [specs addObject:[self numSlider:@"边框宽度" key:@"lkFrameW" def:3 mn:0 mx:12]];
-        {
-            PSSpecifier *btn = [PSSpecifier preferenceSpecifierNamed:@"边框颜色" target:self
-                set:NULL get:NULL detail:nil cell:PSButtonCell edit:nil];
-            [btn setButtonAction:@selector(diOpenFramePick:)];
-            [specs addObject:btn];
-        }
+    [specs addObject:[self numSlider:@"边框宽度" key:@"lkFrameW" def:3 mn:0 mx:12]];
+    {
+        PSSpecifier *btn = [PSSpecifier preferenceSpecifierNamed:@"边框颜色" target:self
+            set:NULL get:NULL detail:nil cell:PSButtonCell edit:nil];
+        [btn setButtonAction:@selector(diOpenFramePick:)];
+        [specs addObject:btn];
     }
     /* 2.6.31: 底栏横条全部功能回归锁屏通知页(用户要求: 不要单独一页) */
     [specs addObject:[self switchSpec:@"底栏横条" key:@"homeBarOn" def:@NO]];
-    if ([[self readPreferenceValue:[self switchSpec:@"底栏横条" key:@"homeBarOn" def:@NO]] boolValue]) {
-        [specs addObject:[self numSlider:@"横条长短" key:@"homeBarLen" def:100 mn:10 mx:200]];
-        {
-            PSSpecifier *btn = [PSSpecifier preferenceSpecifierNamed:@"横条颜色" target:self
-                set:NULL get:NULL detail:nil cell:PSButtonCell edit:nil];
-            [btn setButtonAction:@selector(diOpenHomeBarPick:)];
-            [specs addObject:btn];
-        }
-        [specs addObject:[self switchSpec:@"流光动态" key:@"homeBarFlowOn" def:@NO]];
-        {
-            PSSpecifier *btn = [PSSpecifier preferenceSpecifierNamed:@"流光方向" target:self
-                set:NULL get:NULL detail:nil cell:PSButtonCell edit:nil];
-            [btn setButtonAction:@selector(diPickHomeBarFlowDir:)];
-            [specs addObject:btn];
-        }
+    [specs addObject:[self numSlider:@"横条长短" key:@"homeBarLen" def:100 mn:10 mx:200]];
+    {
+        PSSpecifier *btn = [PSSpecifier preferenceSpecifierNamed:@"横条颜色" target:self
+            set:NULL get:NULL detail:nil cell:PSButtonCell edit:nil];
+        [btn setButtonAction:@selector(diOpenHomeBarPick:)];
+        [specs addObject:btn];
+    }
+    [specs addObject:[self switchSpec:@"流光动态" key:@"homeBarFlowOn" def:@NO]];
+    {
+        PSSpecifier *btn = [PSSpecifier preferenceSpecifierNamed:@"流光方向" target:self
+            set:NULL get:NULL detail:nil cell:PSButtonCell edit:nil];
+        [btn setButtonAction:@selector(diPickHomeBarFlowDir:)];
+        [specs addObject:btn];
     }
     [specs addObject:[self switchSpec:@"隐藏底部横条" key:@"homeBarHideOn" def:@NO]];
-    if ([[self readPreferenceValue:[self switchSpec:@"隐藏底部横条" key:@"homeBarHideOn" def:@NO]] boolValue]) {
-        [specs addObject:[self switchSpec:@"渐变隐藏" key:@"homeBarHideFade" def:@NO]];
-    }
+    [specs addObject:[self switchSpec:@"渐变隐藏" key:@"homeBarHideFade" def:@NO]];
     [specs addObject:[self switchSpec:@"启用手势保护" key:@"gestureProtectOn" def:@NO]];
     {
         PSSpecifier *last = specs.lastObject;
@@ -2411,9 +2404,7 @@ static NSCache *diThumbCache(void) {
     /* 2.9.26: 强制外观 —— 页面最底部单独分组 */
     [specs addObject:[self groupSpec:@"启动功能" footer:nil]];
     [specs addObject:[self switchSpec:@"启动功能" key:@"themeMasterOn" def:@NO]];
-    if ([[self readPreferenceValue:[self switchSpec:@"启动功能" key:@"themeMasterOn" def:@NO]] boolValue]) {
-        [specs addObject:[self switchSpec:@"强制深色" key:@"themeForceDark" def:@NO]];
-    }
+    [specs addObject:[self switchSpec:@"强制深色" key:@"themeForceDark" def:@NO]];
     return specs;
 }
 /* 横条配色 / 流光方向: 两个都是独立窗口, 直接开(与 HOME 面板同一入口) */

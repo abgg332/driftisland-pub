@@ -62,7 +62,7 @@ static double expandTextY = DI_EXP_TEXT_BASE_Y;   // 上下偏移(pt, 下为正,
 static double expandTextScale = 100.0; // 文字大小(%, 100=原样)
 /* 2.8.86: 构建戳 —— 之前横幅打的是 SpringBoard 自己的 CFBundleShortVersionString(恒 1.0),
    日志里根本看不出装的是哪一版。所有诊断行都带这个戳, 下轮日志一眼定位。 */
-#define DI_BUILD_VER @"2.9.70"
+#define DI_BUILD_VER @"2.9.71"
 static BOOL gRecordingActive = NO; // 保留: 岛素材总闸条件
 static NSString *diElementId(UIView *host);
 static BOOL diMiniMusicActive(UIView *host); // 2.6.3: 前置(遮罩层使用)
@@ -14007,6 +14007,26 @@ static void diActivityApply(UIView *artwork) {
     if (ios17 && !smallArt && formNow != 0 && shrinkingForm) {
         compact = YES;
         keepBig = NO;
+    }
+    /* ===== 2.9.71: 过渡途中"这颗大头像就是岛上正在显示的那颗" —— 一律不拆 =====
+       401 日志 + 视频实锤(20:53:50 展开 / 20:53:10 收回):
+         · 播报停在过渡帧(-1), 宿主只有 158x56 / 132x41(小岛尺寸);
+         · MRU 里却有一颗 66x66 的大头像贴在展开位 {{21.67,24},{66,66}};
+         · 2.9.70 的"过渡帧按宿主尺寸让位"把它判成收缩 → 拆玻璃。
+       拆掉玻璃时系统那几层又被我们藏着, 岛上直接变全黑, 两秒后才重建 ——
+       用户看到的"展开从小一下变大""收回小岛专辑偏一下才正常"就是这个空洞。
+       现在: 只要是 66 的大头像、又没有可见的小头像(sibling=0), 它就是岛上
+       正在显示的那颗, 让它跟着岛体动画走 —— 不拆、不重铺、不换尺寸。
+       上限 0.9 秒: 真正的"展开态残留 66"最多多留 0.9 秒, 之后回到原来的规则。 */
+    {
+        static CFAbsoluteTime sHoldBigT = 0;
+        static __weak UIView *sHoldBigV = nil;
+        BOOL holdBig = (ios17 && compact && !smallArt && !sibling && artSide >= 56.0);
+        if (holdBig) {
+            if (sHoldBigV != artwork) { sHoldBigV = artwork; sHoldBigT = CFAbsoluteTimeGetCurrent(); }
+            if (CFAbsoluteTimeGetCurrent() - sHoldBigT > 0.9) holdBig = NO;
+        } else { sHoldBigV = nil; sHoldBigT = 0; }
+        if (holdBig) { compact = NO; keepBig = YES; }
     }
     BOOL expConfirmed = (formNow == 0);
     if (ios17)
