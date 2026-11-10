@@ -62,7 +62,7 @@ static double expandTextY = DI_EXP_TEXT_BASE_Y;   // 上下偏移(pt, 下为正,
 static double expandTextScale = 100.0; // 文字大小(%, 100=原样)
 /* 2.8.86: 构建戳 —— 之前横幅打的是 SpringBoard 自己的 CFBundleShortVersionString(恒 1.0),
    日志里根本看不出装的是哪一版。所有诊断行都带这个戳, 下轮日志一眼定位。 */
-#define DI_BUILD_VER @"2.9.62"
+#define DI_BUILD_VER @"2.9.63"
 static BOOL gRecordingActive = NO; // 保留: 岛素材总闸条件
 static NSString *diElementId(UIView *host);
 static BOOL diMiniMusicActive(UIView *host); // 2.6.3: 前置(遮罩层使用)
@@ -4402,6 +4402,7 @@ static BOOL diApplyMaskToCover(UIView *cover, UIImage *shape) {
         CGRect coverRect = CGRectZero;
         UIView *coverV = nil;
         BOOL freshScan = NO;
+        CGRect prevCover = self.cacheCoverRect;
         {
             /* 2.8.17: 缓存策略收紧 —— 以前 1.5s 重扫一次, 重扫时如果正好赶上
                我们刚把某层藏掉, 候选就会漂到别处(287 的"两边闪")。
@@ -4433,6 +4434,37 @@ static BOOL diApplyMaskToCover(UIView *cover, UIImage *shape) {
             }
             if (!coverV) coverV = self.cacheCoverV;
             if (CGRectIsEmpty(coverRect)) coverRect = self.cacheCoverRect;
+        }
+        /* 2.9.63: 小岛态封面候选漂移守卫 —— 用户报"小岛暂停了会变大偏移"。
+           小岛稳定后封面门户位置是固定的(左槽 26x22@8,7); 暂停/系统重建会触发
+           重扫, 一旦挑到别的层(尺寸 >34pt 或中心挪了 >10pt), 玻璃就会画大/画偏。
+           宿主尺寸没变时一律沿用旧位, 连续 3 次重扫仍漂移才接受新位
+           (真换位置不会一直被拒, 假漂移最多错 12 秒)。 */
+        if (freshScan && coverV && !CGRectIsEmpty(prevCover) && !CGRectIsEmpty(coverRect)
+            && diIsIOS17Up() && isMini
+            && fabs(bs.width - self.cacheBW) <= 2.0 && fabs(bs.height - self.cacheBH) <= 2.0) {
+            CGPoint nc = CGPointMake(coverRect.origin.x + coverRect.size.width * 0.5,
+                                     coverRect.origin.y + coverRect.size.height * 0.5);
+            CGPoint oc = CGPointMake(prevCover.origin.x + prevCover.size.width * 0.5,
+                                     prevCover.origin.y + prevCover.size.height * 0.5);
+            BOOL bigger = (coverRect.size.width > 34.0 || coverRect.size.height > 34.0);
+            BOOL moved = (fabs(nc.x - oc.x) > 10.0 || fabs(nc.y - oc.y) > 10.0);
+            static int sDriftHits; static CFAbsoluteTime sDriftT;
+            if (bigger || moved) {
+                sDriftHits++;
+                if (sDriftHits < 3) {
+                    CGRect driftNew = coverRect;
+                    coverRect = prevCover;
+                    self.cacheCoverRect = prevCover;
+                    if (CFAbsoluteTimeGetCurrent() - sDriftT > 5.0) {
+                        sDriftT = CFAbsoluteTimeGetCurrent();
+                        DLog(@"遮罩[17]: 小岛封面候选漂移 新%@ 旧%@ → 沿用旧位(连续%d次)",
+                             NSStringFromCGRect(driftNew), NSStringFromCGRect(prevCover), sDriftHits);
+                    }
+                }
+            } else {
+                sDriftHits = 0;
+            }
         }
         /* 2.8.18: 换封面视图**不再**整体 teardown。
            288 日志 16:01:21→16:01:22 就是活证据: 同一首歌唱着, 封面从
@@ -13653,16 +13685,13 @@ static void diActivityApply(UIView *artwork) {
     BOOL sibling = (ios17 && !smallArt && formNow != 0) ? diMruCompactSiblingExists(artwork) : NO;
     BOOL compact = ios17 && (smallArt || sibling || formNow == 1
                              || (formNow < 0 && diMruIslandCompact(artwork)));
-    /* 2.9.59: 展开确认期 —— island.plist 连续说"展开"才认。
-       收缩立即生效(切歌后残留立刻收掉), 真展开晚一小会出大玻璃。
-       2.9.62: 1.2 秒 → 0.3 秒。确认期防的是"残留容器把文件写成展开"的假信号,
-       2.9.61 起播报只认可见容器, 这个源头已经没了; 393 日志里 1.2 秒确认期
-       就是用户看到的"展开先显示一下方形专辑, 一会才变圆"。 */
-    static CFAbsoluteTime sExpSince = 0;
-    CFAbsoluteTime nowTs = CFAbsoluteTimeGetCurrent();
-    if (formNow == 0) { if (!sExpSince) sExpSince = nowTs; }
-    else if (formNow == 1) sExpSince = 0;
-    BOOL expConfirmed = (formNow == 0 && sExpSince > 0 && nowTs - sExpSince >= 0.3);
+    /* 2.9.63: 撤掉展开确认期(2.9.59 引入, 2.9.62 缩到 0.3 秒仍不够)。
+       394 日志实锤: 真展开的第一帧 plist 就说"展开", 但确认期从 0 起算,
+       恰恰在这一帧把大玻璃拆了 → 原生方形专辑露出来, 下一拍才铺回圆玻璃
+       (394: 15:48:53 "展开未确认(连续 0.0 秒)" → 15:48:54 玻璃才回来)。
+       它防的"残留容器把文件写成展开"假信号, 2.9.61 起播报只认可见容器已除根;
+       收缩方向不受影响 —— plist 说收缩照样立即拆(formNow==1 直接进 compact)。 */
+    BOOL expConfirmed = (formNow == 0);
     if (ios17)
         /* 2.9.60: 只有"确认过的展开"才向 SB 报展开 —— 切歌瞬间 66 残留被判
            非收缩但还没过确认期, 这时若报 YES, SB 16 侧刚恢复的小岛玻璃会被
@@ -13735,15 +13764,16 @@ static void diActivityApply(UIView *artwork) {
     /* 2.9.59: 判为"展开"的大头像, 还必须过确认期 —— 切歌瞬间 island.plist 会被
        407x198 残留容器写成"展开" 1~2 秒(390 日志 12:43:50 前后), 不确认就画 66,
        就是"切换下一首放大回不去"。真展开信号一直持续, 只晚 1.2 秒。 */
+    /* 2.9.63: 这条分支现在只在"播报缺失/过期"(formNow<0)且大头像无收缩证据时走,
+       属于保守让位, 不再发生在真展开的第一帧。 */
     if (ios17 && !smallArt && !compact && !expConfirmed) {
         if (state) diActivityTeardown(artwork, state);
         static CFAbsoluteTime sHoldT;
         if (CFAbsoluteTimeGetCurrent() - sHoldT > 5.0) {
             sHoldT = CFAbsoluteTimeGetCurrent();
             diMruFileLog([NSString stringWithFormat:
-                          @"小岛态: 展开未确认(连续 %.1f 秒 <0.3), 先拆大玻璃 头像 %.0fx%.0f",
-                          sExpSince > 0 ? CFAbsoluteTimeGetCurrent() - sExpSince : 0.0,
-                          artwork.bounds.size.width, artwork.bounds.size.height]);
+                          @"无播报: 大头像暂不铺玻璃(文件缺/过期) 头像 %.0fx%.0f 文件=%d",
+                          artwork.bounds.size.width, artwork.bounds.size.height, formNow]);
         }
         return;
     }
