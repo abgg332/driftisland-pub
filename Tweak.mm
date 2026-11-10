@@ -62,7 +62,7 @@ static double expandTextY = DI_EXP_TEXT_BASE_Y;   // 上下偏移(pt, 下为正,
 static double expandTextScale = 100.0; // 文字大小(%, 100=原样)
 /* 2.8.86: 构建戳 —— 之前横幅打的是 SpringBoard 自己的 CFBundleShortVersionString(恒 1.0),
    日志里根本看不出装的是哪一版。所有诊断行都带这个戳, 下轮日志一眼定位。 */
-#define DI_BUILD_VER @"2.9.64"
+#define DI_BUILD_VER @"2.9.65"
 static BOOL gRecordingActive = NO; // 保留: 岛素材总闸条件
 static NSString *diElementId(UIView *host);
 static BOOL diMiniMusicActive(UIView *host); // 2.6.3: 前置(遮罩层使用)
@@ -3203,6 +3203,8 @@ static UIImage *diInvertMaskImage(UIImage *m);
 @property (nonatomic, assign) BOOL rotInstalledRev;
 @property (nonatomic, assign) CGFloat lastGlassSide; /* 上次画玻璃的边长, 用于藏层节流 */
 @property (nonatomic, assign) CGPoint lastGlassCenter;
+/* 2.9.65: 过渡帧锁定的玻璃边长(0=不锁) —— 见 diPaintGlassAt 里的说明 */
+@property (nonatomic, assign) CGFloat freezeSide;
 @property (nonatomic, assign) CFAbsoluteTime paintT;     /* 上次真正画玻璃的时间, 稳定态短路用 */
 /* 2.8.39: 上次确认"正在播放"的时间 —— 遮罩锁死用(308 反馈: 切歌/门户重建时
    判定瞬断就拆玻璃, 用户看到"先方形后遮罩"; 播放中或 30s 内播放过就永不拆)。 */
@@ -3382,8 +3384,11 @@ static void diPublishIslandState(CGSize hostSize, BOOL mini, BOOL expand) {
     static CGFloat lw, lh; static CFAbsoluteTime lt; static int lm = -1;
     CFAbsoluteTime now = CFAbsoluteTimeGetCurrent();
     int m = mini ? 1 : (expand ? 2 : 0);
-    /* 2.9.55: 岛容器布局 hook 每帧都会调进来, 写盘压到 5Hz, 免得展开动画期间狂写 */
-    if (lt > 0 && now - lt < 0.2) return;
+    /* 2.9.55: 岛容器布局 hook 每帧都会调进来, 写盘压到 5Hz, 免得展开动画期间狂写
+       2.9.65: 形态"卡在中间"(m=0, 展开/收起动画途中)时放宽到 16Hz ——
+       MRU 靠这份文件判形态, 过渡帧写慢了它就会读到"上一帧的小岛",
+       表现为"展开后专辑先很小再变大"。0.4 秒的动画最多多写 5~6 次, 可忽略。 */
+    if (lt > 0 && now - lt < (m == 0 ? 0.06 : 0.2)) return;
     if (fabs(hostSize.width - lw) < 0.5 && fabs(hostSize.height - lh) < 0.5
         && m == lm && now - lt < 2.0) return;
     lw = hostSize.width; lh = hostSize.height; lm = m; lt = now;
@@ -3718,6 +3723,7 @@ static BOOL diApplyMaskToCover(UIView *cover, UIImage *shape) {
     /* 2.8.13: 玻璃模式标志一并清掉, 下次进来重新判定 */
     _glassOn = NO;
     _glassMiss = 0;
+    _freezeSide = 0;   /* 2.9.65: 边长锁一起清, 下次重新锁 */
     /* 2.8.16: 玻璃拆了就把旋转 CA 动画一起摘掉, 否则视图藏起来动画还在跑(白耗电) */
     if (self.rotInstalled) {
         [_artView.layer removeAnimationForKey:@"diSpin"];
@@ -3830,6 +3836,14 @@ static BOOL diApplyMaskToCover(UIView *cover, UIImage *shape) {
     side = side * (maskScale / 100.0);
     if (side > 60.0) side = 60.0;
     if (side < 10.0) side = 10.0;
+    /* ===== 2.9.65: 过渡帧锁定边长(修"从小岛展开时专辑抖一下") =====
+       396 日志实锤: 小岛稳定态下宿主在 127x37 / 137x42 / 191x41 / 193x37 之间
+       来回变(展开起手/波形进出), 封面候选跟着从 26x22@(8,7.3) 跳到
+       31.2x26.4@(9.6,8.8) → 玻璃边长 25.3 ↔ 30.4 来回跳, 肉眼就是"抖一下"。
+       尺寸还在变的那几帧沿用上一次稳定时的边长, 圆心照旧跟随(位置是平滑的,
+       不会露出系统方角); 稳定 2 帧后自动解锁校准。
+       差 >12pt 说明真的是换了形态(不是过渡抖动), 照常放行。 */
+    if (self.freezeSide > 0 && fabs(side - self.freezeSide) < 12.0) side = self.freezeSide;
     CGFloat cx = rect.origin.x + rect.size.width * 0.5;
     CGFloat cy = rect.origin.y + rect.size.height * 0.5;
     CGRect square = CGRectMake(cx - side * 0.5, cy - side * 0.5, side, side);
@@ -4186,6 +4200,28 @@ static BOOL diApplyMaskToCover(UIView *cover, UIImage *shape) {
                 DLog(@"遮罩[17]: 宿主=%.0fx%.0f 小岛=%d 展开=%d 开=%d 掩码=%d 录屏=%d gate=%d",
                      bs.width, bs.height, isMini, isExpand, enabled, maskOn, gRecordingActive, gate);
             }
+        }
+        /* ===== 2.9.65: 过渡帧锁住玻璃边长(修"从小岛展开时专辑抖一下") =====
+           396 日志实锤: 展开起手 + 波形进出时宿主会在 127x37 / 137x42 / 191x41 /
+           193x37 之间来回跳, 每一跳封面候选都变(边长 25.3 ↔ 30.4, 圆心上下 3pt),
+           玻璃跟着跳 = 用户看到的"小岛专辑抖一下"。
+           这里在"尺寸还在变"的帧把当前边长锁住(圆心仍跟随, 位置是平滑的),
+           稳定 2 帧后解锁, 让下一次校准照常生效。 */
+        if (diIsIOS17Up() && isMini) {
+            if (self.glassOn && sizeChanged && self.lastGlassSide > 1.0) {
+                if (self.freezeSide <= 0) {
+                    self.freezeSide = self.lastGlassSide;
+                    static CFAbsoluteTime sFzT;
+                    if (CFAbsoluteTimeGetCurrent() - sFzT > 3.0) {
+                        sFzT = CFAbsoluteTimeGetCurrent();
+                        DLog(@"遮罩[17]: 过渡帧锁边长 %.1fpt (宿主 %.0fx%.0f)", self.freezeSide, bs.width, bs.height);
+                    }
+                }
+            } else if (self.freezeSide > 0 && self.stableFrm >= 2) {
+                self.freezeSide = 0;
+            }
+        } else if (self.freezeSide > 0) {
+            self.freezeSide = 0;
         }
         /* ===== 2.8.84: 展开态彻底交给 MediaRemoteUI，SpringBoard 侧全部退出 =====
            331 反馈: 头像下方多出一个心形模糊光斑（用户圈出来的"多出来的蒙版"）。
@@ -13621,30 +13657,34 @@ static BOOL diMruIslandCompact(UIView *artwork) {
 }
 
 /* ===== 2.9.54: 形态以 SpringBoard 播报的宿主尺寸为准(所有版本通用) =====
-   返回 1=小岛 0=展开 -1=没拿到/已过期。
+   返回 1=小岛 0=展开 -1=过渡帧(文件新鲜但尺寸卡在形态中间) -2=没拿到/已过期。
    386 日志(iOS 16, 宿主 185x52)里 MRU 只看得到 23x23 的头像, 却把"展开"写回给
    SpringBoard, 小岛玻璃刚画上就被整棵收掉。宿主真实尺寸只有 SpringBoard 知道,
    它每 2 秒写一次 island.plist, 3 秒内有效就采信。 */
 static int diMruFormFromIsland(void) {
-    static int cForm = -1; static CFAbsoluteTime cChecked;
+    static int cForm = -2; static CFAbsoluteTime cChecked;
     CFAbsoluteTime now = CFAbsoluteTimeGetCurrent();
     /* 2.9.64: 读盘缓存 0.5 → 0.15 秒 —— 395: 展开第一帧可能还读到 0.5 秒前的
-       "收缩", 白白拆一次玻璃("偶尔先方再圆"的残党)。0.15 秒内仍去重, 读盘不频繁。 */
-    if (now - cChecked < 0.15) return cForm;
+       "收缩", 白白拆一次玻璃("偶尔先方再圆"的残党)。0.15 秒内仍去重, 读盘不频繁。
+       2.9.65: 0.1 秒 —— 播报端过渡帧已经放到 16Hz, 这里跟上。 */
+    if (now - cChecked < 0.1) return cForm;
     cChecked = now;
     NSString *dir = diMruSelfDir();
     NSDictionary *d = dir.length
         ? [NSDictionary dictionaryWithContentsOfFile:[dir stringByAppendingPathComponent:@"island.plist"]]
         : nil;
-    if (![d isKindOfClass:NSDictionary.class]) { cForm = -1; return cForm; }
+    if (![d isKindOfClass:NSDictionary.class]) { cForm = -2; return cForm; }
     double t = [d[@"t"] doubleValue];
     CGFloat w = [d[@"w"] doubleValue], h = [d[@"h"] doubleValue];
-    if (w < 1.0 || h < 1.0 || fabs(now - t) > 3.0) { cForm = -1; return cForm; }
+    if (w < 1.0 || h < 1.0 || fabs(now - t) > 3.0) { cForm = -2; return cForm; }
     /* ===== 2.9.62: 认播报的形态位, 不再按 w/h 反推 =====
        393 日志实锤: 展开动画中间帧(227x44 之类)按 w/h 反推会被判成"小岛",
        展开确认期被清零 → 玻璃要等动画结束再 +1.2 秒才铺(用户: "展开先显示
        一下方形的, 一会才显示圆的")。播报端本来就写了 mini/expand 两位:
-       展开动画中间帧两位都是 0 → 返回 -1(未知), 不清确认期也不确认。 */
+       展开动画中间帧两位都是 0 → 返回 -1(未知), 不清确认期也不确认。
+       2.9.65: 再细分一层 —— -2=文件缺失/过期(真没信号), -1=文件是新鲜的、
+       但尺寸正好卡在形态中间(展开/收起的动画帧)。两种情况在 MRU 侧处理不同:
+       过渡帧要"保留现有玻璃", 没信号才按"拆掉"处理。 */
     int mini = [d[@"mini"] intValue], exp = [d[@"expand"] intValue];
     if (exp == 1 && (h >= 70.0 && w >= 240.0)) { cForm = 0; return cForm; }
     if (mini == 1 && (h < 70.0 || w < 240.0))  { cForm = 1; return cForm; }
@@ -13799,12 +13839,18 @@ static void diActivityApply(UIView *artwork) {
         }
     }
 
-    /* 2.9.59: 判为"展开"的大头像, 还必须过确认期 —— 切歌瞬间 island.plist 会被
-       407x198 残留容器写成"展开" 1~2 秒(390 日志 12:43:50 前后), 不确认就画 66,
-       就是"切换下一首放大回不去"。真展开信号一直持续, 只晚 1.2 秒。 */
     /* 2.9.63: 这条分支现在只在"播报缺失/过期"(formNow<0)且大头像无收缩证据时走,
        属于保守让位, 不再发生在真展开的第一帧。 */
-    if (ios17 && !smallArt && !compact && !expConfirmed) {
+    /* ===== 2.9.65: 展开动画的"过渡帧"不再拆玻璃 =====
+       396: 展开途中宿主经过 209x40 → 240x70 这一段时, 播报两端都不匹配
+       (m=0), MRU 读到"未知" → 走下面这条保守让位 → 把 66 的玻璃拆掉,
+       系统原生(很小)那张露出来; 等宿主长到 280x120 才重新铺 66 ——
+       用户看到的就是"展开到大的时候专辑很小然后才变大"(396 日志里这段
+       最长能拖 0.3~0.5 秒, 所以只是"偶尔")。
+       现在: 文件新鲜但尺寸卡在中间(=-1) → 认定是展开/收起的动画帧,
+       保留现有玻璃继续走, 玻璃按头像自身 bounds 铺(见下面 box 那段)。
+       只有"文件根本没有/已过期"(=-2)才按保守让位拆掉。 */
+    if (ios17 && !smallArt && !compact && !expConfirmed && formNow != -1) {
         if (state) diActivityTeardown(artwork, state);
         static CFAbsoluteTime sHoldT;
         if (CFAbsoluteTimeGetCurrent() - sHoldT > 5.0) {
@@ -13821,6 +13867,13 @@ static void diActivityApply(UIView *artwork) {
     NSMutableString *chain = [NSMutableString string];
     CGRect box = ios17 ? diActivityVisibleRect(artwork, chain) : artwork.bounds;
     if (box.size.width < 4 || box.size.height < 4) box = artwork.bounds;
+    /* ===== 2.9.65: 展开途中不再按"可见窗口"收玻璃 =====
+       396 日志实锤: 展开动画途中祖先 bounds 还在 189x37 → 407x201 之间长,
+       diActivityVisibleRect 求交出来的窗口很小(过渡帧), 玻璃就按小窗口铺;
+       动画一结束窗口补满, 玻璃才"变大" —— 用户: "展开到大的时候会触发
+       专辑很小然后才变大"。播报为"展开"(0)或"过渡帧"(-1)时,
+       直接按头像自己的 bounds 铺(展开态恒 66x66), 玻璃跟岛体一起缩放, 不再重铺。 */
+    if (ios17 && (formNow == 0 || formNow == -1)) box = artwork.bounds;
     BOOL collapsed = ios17 && (MIN(box.size.width, box.size.height) < 42);
     /* 16 保持 2.9.33 的老判据(按 bounds), 不用窗口 */
     if (ios17) diMruWriteExpandState(!collapsed, box.size);
