@@ -62,7 +62,7 @@ static double expandTextY = DI_EXP_TEXT_BASE_Y;   // 上下偏移(pt, 下为正,
 static double expandTextScale = 100.0; // 文字大小(%, 100=原样)
 /* 2.8.86: 构建戳 —— 之前横幅打的是 SpringBoard 自己的 CFBundleShortVersionString(恒 1.0),
    日志里根本看不出装的是哪一版。所有诊断行都带这个戳, 下轮日志一眼定位。 */
-#define DI_BUILD_VER @"2.9.65"
+#define DI_BUILD_VER @"2.9.66"
 static BOOL gRecordingActive = NO; // 保留: 岛素材总闸条件
 static NSString *diElementId(UIView *host);
 static BOOL diMiniMusicActive(UIView *host); // 2.6.3: 前置(遮罩层使用)
@@ -4174,6 +4174,20 @@ static BOOL diApplyMaskToCover(UIView *cover, UIImage *shape) {
         BOOL isMini = (bs.height >= 24 && bs.height <= 62
                        && bs.width >= 100 && bs.width <= 208
                        && bs.width > bs.height * 1.55);
+        /* ===== 2.9.66: 暂停形变时保住小岛玻璃(修"暂停专辑变大"回归) =====
+           397 日志实锤: 暂停瞬间小岛会加宽到 209x40 → 220x45(播放键换成暂停键那一帧),
+           越过 isMini 的 208 上限 → gate=0 → shapeOnly 里 lockMask 在 17 上是 NO
+           → diRestorePainted + glassOn=NO, SB 玻璃拆掉; 而 MRU 那颗 66 玻璃还在
+           (island.plist 停在"展开"没人改), 于是 37pt 的小岛里嵌了一颗 66pt 的专辑
+           —— 用户视频里"暂停专辑变大"就是这个。
+           这里只在"17 + 已有玻璃 + 当前没在播放(暂停/切歌瞬断)"时放宽宽度上限到 236,
+           让 SB 玻璃跟着形变活下来; 播放中的展开起手照旧按 208 收紧(展开仍归 MRU)。 */
+        BOOL playingAtGate = mrQueryOK ? musicPlaying
+                                       : AVAudioSession.sharedInstance.isOtherAudioPlaying;
+        BOOL pauseMorph = diIsIOS17Up() && self.glassOn && !playingAtGate
+                          && bs.height >= 24 && bs.height <= 70
+                          && bs.width >= 100 && bs.width <= 236
+                          && bs.width > bs.height * 1.55;
         /* 2.8.39: 展开态重新参与(308: "展开岛什么的不要影响, 一直显示遮罩")。
            窗口 = 媒体展开宿主实测 407x201 / 330x72 系; 收紧高度下限 120 挡掉
            来电展开(330x72 高 72)和一切过渡中间帧(259x98 / 313x131 都 < 120 或宽超),
@@ -4191,7 +4205,7 @@ static BOOL diApplyMaskToCover(UIView *cover, UIImage *shape) {
                      (isMini || isExpand) ? @"参与" : @"跳过", isMini, isExpand, maskOn);
             }
         }
-        BOOL gate = enabled && maskOn && !gRecordingActive && (isMini || isExpand);
+        BOOL gate = enabled && maskOn && !gRecordingActive && (isMini || isExpand || pauseMorph);
         if (diIsIOS17Up()) {
             static CFAbsoluteTime sGT; static int sLastGate = -1; static CGFloat sGW, sGH;
             CFAbsoluteTime gn = CFAbsoluteTimeGetCurrent();
@@ -4283,19 +4297,31 @@ static BOOL diApplyMaskToCover(UIView *cover, UIImage *shape) {
                                  bs.width, bs.height);
                         }
                     }
-                } else if (self.glassOn) {
+                } else {
                     /* 2.9.64: 暂停/切歌瞬断保持遮罩 —— 395 实锤: 16:30:11 与 16:30:42
                        暂停时 playing17=NO → 老逻辑 teardown: SB 玻璃拆掉 + 系统门户层
                        还原, 而 MRU 那颗 23 玻璃还挂着 → 两层专辑叠出"暂停变大偏移";
                        切歌瞬间播放态短暂为 NO → "切换先变回原来的"。
-                       已经画着玻璃说明这块岛就是音乐岛, 继续走正常遮罩流程;
-                       若岛真被通知替换, 封面层消失 → 下面 glassMiss 自然收掉。 */
-                    ok17 = YES;
-                    static CFAbsoluteTime sPzT;
-                    if (CFAbsoluteTimeGetCurrent() - sPzT > 5.0) {
-                        sPzT = CFAbsoluteTimeGetCurrent();
-                        DLog(@"[17] 暂停/瞬断: 已有玻璃, 保持遮罩 宿主=%.0fx%.0f",
-                             bs.width, bs.height);
+                       2.9.66: 放宽到"封面层还在就算音乐岛" —— 397 里暂停时玻璃已经被
+                       前一步的形变拆掉过, 单靠 glassOn 救不回来, 小岛就裸着系统专辑。
+                       已画着玻璃、或宿主里仍有 12~50pt 的专辑封面层 → 认定是音乐岛
+                       (暂停不等于通知岛); 真被通知替换时封面层消失, glassMiss 自然收。 */
+                    BOOL keepPause = self.glassOn;
+                    if (!keepPause) {
+                        CGRect crP = CGRectZero;
+                        UIView *cvP = diFindAlbumCoverView(host, &crP);
+                        CGFloat mnP = MIN(crP.size.width, crP.size.height);
+                        CGFloat mxP = MAX(crP.size.width, crP.size.height);
+                        keepPause = (cvP && mnP >= 12.0 && mxP <= 50.0);
+                    }
+                    if (keepPause) {
+                        ok17 = YES;
+                        static CFAbsoluteTime sPzT;
+                        if (CFAbsoluteTimeGetCurrent() - sPzT > 5.0) {
+                            sPzT = CFAbsoluteTimeGetCurrent();
+                            DLog(@"[17] 暂停/瞬断: 封面层仍在, 保持遮罩 宿主=%.0fx%.0f 玻璃=%d",
+                                 bs.width, bs.height, (int)self.glassOn);
+                        }
                     }
                 }
             }
@@ -6705,10 +6731,27 @@ static void updateSingleVideo(UIWindow *win) {
            展开确认期被打断(展开有时生效)、小岛态被写成展开(缩回变大)。
            找不到可见音乐岛就干脆不写盘, 让旧值自然过期(3 秒) → MRU 按无信号处理。 */
         UIView *pubHost = musicRootVis;
+        /* 2.9.66: 暂停粘滞播报 —— 暂停/切歌瞬断时 diIsNowPlayingHostCached 会断开,
+           musicRootVis 变 nil, 播报整个停摆, island.plist 停在最后一次的"展开"。
+           MRU 读到假展开就一直按 66 铺大玻璃(397: 暂停后小岛 189x37, MRU 仍
+           apply 66x66 → 用户"暂停专辑变大")。这里记住上一次可见的音乐岛,
+           只要它还活着就继续按它的真实尺寸播报(仅限小岛尺寸, 通知/充电岛不会进来)。 */
+        static __weak UIView *sPubHost;
+        if (pubHost) {
+            sPubHost = pubHost;
+        } else if (sPubHost && sPubHost.window == win && !sPubHost.isHidden) {
+            CGSize ss = sPubHost.bounds.size;
+            if (ss.height >= 24 && ss.height <= 70 && ss.width >= 100 && ss.width <= 236) pubHost = sPubHost;
+            else sPubHost = nil;
+        }
         if (pubHost) {
             CGSize ps = pubHost.bounds.size;
+            /* 2.9.66: 宽度上限按播放态分开 —— 暂停形变会把小岛加宽到 220(播放键换成
+               暂停键), 播放中的展开起手不能跟着放宽, 否则展开又会被当小岛。 */
+            BOOL playingPub = mrQueryOK ? musicPlaying
+                                         : AVAudioSession.sharedInstance.isOtherAudioPlaying;
             BOOL pMini = (ps.height >= 24 && ps.height <= 62
-                          && ps.width >= 100 && ps.width <= 208
+                          && ps.width >= 100 && ps.width <= (playingPub ? 208.0 : 236.0)
                           && ps.width > ps.height * 1.55);
             BOOL pExp = (ps.height >= 120 && ps.height <= 300
                          && ps.width >= 280 && ps.width <= 440);
@@ -13763,6 +13806,22 @@ static void diActivityApply(UIView *artwork) {
     BOOL sibling = (ios17 && !smallArt && formNow != 0) ? diMruCompactSiblingExists(artwork) : NO;
     BOOL compact = ios17 && (smallArt || sibling || formNow == 1
                              || (formNow < 0 && diMruIslandCompact(artwork)));
+    /* ===== 2.9.66: 播报停摆 + 现场收缩 → 按收缩处理(修"暂停专辑变大") =====
+       397 日志实锤: 暂停后 SpringBoard 的形态播报停摆(音乐岛结构判定断开,
+       没人再写 island.plist), 文件停在最后一次的"展开"; MRU 于是继续按
+       66x66 铺大玻璃, 而宿主早就缩回 189x37 —— 用户视频里小岛里嵌了一颗
+       66pt 的专辑("暂停专辑变大")。
+       现场证据比跨进程文件硬: 头像最近的 NowPlaying 宿主高度 <120 就是小岛
+       (展开态恒 407x201)。真展开不会误伤 —— 只有"文件说展开、现场却说小岛"
+       这种自相矛盾的情况才改判。 */
+    if (ios17 && !smallArt && formNow == 0) {
+        for (UIView *a = artwork.superview; a && a != artwork.window; a = a.superview) {
+            if ([NSStringFromClass(a.class) containsString:@"NowPlaying"]) {
+                if (a.bounds.size.height > 0.5 && a.bounds.size.height < 120.0) compact = YES;
+                break;
+            }
+        }
+    }
     /* 2.9.63: 撤掉展开确认期(2.9.59 引入, 2.9.62 缩到 0.3 秒仍不够)。
        394 日志实锤: 真展开的第一帧 plist 就说"展开", 但确认期从 0 起算,
        恰恰在这一帧把大玻璃拆了 → 原生方形专辑露出来, 下一拍才铺回圆玻璃
