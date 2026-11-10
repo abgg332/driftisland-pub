@@ -62,7 +62,7 @@ static double expandTextY = DI_EXP_TEXT_BASE_Y;   // 上下偏移(pt, 下为正,
 static double expandTextScale = 100.0; // 文字大小(%, 100=原样)
 /* 2.8.86: 构建戳 —— 之前横幅打的是 SpringBoard 自己的 CFBundleShortVersionString(恒 1.0),
    日志里根本看不出装的是哪一版。所有诊断行都带这个戳, 下轮日志一眼定位。 */
-#define DI_BUILD_VER @"2.9.66"
+#define DI_BUILD_VER @"2.9.67"
 static BOOL gRecordingActive = NO; // 保留: 岛素材总闸条件
 static NSString *diElementId(UIView *host);
 static BOOL diMiniMusicActive(UIView *host); // 2.6.3: 前置(遮罩层使用)
@@ -3205,6 +3205,8 @@ static UIImage *diInvertMaskImage(UIImage *m);
 @property (nonatomic, assign) CGPoint lastGlassCenter;
 /* 2.9.65: 过渡帧锁定的玻璃边长(0=不锁) —— 见 diPaintGlassAt 里的说明 */
 @property (nonatomic, assign) CGFloat freezeSide;
+/* 2.9.67: 连续"在变大"的帧数 —— 长按展开起手用, 见 isMini/挂载守卫 */
+@property (nonatomic, assign) NSInteger growStreak;
 @property (nonatomic, assign) CFAbsoluteTime paintT;     /* 上次真正画玻璃的时间, 稳定态短路用 */
 /* 2.8.39: 上次确认"正在播放"的时间 —— 遮罩锁死用(308 反馈: 切歌/门户重建时
    判定瞬断就拆玻璃, 用户看到"先方形后遮罩"; 播放中或 30s 内播放过就永不拆)。 */
@@ -4116,6 +4118,12 @@ static BOOL diApplyMaskToCover(UIView *cover, UIImage *shape) {
            "展开岛偶尔还会显示那个蒙版"), 变大即立即收玻璃, 不等稳定。 */
         BOOL growing = (bs.width - self.lastBW > 2.0) || (bs.height - self.lastBH > 1.5);
         BOOL sizeChanged = (fabs(bs.width - self.lastBW) > 1.2 || fabs(bs.height - self.lastBH) > 1.2);
+        /* 2.9.67: 连续变大帧数 —— "刚注销完第一次长按会变小"的判据。
+           398 反馈: 重启后第一次长按展开, 小岛会先出现一颗 25pt 的小玻璃再变大。
+           根因是 2.9.64 那道"播报说展开就别新挂小玻璃"的闸门依赖 island.plist,
+           刚注销时文件还没被写过 → diIslandFreshExpand 返回 NO → 闸门失效,
+           展开起手照样挂了一颗小圆。改成同时看物理信号: 连续 2 帧在变大 = 正在展开。 */
+        if (growing) self.growStreak++; else self.growStreak = 0;
         /* ===== 2.9.46: 17 上只有"进出展开"才算形变 =====
            小岛自己在 127x37 与 189x37 之间来回(波形/配件进出), 旧判据把这当成
            "变大/明显缩小", 每几秒就拆一次玻璃 → 原图闪现/两份重叠。
@@ -4123,6 +4131,16 @@ static BOOL diApplyMaskToCover(UIView *cover, UIImage *shape) {
         BOOL bigPrev = (self.lastBH >= 60.0);
         BOOL bigNow = (bs.height >= 60.0);
         BOOL bigChange = bigNow || bigPrev;
+        /* 2.9.67: 17 上"宽度已经越过小岛上限(208)"也算形变 —— 398 反馈"刚注销完
+           第一次长按会变小": 展开起手时小岛里那颗 25pt 小玻璃一直挂到 240 宽才让位,
+           于是岛已经在长大, 专辑还是小小一颗。宽度 >212 就按"展开起手"处理, 直接
+           让位给原生内容, 等 MRU 的 66 接管。小岛内部(≤208)的波形进出不受影响。 */
+        if (diIsIOS17Up() && bs.width > 212.0) {
+            /* 暂停/瞬断时不算展开起手 —— 那条路要让 pauseMorph 保住玻璃(见下)。 */
+            BOOL playingNow = mrQueryOK ? musicPlaying
+                                        : AVAudioSession.sharedInstance.isOtherAudioPlaying;
+            if (playingNow) bigChange = YES;
+        }
         /* 17 上"从大形态明显缩小"= 收起起手, 立即让位(小岛内部收缩不算) */
         BOOL shrink17 = diIsIOS17Up() && bigPrev
             && (self.lastBW - bs.width > 8.0 || self.lastBH - bs.height > 8.0);
@@ -4269,7 +4287,8 @@ static BOOL diApplyMaskToCover(UIView *cover, UIImage *shape) {
         /* 2.9.64: 展开过渡期不再新挂小号玻璃 —— 395: 长按展开偶发"专辑很小然后正常":
            过渡中宿主还够着 isMini 窗口, 按 26x22 门户缓存画出一颗 25pt 小圆。
            展开态由 MRU 接管, 播报新鲜且说展开时 SB 别再新挂(已挂的玻璃照旧跟随)。 */
-        if (diIsIOS17Up() && isMini && !self.glassOn && diIslandFreshExpand()) return;
+        if (diIsIOS17Up() && isMini && !self.glassOn
+            && (diIslandFreshExpand() || self.growStreak >= 2)) return;
         /* 2.8.15: 音乐岛关卡 —— 只有"正在放歌"的岛才继续(通知岛/头像一律不遮)。 */
         if (gate && !diIsNowPlayingHostCached(host)) {
             /* ===== 2.9.40: 17 的结构兜底 =====
@@ -13704,6 +13723,7 @@ static BOOL diMruIslandCompact(UIView *artwork) {
    386 日志(iOS 16, 宿主 185x52)里 MRU 只看得到 23x23 的头像, 却把"展开"写回给
    SpringBoard, 小岛玻璃刚画上就被整棵收掉。宿主真实尺寸只有 SpringBoard 知道,
    它每 2 秒写一次 island.plist, 3 秒内有效就采信。 */
+static CGFloat gDIFormW = 0, gDIFormH = 0;   /* 2.9.67: 播报的宿主尺寸(过渡帧判向用) */
 static int diMruFormFromIsland(void) {
     static int cForm = -2; static CFAbsoluteTime cChecked;
     CFAbsoluteTime now = CFAbsoluteTimeGetCurrent();
@@ -13716,10 +13736,11 @@ static int diMruFormFromIsland(void) {
     NSDictionary *d = dir.length
         ? [NSDictionary dictionaryWithContentsOfFile:[dir stringByAppendingPathComponent:@"island.plist"]]
         : nil;
-    if (![d isKindOfClass:NSDictionary.class]) { cForm = -2; return cForm; }
+    if (![d isKindOfClass:NSDictionary.class]) { cForm = -2; gDIFormW = gDIFormH = 0; return cForm; }
     double t = [d[@"t"] doubleValue];
     CGFloat w = [d[@"w"] doubleValue], h = [d[@"h"] doubleValue];
-    if (w < 1.0 || h < 1.0 || fabs(now - t) > 3.0) { cForm = -2; return cForm; }
+    if (w < 1.0 || h < 1.0 || fabs(now - t) > 3.0) { cForm = -2; gDIFormW = gDIFormH = 0; return cForm; }
+    gDIFormW = w; gDIFormH = h;
     /* ===== 2.9.62: 认播报的形态位, 不再按 w/h 反推 =====
        393 日志实锤: 展开动画中间帧(227x44 之类)按 w/h 反推会被判成"小岛",
        展开确认期被清零 → 玻璃要等动画结束再 +1.2 秒才铺(用户: "展开先显示
@@ -13822,12 +13843,19 @@ static void diActivityApply(UIView *artwork) {
             }
         }
     }
-    /* 2.9.63: 撤掉展开确认期(2.9.59 引入, 2.9.62 缩到 0.3 秒仍不够)。
-       394 日志实锤: 真展开的第一帧 plist 就说"展开", 但确认期从 0 起算,
-       恰恰在这一帧把大玻璃拆了 → 原生方形专辑露出来, 下一拍才铺回圆玻璃
-       (394: 15:48:53 "展开未确认(连续 0.0 秒)" → 15:48:54 玻璃才回来)。
-       它防的"残留容器把文件写成展开"假信号, 2.9.61 起播报只认可见容器已除根;
-       收缩方向不受影响 —— plist 说收缩照样立即拆(formNow==1 直接进 compact)。 */
+    /* ===== 2.9.67: 过渡帧按"播报的宿主尺寸"判方向 =====
+       398 日志实锤: 切歌/暂停那一瞬小岛会弹一下(209x40 → 219x45), 播报两位都是 0
+       → formNow=-1; 2.9.65 为了修"展开时专辑先很小再变大", 把 -1 一律当成
+       "展开动画中" → 按头像自身 66x66 铺玻璃。结果这块 45pt 高的小岛里被塞进
+       一颗 66pt 的专辑 —— 用户三次反馈的"暂停专辑变大"。
+       真展开在播报里是能看出尺寸的: 文件带着宿主 w/h。过渡帧里只要 w<240 或
+       h<70, 岛还停在"小岛尺寸"上, 这颗 66 就不该铺 —— 按收缩处理, 交回小岛那颗
+       23 头像 / SpringBoard 玻璃。只有宿主真的长到 ≥240x70(正在变大)才继续保留 66,
+       2.9.65 修的"先小后大"不受影响。 */
+    if (ios17 && !smallArt && formNow == -1 && gDIFormW > 1 && gDIFormH > 1
+        && gDIFormW < 240.0 && gDIFormH < 70.0) {
+        compact = YES;
+    }
     BOOL expConfirmed = (formNow == 0);
     if (ios17)
         /* 2.9.60: 只有"确认过的展开"才向 SB 报展开 —— 切歌瞬间 66 残留被判
