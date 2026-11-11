@@ -65,7 +65,7 @@ static double expandTextY = DI_EXP_TEXT_BASE_Y;   // 上下偏移(pt, 下为正,
 static double expandTextScale = 100.0; // 文字大小(%, 100=原样)
 /* 2.8.86: 构建戳 —— 之前横幅打的是 SpringBoard 自己的 CFBundleShortVersionString(恒 1.0),
    日志里根本看不出装的是哪一版。所有诊断行都带这个戳, 下轮日志一眼定位。 */
-#define DI_BUILD_VER @"3.0.10"
+#define DI_BUILD_VER @"3.0.11"
 static BOOL gRecordingActive = NO; // 保留: 岛素材总闸条件
 static NSString *diElementId(UIView *host);
 static BOOL diMiniMusicActive(UIView *host); // 2.6.3: 前置(遮罩层使用)
@@ -15850,14 +15850,19 @@ static void diNPApplyHideForRoot(UIView *root);
 
 static void diArtKillJitter(UIView *root) {
     if (!diArtIs3x2()) return;
-    /* 首轮 diArtInstall 时 MediaRemoteUI 可能还没加载, 这里补挂一次 */
+    /* 首轮 diArtInstall 时 MediaRemoteUI 可能还没加载, 这里补挂一次
+       3.0.11: 保险引导下不补挂 */
     static BOOL tcTried = NO;
     if (!tcTried) {
-        Class tcc = NSClassFromString(@"MRUNowPlayingTransportControlsView");
-        if (tcc) {
-            tcTried = YES;
-            MSHookMessageEx(tcc, @selector(setFrame:), (IMP)diTCSetFrame, (IMP *)&gDIOrigTCSetFrame);
-            RLog(@"[抖动] 传送栏 setFrame 补挂 %@", gDIOrigTCSetFrame ? @"成功" : @"失败");
+        tcTried = YES;
+        if (!gDIPlayerSafeBoot) {
+            Class tcc = NSClassFromString(@"MRUNowPlayingTransportControlsView");
+            if (tcc) {
+                diCrumb(@"补挂: 传送栏 setFrame 钩子前");
+                MSHookMessageEx(tcc, @selector(setFrame:), (IMP)diTCSetFrame, (IMP *)&gDIOrigTCSetFrame);
+                diCrumb(@"补挂: 传送栏 setFrame 钩子后");
+                RLog(@"[抖动] 传送栏 setFrame 补挂 %@", gDIOrigTCSetFrame ? @"成功" : @"失败");
+            }
         }
     }
     UIView *tc = diArtTransportOf(root);
@@ -15930,13 +15935,9 @@ static void diArtPlayerPost(UIView *root) {
     for (UIView *a in arts) diArtApply(a, on);
     if (on && !arts.count) diArtLogTree(root);
     diArtKillJitter(root);
-    /* 3.1.0: 播放状态变化不一定触发容器 VC 的 layout, 这里兜一层(节流 0.5s) */
-    static CFTimeInterval lastHideTS = 0;
-    CFTimeInterval hideNow = CFAbsoluteTimeGetCurrent();
-    if (hideNow - lastHideTS > 0.5) {
-        lastHideTS = hideNow;
-        diNPApplyHideForRoot(root);
-    }
+    /* 3.0.11: 删除"每 0.5s 遍历整棵播放器树收『未在播放』"—— 布局钩子里走大树,
+       是 3.1.0 起同步路径上唯一的新增代码(两次崩溃日志都停在它前一行的足迹上),
+       头号嫌疑。「未在播放」由模块容器钩子负责, 不在这里兜。 */
     /* 播放器的旋转/布局钩子安装顺序不确定, 可能在我们的清理之后又把动画挂回去。
        0.1s 后再补一次, 保证"关=静止、3×2=不抖"是最后一次写。 */
     static CFTimeInterval lastSweep = 0;
@@ -15979,6 +15980,54 @@ static const void *kDIBgIVKey  = &kDIBgIVKey;
 static const void *kDIBgDimKey = &kDIBgDimKey;
 static const void *kDIBgLastKey = &kDIBgLastKey;   /* 3.0.10: 模块 VC 处理节流 */
 
+/* ===== 3.0.11: 防死循环保险 =====
+   3.0.9/3.1.0/3.0.10 三连"无限安全模式" —— 崩溃点日志上拿不准(缓冲日志崩了就丢),
+   所以不再赌: 每次引导先看时间戳文件, 距上次引导 <90 秒 = 疑似刚崩过 → 本次启动
+   跳过 3.x 全部新钩子(模块背景/隐藏/传送栏拦截/MediaRemote 取图), 封面圆角旋转
+   (3.0.8 时代就稳定)照常。稳定 90 秒后再注销一次, 功能自动回来。
+   代价: 手动连注两次才会偶发关一轮, 换来"永远不会再无限安全模式"。 */
+static BOOL gDIPlayerSafeBoot = NO;
+
+static void diCrumb(NSString *s) {
+    /* 面包屑: 不走缓冲, 直接落盘 —— 崩了也在, 下次日志就能看到死在哪一步 */
+    @try {
+        RLog(@"[足迹] %@", s);
+        NSString *p = @"/var/mobile/Library/Logs/driftisland-crumb.log";
+        NSString *line = [NSString stringWithFormat:@"%@ %@\n",
+                          [NSDate date], s];
+        NSFileHandle *h = [NSFileHandle fileHandleForWritingAtPath:p];
+        if (h) {
+            [h seekToEndOfFile];
+            [h writeData:[line dataUsingEncoding:NSUTF8StringEncoding]];
+            [h closeFile];
+        } else {
+            [line writeToFile:p atomically:YES];
+        }
+    } @catch (__unused NSException *e) {}
+}
+
+static void diBootGuardCheck(void) {
+    @try {
+        NSString *p = @"/var/mobile/Library/Preferences/com.abgg332.driftisland.bootguard.plist";
+        double last = 0;
+        NSData *data = [NSData dataWithContentsOfFile:p];
+        if (data) {
+            NSDictionary *d = [NSPropertyListSerialization
+                propertyListWithData:data options:0 format:NULL error:NULL];
+            if ([d isKindOfClass:NSDictionary.class]) last = [d[@"ts"] doubleValue];
+        }
+        double now = [NSDate date].timeIntervalSince1970;
+        gDIPlayerSafeBoot = (last > 0 && now - last < 90.0);
+        if (gDIPlayerSafeBoot)
+            RLog(@"[保险] 距上次引导仅 %.0f 秒, 疑似刚崩过 → 本次启动关闭播放器新钩子", now - last);
+        else
+            RLog(@"[保险] 正常引导, 播放器功能全开");
+        [NSPropertyListSerialization dataWithPropertyList:@{@"ts": @(now)}
+            format:NSPropertyListBinaryFormat_v1_0 options:0 error:NULL
+            writeToFile:p atomically:YES];
+    } @catch (__unused NSException *e) { gDIPlayerSafeBoot = NO; }
+}
+
 static NSHashTable *gDIBgHosts = nil;
 static UIImage *gDIBgImage = nil;
 static CFTimeInterval gDIBgFetchTS = 0;
@@ -16020,12 +16069,15 @@ static void diNPLoadMediaRemote(void) {
 static void diNPRefreshBackgrounds(void);
 
 static void diNPFetchArtwork(void) {
+    if (gDIPlayerSafeBoot) return;   /* 3.0.11: 保险引导下不取图 */
     diNPLoadMediaRemote();
-    if (!gMRGetNowPlayingInfo) return;
+    diCrumb(@"取图: MediaRemote 已备, 即将发起请求");
+    if (!gMRGetNowPlayingInfo) { diCrumb(@"取图: 符号缺失, 放弃"); return; }
     gMRGetNowPlayingInfo(dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^(CFDictionaryRef info) {
         /* 3.0.10: 回调在后台队列, 整体兜 @try + autoreleasepool —— 这里出任何异常
-           都不能带崩 SpringBoard(上一版就是启动 2~8 秒之间崩死循环) */
+           都不能带崩 SpringBoard */
         @autoreleasepool { @try {
+            diCrumb(@"取图: 回调已到");
             NSData *data = nil;
             if (info) {
                 CFStringRef key = (gMRArtworkKeyPtr && *gMRArtworkKeyPtr) ? *gMRArtworkKeyPtr : NULL;
@@ -16037,61 +16089,64 @@ static void diNPFetchArtwork(void) {
             UIImage *img = data ? [UIImage imageWithData:data] : nil;
             dispatch_async(dispatch_get_main_queue(), ^{
                 @try {
+                    diCrumb(@"取图: 回到主线程, 准备铺背景");
                     if (img == gDIBgImage) return;
                     gDIBgImage = img;
                     diNPRefreshBackgrounds();
+                    diCrumb(@"取图: 铺背景完成");
                     RLog(@"[背景] 专辑图 %@", img ? [NSString stringWithFormat:@"%.0fx%.0f", img.size.width, img.size.height]
                                                  : @"(无, 未在播放)");
-                } @catch (__unused NSException *e) {}
+                } @catch (NSException *e) { diCrumb([NSString stringWithFormat:@"取图: 主线程异常 %@", e.reason]); }
             });
-        } @catch (__unused NSException *e) {} }
+        } @catch (NSException *e) { diCrumb([NSString stringWithFormat:@"取图: 回调异常 %@", e.reason]); } }
     });
+    diCrumb(@"取图: 请求已发出");
 }
 
-/* ---------- 背景层 ---------- */
+/* ---------- 背景层(3.0.11 改 CALayer 子层) ----------
+   3.1.0/3.0.10 用 insertSubview 往模块内容视图里塞 UIImageView —— 模块容器自己
+   管理子视图的次序/约束, 我们插进去它下一轮布局就重排/崩溃。改用 CALayer 子层:
+   插到 host.layer 最底层, 渲染效果一样, 但完全绕开 UIKit 的视图管理簿记。 */
 static void diNPApplyBackgroundTo(UIView *host, BOOL on) {
     @try {
         if (![host isKindOfClass:UIView.class] || !host.window) return;
-        UIImageView *iv = objc_getAssociatedObject(host, kDIBgIVKey);
-        UIView *dim = objc_getAssociatedObject(host, kDIBgDimKey);
+        CALayer *bg = objc_getAssociatedObject(host, kDIBgIVKey);
+        CALayer *dim = objc_getAssociatedObject(host, kDIBgDimKey);
         if (!on || !gDIBgImage) {
-            iv.hidden = YES;
+            bg.hidden = YES;
             dim.hidden = YES;
             return;
         }
         CGSize hs = host.bounds.size;
-        if (hs.width < 40 || hs.height < 40) return;   /* 3.0.10: 占位尺寸不铺 */
-        if (!iv) {
-        iv = [[UIImageView alloc] initWithFrame:host.bounds];
-        iv.contentMode = UIViewContentModeScaleAspectFill;
-        iv.clipsToBounds = YES;
-        iv.userInteractionEnabled = NO;
-        iv.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
-        [host insertSubview:iv atIndex:0];
-        objc_setAssociatedObject(host, kDIBgIVKey, iv, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        if (hs.width < 40 || hs.height < 40) return;   /* 占位尺寸不铺 */
+        if (!bg) {
+            CGFloat r = host.layer.cornerRadius;
+            if (r < 0.5 && host.superview) r = host.superview.layer.cornerRadius;
+            diCrumb([NSString stringWithFormat:@"背景: 创建子层 %@ %.0fx%.0f 圆角%.1f",
+                     NSStringFromClass(host.class), hs.width, hs.height, r]);
+            bg = [CALayer layer];
+            bg.contentsGravity = kCAGravityResizeAspectFill;
+            bg.masksToBounds = YES;
+            bg.cornerRadius = r;
+            [host.layer insertSublayer:bg atIndex:0];
+            objc_setAssociatedObject(host, kDIBgIVKey, bg, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
 
-        dim = [[UIView alloc] initWithFrame:host.bounds];
-        dim.backgroundColor = [UIColor colorWithWhite:0 alpha:0.22];
-        dim.userInteractionEnabled = NO;
-        dim.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
-        [host insertSubview:dim aboveSubview:iv];
-        objc_setAssociatedObject(host, kDIBgDimKey, dim, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-
-        /* 卡片的圆角在容器层上, 背景跟着裁一下, 不然四个角会露出来 */
-        CGFloat r = host.layer.cornerRadius;
-        if (r < 0.5 && host.superview) r = host.superview.layer.cornerRadius;
-        iv.layer.cornerRadius = r;
-        RLog(@"[背景] 已铺到 %@ %.0fx%.0f (圆角 %.1f)",
-             NSStringFromClass(host.class), host.bounds.size.width, host.bounds.size.height, r);
+            dim = [CALayer layer];
+            dim.backgroundColor = [UIColor colorWithWhite:0 alpha:0.22].CGColor;
+            dim.cornerRadius = r;
+            dim.masksToBounds = YES;
+            [host.layer insertSublayer:dim aboveSublayer:bg];
+            objc_setAssociatedObject(host, kDIBgDimKey, dim, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
         }
-        iv.hidden = NO;
+        bg.hidden = NO;
         dim.hidden = NO;
-        if (!CGRectEqualToRect(iv.frame, host.bounds)) {
-            iv.frame = host.bounds;
+        if (!CGRectEqualToRect(bg.frame, host.bounds)) {
+            bg.frame = host.bounds;
             dim.frame = host.bounds;
         }
-        if (iv.image != gDIBgImage) iv.image = gDIBgImage;
-    } @catch (__unused NSException *e) {}
+        if (bg.contents != (__bridge id)gDIBgImage.CGImage)
+            bg.contents = (__bridge id)gDIBgImage.CGImage;
+    } @catch (NSException *e) { diCrumb([NSString stringWithFormat:@"背景: 异常 %@", e.reason]); }
 }
 
 static void diNPRefreshBackgrounds(void) {
@@ -16119,7 +16174,7 @@ static void diNPHideNotPlayingLabels(UIView *root, BOOL hide) {
     }
 }
 
-static void diNPApplyHideForRoot(UIView *root) {
+__attribute__((unused)) static void diNPApplyHideForRoot(UIView *root) {
     diNPTickPrefs();
     diNPHideNotPlayingLabels(root, gDIHideNP);
 }
@@ -16128,9 +16183,11 @@ static void diNPApplyHideForRoot(UIView *root) {
 static void (*gDIOrigModuleLayout)(id, SEL) = NULL;
 
 static void diNPHandleModuleVC(id vc) {
+    if (gDIPlayerSafeBoot) return;
     NSString *ident = nil;
     @try { ident = [vc valueForKey:@"moduleIdentifier"]; } @catch (__unused NSException *e) {}
     if (![ident isKindOfClass:NSString.class] || ![ident containsString:@"nowplaying"]) return;
+    diCrumb(@"模块: 命中 nowplaying 容器");
 
     /* 模块内容视图(播放器视图的父级)最底层: 与播放器平级, 又不插进播放器自己的树 ——
        3.0.8 直接把背景插进播放器视图, 它每次 layout 都重排子视图, 整块布局被带崩。 */
@@ -16150,6 +16207,8 @@ static void diNPHandleModuleVC(id vc) {
     /* 3.0.10: 启动早期卡片的占位尺寸(0x0 / 极小)一律不处理, 等真正排出来再说 */
     CGSize cs = card.bounds.size;
     if (cs.width < 40 || cs.height < 40) return;
+    diCrumb([NSString stringWithFormat:@"模块: 卡片 %@ %.0fx%.0f",
+             NSStringFromClass(card.class), cs.width, cs.height]);
 
     if (!gDIBgHosts) gDIBgHosts = [NSHashTable weakObjectsHashTable];
     [gDIBgHosts addObject:card];
@@ -16162,7 +16221,9 @@ static void diNPHandleModuleVC(id vc) {
             gDIBgFetchTS = CFAbsoluteTimeGetCurrent();
             diNPFetchArtwork();
         }
+        diCrumb(@"模块: 铺背景前");
         diNPApplyBackgroundTo(card, YES);
+        diCrumb(@"模块: 铺背景后");
     } else {
         diNPApplyBackgroundTo(card, NO);
     }
@@ -16171,16 +16232,17 @@ static void diNPHandleModuleVC(id vc) {
 static void diNPModuleLayout(id self, SEL cmd) {
     if (gDIOrigModuleLayout) gDIOrigModuleLayout(self, cmd);
     /* 3.0.10: 绝不在 viewWillLayoutSubviews 里同步改视图树/发 XPC —— 挪到下一轮
-       runloop, 且每个 VC 节流 0.5s。布局进行中插 subview + 高频 CFPreferences/MediaRemote
-       调用是上一版启动即崩的主要嫌疑, 全部异步化兜底。 */
+       runloop, 且每个 VC 节流 0.5s。 */
     @try {
         CFTimeInterval now = CFAbsoluteTimeGetCurrent();
         NSNumber *last = objc_getAssociatedObject(self, kDIBgLastKey);
         if (last && now - last.doubleValue < 0.5) return;
         objc_setAssociatedObject(self, kDIBgLastKey, @(now), OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        static int crumbLeft = 12;   /* 3.0.11: 足迹只记前 12 次, 防刷盘 */
+        if (crumbLeft > 0) { crumbLeft--; diCrumb(@"模块: 容器布局节流通过"); }
         id vc = self;
         dispatch_async(dispatch_get_main_queue(), ^{
-            @try { diNPHandleModuleVC(vc); } @catch (__unused NSException *e) {}
+            @try { diNPHandleModuleVC(vc); } @catch (NSException *e) { diCrumb([NSString stringWithFormat:@"模块: 异常 %@", e.reason]); }
         });
     } @catch (__unused NSException *e) {}
 }
@@ -16225,25 +16287,34 @@ static void diArtInstall(void) {
         if (!gDIArtOrigCCVCLayout) gDIArtOrigCCVCLayout = (void (*)(id, SEL))before;
         any = YES;
     }
-    /* 3.1.0: 模块卡片(专辑背景/隐藏未在播放) —— ControlCenterUI 里的容器 VC */
-    Class mvc = NSClassFromString(@"CCUIContentModuleContainerViewController");
-    if (mvc) {
-        Method m = class_getInstanceMethod(mvc, @selector(viewWillLayoutSubviews));
-        IMP before = m ? method_getImplementation(m) : NULL;
-        MSHookMessageEx(mvc, @selector(viewWillLayoutSubviews), (IMP)diNPModuleLayout, (IMP *)&gDIOrigModuleLayout);
-        if (!gDIOrigModuleLayout) gDIOrigModuleLayout = (void (*)(id, SEL))before;
-        RLog(@"[背景] 模块容器钩子 %@", gDIOrigModuleLayout ? @"已装" : @"失败");
-    }
-    /* 3.0.9: 传送容器 setFrame 接管(3×2 按钮瞬跳的唯一落点) */
-    Class tcc = NSClassFromString(@"MRUNowPlayingTransportControlsView");
-    if (tcc) {
-        MSHookMessageEx(tcc, @selector(setFrame:), (IMP)diTCSetFrame, (IMP *)&gDIOrigTCSetFrame);
-        if (!gDIOrigTCSetFrame) RLog(@"[抖动] 传送栏 setFrame 接管失败, 仅用布局后校正");
+    /* 3.1.0: 模块卡片(专辑背景/隐藏未在播放) —— ControlCenterUI 里的容器 VC
+       3.0.11: 保险引导(距上次引导<90秒)下不装, 防止崩溃循环 */
+    if (!gDIPlayerSafeBoot) {
+        Class mvc = NSClassFromString(@"CCUIContentModuleContainerViewController");
+        if (mvc) {
+            diCrumb(@"安装: 模块容器钩子前");
+            Method m = class_getInstanceMethod(mvc, @selector(viewWillLayoutSubviews));
+            IMP before = m ? method_getImplementation(m) : NULL;
+            MSHookMessageEx(mvc, @selector(viewWillLayoutSubviews), (IMP)diNPModuleLayout, (IMP *)&gDIOrigModuleLayout);
+            if (!gDIOrigModuleLayout) gDIOrigModuleLayout = (void (*)(id, SEL))before;
+            diCrumb(@"安装: 模块容器钩子后");
+            RLog(@"[背景] 模块容器钩子 %@", gDIOrigModuleLayout ? @"已装" : @"失败");
+        }
+        /* 3.0.9: 传送容器 setFrame 接管(3×2 按钮瞬跳的唯一落点) */
+        Class tcc = NSClassFromString(@"MRUNowPlayingTransportControlsView");
+        if (tcc) {
+            diCrumb(@"安装: 传送栏 setFrame 钩子前");
+            MSHookMessageEx(tcc, @selector(setFrame:), (IMP)diTCSetFrame, (IMP *)&gDIOrigTCSetFrame);
+            diCrumb(@"安装: 传送栏 setFrame 钩子后");
+            if (!gDIOrigTCSetFrame) RLog(@"[抖动] 传送栏 setFrame 接管失败, 仅用布局后校正");
+        }
+    } else {
+        RLog(@"[保险] 安全引导: 模块背景/隐藏/传送栏拦截 本次不装");
     }
     if (any) {
         gDIArtHooked = YES;
-        RLog(@"[封面] 钩子已装 (NowPlayingView=%d CCVC=%d 开关=%d 传送栏=%d)",
-             npv != nil, ccv != nil, diArtPrefOn(), tcc != nil);
+        RLog(@"[封面] 钩子已装 (NowPlayingView=%d CCVC=%d 开关=%d)",
+             npv != nil, ccv != nil, diArtPrefOn());
     }
 }
 
@@ -16295,6 +16366,8 @@ __attribute__((constructor)) static void init(void) {
             return;
         }
         refreshPrefs();
+        /* 3.0.11: 防死循环保险 —— 必须在任何 3.x 钩子安装之前判定 */
+        diBootGuardCheck();
         /* 2.8.5: 来电视频已整体删除, 非 SpringBoard 进程直接退出 */
         NSString *bid = NSBundle.mainBundle.bundleIdentifier.lowercaseString;
         if (![bid isEqual:@"com.apple.springboard"]
@@ -16388,10 +16461,13 @@ __attribute__((constructor)) static void init(void) {
                 prefsChanged, CFSTR("com.abgg332.driftisland/prefsChanged"), NULL,
                 CFNotificationSuspensionBehaviorDeliverImmediately);
 
-            /* 3.1.0: 系统「正在播放信息变化」 —— 换歌/开始播放时刷新专辑背景 */
-            CFNotificationCenterAddObserver(CFNotificationCenterGetDarwinNotifyCenter(), NULL,
-                diNPMediaChanged, CFSTR("kMRMediaRemoteNowPlayingInfoDidChangeNotification"), NULL,
-                CFNotificationSuspensionBehaviorDeliverImmediately);
+            /* 3.1.0: 系统「正在播放信息变化」 —— 换歌/开始播放时刷新专辑背景
+               3.0.11: 保险引导下不监听 */
+            if (!gDIPlayerSafeBoot) {
+                CFNotificationCenterAddObserver(CFNotificationCenterGetDarwinNotifyCenter(), NULL,
+                    diNPMediaChanged, CFSTR("kMRMediaRemoteNowPlayingInfoDidChangeNotification"), NULL,
+                    CFNotificationSuspensionBehaviorDeliverImmediately);
+            }
             /* 3.0.6: 面板里拨「专辑图旋转」→ 立刻刷新封面蒙版(不用注销) */
             CFNotificationCenterAddObserver(CFNotificationCenterGetDarwinNotifyCenter(), NULL,
                 diArtChanged, CFSTR("com.local.playerexact/artwork-changed"), NULL,
