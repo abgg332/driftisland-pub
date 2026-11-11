@@ -1443,6 +1443,8 @@ static void diWriteColors(NSArray<NSString *> *colors) {
         DI_ADD([self linkSpec:@"控制中心" detail:[DICCSettings class]]);
         /* 2.9.19: 组件隐藏 —— 按用户要求在「控制中心」下面新增入口 */
         DI_ADD([self linkSpec:@"组件隐藏" detail:[DIWidgetHidePage class]]);
+        /* 3.0.1: 播放器入口 —— 与「组件隐藏」同级, 就放在它下面 */
+        DI_ADD([self linkSpec:@"播放器入口" detail:[DIPlayerEntryPage class]]);
 
         _smallRow = _expandRow = -1;
         {
@@ -5546,11 +5548,6 @@ static void diwKillByComm(const char *comm) {
         set:NULL get:@selector(readAppCount:) detail:[DIWidgetAppsPage class] cell:PSLinkCell edit:nil];
     [specs addObject:appsRow];
 
-    /* 3.0: 播放器入口 —— 全局悬浮球 + 系统播放器 */
-    [specs addObject:[self groupSpec:@"播放器入口"
-                              footer:@"开一颗全局悬浮球(png / gif 素材, 可拖动)。点击它呼出播放面板, 播放/暂停/上下曲/进度直接接系统播放器。"]];
-    [specs addObject:[self linkSpec:@"播放器入口设置" detail:[DIPlayerEntryPage class]]];
-
     [specs addObject:[self groupSpec:nil footer:nil]];
     [specs addObject:[self buttonSpec:@"注销生效" action:@selector(doWidgetRespring:)]];
     return specs;
@@ -5623,7 +5620,7 @@ static void diwKillByComm(const char *comm) {
 - (NSArray *)buildSpecifiers {
     NSMutableArray *specs = [NSMutableArray array];
     [specs addObject:[self groupSpec:@"播放器入口"
-        footer:@"开启后屏幕上常驻一颗悬浮球, 可拖动, 位置会自动记住。\n点击悬浮球呼出播放面板: 上一首 / 播放暂停 / 下一首 / 进度条, 全部走系统播放器(当前正在播放的音乐)。"]];
+        footer:@"开启后屏幕上常驻一颗悬浮球, 可拖动, 位置会自动记住。\n点击悬浮球呼出播放面板: 「正在播」控制当前系统播放的音乐(酷我/QQ 音乐 App 可一键直达); 「搜索」走酷我音源搜歌即点即播; 「我喜欢」和「最近播」自动保存在本机。"]];
     [specs addObject:[self switchSpec:@"启用悬浮球" key:@"pbFloatOn" def:@NO]];
     [specs addObject:[self switchSpec:@"圆形裁剪" key:@"pbFloatRound" def:@YES]];
 
