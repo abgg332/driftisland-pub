@@ -5126,6 +5126,8 @@ static void diOpenHomeBarPickWindow(void) {
        2.8.23: 按用户要求删掉整段 footer 说明文字 */
     [specs addObject:[self groupSpec:@"遮罩设置" footer:nil]];
     [specs addObject:[self switchSpec:@"启用遮罩" key:@"maskOn" def:@NO]];
+    /* 2.9.78: 大岛(展开态)遮罩独立开关 —— 与小岛遮罩彻底分开, 各管各的 */
+    [specs addObject:[self switchSpec:@"启用大岛遮罩" key:@"maskExpandOn" def:@YES]];
     PSSpecifier *maskRow = [PSSpecifier preferenceSpecifierNamed:@"遮罩素材"
         target:self set:NULL get:@selector(readAlbumMaskName:) detail:[DIMaskPicker class] cell:PSLinkCell edit:nil];
     [specs addObject:maskRow];
