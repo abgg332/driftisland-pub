@@ -15720,6 +15720,9 @@ static void diArtLogTree(UIView *root) {
 
 static void diArtPlayerPost(UIView *root) {
     if (![root isKindOfClass:UIView.class]) return;
+    /* 灵动岛那套(MRUActivityNowPlayingView)可能继承自 MRUNowPlayingView, 会顺带命中
+       这个 hook —— 岛上的头像是用户自己的遮罩素材在管, 这里绝不能碰。 */
+    if ([NSStringFromClass(root.class) containsString:@"Activity"]) return;
     if (!gDIArtRoots) gDIArtRoots = [NSHashTable weakObjectsHashTable];
     [gDIArtRoots addObject:root];
     BOOL on = diArtPrefOn();
