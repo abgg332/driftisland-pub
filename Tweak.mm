@@ -16111,12 +16111,19 @@ static void diNPHandleModuleVC(id vc) {
     @try { ident = [vc valueForKey:@"moduleIdentifier"]; } @catch (__unused NSException *e) {}
     if (![ident isKindOfClass:NSString.class] || ![ident containsString:@"nowplaying"]) return;
 
-    /* 卡片视图: 背景铺在它最底层, 与播放器视图平级 —— 绝不插进播放器自己的树 */
+    /* 模块内容视图(播放器视图的父级)最底层: 与播放器平级, 又不插进播放器自己的树 ——
+       3.0.8 直接把背景插进播放器视图, 它每次 layout 都重排子视图, 整块布局被带崩。 */
     UIView *card = nil;
     @try {
-        id cv = [vc valueForKey:@"containerView"];
+        id cv = [vc valueForKey:@"moduleContentView"];
         if ([cv isKindOfClass:UIView.class]) card = cv;
     } @catch (__unused NSException *e) {}
+    if (!card) {
+        @try {
+            id cv = [vc valueForKey:@"containerView"];
+            if ([cv isKindOfClass:UIView.class]) card = cv;
+        } @catch (__unused NSException *e) {}
+    }
     if (!card) card = [(UIViewController *)vc view];
     if (![card isKindOfClass:UIView.class] || !card.window) return;
 
