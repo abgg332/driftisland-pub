@@ -15786,11 +15786,17 @@ static void diArtInstall(void) {
     }
     BOOL any = NO;
     if (npv) {
+        Method m = class_getInstanceMethod(npv, @selector(layoutSubviews));
+        IMP before = m ? method_getImplementation(m) : NULL;
         MSHookMessageEx(npv, @selector(layoutSubviews), (IMP)diArtNPLayout, (IMP *)&gDIArtOrigNPViewLayout);
+        if (!gDIArtOrigNPViewLayout) gDIArtOrigNPViewLayout = (void (*)(id, SEL))before;
         any = YES;
     }
     if (ccv) {
+        Method m = class_getInstanceMethod(ccv, @selector(layoutSubviews));
+        IMP before = m ? method_getImplementation(m) : NULL;
         MSHookMessageEx(ccv, @selector(layoutSubviews), (IMP)diArtCCLayout, (IMP *)&gDIArtOrigCCVCLayout);
+        if (!gDIArtOrigCCVCLayout) gDIArtOrigCCVCLayout = (void (*)(id, SEL))before;
         any = YES;
     }
     if (any) {
