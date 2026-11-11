@@ -65,7 +65,7 @@ static double expandTextY = DI_EXP_TEXT_BASE_Y;   // 上下偏移(pt, 下为正,
 static double expandTextScale = 100.0; // 文字大小(%, 100=原样)
 /* 2.8.86: 构建戳 —— 之前横幅打的是 SpringBoard 自己的 CFBundleShortVersionString(恒 1.0),
    日志里根本看不出装的是哪一版。所有诊断行都带这个戳, 下轮日志一眼定位。 */
-#define DI_BUILD_VER @"3.0.12"
+#define DI_BUILD_VER @"3.0.13"
 static BOOL gRecordingActive = NO; // 保留: 岛素材总闸条件
 static NSString *diElementId(UIView *host);
 static BOOL diMiniMusicActive(UIView *host); // 2.6.3: 前置(遮罩层使用)
@@ -15533,6 +15533,7 @@ static void diNPDumpDomain(void) {
 @interface DIArtRootState : NSObject
 @property (nonatomic, strong) NSArray<UIView *> *arts;
 @property (nonatomic, assign) CFTimeInterval scanTS;
+@property (nonatomic, assign) int recollects;   /* 3.0.13: 延迟二次收集的链式次数上限 */
 @end
 @implementation DIArtRootState
 @end
@@ -15607,8 +15608,8 @@ static void diArtDisableNPRSpin(void) {
 
 /* 递归摘掉图层树上的旋转/循环动画 —— 播放器的旋转不一定挂在封面自身,
    常常挂在里面那层 imageView 上, 只查 view.layer 会漏。 */
-static void diArtStripSpin(CALayer *layer, int depth) {
-    if (!layer || depth > 5) return;
+static void diArtStripSpin(CALayer *layer, int depth, int maxDepth) {
+    if (!layer || depth > maxDepth) return;
     NSArray<NSString *> *keys = [layer.animationKeys copy];
     for (NSString *k in keys) {
         CAAnimation *a = [layer animationForKey:k];
@@ -15620,7 +15621,7 @@ static void diArtStripSpin(CALayer *layer, int depth) {
         }
     }
     NSArray<CALayer *> *subs = [layer.sublayers copy];
-    for (CALayer *s in subs) diArtStripSpin(s, depth + 1);
+    for (CALayer *s in subs) diArtStripSpin(s, depth + 1, maxDepth);
 }
 
 /* 3×2 / 3×2B: 变体键优先(B 档模块尺寸写的是 4x2), 没有变体再看 ModuleSizes */
@@ -15670,6 +15671,8 @@ static BOOL diArtInChrome(UIView *v) {
     return NO;
 }
 
+static BOOL gDIArtSawEmptyTile = NO;   /* 3.0.13: 这轮扫描里看到了"该当封面但图还没加载完"的格子 */
+
 static NSArray<UIView *> *diArtCollectIn(UIView *root) {
     NSMutableArray *out = [NSMutableArray array];
     if (!root) return out;
@@ -15688,10 +15691,19 @@ static NSArray<UIView *> *diArtCollectIn(UIView *root) {
                 /* 3.0.12: 建议网格里没加载到封面的格子仍是普通视图, 有图的格子
                    也未必是 MRUArtworkView —— 补一条"够大的方形 UIImageView"兜底,
                    但必须排除控件壳里的图标(上面 diArtInChrome)。 */
+                BOOL chrome = diArtInChrome(v);
                 BOOL plain = ([v isKindOfClass:UIImageView.class]
                               && ((UIImageView *)v).image != nil
                               && s.width >= 38 && s.height >= 38
-                              && !diArtInChrome(v));
+                              && !chrome);
+                /* 3.0.13: 图还没异步加载完的格子会一直漏蒙 —— 记下来, 靠延迟
+                   二次收集补蒙(见 diArtPlayerPost) */
+                if (!tooBig && !chrome && ratio > 0.7 && ratio < 1.45
+                    && [v isKindOfClass:UIImageView.class]
+                    && ((UIImageView *)v).image == nil
+                    && s.width >= 38 && s.height >= 38) {
+                    gDIArtSawEmptyTile = YES;
+                }
                 if (!tooBig && ratio > 0.7 && ratio < 1.45 && (named || plain)) {
                     [out addObject:v];
                     if (out.count >= 9) break;
@@ -15721,7 +15733,7 @@ static void diArtApply(UIView *v, BOOL on) {
         } else if (!CATransform3DIsIdentity(layer.transform)) {
             layer.transform = CATransform3DIdentity;
         }
-        diArtStripSpin(layer, 0);
+        diArtStripSpin(layer, 0, 5);
         return;
     }
     CGRect b = v.bounds;
@@ -15893,28 +15905,29 @@ static void diCrumb(NSString *s) {
     } @catch (__unused NSException *e) {}
 }
 
+static int gDIStage = 3;              /* 功能档位: 3=全开 2=去掉传送栏setFrame钩子 1=再去掉模块背景/隐藏钩子 0=全关(旧保险态) */
+static CFTimeInterval gDILoadTS = 0;   /* 引导时间戳: 高危钩子推迟到引导 8 秒后再装 */
+static NSString *gDIBootVerdict = nil; /* 引导判定结论, 第2秒诊断时回放(躲开日志截断) */
+
 static void diBootGuardCheck(void) {
-    /* 3.0.12: 3.0.11 的"90 秒内引导=崩溃"误判太狠 —— 用户设置页注销(常见 20~40 秒)
-       也被当成崩溃, 结果新功能整轮全关, 白测。现在三重判据:
-         ① 设置页注销前会写 PendingRespringTS(cfprefs, 两边都能写) → 明确是人为注销;
-         ② 最近的 SpringBoard 崩溃报告(180 秒内) → 真崩过, 还顺带记录报告里有没有漂流岛;
-         ③ 兜底: 距上次引导 <20 秒(崩溃后 respawn 通常 5~10 秒, 人为注销 20 秒以上)。 */
+    /* 3.0.13: 档位制防死循环 —— 引导#1 全功能若真崩, 下次引导自动降一档,
+       崩到哪一档停, 日志立刻告诉我们罪魁是哪组钩子; 用户在设置里拨任意开关
+       = 明确的"恢复全功能"动作, 档位回 3。 */
     @try {
         double now = [NSDate date].timeIntervalSince1970;
+        NSString *dom = CFSTR("com.abgg332.driftisland");
 
-        /* ① 人为注销标记 */
-        CFPreferencesSynchronize(CFSTR("com.abgg332.driftisland"), kCFPreferencesCurrentUser, kCFPreferencesAnyHost);
-        id mark = CFBridgingRelease(CFPreferencesCopyAppValue(CFSTR("PendingRespringTS"),
-                                                             CFSTR("com.abgg332.driftisland")));
+        CFPreferencesSynchronize(dom, kCFPreferencesCurrentUser, kCFPreferencesAnyHost);
+        id mark = CFBridgingRelease(CFPreferencesCopyAppValue(CFSTR("PendingRespringTS"), dom));
         BOOL userRespring = NO;
         if ([mark isKindOfClass:NSNumber.class]) {
             double mt = [mark doubleValue];
             userRespring = (now - mt >= 0 && now - mt < 600.0);
-            CFPreferencesSetAppValue(CFSTR("PendingRespringTS"), NULL, CFSTR("com.abgg332.driftisland"));
-            CFPreferencesAppSynchronize(CFSTR("com.abgg332.driftisland"));
+            CFPreferencesSetAppValue(CFSTR("PendingRespringTS"), NULL, dom);
+            CFPreferencesAppSynchronize(dom);
         }
 
-        /* ② 最近崩溃报告 */
+        /* 最近 SpringBoard 崩溃报告 */
         double crashAge = -1;
         BOOL crashHasUs = NO;
         for (NSString *dir in @[@"/var/mobile/Library/Logs/CrashReporter",
@@ -15936,7 +15949,7 @@ static void diBootGuardCheck(void) {
             }
         }
 
-        /* ③ 时间窗兜底 */
+        /* 时间窗兜底: 距上次引导 <20 秒(崩溃 respawn 5~10 秒, 人为注销更久) */
         NSString *p = @"/var/mobile/Library/Preferences/com.abgg332.driftisland.bootguard.plist";
         double lastTS = 0;
         NSData *data = [NSData dataWithContentsOfFile:p];
@@ -15947,12 +15960,35 @@ static void diBootGuardCheck(void) {
         }
         BOOL quick = (lastTS > 0 && now - lastTS < 20.0);
 
-        gDIPlayerSafeBoot = !userRespring && (crashAge >= 0 || quick);
-        RLog(@"[保险] 人为注销=%d 崩溃报告=%@ 报告含漂流岛=%d 距上次引导=%.0fs → %@",
-             userRespring,
-             crashAge >= 0 ? [NSString stringWithFormat:@"%.0f秒前", crashAge] : @"无",
-             crashHasUs, lastTS > 0 ? now - lastTS : -1,
-             gDIPlayerSafeBoot ? @"安全引导(新钩子本次关闭)" : @"正常引导(功能全开)");
+        /* 当前档位 */
+        int stage = 3;
+        id sv = CFBridgingRelease(CFPreferencesCopyAppValue(CFSTR("FeatureStage"), dom));
+        if ([sv isKindOfClass:NSNumber.class]) {
+            stage = [sv intValue];
+            if (stage < 0) stage = 0;
+            if (stage > 3) stage = 3;
+        }
+
+        BOOL crashed = !userRespring && (crashAge >= 0 || quick);
+        if (crashed && stage > 0) {
+            stage--;
+            CFPreferencesSetAppValue(CFSTR("FeatureStage"), @(stage), dom);
+            CFPreferencesAppSynchronize(dom);
+        }
+        gDIStage = stage;
+        gDIPlayerSafeBoot = (stage <= 0);
+
+        gDIBootVerdict = [NSString stringWithFormat:
+            @"[保险] 人为注销=%d 崩溃报告=%@ 含漂流岛=%d 距上次引导=%.0fs → 判定=%@ 功能档位=%d %@",
+            userRespring,
+            crashAge >= 0 ? [NSString stringWithFormat:@"%.0f秒前", crashAge] : @"无",
+            crashHasUs, lastTS > 0 ? now - lastTS : -1,
+            crashed ? @"崩过(降档)" : @"正常",
+            stage,
+            stage == 3 ? @"(全开)" : stage == 2 ? @"(无传送栏钩子)" :
+            stage == 1 ? @"(无模块背景/隐藏钩子)" : @"(全关, 拨任意开关恢复)"];
+        RLog(@"%@", gDIBootVerdict);
+        diCrumb(gDIBootVerdict);
 
         NSData *out = [NSPropertyListSerialization
             dataWithPropertyList:@{@"ts": @(now)}
@@ -15961,8 +15997,77 @@ static void diBootGuardCheck(void) {
     } @catch (__unused NSException *e) { gDIPlayerSafeBoot = NO; }
 }
 
+/* 3.0.13: 崩溃证据回放 —— 把最近一次 SpringBoard 崩溃报告的摘要和足迹日志
+   打进主日志。日志文件有 512KB 截断, 引导最开头的内容会被冲掉, 所以放在
+   第 2 秒诊断里打(那时内容能活到用户导出日志)。 */
+static void diNPDumpCrashEvidence(void) {
+    @try {
+        if (gDIBootVerdict) RLog(@"[保险] 回放: %@", gDIBootVerdict);
+
+        double now = [NSDate date].timeIntervalSince1970;
+        NSString *best = nil; NSDate *bestD = nil; NSString *bestName = nil;
+        for (NSString *dir in @[@"/var/mobile/Library/Logs/CrashReporter",
+                                @"/var/jb/var/mobile/Library/Logs/CrashReporter"]) {
+            NSArray *files = [[NSFileManager defaultManager] contentsOfDirectoryAtPath:dir error:NULL];
+            for (NSString *f in files) {
+                if (![f containsString:@"SpringBoard"]) continue;
+                NSString *fp = [dir stringByAppendingPathComponent:f];
+                NSDictionary *at = [[NSFileManager defaultManager] attributesOfItemAtPath:fp error:NULL];
+                NSDate *d = at[NSFileModificationDate];
+                if (!d) continue;
+                if (now - [d timeIntervalSince1970] > 900) continue;
+                if (!bestD || [d compare:bestD] == NSOrderedDescending) { bestD = d; best = fp; bestName = f; }
+            }
+        }
+        if (!best) {
+            RLog(@"[崩溃回放] 900 秒内没有 SpringBoard 崩溃报告");
+        } else {
+            double age = now - [bestD timeIntervalSince1970];
+            RLog(@"[崩溃回放] 最近报告: %@ (%.0f 秒前)", bestName, age);
+            NSString *txt = [NSString stringWithContentsOfFile:best encoding:NSUTF8StringEncoding error:NULL];
+            if (txt.length) {
+                /* .ips: 第一行是元数据 JSON, 后面是正文。抽出关键行 + 含 DriftIsland 的帧 */
+                NSArray *lines = [txt componentsSeparatedByCharactersInSet:
+                                  [NSCharacterSet newlineCharacterSet]];
+                int shown = 0;
+                for (NSString *ln in lines) {
+                    BOOL key = [ln containsString:@"Exception Type"] || [ln containsString:@"Exception Codes"]
+                            || [ln containsString:@"Termination Reason"] || [ln containsString:@"Termination Description"]
+                            || [ln containsString:@"Triggered by Thread"] || [ln containsString:@"crashed"];
+                    BOOL ours = [ln containsString:@"DriftIsland"];
+                    if ((key || ours) && shown < 14) {
+                        if (ln.length > 300) ln = [[ln substringToIndex:300] stringByAppendingString:@"…"];
+                        RLog(@"[崩溃回放] %@", ln);
+                        shown++;
+                    }
+                }
+                if (shown == 0) RLog(@"[崩溃回放] 报告里没有匹配行(可能整篇 JSON, 长度 %lu)", (unsigned long)txt.length);
+            } else {
+                RLog(@"[崩溃回放] 报告读不出来(可能权限/格式)");
+            }
+        }
+
+        /* 足迹回放: 崩溃前最后 30 步 */
+        NSString *crumb = [NSString stringWithContentsOfFile:@"/var/mobile/Library/Logs/driftisland-crumb.log"
+                                                    encoding:NSUTF8StringEncoding error:NULL];
+        if (crumb.length) {
+            NSArray *lines = [crumb componentsSeparatedByCharactersInSet:
+                              [NSCharacterSet newlineCharacterSet]];
+            NSUInteger n = lines.count;
+            NSUInteger from = n > 30 ? n - 30 : 0;
+            for (NSUInteger i = from; i < n; i++) {
+                if (((NSString *)lines[i]).length) RLog(@"[足迹回放] %@", lines[i]);
+            }
+        } else {
+            RLog(@"[足迹回放] 足迹文件为空/不存在");
+        }
+    } @catch (__unused NSException *e) {}
+}
+
 /* 3.1.0: 定义在后面, 这里先声明 —— 播放器每次 layout 顺手把「未在播放」收掉 */
 static void diNPApplyHideForRoot(UIView *root);
+/* 3.0.13: 高危钩子(模块背景/隐藏 + 传送栏 setFrame)延迟安装, 定义在后面 */
+static void diArtInstallGated(void);
 
 static void diArtKillJitter(UIView *root) {
     if (!diArtIs3x2()) return;
@@ -15971,15 +16076,7 @@ static void diArtKillJitter(UIView *root) {
     static BOOL tcTried = NO;
     if (!tcTried) {
         tcTried = YES;
-        if (!gDIPlayerSafeBoot) {
-            Class tcc = NSClassFromString(@"MRUNowPlayingTransportControlsView");
-            if (tcc) {
-                diCrumb(@"补挂: 传送栏 setFrame 钩子前");
-                MSHookMessageEx(tcc, @selector(setFrame:), (IMP)diTCSetFrame, (IMP *)&gDIOrigTCSetFrame);
-                diCrumb(@"补挂: 传送栏 setFrame 钩子后");
-                RLog(@"[抖动] 传送栏 setFrame 补挂 %@", gDIOrigTCSetFrame ? @"成功" : @"失败");
-            }
-        }
+        diArtInstallGated();   /* 3.0.13: 内部自带档位/引导满8秒门控 */
     }
     UIView *tc = diArtTransportOf(root);
     if (!tc) return;
@@ -15994,7 +16091,7 @@ static void diArtKillJitter(UIView *root) {
     }
     [CATransaction begin];
     [CATransaction setDisableActions:YES];
-    diArtStripSpin(tc.layer, 0);
+    diArtStripSpin(tc.layer, 0, 5);
     [CATransaction commit];
     /* 3.0.10: 删除 3.0.9 的"布局后校正传送栏"兜底 —— 在布局 pass 里直接写别的视图
        的 frame, 系统下一帧又改回来, 两边反复打架是无限注销的第二处根源。
@@ -16073,6 +16170,15 @@ static void diArtPlayerPost(UIView *root) {
         objc_setAssociatedObject(root, kDIArtRootKey, rs, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
     }
     CFTimeInterval now = CFAbsoluteTimeGetCurrent();
+    /* 3.0.13: 全树旋转清理(深度 9, 1 秒节流) —— 内置播放器给"没被我们收集到"的
+       格子也挂原生旋转, 只清已收集封面会漏, 表现就是"有些有原旋转有些没有"。
+       清完下面给已收集的重新挂我们自己的旋转。 */
+    static CFTimeInterval lastRootStrip = 0;
+    if (now - lastRootStrip > 1.0) {
+        lastRootStrip = now;
+        diArtStripSpin(root.layer, 0, 9);
+    }
+    gDIArtSawEmptyTile = NO;
     NSArray<UIView *> *arts = rs.arts;
     if (!arts || !arts.count || now - rs.scanTS > 1.0) {
         arts = diArtCollectIn(root);
@@ -16082,6 +16188,22 @@ static void diArtPlayerPost(UIView *root) {
         }
         rs.arts = arts;
         rs.scanTS = now;
+        if (!gDIArtSawEmptyTile) rs.recollects = 0;   /* 这轮没空格子, 重置重扫链 */
+        /* 3.0.13: 有格子图还没加载完 → 0.8 秒后强制重扫一次(最多链 4 次),
+           图片异步加载完成是布局系统不感知的, 不重扫就永远漏蒙 */
+        if (gDIArtSawEmptyTile && rs.recollects < 4) {
+            rs.recollects++;
+            __weak UIView *w = root;
+            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.8 * NSEC_PER_SEC)),
+                           dispatch_get_main_queue(), ^{
+                @try {
+                    if (!w.window) return;
+                    DIArtRootState *rs2 = objc_getAssociatedObject(w, kDIArtRootKey);
+                    if (rs2) rs2.scanTS = 0;   /* 强制重扫 */
+                    diArtPlayerPost(w);
+                } @catch (__unused NSException *e) {}
+            });
+        }
     }
     for (UIView *a in arts) diArtApply(a, on);
     if (on && !arts.count) diArtLogTree(root);
@@ -16185,7 +16307,7 @@ static void diNPLoadMediaRemote(void) {
 static void diNPRefreshBackgrounds(void);
 
 static void diNPFetchArtwork(void) {
-    if (gDIPlayerSafeBoot) return;   /* 3.0.11: 保险引导下不取图 */
+    if (gDIStage < 1) return;   /* 档位 0: 不取图 */
     diNPLoadMediaRemote();
     diCrumb(@"取图: MediaRemote 已备, 即将发起请求");
     if (!gMRGetNowPlayingInfo) { diCrumb(@"取图: 符号缺失, 放弃"); return; }
@@ -16302,7 +16424,7 @@ static void diNPApplyHideForRoot(UIView *root) {
 static void (*gDIOrigModuleLayout)(id, SEL) = NULL;
 
 static void diNPHandleModuleVC(id vc) {
-    if (gDIPlayerSafeBoot) return;
+    if (gDIStage < 1) return;
     NSString *ident = nil;
     @try { ident = [vc valueForKey:@"moduleIdentifier"]; } @catch (__unused NSException *e) {}
     if (![ident isKindOfClass:NSString.class] || ![ident containsString:@"nowplaying"]) return;
@@ -16408,8 +16530,41 @@ static void diArtInstall(void) {
     }
     /* 3.1.0: 模块卡片(专辑背景/隐藏未在播放) —— ControlCenterUI 里的容器 VC
        3.0.11: 保险引导(距上次引导<90秒)下不装, 防止崩溃循环 */
-    if (!gDIPlayerSafeBoot) {
-        Class mvc = NSClassFromString(@"CCUIContentModuleContainerViewController");
+    if (any) {
+        gDIArtHooked = YES;
+        RLog(@"[封面] 钩子已装 (NowPlayingView=%d CCVC=%d 开关=%d)",
+             npv != nil, ccv != nil, diArtPrefOn());
+    }
+}
+
+/* 3.0.13: 高危钩子独立安装 —— 引导满 8 秒后才调用(第 8/20 秒诊断各试一次),
+   档位 1=模块背景/隐藏, 2+=传送栏 setFrame。引导早期(SpringBoard 还在铺布局)
+   碰这些是 3.0.9 起每次引导#1 必崩的头号时间窗。 */
+static BOOL gDIStageHooksDone = NO;
+static void diArtInstallGated(void) {
+    if (gDIStageHooksDone) return;
+    if (gDIStage < 1) return;
+    if (gDILoadTS <= 0 || CFAbsoluteTimeGetCurrent() - gDILoadTS < 8.0) return;
+    /* 类懒加载: 跟 diArtInstall 同一套拉起, 类不在就拉框架 */
+    if (!NSClassFromString(@"MRUNowPlayingTransportControlsView")
+        || !NSClassFromString(@"CCUIContentModuleContainerViewController")) {
+        const char *fws[3] = {
+            "/System/Library/PrivateFrameworks/MediaRemoteUI.framework/MediaRemoteUI",
+            "/System/Library/PrivateFrameworks/ControlCenterUI.framework/ControlCenterUI",
+            "/System/Library/PrivateFrameworks/MediaRemote.framework/MediaRemote"
+        };
+        for (int i = 0; i < 3; i++) dlopen(fws[i], RTLD_NOW | RTLD_GLOBAL);
+    }
+    Class mvc = NSClassFromString(@"CCUIContentModuleContainerViewController");
+    Class tcc = NSClassFromString(@"MRUNowPlayingTransportControlsView");
+    BOOL needModule = (gDIStage >= 1);
+    BOOL needTC = (gDIStage >= 2);
+    if (needModule && !mvc) return;   /* 类还没出来, 第 20 秒诊断会再试 */
+    if (needTC && !tcc) return;
+    gDIStageHooksDone = YES;
+    diCrumb([NSString stringWithFormat:@"安装: 高危钩子开始(档位 %d)", gDIStage]);
+
+    if (needModule) {
         if (mvc) {
             diCrumb(@"安装: 模块容器钩子前");
             Method m = class_getInstanceMethod(mvc, @selector(viewWillLayoutSubviews));
@@ -16419,26 +16574,31 @@ static void diArtInstall(void) {
             diCrumb(@"安装: 模块容器钩子后");
             RLog(@"[背景] 模块容器钩子 %@", gDIOrigModuleLayout ? @"已装" : @"失败");
         }
-        /* 3.0.9: 传送容器 setFrame 接管(3×2 按钮瞬跳的唯一落点) */
-        Class tcc = NSClassFromString(@"MRUNowPlayingTransportControlsView");
-        if (tcc) {
+    }
+    if (needTC) {
+        {
             diCrumb(@"安装: 传送栏 setFrame 钩子前");
             MSHookMessageEx(tcc, @selector(setFrame:), (IMP)diTCSetFrame, (IMP *)&gDIOrigTCSetFrame);
             diCrumb(@"安装: 传送栏 setFrame 钩子后");
             if (!gDIOrigTCSetFrame) RLog(@"[抖动] 传送栏 setFrame 接管失败, 仅用布局后校正");
+            else RLog(@"[抖动] 传送栏 setFrame 接管已装(档位=%d)", gDIStage);
         }
     } else {
-        RLog(@"[保险] 安全引导: 模块背景/隐藏/传送栏拦截 本次不装");
-    }
-    if (any) {
-        gDIArtHooked = YES;
-        RLog(@"[封面] 钩子已装 (NowPlayingView=%d CCVC=%d 开关=%d)",
-             npv != nil, ccv != nil, diArtPrefOn());
+        RLog(@"[保险] 档位=%d: 传送栏 setFrame 钩子不装(崩溃降档)", gDIStage);
     }
 }
 
+
 static void diArtChanged(CFNotificationCenterRef c, void *obs, CFStringRef name,
                          const void *obj, CFDictionaryRef info) {
+    /* 3.0.13: 用户在设置里动了开关 = 明确要求恢复全功能, 档位回满(下次引导生效) */
+    if (gDIStage < 3) {
+        gDIStage = 3;
+        gDIPlayerSafeBoot = NO;
+        CFPreferencesSetAppValue(CFSTR("FeatureStage"), @3, CFSTR("com.abgg332.driftisland"));
+        CFPreferencesAppSynchronize(CFSTR("com.abgg332.driftisland"));
+        RLog(@"[保险] 设置有改动 → 功能档位恢复全开(下次引导生效)");
+    }
     diArtForceRefresh();
     diArtDisableNPRSpin();
     gDIBgPrefTS = 0;               /* 3.1.0: 背景/隐藏未在播放的开关立刻重读 */
@@ -16485,6 +16645,7 @@ __attribute__((constructor)) static void init(void) {
             return;
         }
         refreshPrefs();
+        gDILoadTS = CFAbsoluteTimeGetCurrent();
         /* 3.0.11: 防死循环保险 —— 必须在任何 3.x 钩子安装之前判定 */
         diBootGuardCheck();
         /* 2.8.5: 来电视频已整体删除, 非 SpringBoard 进程直接退出 */
@@ -16504,10 +16665,12 @@ __attribute__((constructor)) static void init(void) {
                            dispatch_get_main_queue(), ^{
                 @try {
                     RLog(@"[播放器][诊断] ==== 第 %d 秒 ====", npSec);
+                    if (npSec == 2) diNPDumpCrashEvidence();   /* 3.0.13: 崩溃报告+足迹回放 */
                     diNPHealPrefs();
                     diNPProbe();
                     diNPImages();
                     diArtInstall();   /* 3.0.6: 封面圆角/3×2 抖动 */
+                    diArtInstallGated();   /* 3.0.13: 档位门控的高危钩子(满8秒才装) */
                     if (npSec >= 8) {
                         int hk = diNPHookCheck();
                         diNPDumpDomain();
