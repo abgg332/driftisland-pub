@@ -5579,7 +5579,7 @@ static void diNPWrite(NSString *key, id val, NSString *dom) {
 
 /* 尺寸/功能共用的键表 —— 导入与重置都按这张表走(与原版面板同源) */
 static NSArray<NSString *> *diNPKeys(void) {
-    return @[ @"Size", @"ModuleSizes",
+    return @[ @"Size", @"ModuleSizes", @"PlayerGridVariant",
               @"MusicArtworkBackgroundMode", @"MusicArtworkBlurRadius",
               @"MusicArtworkGradientEnabled", @"ArtworkRotationEnabled",
               @"BlockN95Artwork", @"HideRoutingIcon" ];
@@ -5588,6 +5588,44 @@ static NSArray<NSString *> *diNPKeys(void) {
 static BOOL diNPReadEnabled(void) {
     id v = diNPRead(@"Enabled", kNPDomain);
     return ([v isKindOfClass:NSNumber.class]) ? [v boolValue] : YES;
+}
+
+/* ===== 3.0.5: 尺寸真正生效的写法 =====
+   反编译原版面板(NativePlayerOriginalPrefs)的 setPreferenceValue:specifier: 后确认:
+   播放器启动时读的**不是** Size 键, 而是
+       ModuleSizes 字典里的 "com.apple.mediaremote.controlcenter.nowplaying" 一项;
+       另外 3×2 布局 B 这个特殊档, 模块尺寸要写 4x2、把 "3x2b" 写进 PlayerGridVariant。
+   只写 Size 时播放器永远读默认值(3x2), 所以之前不管怎么改尺寸都没反应。 */
+static NSString * const kNPModuleID = @"com.apple.mediaremote.controlcenter.nowplaying";
+
+static NSString *diNPCurrentSize(void) {
+    id variant = diNPRead(@"PlayerGridVariant", kNPDomain);
+    if ([variant isKindOfClass:NSString.class] && [variant length]) return variant;
+    id dict = diNPRead(@"ModuleSizes", kNPDomain);
+    if ([dict isKindOfClass:NSDictionary.class]) {
+        id s = dict[kNPModuleID];
+        if ([s isKindOfClass:NSString.class] && [s length]) return s;
+    }
+    id sz = diNPRead(@"Size", kNPDomain);
+    return ([sz isKindOfClass:NSString.class] && [sz length]) ? sz : @"2x2";
+}
+
+static void diNPApplySize(NSString *size) {
+    if (![size isKindOfClass:NSString.class] || !size.length) return;
+    NSMutableDictionary *sizes = [NSMutableDictionary dictionary];
+    id cur = diNPRead(@"ModuleSizes", kNPDomain);
+    if ([cur isKindOfClass:NSDictionary.class]) [sizes addEntriesFromDictionary:cur];
+
+    NSString *moduleSize = size;
+    NSString *variant = nil;
+    if ([size isEqualToString:@"3x2b"]) {   /* 布局 B: 模块按 4x2 放, 变体交给 PlayerGridVariant */
+        moduleSize = @"4x2";
+        variant = @"3x2b";
+    }
+    sizes[kNPModuleID] = moduleSize;
+    diNPWrite(@"ModuleSizes", sizes, kNPDomain);
+    diNPWrite(@"PlayerGridVariant", variant, kNPDomain);
+    diNPWrite(@"Size", size, kNPDomain);
 }
 
 /* 3.0.3: 播放器构造器有两道门槛 —— Enabled 必须是 true, 且 ActivationVersion 必须等于 "0.3.1"。
@@ -5642,6 +5680,12 @@ static void diNPEnsureActivation(void) {
     BOOL on = [value boolValue];
     diNPWrite(@"Enabled", @(on), kNPDomain);
     if (on) {
+        /* 第一次开启时把尺寸落到 ModuleSizes, 否则播放器沿用旧值(常见是 3x2) */
+        NSDictionary *sizes = diNPRead(@"ModuleSizes", kNPDomain);
+        if (![sizes isKindOfClass:NSDictionary.class] || !sizes[kNPModuleID]) {
+            NSString *sz = diNPRead(@"Size", kNPDomain);
+            diNPApplySize(([sz isKindOfClass:NSString.class] && [sz length]) ? sz : @"2x2");
+        }
         /* 3.0.3: 第二道门槛 —— 拨开开关时同时写激活版本, 否则播放器照样不启动 */
         diNPWrite(@"ActivationVersion", kNPActivationVer, kNPDomain);
         /* pending 键是播放器 30 秒清理标记, 残留会被旧版误判成启动失败, 顺手清掉 */
@@ -5784,6 +5828,16 @@ static void diNPEnsureActivation(void) {
    这里改成自己的 8 行按钮页: 当前项文本前打「✓」, 点一行写 Size 就返回。 */
 @implementation DIPlayerSizePage
 
+/* 与播放器入口页同一套注销通道 */
+- (void)doRespring:(PSSpecifier *)sp {
+    notify_post("com.abgg332.driftisland.widget.respring");
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.6 * NSEC_PER_SEC)),
+                   dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
+        diwKillByComm("chronod");
+        diwKillByComm("SpringBoard");
+    });
+}
+
 - (NSArray *)buildSpecifiers {
     NSMutableArray *specs = [NSMutableArray array];
     [specs addObject:[self groupSpec:@"播放器尺寸" footer:nil]];
@@ -5791,8 +5845,7 @@ static void diNPEnsureActivation(void) {
     NSArray<NSString *> *vals = @[ @"2x2", @"2x3", @"3x2", @"3x2b", @"4x1", @"4x2", @"4x2b", @"4x3" ];
     NSArray<NSString *> *titles = @[ @"2 × 2", @"2 × 3", @"3 × 2", @"3 × 2（布局 B）",
                                      @"4 × 1", @"4 × 2", @"4 × 2（布局 B）", @"4 × 3" ];
-    NSString *cur = diNPRead(@"Size", kNPDomain);
-    if (![cur isKindOfClass:NSString.class] || !cur.length) cur = @"2x2";
+    NSString *cur = diNPCurrentSize();
 
     for (NSUInteger i = 0; i < vals.count && i < titles.count; i++) {
         BOOL on = [vals[i] isEqualToString:cur];
@@ -5809,9 +5862,21 @@ static void diNPEnsureActivation(void) {
 - (void)pickSize:(PSSpecifier *)sp {
     NSString *v = [sp propertyForKey:@"sizeValue"];
     if ([v isKindOfClass:NSString.class] && v.length) {
-        diNPWrite(@"Size", v, kNPDomain);
+        diNPApplySize(v);
         notify_post("com.local.playerexact/artwork-changed");
     }
     [self.navigationController popViewControllerAnimated:YES];
+
+    /* 尺寸是播放器启动时读的, 改完必须重启桌面 */
+    UIAlertController *ac = [UIAlertController alertControllerWithTitle:@"已保存"
+        message:@"播放器尺寸需要注销后生效。" preferredStyle:UIAlertControllerStyleAlert];
+    [ac addAction:[UIAlertAction actionWithTitle:@"立即注销" style:UIAlertActionStyleDefault
+        handler:^(UIAlertAction *a) { [self doRespring:nil]; }]];
+    [ac addAction:[UIAlertAction actionWithTitle:@"稍后" style:UIAlertActionStyleCancel handler:nil]];
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.35 * NSEC_PER_SEC)),
+                   dispatch_get_main_queue(), ^{
+        UIViewController *top = self.navigationController ?: self;
+        [top presentViewController:ac animated:YES completion:nil];
+    });
 }
 @end
