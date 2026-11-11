@@ -5582,7 +5582,7 @@ static NSArray<NSString *> *diNPKeys(void) {
     return @[ @"Size", @"ModuleSizes", @"PlayerGridVariant",
               @"MusicArtworkBackgroundMode", @"MusicArtworkBlurRadius",
               @"MusicArtworkGradientEnabled", @"ArtworkRotationEnabled",
-              @"BlockN95Artwork", @"HideRoutingIcon" ];
+              @"BlockN95Artwork", @"HideRoutingIcon", @"HideNotPlaying" ];
 }
 
 static BOOL diNPReadEnabled(void) {
@@ -5803,6 +5803,8 @@ static void diNPEnsureActivation(void) {
     /* ---- 功能(原版 4 个开关) ---- */
     [specs addObject:[self groupSpec:@"功能" footer:nil]];
     [specs addObject:[self npSwitch:@"封面背景" key:@"MusicArtworkGradientEnabled" def:YES]];
+    /* 3.1.0: 参考 CCUIPlayer 的 HideNotPlaying —— 打开后隐藏模块里的「未在播放」文字 */
+    [specs addObject:[self npSwitch:@"隐藏未在播放" key:@"HideNotPlaying" def:NO]];
     [specs addObject:[self npRotateSwitch]];
     [specs addObject:[self npSwitch:@"禁止 N95 修改专辑图" key:@"BlockN95Artwork" def:NO]];
     [specs addObject:[self npSwitch:@"隐藏投送图标" key:@"HideRoutingIcon" def:NO]];

@@ -65,7 +65,7 @@ static double expandTextY = DI_EXP_TEXT_BASE_Y;   // 上下偏移(pt, 下为正,
 static double expandTextScale = 100.0; // 文字大小(%, 100=原样)
 /* 2.8.86: 构建戳 —— 之前横幅打的是 SpringBoard 自己的 CFBundleShortVersionString(恒 1.0),
    日志里根本看不出装的是哪一版。所有诊断行都带这个戳, 下轮日志一眼定位。 */
-#define DI_BUILD_VER @"3.0.9"
+#define DI_BUILD_VER @"3.1.0"
 static BOOL gRecordingActive = NO; // 保留: 岛素材总闸条件
 static NSString *diElementId(UIView *host);
 static BOOL diMiniMusicActive(UIView *host); // 2.6.3: 前置(遮罩层使用)
@@ -15817,6 +15817,9 @@ static void diTCSetFrame(id self, SEL cmd, CGRect f) {
     if (gDIOrigTCSetFrame) gDIOrigTCSetFrame(self, cmd, f);
 }
 
+/* 3.1.0: 定义在后面, 这里先声明 —— 播放器每次 layout 顺手把「未在播放」收掉 */
+static void diNPApplyHideForRoot(UIView *root);
+
 static void diArtKillJitter(UIView *root) {
     if (!diArtIs3x2()) return;
     /* 首轮 diArtInstall 时 MediaRemoteUI 可能还没加载, 这里补挂一次 */
@@ -15917,6 +15920,13 @@ static void diArtPlayerPost(UIView *root) {
     for (UIView *a in arts) diArtApply(a, on);
     if (on && !arts.count) diArtLogTree(root);
     diArtKillJitter(root);
+    /* 3.1.0: 播放状态变化不一定触发容器 VC 的 layout, 这里兜一层(节流 0.5s) */
+    static CFTimeInterval lastHideTS = 0;
+    CFTimeInterval hideNow = CFAbsoluteTimeGetCurrent();
+    if (hideNow - lastHideTS > 0.5) {
+        lastHideTS = hideNow;
+        diNPApplyHideForRoot(root);
+    }
     /* 播放器的旋转/布局钩子安装顺序不确定, 可能在我们的清理之后又把动画挂回去。
        0.1s 后再补一次, 保证"关=静止、3×2=不抖"是最后一次写。 */
     static CFTimeInterval lastSweep = 0;
@@ -15944,6 +15954,201 @@ static void diArtNPLayout(id self, SEL cmd) {
 static void diArtCCLayout(id self, SEL cmd) {
     if (gDIArtOrigCCVCLayout) gDIArtOrigCCVCLayout(self, cmd);
     @try { diArtPlayerPost((UIView *)self); } @catch (__unused NSException *e) {}
+}
+
+/* ===== 3.1.0: 控制中心「专辑背景」+「隐藏未在播放」 =====
+   参照 CCUIPlayer(com.susu.ccuiplayer) 的做法:
+     · 挂 CCUIContentModuleContainerViewController 的 viewWillLayoutSubviews,
+       认 moduleIdentifier == com.apple.mediaremote.controlcenter.nowplaying;
+     · 专辑图不走播放器自己的渐变层, 而是从 MediaRemote 取
+       kMRMediaRemoteNowPlayingInfoArtworkData, 铺成整块背景;
+     · 「未在播放」是模块里的一条 UILabel, 按文字内容找出来直接隐藏。
+   关键: 背景层插在"模块卡片视图"上(播放器视图的兄弟), 不插进播放器自己的
+   视图树 —— 3.0.8 插进播放器里导致它每次 layout 都被重新排列, 整块布局都乱了。 */
+static const void *kDIBgIVKey  = &kDIBgIVKey;
+static const void *kDIBgDimKey = &kDIBgDimKey;
+
+static NSHashTable *gDIBgHosts = nil;
+static UIImage *gDIBgImage = nil;
+static CFTimeInterval gDIBgFetchTS = 0;
+static CFTimeInterval gDIBgPrefTS = 0;
+static BOOL gDIBgOnCache = YES;
+static BOOL gDIHideNP = NO;
+
+static BOOL diNPPrefFlag(NSString *key, BOOL def) {
+    id v = CFBridgingRelease(CFPreferencesCopyAppValue((__bridge CFStringRef)key,
+                                                      CFSTR("com.local.playerexact")));
+    return [v isKindOfClass:NSNumber.class] ? [v boolValue] : def;
+}
+
+static void diNPTickPrefs(void) {
+    CFTimeInterval now = CFAbsoluteTimeGetCurrent();
+    if (now - gDIBgPrefTS < 1.0) return;
+    gDIBgPrefTS = now;
+    gDIBgOnCache = diNPPrefFlag(@"MusicArtworkGradientEnabled", YES);
+    gDIHideNP = diNPPrefFlag(@"HideNotPlaying", NO);
+}
+
+/* ---------- MediaRemote: 取当前专辑图 ---------- */
+static void (*gMRGetNowPlayingInfo)(dispatch_queue_t, void (^)(CFDictionaryRef)) = NULL;
+static CFStringRef *gMRArtworkKeyPtr = NULL;
+static BOOL gMRTried = NO;
+
+static void diNPLoadMediaRemote(void) {
+    if (gMRTried) return;
+    gMRTried = YES;
+    void *h = dlopen("/System/Library/PrivateFrameworks/MediaRemote.framework/MediaRemote", RTLD_NOW);
+    if (!h) h = dlopen(NULL, RTLD_NOW);
+    if (!h) return;
+    *(void **)&gMRGetNowPlayingInfo = dlsym(h, "MRMediaRemoteGetNowPlayingInfo");
+    gMRArtworkKeyPtr = (CFStringRef *)dlsym(h, "kMRMediaRemoteNowPlayingInfoArtworkData");
+    if (!gMRGetNowPlayingInfo)
+        RLog(@"[背景] MediaRemote 取不到 MRMediaRemoteGetNowPlayingInfo, 背景暂不可用");
+}
+
+static void diNPRefreshBackgrounds(void);
+
+static void diNPFetchArtwork(void) {
+    diNPLoadMediaRemote();
+    if (!gMRGetNowPlayingInfo) return;
+    gMRGetNowPlayingInfo(dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^(CFDictionaryRef info) {
+        NSData *data = nil;
+        if (info) {
+            CFStringRef key = (gMRArtworkKeyPtr && *gMRArtworkKeyPtr) ? *gMRArtworkKeyPtr : NULL;
+            if (key) {
+                id v = (__bridge id)CFDictionaryGetValue(info, key);
+                if ([v isKindOfClass:NSData.class] && [((NSData *)v) length] > 64) data = v;
+            }
+        }
+        UIImage *img = data ? [UIImage imageWithData:data] : nil;
+        dispatch_async(dispatch_get_main_queue(), ^{
+            if (img == gDIBgImage) return;
+            gDIBgImage = img;
+            diNPRefreshBackgrounds();
+            RLog(@"[背景] 专辑图 %@", img ? [NSString stringWithFormat:@"%.0fx%.0f", img.size.width, img.size.height]
+                                         : @"(无, 未在播放)");
+        });
+    });
+}
+
+/* ---------- 背景层 ---------- */
+static void diNPApplyBackgroundTo(UIView *host, BOOL on) {
+    if (![host isKindOfClass:UIView.class]) return;
+    UIImageView *iv = objc_getAssociatedObject(host, kDIBgIVKey);
+    UIView *dim = objc_getAssociatedObject(host, kDIBgDimKey);
+    if (!on || !gDIBgImage) {
+        iv.hidden = YES;
+        dim.hidden = YES;
+        return;
+    }
+    if (!iv) {
+        iv = [[UIImageView alloc] initWithFrame:host.bounds];
+        iv.contentMode = UIViewContentModeScaleAspectFill;
+        iv.clipsToBounds = YES;
+        iv.userInteractionEnabled = NO;
+        iv.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
+        [host insertSubview:iv atIndex:0];
+        objc_setAssociatedObject(host, kDIBgIVKey, iv, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+
+        dim = [[UIView alloc] initWithFrame:host.bounds];
+        dim.backgroundColor = [UIColor colorWithWhite:0 alpha:0.22];
+        dim.userInteractionEnabled = NO;
+        dim.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
+        [host insertSubview:dim aboveSubview:iv];
+        objc_setAssociatedObject(host, kDIBgDimKey, dim, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+
+        /* 卡片的圆角在容器层上, 背景跟着裁一下, 不然四个角会露出来 */
+        CGFloat r = host.layer.cornerRadius;
+        if (r < 0.5 && host.superview) r = host.superview.layer.cornerRadius;
+        iv.layer.cornerRadius = r;
+        RLog(@"[背景] 已铺到 %@ %.0fx%.0f (圆角 %.1f)",
+             NSStringFromClass(host.class), host.bounds.size.width, host.bounds.size.height, r);
+    }
+    iv.hidden = NO;
+    dim.hidden = NO;
+    if (!CGRectEqualToRect(iv.frame, host.bounds)) {
+        iv.frame = host.bounds;
+        dim.frame = host.bounds;
+    }
+    if (iv.image != gDIBgImage) iv.image = gDIBgImage;
+}
+
+static void diNPRefreshBackgrounds(void) {
+    diNPTickPrefs();
+    for (UIView *host in gDIBgHosts.allObjects) {
+        diNPApplyBackgroundTo(host, gDIBgOnCache);
+    }
+}
+
+/* ---------- 隐藏「未在播放」 ---------- */
+static void diNPHideNotPlayingLabels(UIView *root, BOOL hide) {
+    if (!root) return;
+    NSMutableArray *stack = [NSMutableArray arrayWithObject:root];
+    int budget = 1500;
+    while (stack.count && budget-- > 0) {
+        UIView *v = stack.lastObject; [stack removeLastObject];
+        if ([v isKindOfClass:UILabel.class]) {
+            NSString *t = ((UILabel *)v).text;
+            if (t.length && ([t containsString:@"未在播放"] || [t containsString:@"Not Playing"]
+                             || [t containsString:@"Nothing Playing"])) {
+                if (v.hidden != hide) v.hidden = hide;
+            }
+        }
+        for (UIView *c in v.subviews) [stack addObject:c];
+    }
+}
+
+static void diNPApplyHideForRoot(UIView *root) {
+    diNPTickPrefs();
+    diNPHideNotPlayingLabels(root, gDIHideNP);
+}
+
+/* ---------- 模块容器钩子 ---------- */
+static void (*gDIOrigModuleLayout)(id, SEL) = NULL;
+
+static void diNPHandleModuleVC(id vc) {
+    NSString *ident = nil;
+    @try { ident = [vc valueForKey:@"moduleIdentifier"]; } @catch (__unused NSException *e) {}
+    if (![ident isKindOfClass:NSString.class] || ![ident containsString:@"nowplaying"]) return;
+
+    /* 卡片视图: 背景铺在它最底层, 与播放器视图平级 —— 绝不插进播放器自己的树 */
+    UIView *card = nil;
+    @try {
+        id cv = [vc valueForKey:@"containerView"];
+        if ([cv isKindOfClass:UIView.class]) card = cv;
+    } @catch (__unused NSException *e) {}
+    if (!card) card = [(UIViewController *)vc view];
+    if (![card isKindOfClass:UIView.class] || !card.window) return;
+
+    if (!gDIBgHosts) gDIBgHosts = [NSHashTable weakObjectsHashTable];
+    [gDIBgHosts addObject:card];
+
+    diNPTickPrefs();
+    diNPHideNotPlayingLabels(card, gDIHideNP);
+
+    if (gDIBgOnCache) {
+        if (!gDIBgImage && CFAbsoluteTimeGetCurrent() - gDIBgFetchTS > 1.0) {
+            gDIBgFetchTS = CFAbsoluteTimeGetCurrent();
+            diNPFetchArtwork();
+        }
+        diNPApplyBackgroundTo(card, YES);
+    } else {
+        diNPApplyBackgroundTo(card, NO);
+    }
+}
+
+static void diNPModuleLayout(id self, SEL cmd) {
+    if (gDIOrigModuleLayout) gDIOrigModuleLayout(self, cmd);
+    @try { diNPHandleModuleVC(self); } @catch (__unused NSException *e) {}
+}
+
+static void diNPMediaChanged(CFNotificationCenterRef c, void *obs, CFStringRef name,
+                             const void *obj, CFDictionaryRef info) {
+    static CFTimeInterval last = 0;
+    CFTimeInterval now = CFAbsoluteTimeGetCurrent();
+    if (now - last < 0.4) return;
+    last = now;
+    diNPFetchArtwork();
 }
 
 static void diArtInstall(void) {
@@ -15977,6 +16182,15 @@ static void diArtInstall(void) {
         if (!gDIArtOrigCCVCLayout) gDIArtOrigCCVCLayout = (void (*)(id, SEL))before;
         any = YES;
     }
+    /* 3.1.0: 模块卡片(专辑背景/隐藏未在播放) —— ControlCenterUI 里的容器 VC */
+    Class mvc = NSClassFromString(@"CCUIContentModuleContainerViewController");
+    if (mvc) {
+        Method m = class_getInstanceMethod(mvc, @selector(viewWillLayoutSubviews));
+        IMP before = m ? method_getImplementation(m) : NULL;
+        MSHookMessageEx(mvc, @selector(viewWillLayoutSubviews), (IMP)diNPModuleLayout, (IMP *)&gDIOrigModuleLayout);
+        if (!gDIOrigModuleLayout) gDIOrigModuleLayout = (void (*)(id, SEL))before;
+        RLog(@"[背景] 模块容器钩子 %@", gDIOrigModuleLayout ? @"已装" : @"失败");
+    }
     /* 3.0.9: 传送容器 setFrame 接管(3×2 按钮瞬跳的唯一落点) */
     Class tcc = NSClassFromString(@"MRUNowPlayingTransportControlsView");
     if (tcc) {
@@ -15994,9 +16208,15 @@ static void diArtChanged(CFNotificationCenterRef c, void *obs, CFStringRef name,
                          const void *obj, CFDictionaryRef info) {
     diArtForceRefresh();
     diArtDisableNPRSpin();
+    gDIBgPrefTS = 0;               /* 3.1.0: 背景/隐藏未在播放的开关立刻重读 */
+    gDIBgFetchTS = 0;
     dispatch_async(dispatch_get_main_queue(), ^{
         BOOL on = diArtPrefOn();
         RLog(@"[封面] 开关变化 → %@", on ? @"圆 + 旋转" : @"方形 + 停止");
+        diNPRefreshBackgrounds();
+        for (UIView *host in gDIBgHosts.allObjects) {
+            diNPHideNotPlayingLabels(host, diNPPrefFlag(@"HideNotPlaying", NO));
+        }
         for (UIView *root in gDIArtRoots.allObjects) {
             DIArtRootState *rs = objc_getAssociatedObject(root, kDIArtRootKey);
             for (UIView *a in rs.arts) diArtApply(a, on);
@@ -16121,6 +16341,11 @@ __attribute__((constructor)) static void init(void) {
             /* 2.6.12: 设置页选完遮罩素材后 post 这条, 让遮罩立刻换图 */
             CFNotificationCenterAddObserver(CFNotificationCenterGetDarwinNotifyCenter(), NULL,
                 prefsChanged, CFSTR("com.abgg332.driftisland/prefsChanged"), NULL,
+                CFNotificationSuspensionBehaviorDeliverImmediately);
+
+            /* 3.1.0: 系统「正在播放信息变化」 —— 换歌/开始播放时刷新专辑背景 */
+            CFNotificationCenterAddObserver(CFNotificationCenterGetDarwinNotifyCenter(), NULL,
+                diNPMediaChanged, CFSTR("kMRMediaRemoteNowPlayingInfoDidChangeNotification"), NULL,
                 CFNotificationSuspensionBehaviorDeliverImmediately);
             /* 3.0.6: 面板里拨「专辑图旋转」→ 立刻刷新封面蒙版(不用注销) */
             CFNotificationCenterAddObserver(CFNotificationCenterGetDarwinNotifyCenter(), NULL,
