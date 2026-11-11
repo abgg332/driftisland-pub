@@ -65,7 +65,7 @@ static double expandTextY = DI_EXP_TEXT_BASE_Y;   // 上下偏移(pt, 下为正,
 static double expandTextScale = 100.0; // 文字大小(%, 100=原样)
 /* 2.8.86: 构建戳 —— 之前横幅打的是 SpringBoard 自己的 CFBundleShortVersionString(恒 1.0),
    日志里根本看不出装的是哪一版。所有诊断行都带这个戳, 下轮日志一眼定位。 */
-#define DI_BUILD_VER @"3.0.11"
+#define DI_BUILD_VER @"3.0.12"
 static BOOL gRecordingActive = NO; // 保留: 岛素材总闸条件
 static NSString *diElementId(UIView *host);
 static BOOL diMiniMusicActive(UIView *host); // 2.6.3: 前置(遮罩层使用)
@@ -15656,12 +15656,26 @@ static BOOL diArtNameIsArtwork(NSString *cn) {
 /* 收集播放器里的所有封面: 3×2 展开态是四宫格, 会有 3~4 个封面同时存在,
    以前只取最大的那一个, 所以"图一那种布局"永远只有一张变圆。
    判据: 类名带 Artwork / 接近正方形 / 不能是铺满整块的背景图。 */
+/* 3.0.12: 是不是播放器"控件壳"里的图标(上下首/滑块/音量/头部) —— 这些里的
+   UIImageView 绝对不能当封面蒙(3.0.8 "有些圆有些不圆"就是这么来的)。 */
+static BOOL diArtInChrome(UIView *v) {
+    for (UIView *p = v.superview; p; p = p.superview) {
+        NSString *cn = NSStringFromClass(p.class);
+        if ([cn containsString:@"TransportButton"] || [cn containsString:@"TransportControls"]
+            || [cn containsString:@"Stepper"] || [cn containsString:@"Slider"]
+            || [cn containsString:@"TimeControls"] || [cn containsString:@"VolumeControls"]
+            || [cn containsString:@"Header"] || [cn containsString:@"CAPackage"]
+            || [cn containsString:@"Route"]) return YES;
+    }
+    return NO;
+}
+
 static NSArray<UIView *> *diArtCollectIn(UIView *root) {
     NSMutableArray *out = [NSMutableArray array];
     if (!root) return out;
     CGFloat rootArea = root.bounds.size.width * root.bounds.size.height;
     NSMutableArray *stack = [NSMutableArray arrayWithObject:root];
-    int budget = 800;
+    int budget = 1500;   /* 3×2 建议网格节点多, 800 会截断 */
     while (stack.count && budget-- > 0) {
         UIView *v = stack.lastObject; [stack removeLastObject];
         if (v != root && !v.hidden && v.alpha > 0.05) {
@@ -15670,9 +15684,17 @@ static NSArray<UIView *> *diArtCollectIn(UIView *root) {
                 CGFloat ratio = s.width / MAX(1.0, s.height);
                 CGFloat area = s.width * s.height;
                 BOOL tooBig = rootArea > 1 && area > rootArea * 0.55;
-                if (!tooBig && ratio > 0.7 && ratio < 1.45 && diArtNameIsArtwork(NSStringFromClass(v.class))) {
+                BOOL named = diArtNameIsArtwork(NSStringFromClass(v.class));
+                /* 3.0.12: 建议网格里没加载到封面的格子仍是普通视图, 有图的格子
+                   也未必是 MRUArtworkView —— 补一条"够大的方形 UIImageView"兜底,
+                   但必须排除控件壳里的图标(上面 diArtInChrome)。 */
+                BOOL plain = ([v isKindOfClass:UIImageView.class]
+                              && ((UIImageView *)v).image != nil
+                              && s.width >= 38 && s.height >= 38
+                              && !diArtInChrome(v));
+                if (!tooBig && ratio > 0.7 && ratio < 1.45 && (named || plain)) {
                     [out addObject:v];
-                    if (out.count >= 6) break;
+                    if (out.count >= 9) break;
                     continue;   /* 命中封面就不再往里钻, 免得把它内部的 imageView 也当封面 */
                 }
             }
@@ -15872,21 +15894,66 @@ static void diCrumb(NSString *s) {
 }
 
 static void diBootGuardCheck(void) {
+    /* 3.0.12: 3.0.11 的"90 秒内引导=崩溃"误判太狠 —— 用户设置页注销(常见 20~40 秒)
+       也被当成崩溃, 结果新功能整轮全关, 白测。现在三重判据:
+         ① 设置页注销前会写 PendingRespringTS(cfprefs, 两边都能写) → 明确是人为注销;
+         ② 最近的 SpringBoard 崩溃报告(180 秒内) → 真崩过, 还顺带记录报告里有没有漂流岛;
+         ③ 兜底: 距上次引导 <20 秒(崩溃后 respawn 通常 5~10 秒, 人为注销 20 秒以上)。 */
     @try {
+        double now = [NSDate date].timeIntervalSince1970;
+
+        /* ① 人为注销标记 */
+        CFPreferencesSynchronize(CFSTR("com.abgg332.driftisland"), kCFPreferencesCurrentUser, kCFPreferencesAnyHost);
+        id mark = CFBridgingRelease(CFPreferencesCopyAppValue(CFSTR("PendingRespringTS"),
+                                                             CFSTR("com.abgg332.driftisland")));
+        BOOL userRespring = NO;
+        if ([mark isKindOfClass:NSNumber.class]) {
+            double mt = [mark doubleValue];
+            userRespring = (now - mt >= 0 && now - mt < 600.0);
+            CFPreferencesSetAppValue(CFSTR("PendingRespringTS"), NULL, CFSTR("com.abgg332.driftisland"));
+            CFPreferencesAppSynchronize(CFSTR("com.abgg332.driftisland"));
+        }
+
+        /* ② 最近崩溃报告 */
+        double crashAge = -1;
+        BOOL crashHasUs = NO;
+        for (NSString *dir in @[@"/var/mobile/Library/Logs/CrashReporter",
+                                @"/var/jb/var/mobile/Library/Logs/CrashReporter"]) {
+            NSArray *files = [[NSFileManager defaultManager] contentsOfDirectoryAtPath:dir error:NULL];
+            for (NSString *f in files) {
+                if (![f containsString:@"SpringBoard"]) continue;
+                NSString *fp = [dir stringByAppendingPathComponent:f];
+                NSDictionary *at = [[NSFileManager defaultManager] attributesOfItemAtPath:fp error:NULL];
+                NSDate *d = at[NSFileModificationDate];
+                if (!d) continue;
+                double age = now - [d timeIntervalSince1970];
+                if (age < 0 || age > 180.0) continue;
+                if (crashAge < 0 || age < crashAge) {
+                    crashAge = age;
+                    NSString *txt = [NSString stringWithContentsOfFile:fp encoding:NSUTF8StringEncoding error:NULL];
+                    crashHasUs = (txt && [txt containsString:@"DriftIsland"]);
+                }
+            }
+        }
+
+        /* ③ 时间窗兜底 */
         NSString *p = @"/var/mobile/Library/Preferences/com.abgg332.driftisland.bootguard.plist";
-        double last = 0;
+        double lastTS = 0;
         NSData *data = [NSData dataWithContentsOfFile:p];
         if (data) {
             NSDictionary *d = [NSPropertyListSerialization
                 propertyListWithData:data options:0 format:NULL error:NULL];
-            if ([d isKindOfClass:NSDictionary.class]) last = [d[@"ts"] doubleValue];
+            if ([d isKindOfClass:NSDictionary.class]) lastTS = [d[@"ts"] doubleValue];
         }
-        double now = [NSDate date].timeIntervalSince1970;
-        gDIPlayerSafeBoot = (last > 0 && now - last < 90.0);
-        if (gDIPlayerSafeBoot)
-            RLog(@"[保险] 距上次引导仅 %.0f 秒, 疑似刚崩过 → 本次启动关闭播放器新钩子", now - last);
-        else
-            RLog(@"[保险] 正常引导, 播放器功能全开");
+        BOOL quick = (lastTS > 0 && now - lastTS < 20.0);
+
+        gDIPlayerSafeBoot = !userRespring && (crashAge >= 0 || quick);
+        RLog(@"[保险] 人为注销=%d 崩溃报告=%@ 报告含漂流岛=%d 距上次引导=%.0fs → %@",
+             userRespring,
+             crashAge >= 0 ? [NSString stringWithFormat:@"%.0f秒前", crashAge] : @"无",
+             crashHasUs, lastTS > 0 ? now - lastTS : -1,
+             gDIPlayerSafeBoot ? @"安全引导(新钩子本次关闭)" : @"正常引导(功能全开)");
+
         NSData *out = [NSPropertyListSerialization
             dataWithPropertyList:@{@"ts": @(now)}
             format:NSPropertyListBinaryFormat_v1_0 options:0 error:NULL];
@@ -15954,6 +16021,41 @@ static void diArtLogTree(UIView *root) {
     RLog(@"[封面] 播放器视图树| %@", s);
 }
 
+/* 3.0.12: 展开态导出一次完整视图树 —— 只为定位"有些封面没覆盖/未在播放找不到"
+   到底差在哪个类上。写盘一份, 日志只报节点数, 不刷屏。 */
+static void diDumpExpandedTreeOnce(UIView *root) {
+    static BOOL done = NO;
+    if (done || !root) return;
+    if (root.bounds.size.width < 200 || root.bounds.size.height < 150) return;
+    done = YES;
+    NSMutableString *s = [NSMutableString string];
+    [s appendFormat:@"=== 播放器展开树 %@ %.0fx%.0f 3x2=%d ===\n", NSStringFromClass(root.class),
+        root.bounds.size.width, root.bounds.size.height, diArtIs3x2()];
+    NSMutableArray *stack = [NSMutableArray arrayWithObject:@[root, @0]];
+    int n = 0;
+    while (stack.count && n < 400) {
+        NSArray *pr = stack.lastObject; [stack removeLastObject];
+        UIView *v = pr[0]; int d = [pr[1] intValue];
+        NSString *ind = [@"" stringByPaddingToLength:(NSUInteger)(d * 2) withString:@" " startingAtIndex:0];
+        NSString *extra = @"";
+        if ([v isKindOfClass:UIImageView.class]) {
+            UIImage *im = ((UIImageView *)v).image;
+            extra = im ? [NSString stringWithFormat:@" img=%.0fx%.0f", im.size.width, im.size.height]
+                       : @" img=nil";
+        } else if ([v isKindOfClass:UILabel.class]) {
+            NSString *t = ((UILabel *)v).text;
+            if (t.length) extra = [NSString stringWithFormat:@" text=%@", t];
+        }
+        [s appendFormat:@"%@%@ %@ h=%d a=%.2f cr=%.1f%@\n", ind, NSStringFromClass(v.class),
+            NSStringFromCGRect(v.frame), v.hidden, v.alpha, v.layer.cornerRadius, extra];
+        n++;
+        if (d < 7) for (UIView *c in v.subviews) [stack addObject:@[c, @(d + 1)]];
+    }
+    NSString *path = @"/var/mobile/Library/Logs/driftisland-tree.log";
+    [s writeToFile:path atomically:YES encoding:NSUTF8StringEncoding error:NULL];
+    RLog(@"[树] 已导出展开态视图树 %d 节点 → %@", n, path);
+}
+
 static void diArtPlayerPost(UIView *root) {
     if (![root isKindOfClass:UIView.class]) return;
     /* 灵动岛那套(MRUActivityNowPlayingView)可能继承自 MRUNowPlayingView, 会顺带命中
@@ -15984,9 +16086,21 @@ static void diArtPlayerPost(UIView *root) {
     for (UIView *a in arts) diArtApply(a, on);
     if (on && !arts.count) diArtLogTree(root);
     diArtKillJitter(root);
-    /* 3.0.11: 删除"每 0.5s 遍历整棵播放器树收『未在播放』"—— 布局钩子里走大树,
-       是 3.1.0 起同步路径上唯一的新增代码(两次崩溃日志都停在它前一行的足迹上),
-       头号嫌疑。「未在播放」由模块容器钩子负责, 不在这里兜。 */
+    /* 3.0.12: 「隐藏未在播放」恢复 —— 但不再在布局 pass 里同步走树:
+       异步丢到主队列下一轮, 1 秒节流。模块容器钩子在本机(layout=0x0 那种早期
+       形态)不一定命中, 播放器根视图这条路径才是稳的。 */
+    {
+        static CFTimeInterval lastHideTS = 0;
+        CFTimeInterval hn = CFAbsoluteTimeGetCurrent();
+        if (hn - lastHideTS > 1.0) {
+            lastHideTS = hn;
+            dispatch_async(dispatch_get_main_queue(), ^{
+                @try { diNPApplyHideForRoot(root); } @catch (__unused NSException *e) {}
+            });
+        }
+    }
+    /* 3.0.12: 展开态自动导出一次完整视图树(只为定位"有些封面没覆盖"), 写盘不刷屏 */
+    diDumpExpandedTreeOnce(root);
     /* 播放器的旋转/布局钩子安装顺序不确定, 可能在我们的清理之后又把动画挂回去。
        0.1s 后再补一次, 保证"关=静止、3×2=不抖"是最后一次写。 */
     static CFTimeInterval lastSweep = 0;
@@ -16162,11 +16276,14 @@ static void diNPRefreshBackgrounds(void) {
 static void diNPHideNotPlayingLabels(UIView *root, BOOL hide) {
     if (!root) return;
     NSMutableArray *stack = [NSMutableArray arrayWithObject:root];
-    int budget = 1500;
+    int budget = 2500;
     while (stack.count && budget-- > 0) {
         UIView *v = stack.lastObject; [stack removeLastObject];
         if ([v isKindOfClass:UILabel.class]) {
-            NSString *t = ((UILabel *)v).text;
+            UILabel *lb = (UILabel *)v;
+            NSMutableString *t = [NSMutableString string];
+            if (lb.text.length) [t appendString:lb.text];
+            if (lb.attributedText.length) [t appendString:lb.attributedText.string];
             if (t.length && ([t containsString:@"未在播放"] || [t containsString:@"Not Playing"]
                              || [t containsString:@"Nothing Playing"])) {
                 if (v.hidden != hide) v.hidden = hide;
@@ -16176,7 +16293,7 @@ static void diNPHideNotPlayingLabels(UIView *root, BOOL hide) {
     }
 }
 
-__attribute__((unused)) static void diNPApplyHideForRoot(UIView *root) {
+static void diNPApplyHideForRoot(UIView *root) {
     diNPTickPrefs();
     diNPHideNotPlayingLabels(root, gDIHideNP);
 }

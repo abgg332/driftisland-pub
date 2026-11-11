@@ -5313,6 +5313,14 @@ static NSArray<NSDictionary *> *diwCachedApps(void) {
 /* 注销: 原插件在 Preferences 进程里直接给 SpringBoard/chronod 发 SIGTERM。
    同为 mobile 用户, 权限够; 这里只按 p_comm 匹配(SpringBoard/chronod 都在 16 字节内)。 */
 static void diwKillByComm(const char *comm) {
+    /* 3.0.12: 真要注销 SpringBoard 前先落"人为注销"标记(所有注销入口共用这里),
+       启动保险据此区分"人按了注销"和"崩溃后自动 respawn"。 */
+    if (comm && strcmp(comm, "SpringBoard") == 0) {
+        CFPreferencesSetAppValue(CFSTR("PendingRespringTS"),
+                                 (__bridge CFPropertyListRef)@([[NSDate date] timeIntervalSince1970]),
+                                 CFSTR("com.abgg332.driftisland"));
+        CFPreferencesAppSynchronize(CFSTR("com.abgg332.driftisland"));
+    }
     int mib[4] = {CTL_KERN, KERN_PROC, KERN_PROC_ALL, 0};
     size_t len = 0;
     if (sysctl(mib, 4, NULL, &len, NULL, 0) < 0 || len == 0) return;
@@ -5516,6 +5524,12 @@ static void diwKillByComm(const char *comm) {
        现在: ① 发 Darwin 通知, 由 SpringBoard / chronod 自己退出(不依赖 kill 权限)
              ② 后台再兜底 kill 一次(允许就当加速)
              ③ 弹窗带「好」按钮, 并且 2.5 秒后自动关闭 —— 无论成败都不会卡住界面 */
+    /* 3.0.12: 注销前写"人为注销"标记(cfprefs, SpringBoard 侧能读到), 
+       否则启动保险会把正常注销误判成崩溃, 把新功能整轮关掉。 */
+    CFPreferencesSetAppValue(CFSTR("PendingRespringTS"),
+                             (__bridge CFPropertyListRef)@([[NSDate date] timeIntervalSince1970]),
+                             (__bridge CFStringRef)kDomain);
+    CFPreferencesAppSynchronize((__bridge CFStringRef)kDomain);
     notify_post("com.abgg332.driftisland.widget.respring");
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.8 * NSEC_PER_SEC)),
                    dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
