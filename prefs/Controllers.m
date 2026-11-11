@@ -761,8 +761,10 @@ static Class diStepSliderClass(void) {
 /* 2.9.19: 组件隐藏(移植 RemoveWidgetBackground 1.7) */
 @interface DIWidgetHidePage : DIMiniBaseController @end
 @interface DIWidgetAppsPage : DIMiniBaseController @end
-/* 2.9.75: 播放器入口 —— 组件隐藏下面同级, 开关写 com.local.playerexact(内置原生播放器域) */
+/* 3.0: 播放器入口 —— 组件隐藏下面同级, 开关写 com.local.playerexact(内置原生播放器域) */
 @interface DIPlayerEntryPage : DIMiniBaseController @end
+/* 3.0.1: 尺寸选择页自建 —— 不再走系统的 PSListItemsController(点进去闪退) */
+@interface DIPlayerSizePage : DIMiniBaseController @end
 @interface DIFrameFoldersMask : DIFrameFolders @end /* 2.6.3: 遮罩素材选择(键 maskAnimFolder) */
 @interface DIFrameFoldersMini : DIFrameFolders @end  /* 左侧(mini)帧率素材选择(键 smallAnimFolder) */
 @interface DIFrameFoldersAudio : DIFrameFolders @end /* 右侧音频素材(键 miniAudioFolder) */
@@ -5590,6 +5592,12 @@ static BOOL diNPReadEnabled(void) {
 
 @implementation DIPlayerEntryPage
 
+/* 从尺寸页返回后刷新右侧当前值 */
+- (void)viewWillAppear:(BOOL)animated {
+    [super viewWillAppear:animated];
+    [self reloadSpecifiers];
+}
+
 /* 本页所有 specifier 都带 defaults=com.local.playerexact, 这里按 specifier 的域读写,
    不沿用基类的 kDomain(漂流岛自己的域) —— 播放器只认它自己的域。 */
 - (id)readPreferenceValue:(PSSpecifier *)spec {
@@ -5684,21 +5692,42 @@ static BOOL diNPReadEnabled(void) {
     return sp;
 }
 
+- (PSSpecifier *)npRotateSwitch {
+    PSSpecifier *sp = [PSSpecifier preferenceSpecifierNamed:@"专辑图旋转" target:self
+        set:@selector(writeRotateEnabled:specifier:) get:@selector(readPreferenceValue:)
+        detail:nil cell:PSSwitchCell edit:nil];
+    [sp setProperty:@"ArtworkRotationEnabled" forKey:@"key"];
+    [sp setProperty:kNPDomain forKey:@"defaults"];
+    [sp setProperty:@NO forKey:@"default"];
+    return sp;
+}
+
+/* 3.0.1: 旋转是播放器启动时装配的动画, 改完必须重启桌面才停 —— 切换后直接给注销入口 */
+- (void)writeRotateEnabled:(id)value specifier:(PSSpecifier *)spec {
+    diNPWrite(@"ArtworkRotationEnabled", @([value boolValue]), kNPDomain);
+    notify_post("com.local.playerexact/artwork-changed");
+    UIAlertController *ac = [UIAlertController alertControllerWithTitle:@"已保存"
+        message:@"专辑图旋转需要注销后生效。" preferredStyle:UIAlertControllerStyleAlert];
+    [ac addAction:[UIAlertAction actionWithTitle:@"立即注销" style:UIAlertActionStyleDefault
+        handler:^(UIAlertAction *a) { [self doRespring:nil]; }]];
+    [ac addAction:[UIAlertAction actionWithTitle:@"稍后" style:UIAlertActionStyleCancel handler:nil]];
+    [self presentViewController:ac animated:YES completion:nil];
+}
+
 - (NSArray *)buildSpecifiers {
     NSMutableArray *specs = [NSMutableArray array];
 
-    [specs addObject:[self groupSpec:@"播放器入口"
-        footer:@"内置「原生播放器调节」0.3.21 修复版(控制中心原生播放器增强)。以下设置全部写播放器自己的偏好域, 开关即时生效。"]];
+    [specs addObject:[self groupSpec:@"播放器入口" footer:nil]];
     PSSpecifier *sw = [PSSpecifier preferenceSpecifierNamed:@"启用原生播放器" target:self
         set:@selector(writeNPEnabled:specifier:) get:@selector(readNPEnabled:)
         detail:nil cell:PSSwitchCell edit:nil];
     [specs addObject:sw];
 
     /* ---- 尺寸(原版 8 档, 同一键 Size) ---- */
-    [specs addObject:[self groupSpec:@"播放器尺寸" footer:@"改尺寸后点最下面的「注销生效」。"]];
+    [specs addObject:[self groupSpec:@"播放器尺寸" footer:nil]];
     PSSpecifier *size = [PSSpecifier preferenceSpecifierNamed:@"播放器尺寸" target:self
         set:@selector(setPreferenceValue:specifier:) get:@selector(readPreferenceValue:)
-        detail:NSClassFromString(@"PSListItemsController") cell:PSLinkListCell edit:nil];
+        detail:[DIPlayerSizePage class] cell:PSLinkListCell edit:nil];
     [size setProperty:@"Size" forKey:@"key"];
     [size setProperty:kNPDomain forKey:@"defaults"];
     [size setProperty:@"2x2" forKey:@"default"];
@@ -5712,18 +5741,54 @@ static BOOL diNPReadEnabled(void) {
     /* ---- 功能(原版 4 个开关) ---- */
     [specs addObject:[self groupSpec:@"功能" footer:nil]];
     [specs addObject:[self npSwitch:@"封面背景" key:@"MusicArtworkGradientEnabled" def:YES]];
-    [specs addObject:[self npSwitch:@"专辑图旋转" key:@"ArtworkRotationEnabled" def:NO]];
+    [specs addObject:[self npRotateSwitch]];
     [specs addObject:[self npSwitch:@"禁止 N95 修改专辑图" key:@"BlockN95Artwork" def:NO]];
     [specs addObject:[self npSwitch:@"隐藏投送图标" key:@"HideRoutingIcon" def:NO]];
 
     /* ---- 原版参数管理 ---- */
-    [specs addObject:[self groupSpec:@"原插件参数"
-        footer:@"「导入」会从已装的 EvoCenter / 旧尺寸插件读取同样 8 个键; 「恢复默认」删除这 8 个键(总开关保留)。"]];
+    [specs addObject:[self groupSpec:@"原插件参数" footer:nil]];
     [specs addObject:[self buttonSpec:@"导入原播放器参数" action:@selector(importPlayerPreferences:)]];
     [specs addObject:[self buttonSpec:@"恢复默认播放器参数" action:@selector(resetPlayerPreferences:)]];
 
     [specs addObject:[self groupSpec:nil footer:nil]];
     [specs addObject:[self buttonSpec:@"注销生效" action:@selector(doRespring:)]];
     return specs;
+}
+@end
+
+/* ================= 3.0.1: 播放器尺寸选择页(自建) =================
+   3.0 用系统的 PSListItemsController 进页即闪退(Settings 进程崩),
+   这里改成自己的 8 行按钮页: 当前项文本前打「✓」, 点一行写 Size 就返回。 */
+@implementation DIPlayerSizePage
+
+- (NSArray *)buildSpecifiers {
+    NSMutableArray *specs = [NSMutableArray array];
+    [specs addObject:[self groupSpec:@"播放器尺寸" footer:nil]];
+
+    NSArray<NSString *> *vals = @[ @"2x2", @"2x3", @"3x2", @"3x2b", @"4x1", @"4x2", @"4x2b", @"4x3" ];
+    NSArray<NSString *> *titles = @[ @"2 × 2", @"2 × 3", @"3 × 2", @"3 × 2（布局 B）",
+                                     @"4 × 1", @"4 × 2", @"4 × 2（布局 B）", @"4 × 3" ];
+    NSString *cur = diNPRead(@"Size", kNPDomain);
+    if (![cur isKindOfClass:NSString.class] || !cur.length) cur = @"2x2";
+
+    for (NSUInteger i = 0; i < vals.count && i < titles.count; i++) {
+        BOOL on = [vals[i] isEqualToString:cur];
+        NSString *name = on ? [@"✓ " stringByAppendingString:titles[i]] : titles[i];
+        PSSpecifier *sp = [PSSpecifier preferenceSpecifierNamed:name target:self
+            set:NULL get:NULL detail:nil cell:PSButtonCell edit:nil];
+        [sp setProperty:vals[i] forKey:@"sizeValue"];
+        [sp setButtonAction:@selector(pickSize:)];
+        [specs addObject:sp];
+    }
+    return specs;
+}
+
+- (void)pickSize:(PSSpecifier *)sp {
+    NSString *v = [sp propertyForKey:@"sizeValue"];
+    if ([v isKindOfClass:NSString.class] && v.length) {
+        diNPWrite(@"Size", v, kNPDomain);
+        notify_post("com.local.playerexact/artwork-changed");
+    }
+    [self.navigationController popViewControllerAnimated:YES];
 }
 @end
