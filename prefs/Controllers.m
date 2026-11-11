@@ -5769,16 +5769,11 @@ static void diNPEnsureActivation(void) {
     return sp;
 }
 
-/* 3.0.1: 旋转是播放器启动时装配的动画, 改完必须重启桌面才停 —— 切换后直接给注销入口 */
+/* 3.0.6: 旋转/蒙版现在由 SpringBoard 侧实时应用, 改完立即生效, 不再弹「已保存」。
+   用户统一用页面底部的「注销生效」。 */
 - (void)writeRotateEnabled:(id)value specifier:(PSSpecifier *)spec {
     diNPWrite(@"ArtworkRotationEnabled", @([value boolValue]), kNPDomain);
     notify_post("com.local.playerexact/artwork-changed");
-    UIAlertController *ac = [UIAlertController alertControllerWithTitle:@"已保存"
-        message:@"专辑图旋转需要注销后生效。" preferredStyle:UIAlertControllerStyleAlert];
-    [ac addAction:[UIAlertAction actionWithTitle:@"立即注销" style:UIAlertActionStyleDefault
-        handler:^(UIAlertAction *a) { [self doRespring:nil]; }]];
-    [ac addAction:[UIAlertAction actionWithTitle:@"稍后" style:UIAlertActionStyleCancel handler:nil]];
-    [self presentViewController:ac animated:YES completion:nil];
 }
 
 - (NSArray *)buildSpecifiers {
@@ -5865,18 +5860,8 @@ static void diNPEnsureActivation(void) {
         diNPApplySize(v);
         notify_post("com.local.playerexact/artwork-changed");
     }
+    /* 3.0.6: 选完直接回上一页, 不弹「已保存/需要注销」——
+       用户自己用底部「注销生效」按钮, 不打断连选。 */
     [self.navigationController popViewControllerAnimated:YES];
-
-    /* 尺寸是播放器启动时读的, 改完必须重启桌面 */
-    UIAlertController *ac = [UIAlertController alertControllerWithTitle:@"已保存"
-        message:@"播放器尺寸需要注销后生效。" preferredStyle:UIAlertControllerStyleAlert];
-    [ac addAction:[UIAlertAction actionWithTitle:@"立即注销" style:UIAlertActionStyleDefault
-        handler:^(UIAlertAction *a) { [self doRespring:nil]; }]];
-    [ac addAction:[UIAlertAction actionWithTitle:@"稍后" style:UIAlertActionStyleCancel handler:nil]];
-    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.35 * NSEC_PER_SEC)),
-                   dispatch_get_main_queue(), ^{
-        UIViewController *top = self.navigationController ?: self;
-        [top presentViewController:ac animated:YES completion:nil];
-    });
 }
 @end
