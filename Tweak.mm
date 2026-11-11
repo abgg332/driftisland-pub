@@ -15915,7 +15915,7 @@ static void diBootGuardCheck(void) {
        = 明确的"恢复全功能"动作, 档位回 3。 */
     @try {
         double now = [NSDate date].timeIntervalSince1970;
-        NSString *dom = CFSTR("com.abgg332.driftisland");
+        CFStringRef dom = CFSTR("com.abgg332.driftisland");
 
         CFPreferencesSynchronize(dom, kCFPreferencesCurrentUser, kCFPreferencesAnyHost);
         id mark = CFBridgingRelease(CFPreferencesCopyAppValue(CFSTR("PendingRespringTS"), dom));
@@ -15972,7 +15972,7 @@ static void diBootGuardCheck(void) {
         BOOL crashed = !userRespring && (crashAge >= 0 || quick);
         if (crashed && stage > 0) {
             stage--;
-            CFPreferencesSetAppValue(CFSTR("FeatureStage"), @(stage), dom);
+            CFPreferencesSetAppValue(CFSTR("FeatureStage"), (__bridge CFPropertyListRef)@(stage), dom);
             CFPreferencesAppSynchronize(dom);
         }
         gDIStage = stage;
