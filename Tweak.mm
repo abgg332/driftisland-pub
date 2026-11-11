@@ -7,6 +7,8 @@
 #import <objc/runtime.h>
 #import <objc/message.h>
 #import <dlfcn.h>
+#include <mach-o/dyld.h>
+#include <string.h>
 #import <substrate.h>
 #import <os/log.h>
 #include <dispatch/dispatch.h>
@@ -62,7 +64,7 @@ static double expandTextY = DI_EXP_TEXT_BASE_Y;   // 上下偏移(pt, 下为正,
 static double expandTextScale = 100.0; // 文字大小(%, 100=原样)
 /* 2.8.86: 构建戳 —— 之前横幅打的是 SpringBoard 自己的 CFBundleShortVersionString(恒 1.0),
    日志里根本看不出装的是哪一版。所有诊断行都带这个戳, 下轮日志一眼定位。 */
-#define DI_BUILD_VER @"3.0.2"
+#define DI_BUILD_VER @"3.0.3"
 static BOOL gRecordingActive = NO; // 保留: 岛素材总闸条件
 static NSString *diElementId(UIView *host);
 static BOOL diMiniMusicActive(UIView *host); // 2.6.3: 前置(遮罩层使用)
@@ -15329,6 +15331,83 @@ static void diMruTailInstall(void) {
     [NSRunLoop.mainRunLoop addTimer:t forMode:NSRunLoopCommonModes];
     diMruTailTick();
 }
+/* ============ 3.0.3: 内置播放器(NativePlayerOriginal)接入自检 ============
+   症状: 设置里改尺寸/开关都写进去了, 桌面一点变化都没有, 也不崩。
+   根因: 播放器构造函数里有一道硬门槛(反编译 0.3.20 启动段确认):
+        Enabled 必须是 NSNumber 且为 true,
+        并且 ActivationVersion 必须字符串等于 "0.3.1";
+   两道门槛任一不过就直接 return —— 一个 hook 都不装, 所以表现成"设置无效"。
+   原版设置面板拨开关时会把这两个键一起写, 我们复刻的面板只写了 Enabled,
+   ActivationVersion 从来没写过 → 播放器永远停在门外。
+   这里在 SpringBoard 里: ①补写激活键(仅当用户没显式关闭) ②确认 dylib 是否真的注入,
+   必要时按本 dylib 所在目录手动 dlopen, 结果全部写进主日志。 */
+static NSString *const kNPPlayerDomain = @"com.local.playerexact";
+static NSString *const kNPActivationVer = @"0.3.1";
+
+static BOOL diNPImageLoaded(void) {
+    uint32_t n = _dyld_image_count();
+    for (uint32_t i = 0; i < n; i++) {
+        const char *nm = _dyld_get_image_name(i);
+        if (nm && strstr(nm, "NativePlayerOriginal")) return YES;
+    }
+    return NO;
+}
+
+static void diNPHealPrefs(void) {
+    CFStringRef dom = (__bridge CFStringRef)kNPPlayerDomain;
+    CFPreferencesAppSynchronize(dom);
+    NSNumber *en = CFBridgingRelease(CFPreferencesCopyAppValue(CFSTR("Enabled"), dom));
+    NSString *av = CFBridgingRelease(CFPreferencesCopyAppValue(CFSTR("ActivationVersion"), dom));
+    if (![av isKindOfClass:NSString.class]) av = nil;
+    BOOL keyExists = [en isKindOfClass:NSNumber.class];
+    BOOL on = keyExists ? en.boolValue : YES;   /* 键缺失=新装, 与设置页默认(开)保持一致 */
+    if (!on) {
+        RLog(@"[播放器] 总开关是关的(用户手动关过), 不补写激活键");
+        return;
+    }
+    if (!keyExists || ![av isEqualToString:kNPActivationVer]) {
+        CFPreferencesSetAppValue(CFSTR("Enabled"), kCFBooleanTrue, dom);
+        CFPreferencesSetAppValue(CFSTR("ActivationVersion"), (__bridge CFPropertyListRef)kNPActivationVer, dom);
+        CFPreferencesSetAppValue(CFSTR("StartupPendingVersion"), NULL, dom);
+        CFPreferencesSetAppValue(CFSTR("StartupPendingToken"), NULL, dom);
+        CFPreferencesAppSynchronize(dom);
+        RLog(@"[播放器] 已补写激活键: Enabled=true ActivationVersion=%@ (原 Enabled=%@ 原 ActivationVersion=%@)",
+             kNPActivationVer, en ?: @"(无)", av ?: @"(无)");
+    } else {
+        RLog(@"[播放器] 激活键正常: Enabled=true ActivationVersion=%@", av);
+    }
+}
+
+static void diNPProbe(void) {
+    if (diNPImageLoaded()) {
+        RLog(@"[播放器] NativePlayerOriginal 已被注入本进程");
+        return;
+    }
+    /* 没注入: 先按本 dylib 所在目录找, 再退回两种常见布局, 手动 dlopen 并把失败原因打出来 */
+    NSMutableArray<NSString *> *cands = [NSMutableArray array];
+    Dl_info info;
+    if (dladdr((void *)&diNPProbe, &info) && info.dli_fname) {
+        NSString *self0 = [NSString stringWithUTF8String:info.dli_fname];
+        NSString *dir = [self0 stringByDeletingLastPathComponent];
+        if (dir.length) [cands addObject:[dir stringByAppendingPathComponent:@"NativePlayerOriginal.dylib"]];
+    }
+    [cands addObject:@"/var/jb/Library/MobileSubstrate/DynamicLibraries/NativePlayerOriginal.dylib"];
+    [cands addObject:@"/Library/MobileSubstrate/DynamicLibraries/NativePlayerOriginal.dylib"];
+    for (NSString *p in cands) {
+        if (![[NSFileManager defaultManager] fileExistsAtPath:p]) {
+            RLog(@"[播放器] 候选路径不存在: %@", p);
+            continue;
+        }
+        void *h = dlopen(p.UTF8String, RTLD_NOW);
+        if (h) {
+            RLog(@"[播放器] 手动 dlopen 成功: %@", p);
+            return;
+        }
+        const char *err = dlerror();
+        RLog(@"[播放器] dlopen 失败: %@ → %s", p, err ? err : "(无错误信息)");
+    }
+}
+
 __attribute__((constructor)) static void init(void) {
     @autoreleasepool {
         /* 2.7.15: 版本标记写死在这里, 不依赖 CFBundleShortVersionString ——
@@ -15363,6 +15442,15 @@ __attribute__((constructor)) static void init(void) {
         logHandle = os_log_create("com.abgg332.driftisland", "runtime");
         DLog(@"===== 漂流岛 tweak 加载 (SpringBoard) 版本 %@ (构建 %@) =====", \
          [NSBundle.mainBundle.infoDictionary[@"CFBundleShortVersionString"] description] ?: @"?", DI_BUILD_VER);
+        /* 3.0.3: 内置播放器自检 —— 同步补激活键(万一本 dylib 的构造器排在播放器之前, 这一写就能救回来),
+           再在第 2/6 秒各探一次: 播放器到底有没有被注入, 没有就手动 dlopen 并把 dlerror 记下来。 */
+        @try { diNPHealPrefs(); } @catch (NSException *e) { RLog(@"[播放器] 补写激活键异常: %@", e.reason); }
+        for (int npSec : {2, 6})
+            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)npSec * NSEC_PER_SEC),
+                           dispatch_get_main_queue(), ^{
+                @try { diNPHealPrefs(); diNPProbe(); }
+                @catch (NSException *e) { RLog(@"[播放器] 自检异常: %@", e.reason); }
+            });
         /* 2.8.78: 接收 MediaRemoteUI 的打点 + 把遮罩素材导出给那个进程 */
         diMruObserve();
         diMruTailInstall();

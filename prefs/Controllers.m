@@ -5590,11 +5590,29 @@ static BOOL diNPReadEnabled(void) {
     return ([v isKindOfClass:NSNumber.class]) ? [v boolValue] : YES;
 }
 
+/* 3.0.3: 播放器构造器有两道门槛 —— Enabled 必须是 true, 且 ActivationVersion 必须等于 "0.3.1"。
+   只拨开关不写 ActivationVersion, 播放器直接 return, 一个 hook 都不装(表现就是"改了没效果")。
+   原版面板拨开关时两个键是一起写的, 这里补上。 */
+static NSString * const kNPActivationVer = @"0.3.1";
+
+static void diNPEnsureActivation(void) {
+    id en = diNPRead(@"Enabled", kNPDomain);
+    BOOL keyExists = [en isKindOfClass:NSNumber.class];
+    if (keyExists && ![en boolValue]) return;   /* 用户显式关掉, 不擅自改 */
+    NSString *av = diNPRead(@"ActivationVersion", kNPDomain);
+    if (keyExists && [av isKindOfClass:NSString.class] && [av isEqualToString:kNPActivationVer]) return;
+    diNPWrite(@"Enabled", @YES, kNPDomain);
+    diNPWrite(@"ActivationVersion", kNPActivationVer, kNPDomain);
+    diNPWrite(@"StartupPendingVersion", nil, kNPDomain);
+    diNPWrite(@"StartupPendingToken", nil, kNPDomain);
+}
+
 @implementation DIPlayerEntryPage
 
 /* 从尺寸页返回后刷新右侧当前值 */
 - (void)viewWillAppear:(BOOL)animated {
     [super viewWillAppear:animated];
+    diNPEnsureActivation();   /* 3.0.3: 进页先补齐激活键, 页面显示状态与实际一致 */
     [self reloadSpecifiers];
 }
 
@@ -5621,10 +5639,15 @@ static BOOL diNPReadEnabled(void) {
 /* 播放器自己的开关(Enabled 默认 YES, 与基类 switchSpec 的 def 语义一致) */
 - (id)readNPEnabled:(PSSpecifier *)sp { return @(diNPReadEnabled()); }
 - (void)writeNPEnabled:(id)value specifier:(PSSpecifier *)sp {
-    diNPWrite(@"Enabled", @([value boolValue]), kNPDomain);
-    /* pending 键是播放器 30 秒清理标记, 残留会被 0.3.20 误判成启动失败, 顺手清掉 */
-    diNPWrite(@"StartupPendingVersion", nil, kNPDomain);
-    diNPWrite(@"StartupPendingToken", nil, kNPDomain);
+    BOOL on = [value boolValue];
+    diNPWrite(@"Enabled", @(on), kNPDomain);
+    if (on) {
+        /* 3.0.3: 第二道门槛 —— 拨开开关时同时写激活版本, 否则播放器照样不启动 */
+        diNPWrite(@"ActivationVersion", kNPActivationVer, kNPDomain);
+        /* pending 键是播放器 30 秒清理标记, 残留会被旧版误判成启动失败, 顺手清掉 */
+        diNPWrite(@"StartupPendingVersion", nil, kNPDomain);
+        diNPWrite(@"StartupPendingToken", nil, kNPDomain);
+    }
     notify_post("com.local.playerexact/artwork-changed");
 }
 
