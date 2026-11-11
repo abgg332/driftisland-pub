@@ -1,0 +1,670 @@
+{
+  "sourceVersion": "3.0.0-beta.3",
+  "domain": "com.local.playerexact",
+  "images": [
+    {
+      "source": "ZZEvoCenterRuntime.dylib",
+      "output": "NPROriginalRuntime.dylib",
+      "sourceSHA256": "e69703f68762ecc80efeeb687ba13184ff9a5999a67cc3a9fb749c78a50ac0fd",
+      "slices": [
+        {
+          "subtype": 0,
+          "startupPatch": {
+            "address": "0xa914",
+            "before": "fa67bba9",
+            "after": "c0035fd6"
+          },
+          "layoutRefreshPatches": [
+            {
+              "function": "0x2d6d8",
+              "address": "0x2e4b8",
+              "selector": "setNeedsLayout",
+              "before": "21630094",
+              "after": "1f2003d5"
+            },
+            {
+              "function": "0x2ff60",
+              "address": "0x3031c",
+              "selector": "setNeedsLayout",
+              "before": "885b0094",
+              "after": "1f2003d5"
+            },
+            {
+              "function": "0x303fc",
+              "address": "0x306b8",
+              "selector": "setNeedsLayout",
+              "before": "a15a0094",
+              "after": "1f2003d5"
+            },
+            {
+              "function": "0x309fc",
+              "address": "0x311c8",
+              "selector": "setNeedsLayout",
+              "before": "dd570094",
+              "after": "1f2003d5"
+            },
+            {
+              "function": "0x313a4",
+              "address": "0x31844",
+              "selector": "setNeedsLayout",
+              "before": "3e560094",
+              "after": "1f2003d5"
+            }
+          ],
+          "variantInstructionPatches": [],
+          "domainReplacements": 13,
+          "offsets": {
+            "ctor": 43284,
+            "preferences": 47760,
+            "settings": 70652,
+            "sizes": 71240,
+            "instance": 72444,
+            "settingsSlot": 416792,
+            "sizesSlot": 416800,
+            "instanceSlot": 416808,
+            "visibility": 90368,
+            "widePredicate": 90492,
+            "wideInstall": 90704,
+            "nowPlayingInstall": 208076,
+            "transportInstall": 208492,
+            "headerInstall": 208608,
+            "progressSlider": 180548,
+            "wideApply": 186072,
+            "artworkBounds": 196448,
+            "captureBaseline": 192896,
+            "nativeV2Config": 416640,
+            "nativeV2Enabled": 416600,
+            "progressBounds": 197628,
+            "timeLabels": 181928,
+            "timeCodesBounds": 199164
+          },
+          "executableSections": [
+            {
+              "name": "__text",
+              "address": "0x6fc8",
+              "size": 261640,
+              "sourceSHA256": "70f3cb0328a41f143823d64e99406a7935936389c6334ecb8d7c8330989755ac",
+              "isolatedSHA256": "6fed3c0e7c7eed322a07264ac372f63f9b739fc9892f0ab3340916a60dece4f3"
+            },
+            {
+              "name": "__stubs",
+              "address": "0x46dd0",
+              "size": 1080,
+              "sourceSHA256": "79fa110872aed93a3deb0c456cf8e30ea3f16a2b4f202c41d3a60e53b9e39973",
+              "isolatedSHA256": "79fa110872aed93a3deb0c456cf8e30ea3f16a2b4f202c41d3a60e53b9e39973"
+            }
+          ]
+        },
+        {
+          "subtype": 2,
+          "startupPatch": {
+            "address": "0x98dc",
+            "before": "7f2303d5",
+            "after": "c0035fd6"
+          },
+          "layoutRefreshPatches": [
+            {
+              "function": "0x2d960",
+              "address": "0x2e754",
+              "selector": "setNeedsLayout",
+              "before": "f4620094",
+              "after": "1f2003d5"
+            },
+            {
+              "function": "0x30274",
+              "address": "0x30634",
+              "selector": "setNeedsLayout",
+              "before": "3c5b0094",
+              "after": "1f2003d5"
+            },
+            {
+              "function": "0x30714",
+              "address": "0x309d4",
+              "selector": "setNeedsLayout",
+              "before": "545a0094",
+              "after": "1f2003d5"
+            },
+            {
+              "function": "0x30d1c",
+              "address": "0x314ec",
+              "selector": "setNeedsLayout",
+              "before": "8e570094",
+              "after": "1f2003d5"
+            },
+            {
+              "function": "0x316c8",
+              "address": "0x31b6c",
+              "selector": "setNeedsLayout",
+              "before": "ee550094",
+              "after": "1f2003d5"
+            }
+          ],
+          "variantInstructionPatches": [],
+          "domainReplacements": 12,
+          "offsets": {
+            "ctor": 39132,
+            "preferences": 44028,
+            "settings": 67296,
+            "sizes": 67892,
+            "instance": 69100,
+            "settingsSlot": 416112,
+            "sizesSlot": 416120,
+            "instanceSlot": 416128,
+            "visibility": 87524,
+            "widePredicate": 87664,
+            "wideInstall": 87880,
+            "nowPlayingInstall": 209596,
+            "transportInstall": 210024,
+            "headerInstall": 210156,
+            "progressSlider": 181148,
+            "wideApply": 186720,
+            "artworkBounds": 197236,
+            "captureBaseline": 193644,
+            "nativeV2Config": 415960,
+            "nativeV2Enabled": 415920,
+            "progressBounds": 198420,
+            "timeLabels": 182536,
+            "timeCodesBounds": 199964
+          },
+          "executableSections": [
+            {
+              "name": "__text",
+              "address": "0x5ecc",
+              "size": 266168,
+              "sourceSHA256": "1734b39d711256e25b9cbd4d47d5535a1c8a9f827ea2a9961be0366aff13c8d6",
+              "isolatedSHA256": "6be38e914ade6708c6c7b721431f71a9a75c3fbb1b547f25124480c074517e2c"
+            }
+          ]
+        }
+      ],
+      "isolatedUnsignedSHA256": "a3486711d842c703b115426d8e2937470a8650082d5d78595dff840412ba6a6b"
+    },
+    {
+      "source": "ZZZEvoCenterCustomization.dylib",
+      "output": "NPROriginalLayout.dylib",
+      "sourceSHA256": "d8275ae98773aefce24dabfc12d3d4b4498fcf029db33094395c3d463147866e",
+      "slices": [
+        {
+          "subtype": 0,
+          "startupPatch": {
+            "address": "0x40a98",
+            "before": "ffc300d1",
+            "after": "c0035fd6"
+          },
+          "layoutRefreshPatches": [],
+          "variantInstructionPatches": [],
+          "domainReplacements": 35,
+          "offsets": {
+            "MusicLayout": 232732,
+            "MusicLayoutIMP": 571120,
+            "MusicOuterLayout": 232916,
+            "MusicOuterLayoutIMP": 571128,
+            "InstallMusicTransitions": 232576,
+            "EVOHook": 53728,
+            "FeatureMusicViews": 571008,
+            "RouteNameHidden": 373508,
+            "RouteNameHiddenIMP": 571640,
+            "RouteNameLayout": 373644,
+            "RouteNameLayoutIMP": 571680,
+            "RouteShowLabel": 373756,
+            "RouteShowLabelIMP": 571688,
+            "RouteSet": 373968,
+            "RouteSetIMP": 571696,
+            "RouteLayout": 374228,
+            "RouteLayoutIMP": 571704,
+            "RouteHidden": 374452,
+            "RouteHiddenIMP": 571648,
+            "WillOpen": 261724,
+            "WillOpenIMP": 571376,
+            "WillClose": 261924,
+            "WillCloseIMP": 571384,
+            "DidClose": 262124,
+            "DidCloseIMP": 571392,
+            "EVORead": 29308,
+            "ObjectIvar": 282068,
+            "MediaController": 346312,
+            "MediaMusicIsExpanded": 345932
+          },
+          "executableSections": [
+            {
+              "name": "__text",
+              "address": "0x727c",
+              "size": 422692,
+              "sourceSHA256": "265ee083b227a2140be35e510022a5bc1bfae788471be025f1399037b41251a9",
+              "isolatedSHA256": "505c467a3126097c7686b99e61b0084605397a4b10c5ef005be104e02e5037cc"
+            },
+            {
+              "name": "__stubs",
+              "address": "0x6e5a0",
+              "size": 1440,
+              "sourceSHA256": "0b4f528c13e818e3eafd2b0c464003b9d7d4bab8597fab31d4b227fdad588d54",
+              "isolatedSHA256": "0b4f528c13e818e3eafd2b0c464003b9d7d4bab8597fab31d4b227fdad588d54"
+            }
+          ]
+        },
+        {
+          "subtype": 2,
+          "startupPatch": {
+            "address": "0x41680",
+            "before": "7f2303d5",
+            "after": "c0035fd6"
+          },
+          "layoutRefreshPatches": [],
+          "variantInstructionPatches": [],
+          "domainReplacements": 35,
+          "offsets": {
+            "MusicLayout": 235900,
+            "MusicLayoutIMP": 570152,
+            "MusicOuterLayout": 236088,
+            "MusicOuterLayoutIMP": 570160,
+            "InstallMusicTransitions": 235732,
+            "EVOHook": 56572,
+            "FeatureMusicViews": 570040,
+            "RouteNameHidden": 375412,
+            "RouteNameHiddenIMP": 570672,
+            "RouteNameLayout": 375540,
+            "RouteNameLayoutIMP": 570712,
+            "RouteShowLabel": 375648,
+            "RouteShowLabelIMP": 570720,
+            "RouteSet": 375844,
+            "RouteSetIMP": 570728,
+            "RouteLayout": 376088,
+            "RouteLayoutIMP": 570736,
+            "RouteHidden": 376300,
+            "RouteHiddenIMP": 570680,
+            "WillOpen": 264968,
+            "WillOpenIMP": 570408,
+            "WillClose": 265164,
+            "WillCloseIMP": 570416,
+            "DidClose": 265360,
+            "DidCloseIMP": 570424,
+            "EVORead": 31940,
+            "ObjectIvar": 284984,
+            "MediaController": 348580,
+            "MediaMusicIsExpanded": 348216
+          },
+          "executableSections": [
+            {
+              "name": "__text",
+              "address": "0x7cc4",
+              "size": 420828,
+              "sourceSHA256": "55b76c361b507df5629134d6a26414b48b5671ed87c2a490ed73b8b6160a75f9",
+              "isolatedSHA256": "d72244157f432d2dc278bea39ab40743473352c7fd467a654e6c26063ab1d981"
+            }
+          ]
+        }
+      ],
+      "isolatedUnsignedSHA256": "03b40b225b0faf66e1dd036137e3320b746a93924a853167cd527a8e8fa41f23"
+    },
+    {
+      "source": "ZZEvoCenterRuntime.dylib",
+      "output": "NPROriginalRuntime3x2B.dylib",
+      "sourceSHA256": "e69703f68762ecc80efeeb687ba13184ff9a5999a67cc3a9fb749c78a50ac0fd",
+      "slices": [
+        {
+          "subtype": 0,
+          "startupPatch": {
+            "address": "0xa914",
+            "before": "fa67bba9",
+            "after": "c0035fd6"
+          },
+          "layoutRefreshPatches": [
+            {
+              "function": "0x2d6d8",
+              "address": "0x2e4b8",
+              "selector": "setNeedsLayout",
+              "before": "21630094",
+              "after": "1f2003d5"
+            },
+            {
+              "function": "0x2ff60",
+              "address": "0x3031c",
+              "selector": "setNeedsLayout",
+              "before": "885b0094",
+              "after": "1f2003d5"
+            },
+            {
+              "function": "0x303fc",
+              "address": "0x306b8",
+              "selector": "setNeedsLayout",
+              "before": "a15a0094",
+              "after": "1f2003d5"
+            },
+            {
+              "function": "0x309fc",
+              "address": "0x311c8",
+              "selector": "setNeedsLayout",
+              "before": "dd570094",
+              "after": "1f2003d5"
+            },
+            {
+              "function": "0x313a4",
+              "address": "0x31844",
+              "selector": "setNeedsLayout",
+              "before": "3e560094",
+              "after": "1f2003d5"
+            }
+          ],
+          "variantInstructionPatches": [
+            {
+              "function": "0x113fc",
+              "address": "0x11500",
+              "before": "9b008052",
+              "after": "7b008052",
+              "purpose": "4x2 geometry occupies a 3x2 module grid"
+            },
+            {
+              "function": "0x2d6d8",
+              "address": "0x2d914",
+              "before": "221c601e",
+              "after": "2240601e",
+              "purpose": "allow 190 pt wide three-column compact containers"
+            },
+            {
+              "function": "0x309fc",
+              "address": "0x30d70",
+              "before": "414c611e",
+              "after": "1f2003d5",
+              "purpose": "time labels use current text width rather than worst-duration reserve"
+            },
+            {
+              "function": "0x309fc",
+              "address": "0x30d7c",
+              "before": "204c601e",
+              "after": "2040601e",
+              "purpose": "time labels use current text width rather than original bounds width"
+            }
+          ],
+          "domainReplacements": 13,
+          "offsets": {
+            "ctor": 43284,
+            "preferences": 47760,
+            "settings": 70652,
+            "sizes": 71240,
+            "instance": 72444,
+            "settingsSlot": 416792,
+            "sizesSlot": 416800,
+            "instanceSlot": 416808,
+            "visibility": 90368,
+            "widePredicate": 90492,
+            "wideInstall": 90704,
+            "nowPlayingInstall": 208076,
+            "transportInstall": 208492,
+            "headerInstall": 208608,
+            "progressSlider": 180548,
+            "wideApply": 186072,
+            "artworkBounds": 196448,
+            "captureBaseline": 192896,
+            "nativeV2Config": 416640,
+            "nativeV2Enabled": 416600,
+            "progressBounds": 197628,
+            "timeLabels": 181928,
+            "timeCodesBounds": 199164
+          },
+          "executableSections": [
+            {
+              "name": "__text",
+              "address": "0x6fc8",
+              "size": 261640,
+              "sourceSHA256": "70f3cb0328a41f143823d64e99406a7935936389c6334ecb8d7c8330989755ac",
+              "isolatedSHA256": "1c539225b2ad96e593100ec9a356e5c4de3279dcb614cd1f7f386c6cf1a92165"
+            },
+            {
+              "name": "__stubs",
+              "address": "0x46dd0",
+              "size": 1080,
+              "sourceSHA256": "79fa110872aed93a3deb0c456cf8e30ea3f16a2b4f202c41d3a60e53b9e39973",
+              "isolatedSHA256": "79fa110872aed93a3deb0c456cf8e30ea3f16a2b4f202c41d3a60e53b9e39973"
+            }
+          ]
+        },
+        {
+          "subtype": 2,
+          "startupPatch": {
+            "address": "0x98dc",
+            "before": "7f2303d5",
+            "after": "c0035fd6"
+          },
+          "layoutRefreshPatches": [
+            {
+              "function": "0x2d960",
+              "address": "0x2e754",
+              "selector": "setNeedsLayout",
+              "before": "f4620094",
+              "after": "1f2003d5"
+            },
+            {
+              "function": "0x30274",
+              "address": "0x30634",
+              "selector": "setNeedsLayout",
+              "before": "3c5b0094",
+              "after": "1f2003d5"
+            },
+            {
+              "function": "0x30714",
+              "address": "0x309d4",
+              "selector": "setNeedsLayout",
+              "before": "545a0094",
+              "after": "1f2003d5"
+            },
+            {
+              "function": "0x30d1c",
+              "address": "0x314ec",
+              "selector": "setNeedsLayout",
+              "before": "8e570094",
+              "after": "1f2003d5"
+            },
+            {
+              "function": "0x316c8",
+              "address": "0x31b6c",
+              "selector": "setNeedsLayout",
+              "before": "ee550094",
+              "after": "1f2003d5"
+            }
+          ],
+          "variantInstructionPatches": [
+            {
+              "function": "0x106e0",
+              "address": "0x107e8",
+              "before": "9b008052",
+              "after": "7b008052",
+              "purpose": "4x2 geometry occupies a 3x2 module grid"
+            },
+            {
+              "function": "0x2d960",
+              "address": "0x2dbac",
+              "before": "221c601e",
+              "after": "2240601e",
+              "purpose": "allow 190 pt wide three-column compact containers"
+            },
+            {
+              "function": "0x30d1c",
+              "address": "0x31094",
+              "before": "414c611e",
+              "after": "1f2003d5",
+              "purpose": "time labels use current text width rather than worst-duration reserve"
+            },
+            {
+              "function": "0x30d1c",
+              "address": "0x310a0",
+              "before": "204c601e",
+              "after": "2040601e",
+              "purpose": "time labels use current text width rather than original bounds width"
+            }
+          ],
+          "domainReplacements": 12,
+          "offsets": {
+            "ctor": 39132,
+            "preferences": 44028,
+            "settings": 67296,
+            "sizes": 67892,
+            "instance": 69100,
+            "settingsSlot": 416112,
+            "sizesSlot": 416120,
+            "instanceSlot": 416128,
+            "visibility": 87524,
+            "widePredicate": 87664,
+            "wideInstall": 87880,
+            "nowPlayingInstall": 209596,
+            "transportInstall": 210024,
+            "headerInstall": 210156,
+            "progressSlider": 181148,
+            "wideApply": 186720,
+            "artworkBounds": 197236,
+            "captureBaseline": 193644,
+            "nativeV2Config": 415960,
+            "nativeV2Enabled": 415920,
+            "progressBounds": 198420,
+            "timeLabels": 182536,
+            "timeCodesBounds": 199964
+          },
+          "executableSections": [
+            {
+              "name": "__text",
+              "address": "0x5ecc",
+              "size": 266168,
+              "sourceSHA256": "1734b39d711256e25b9cbd4d47d5535a1c8a9f827ea2a9961be0366aff13c8d6",
+              "isolatedSHA256": "96d990327396f7f70f81876f9374c9772d3ea32c8a3c0e6597179d139372281f"
+            }
+          ]
+        }
+      ],
+      "variant": "3x2b",
+      "isolatedUnsignedSHA256": "bbc27a649c70877e207e1afb8a0c60f9fef444be65839d322116c9f81c00633c"
+    },
+    {
+      "source": "ZZZEvoCenterCustomization.dylib",
+      "output": "NPROriginalLayout3x2B.dylib",
+      "sourceSHA256": "d8275ae98773aefce24dabfc12d3d4b4498fcf029db33094395c3d463147866e",
+      "slices": [
+        {
+          "subtype": 0,
+          "startupPatch": {
+            "address": "0x40a98",
+            "before": "ffc300d1",
+            "after": "c0035fd6"
+          },
+          "layoutRefreshPatches": [],
+          "variantInstructionPatches": [
+            {
+              "function": "0x569fc",
+              "address": "0x569fc",
+              "before": "fc6fbea9",
+              "after": "c0035fd6",
+              "purpose": "leave variant artwork width cap intact; skip compact phone artwork override"
+            }
+          ],
+          "domainReplacements": 35,
+          "offsets": {
+            "MusicLayout": 232732,
+            "MusicLayoutIMP": 571120,
+            "MusicOuterLayout": 232916,
+            "MusicOuterLayoutIMP": 571128,
+            "InstallMusicTransitions": 232576,
+            "EVOHook": 53728,
+            "FeatureMusicViews": 571008,
+            "RouteNameHidden": 373508,
+            "RouteNameHiddenIMP": 571640,
+            "RouteNameLayout": 373644,
+            "RouteNameLayoutIMP": 571680,
+            "RouteShowLabel": 373756,
+            "RouteShowLabelIMP": 571688,
+            "RouteSet": 373968,
+            "RouteSetIMP": 571696,
+            "RouteLayout": 374228,
+            "RouteLayoutIMP": 571704,
+            "RouteHidden": 374452,
+            "RouteHiddenIMP": 571648,
+            "WillOpen": 261724,
+            "WillOpenIMP": 571376,
+            "WillClose": 261924,
+            "WillCloseIMP": 571384,
+            "DidClose": 262124,
+            "DidCloseIMP": 571392,
+            "EVORead": 29308,
+            "ObjectIvar": 282068,
+            "MediaController": 346312,
+            "MediaMusicIsExpanded": 345932
+          },
+          "executableSections": [
+            {
+              "name": "__text",
+              "address": "0x727c",
+              "size": 422692,
+              "sourceSHA256": "265ee083b227a2140be35e510022a5bc1bfae788471be025f1399037b41251a9",
+              "isolatedSHA256": "cc8849d5a655bd279e6d75f7ade77a6560fb94380787a4fb5a1a76bd1dd69298"
+            },
+            {
+              "name": "__stubs",
+              "address": "0x6e5a0",
+              "size": 1440,
+              "sourceSHA256": "0b4f528c13e818e3eafd2b0c464003b9d7d4bab8597fab31d4b227fdad588d54",
+              "isolatedSHA256": "0b4f528c13e818e3eafd2b0c464003b9d7d4bab8597fab31d4b227fdad588d54"
+            }
+          ]
+        },
+        {
+          "subtype": 2,
+          "startupPatch": {
+            "address": "0x41680",
+            "before": "7f2303d5",
+            "after": "c0035fd6"
+          },
+          "layoutRefreshPatches": [],
+          "variantInstructionPatches": [
+            {
+              "function": "0x5734c",
+              "address": "0x5734c",
+              "before": "7f2303d5",
+              "after": "c0035fd6",
+              "purpose": "leave variant artwork width cap intact; skip compact phone artwork override"
+            }
+          ],
+          "domainReplacements": 35,
+          "offsets": {
+            "MusicLayout": 235900,
+            "MusicLayoutIMP": 570152,
+            "MusicOuterLayout": 236088,
+            "MusicOuterLayoutIMP": 570160,
+            "InstallMusicTransitions": 235732,
+            "EVOHook": 56572,
+            "FeatureMusicViews": 570040,
+            "RouteNameHidden": 375412,
+            "RouteNameHiddenIMP": 570672,
+            "RouteNameLayout": 375540,
+            "RouteNameLayoutIMP": 570712,
+            "RouteShowLabel": 375648,
+            "RouteShowLabelIMP": 570720,
+            "RouteSet": 375844,
+            "RouteSetIMP": 570728,
+            "RouteLayout": 376088,
+            "RouteLayoutIMP": 570736,
+            "RouteHidden": 376300,
+            "RouteHiddenIMP": 570680,
+            "WillOpen": 264968,
+            "WillOpenIMP": 570408,
+            "WillClose": 265164,
+            "WillCloseIMP": 570416,
+            "DidClose": 265360,
+            "DidCloseIMP": 570424,
+            "EVORead": 31940,
+            "ObjectIvar": 284984,
+            "MediaController": 348580,
+            "MediaMusicIsExpanded": 348216
+          },
+          "executableSections": [
+            {
+              "name": "__text",
+              "address": "0x7cc4",
+              "size": 420828,
+              "sourceSHA256": "55b76c361b507df5629134d6a26414b48b5671ed87c2a490ed73b8b6160a75f9",
+              "isolatedSHA256": "c0f86ce3a25154b1ecd04ad11b5ea9e148ce654b9633ddd729ee9e8dad66ee67"
+            }
+          ]
+        }
+      ],
+      "variant": "3x2b",
+      "isolatedUnsignedSHA256": "460c2a5044c6afcd2d76b601cf6d44978c56a4d8b592428a44cbbaf705c4e973"
+    }
+  ]
+}

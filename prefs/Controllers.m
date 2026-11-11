@@ -761,7 +761,7 @@ static Class diStepSliderClass(void) {
 /* 2.9.19: 组件隐藏(移植 RemoveWidgetBackground 1.7) */
 @interface DIWidgetHidePage : DIMiniBaseController @end
 @interface DIWidgetAppsPage : DIMiniBaseController @end
-/* 3.0: 播放器入口(全局悬浮球 + 系统播放器) */
+/* 2.9.75: 播放器入口 —— 组件隐藏下面同级, 开关写 com.local.playerexact(内置原生播放器域) */
 @interface DIPlayerEntryPage : DIMiniBaseController @end
 @interface DIFrameFoldersMask : DIFrameFolders @end /* 2.6.3: 遮罩素材选择(键 maskAnimFolder) */
 @interface DIFrameFoldersMini : DIFrameFolders @end  /* 左侧(mini)帧率素材选择(键 smallAnimFolder) */
@@ -1443,7 +1443,7 @@ static void diWriteColors(NSArray<NSString *> *colors) {
         DI_ADD([self linkSpec:@"控制中心" detail:[DICCSettings class]]);
         /* 2.9.19: 组件隐藏 —— 按用户要求在「控制中心」下面新增入口 */
         DI_ADD([self linkSpec:@"组件隐藏" detail:[DIWidgetHidePage class]]);
-        /* 3.0.1: 播放器入口 —— 与「组件隐藏」同级, 就放在它下面 */
+        /* 2.9.75: 播放器入口 —— 组件隐藏下面同级(不在里面); 内置原生播放器(控制中心播放器增强) */
         DI_ADD([self linkSpec:@"播放器入口" detail:[DIPlayerEntryPage class]]);
 
         _smallRow = _expandRow = -1;
@@ -5554,95 +5554,71 @@ static void diwKillByComm(const char *comm) {
 }
 @end
 
-#pragma mark - 3.0 播放器入口
+
+
+/* ================= 2.9.75: 播放器入口页 =================
+   2.9.75 内置原生播放器(NativePlayerOriginal 0.3.21 修复版, 即控制中心播放器增强):
+   dylib 由 substrate 自动注入 SpringBoard, 这里只管它的总开关。
+   偏好域与播放器本体一致: com.local.playerexact 的 Enabled ——
+   注意不写漂流岛自己的域, 播放器只认这个域。 */
+static NSString * const kNPDomain = @"com.local.playerexact";
+
+static BOOL diNPReadEnabled(void) {
+    CFPreferencesAppSynchronize((__bridge CFStringRef)kNPDomain);
+    id v = CFBridgingRelease(CFPreferencesCopyAppValue(CFSTR("Enabled"), (__bridge CFStringRef)kNPDomain));
+    return ([v isKindOfClass:NSNumber.class]) ? [v boolValue] : YES;
+}
+
+static void diNPWriteEnabled(BOOL on) {
+    CFPreferencesSetAppValue(CFSTR("Enabled"), (on ? kCFBooleanTrue : kCFBooleanFalse),
+                             (__bridge CFStringRef)kNPDomain);
+    /* pending 键是播放器自己的 30 秒清理标记, 残留会让旧版误判启动失败, 顺手清掉 */
+    CFPreferencesSetAppValue(CFSTR("StartupPendingVersion"), NULL, (__bridge CFStringRef)kNPDomain);
+    CFPreferencesSetAppValue(CFSTR("StartupPendingToken"), NULL, (__bridge CFStringRef)kNPDomain);
+    CFPreferencesAppSynchronize((__bridge CFStringRef)kNPDomain);
+}
 
 @implementation DIPlayerEntryPage
 
-- (NSString *)pbAssetDir { return @"/var/mobile/灵动岛/播放器入口"; }
-
-- (NSArray *)pbAssetNames {
-    NSFileManager *fm = [NSFileManager defaultManager];
-    NSString *dir = [self pbAssetDir];
-    [fm createDirectoryAtPath:dir withIntermediateDirectories:YES attributes:nil error:NULL];
-    NSSet *ok = [NSSet setWithObjects:@"png", @"gif", @"jpg", @"jpeg", @"webp", @"heic", nil];
-    NSMutableArray *out = [NSMutableArray array];
-    for (NSString *n in [fm contentsOfDirectoryAtPath:dir error:NULL]) {
-        if ([ok containsObject:n.pathExtension.lowercaseString]
-            && ![n hasPrefix:@"."]) [out addObject:n];
-    }
-    [out sortUsingSelector:@selector(localizedStandardCompare:)];
-    return out;
+- (id)readNPEnabled:(PSSpecifier *)sp {
+    return @(diNPReadEnabled());
 }
 
-- (void)pickAsset:(PSSpecifier *)sp {
-    NSArray *names = [self pbAssetNames];
-    if (!names.count) {
-        UIAlertController *a = [UIAlertController alertControllerWithTitle:@"没有找到素材"
-            message:[NSString stringWithFormat:@"把 png / gif 图片放进这个目录后再回来:\n\n%@", [self pbAssetDir]]
-            preferredStyle:UIAlertControllerStyleAlert];
-        [a addAction:[UIAlertAction actionWithTitle:@"好" style:UIAlertActionStyleCancel handler:nil]];
-        [self presentViewController:a animated:YES completion:nil];
-        return;
-    }
-    UIAlertController *ac = [UIAlertController alertControllerWithTitle:@"选择悬浮球素材"
-        message:@"png 静态显示, gif 自动循环播放" preferredStyle:UIAlertControllerStyleActionSheet];
-    for (NSString *n in names) {
-        [ac addAction:[UIAlertAction actionWithTitle:n style:UIAlertActionStyleDefault handler:^(UIAlertAction *x) {
-            CFPreferencesSetAppValue(CFSTR("pbFloatAsset"), (__bridge CFPropertyListRef)n,
-                                     (__bridge CFStringRef)kDomain);
-            CFPreferencesAppSynchronize((__bridge CFStringRef)kDomain);
-            postReload();
-            [self reloadSpecifiers];
-        }]];
-    }
-    [ac addAction:[UIAlertAction actionWithTitle:@"自动(目录里第一个)" style:UIAlertActionStyleDefault handler:^(UIAlertAction *x) {
-        CFPreferencesSetAppValue(CFSTR("pbFloatAsset"), NULL, (__bridge CFStringRef)kDomain);
-        CFPreferencesAppSynchronize((__bridge CFStringRef)kDomain);
-        postReload();
-        [self reloadSpecifiers];
-    }]];
-    [ac addAction:[UIAlertAction actionWithTitle:@"取消" style:UIAlertActionStyleCancel handler:nil]];
-    /* iPad / 无 popover 锚点会直接崩, 必须给 sourceView */
-    ac.popoverPresentationController.sourceView = self.view;
-    ac.popoverPresentationController.sourceRect = CGRectMake(self.view.bounds.size.width * 0.5,
-                                                             self.view.bounds.size.height * 0.5, 1, 1);
-    ac.popoverPresentationController.permittedArrowDirections = 0;
+- (void)writeNPEnabled:(id)value specifier:(PSSpecifier *)sp {
+    diNPWriteEnabled([value boolValue]);
+}
+
+- (void)doRespring:(PSSpecifier *)sp {
+    /* 与组件隐藏页同一套注销流程: 发 Darwin 通知由 SpringBoard 自己退, 后台兜底 kill */
+    notify_post("com.abgg332.driftisland.widget.respring");
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.8 * NSEC_PER_SEC)),
+                   dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
+        diwKillByComm("chronod");
+        diwKillByComm("SpringBoard");
+    });
+    UIAlertController *ac = [UIAlertController alertControllerWithTitle:@"正在注销"
+        message:@"屏幕会短暂黑一下, 播放器开关在桌面回来后生效。" preferredStyle:UIAlertControllerStyleAlert];
+    [ac addAction:[UIAlertAction actionWithTitle:@"好" style:UIAlertActionStyleCancel handler:nil]];
     [self presentViewController:ac animated:YES completion:nil];
-}
-
-- (void)resetPosition:(PSSpecifier *)sp {
-    CFPreferencesSetAppValue(CFSTR("pbFloatX"), NULL, (__bridge CFStringRef)kDomain);
-    CFPreferencesSetAppValue(CFSTR("pbFloatY"), NULL, (__bridge CFStringRef)kDomain);
-    CFPreferencesAppSynchronize((__bridge CFStringRef)kDomain);
-    postReload();
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(2.5 * NSEC_PER_SEC)),
+                   dispatch_get_main_queue(), ^{
+        if (ac.presentingViewController) [ac dismissViewControllerAnimated:YES completion:nil];
+    });
 }
 
 - (NSArray *)buildSpecifiers {
     NSMutableArray *specs = [NSMutableArray array];
-    [specs addObject:[self groupSpec:@"播放器入口"
-        footer:@"开启后屏幕上常驻一颗悬浮球, 可拖动, 位置会自动记住。\n点击悬浮球呼出播放面板: 「正在播」控制当前系统播放的音乐(酷我/QQ 音乐 App 可一键直达); 「搜索」走酷我音源搜歌即点即播; 「我喜欢」和「最近播」自动保存在本机。"]];
-    [specs addObject:[self switchSpec:@"启用悬浮球" key:@"pbFloatOn" def:@NO]];
-    [specs addObject:[self switchSpec:@"圆形裁剪" key:@"pbFloatRound" def:@YES]];
+    [specs addObject:[self groupSpec:@"播放器入口" footer:nil]];
 
-    [specs addObject:[self groupSpec:@"桌面歌词"
-        footer:@"屏幕下方的悬浮歌词条, 可拖动, 位置自动记住。在线播放自动带逐行歌词(网易云词源); 播放系统音乐时显示歌名与歌手。"]];
-    [specs addObject:[self switchSpec:@"启用桌面歌词" key:@"pbLyricOn" def:@YES]];
-    [specs addObject:[self numSlider:@"歌词大小" key:@"pbLyricSize" def:15 mn:12 mx:24]];
+    PSSpecifier *sw = [PSSpecifier preferenceSpecifierNamed:@"启用原生播放器" target:self
+        set:@selector(writeNPEnabled:specifier:) get:@selector(readNPEnabled:)
+        detail:nil cell:PSSwitchCell edit:nil];
+    [specs addObject:sw];
 
-    [specs addObject:[self groupSpec:@"悬浮球素材"
-        footer:[NSString stringWithFormat:@"素材目录:\n%@\n支持 png / gif / jpg。gif 会自动循环播放; 目录为空时显示占位音符球。", [self pbAssetDir]]]];
-
-    NSString *cur = nil;
-    id v = CFBridgingRelease(CFPreferencesCopyAppValue(CFSTR("pbFloatAsset"),
-                                                       (__bridge CFStringRef)kDomain));
-    if ([v isKindOfClass:NSString.class] && [v length]) cur = v;
-    [specs addObject:[self buttonSpec:[NSString stringWithFormat:@"选择素材%@",
-        cur.length ? [NSString stringWithFormat:@" (%@)", cur] : @" (自动)"]
-                               action:@selector(pickAsset:)]];
-    [specs addObject:[self numSlider:@"悬浮球大小" key:@"pbFloatSize" def:64 mn:36 mx:120]];
-    [specs addObject:[self buttonSpec:@"重置悬浮球位置" action:@selector(resetPosition:)]];
+    [specs addObject:[self groupSpec:@"使用说明"
+        footer:@"内置「原生播放器调节」(控制中心播放器增强, 已合入 0.3.21 启动修复): 在控制中心点住播放器即可展开原生播放器大窗。开关只写播放器自己的偏好域, 改动后点「注销生效」。"]];
+    [specs addObject:[self groupSpec:nil footer:nil]];
+    [specs addObject:[self buttonSpec:@"注销生效" action:@selector(doRespring:)]];
     return specs;
 }
 @end
-
-
