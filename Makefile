@@ -33,5 +33,6 @@ after-stage::
 	@cp np/NativePlayerOriginal.dylib np/NativePlayerOriginal.plist "$(THEOS_STAGING_DIR)/Library/MobileSubstrate/DynamicLibraries/"
 	@cp np/NPROriginalRuntime.dylib np/NPROriginalRuntime3x2B.dylib np/NPROriginalLayout.dylib np/NPROriginalLayout3x2B.dylib np/extraction-manifest.json "$(THEOS_STAGING_DIR)/Library/Application Support/NativePlayerOriginal/"
 	@echo "==> 生成合并版 postinst (初始化播放器偏好域 com.local.playerexact)"
+	@mkdir -p "$(THEOS_STAGING_DIR)/DEBIAN"
 	@printf '#!/bin/sh\nset -e\nif [ "$$1" = "configure" ]; then\n  rm -f -- /var/mobile/Library/Logs/NativePlayerOriginal-0.3.1.log\n  for D in /var/jb/usr/bin/defaults /usr/bin/defaults; do\n    if [ -x "$$D" ] && command -v su >/dev/null 2>&1; then\n      su mobile -c "$$D write com.local.playerexact Enabled -bool true" >/dev/null 2>&1 || true\n      su mobile -c "$$D delete com.local.playerexact StartupPendingVersion" >/dev/null 2>&1 || true\n      su mobile -c "$$D delete com.local.playerexact StartupPendingToken" >/dev/null 2>&1 || true\n      break\n    fi\n  done\nfi\nexit 0\n' > "$(THEOS_STAGING_DIR)/DEBIAN/postinst"
 	@chmod 755 "$(THEOS_STAGING_DIR)/DEBIAN/postinst"
