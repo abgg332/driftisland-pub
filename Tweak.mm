@@ -62,7 +62,7 @@ static double expandTextY = DI_EXP_TEXT_BASE_Y;   // 上下偏移(pt, 下为正,
 static double expandTextScale = 100.0; // 文字大小(%, 100=原样)
 /* 2.8.86: 构建戳 —— 之前横幅打的是 SpringBoard 自己的 CFBundleShortVersionString(恒 1.0),
    日志里根本看不出装的是哪一版。所有诊断行都带这个戳, 下轮日志一眼定位。 */
-#define DI_BUILD_VER @"2.9.74.1"
+#define DI_BUILD_VER @"2.9.74.2"
 static BOOL gRecordingActive = NO; // 保留: 岛素材总闸条件
 static NSString *diElementId(UIView *host);
 static BOOL diMiniMusicActive(UIView *host); // 2.6.3: 前置(遮罩层使用)
@@ -14437,10 +14437,20 @@ static void diActivityApply(UIView *artwork) {
     }
     if (!CGRectEqualToRect(state.glassImage.frame, state.glass.bounds)) state.glassImage.frame = state.glass.bounds;
     /* 2.9.36: 收缩态窗口是竖长条(约 26x34), 形状按比例居中缩放, 不把圆压成椭圆;
-       展开态窗口就是正方形, 维持原来的铺满行为, 不动 16 上已经调好的观感。 */
+       展开态窗口就是正方形, 维持原来的铺满行为, 不动 16 上已经调好的观感。
+       ===== 2.9.74.2: 这条保护对 16 也生效 =====
+       16 上 collapsed 恒为 NO(判据带 ios17), 而 16 小岛右侧那颗专辑的窗口实测是
+       45x22 / 26x22 —— 形状素材被 ScaleToFill 直接拉到窗口上, 圆就被横向拉成
+       椭圆的"扁专辑"(用户 409 反馈, 16 也有)。现在不再看形态标志: 窗口不是正方形
+       就取短边做正方形, 素材在其中等比居中(正圆素材 → 正圆, 任何素材都不会变形);
+       正方形窗口(展开态)照旧铺满, 观感一点没变。 */
     CGRect mf = state.glassImage.bounds;
-    if (collapsed) mf = diAspectFitRect(state.glassMask.image ? state.glassMask.image.size : CGSizeZero,
-                                        state.glassImage.bounds);
+    if (collapsed || fabs(mf.size.width - mf.size.height) > 1.0) {
+        CGFloat side = MIN(mf.size.width, mf.size.height);
+        CGRect sq = CGRectMake(mf.origin.x + (mf.size.width - side) * 0.5,
+                               mf.origin.y + (mf.size.height - side) * 0.5, side, side);
+        mf = diAspectFitRect(state.glassMask.image ? state.glassMask.image.size : CGSizeZero, sq);
+    }
     if (!CGRectEqualToRect(state.glassMask.frame, mf)) state.glassMask.frame = mf;
     if (art && state.glassImage.image != art) { state.glassImage.image = art; state.lastArt = art; }
     if (state.glassMask.image != gDIActivityShape) state.glassMask.image = gDIActivityShape;
