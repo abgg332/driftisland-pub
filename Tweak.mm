@@ -14451,7 +14451,15 @@ static void diActivityApply(UIView *artwork) {
                                mf.origin.y + (mf.size.height - side) * 0.5, side, side);
         mf = diAspectFitRect(state.glassMask.image ? state.glassMask.image.size : CGSizeZero, sq);
     }
-    if (!CGRectEqualToRect(state.glassMask.frame, mf)) state.glassMask.frame = mf;
+    if (!CGRectEqualToRect(state.glassMask.frame, mf)) {
+        static CFAbsoluteTime sShapeT;
+        if (CFAbsoluteTimeGetCurrent() - sShapeT > 6.0) {
+            sShapeT = CFAbsoluteTimeGetCurrent();
+            diMruFileLog([NSString stringWithFormat:@"形状等比: 窗口 %@ → 形状 %@ (不拉扁)",
+                          NSStringFromCGRect(state.glassImage.bounds), NSStringFromCGRect(mf)]);
+        }
+        state.glassMask.frame = mf;
+    }
     if (art && state.glassImage.image != art) { state.glassImage.image = art; state.lastArt = art; }
     if (state.glassMask.image != gDIActivityShape) state.glassMask.image = gDIActivityShape;
     if (artwork.subviews.lastObject != state.glass) [artwork bringSubviewToFront:state.glass];
