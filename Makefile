@@ -4,10 +4,10 @@ ARCHS = arm64 arm64e
 include $(THEOS)/makefiles/common.mk
 
 TWEAK_NAME = DriftIsland DIWidgetHide
-DriftIsland_FILES = Tweak.mm DIAlbumMask.mm
+DriftIsland_FILES = Tweak.mm DIAlbumMask.mm DIPlayerEntry.mm
 DriftIsland_CFLAGS = -fobjc-arc -std=c++17
 
-DriftIsland_FRAMEWORKS = UIKit Foundation AVFoundation CoreMedia CoreFoundation MediaPlayer
+DriftIsland_FRAMEWORKS = UIKit Foundation AVFoundation CoreMedia CoreFoundation MediaPlayer ImageIO
 DriftIsland_LDFLAGS = -F$(THEOS_VENDOR_LIBRARY_PATH) -framework CydiaSubstrate
 
 # 2.9.19: 组件隐藏(移植 RemoveWidgetBackground 1.7) —— 单独一个 dylib,

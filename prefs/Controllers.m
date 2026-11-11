@@ -761,6 +761,8 @@ static Class diStepSliderClass(void) {
 /* 2.9.19: 组件隐藏(移植 RemoveWidgetBackground 1.7) */
 @interface DIWidgetHidePage : DIMiniBaseController @end
 @interface DIWidgetAppsPage : DIMiniBaseController @end
+/* 3.0: 播放器入口(全局悬浮球 + 系统播放器) */
+@interface DIPlayerEntryPage : DIMiniBaseController @end
 @interface DIFrameFoldersMask : DIFrameFolders @end /* 2.6.3: 遮罩素材选择(键 maskAnimFolder) */
 @interface DIFrameFoldersMini : DIFrameFolders @end  /* 左侧(mini)帧率素材选择(键 smallAnimFolder) */
 @interface DIFrameFoldersAudio : DIFrameFolders @end /* 右侧音频素材(键 miniAudioFolder) */
@@ -5544,8 +5546,99 @@ static void diwKillByComm(const char *comm) {
         set:NULL get:@selector(readAppCount:) detail:[DIWidgetAppsPage class] cell:PSLinkCell edit:nil];
     [specs addObject:appsRow];
 
+    /* 3.0: 播放器入口 —— 全局悬浮球 + 系统播放器 */
+    [specs addObject:[self groupSpec:@"播放器入口"
+                              footer:@"开一颗全局悬浮球(png / gif 素材, 可拖动)。点击它呼出播放面板, 播放/暂停/上下曲/进度直接接系统播放器。"]];
+    [specs addObject:[self linkSpec:@"播放器入口设置" detail:[DIPlayerEntryPage class]]];
+
     [specs addObject:[self groupSpec:nil footer:nil]];
     [specs addObject:[self buttonSpec:@"注销生效" action:@selector(doWidgetRespring:)]];
+    return specs;
+}
+@end
+
+#pragma mark - 3.0 播放器入口
+
+@implementation DIPlayerEntryPage
+
+- (NSString *)pbAssetDir { return @"/var/mobile/灵动岛/播放器入口"; }
+
+- (NSArray *)pbAssetNames {
+    NSFileManager *fm = [NSFileManager defaultManager];
+    NSString *dir = [self pbAssetDir];
+    [fm createDirectoryAtPath:dir withIntermediateDirectories:YES attributes:nil error:NULL];
+    NSSet *ok = [NSSet setWithObjects:@"png", @"gif", @"jpg", @"jpeg", @"webp", @"heic", nil];
+    NSMutableArray *out = [NSMutableArray array];
+    for (NSString *n in [fm contentsOfDirectoryAtPath:dir error:NULL]) {
+        if ([ok containsObject:n.pathExtension.lowercaseString]
+            && ![n hasPrefix:@"."]) [out addObject:n];
+    }
+    [out sortUsingSelector:@selector(localizedStandardCompare:)];
+    return out;
+}
+
+- (void)pickAsset:(PSSpecifier *)sp {
+    NSArray *names = [self pbAssetNames];
+    if (!names.count) {
+        UIAlertController *a = [UIAlertController alertControllerWithTitle:@"没有找到素材"
+            message:[NSString stringWithFormat:@"把 png / gif 图片放进这个目录后再回来:\n\n%@", [self pbAssetDir]]
+            preferredStyle:UIAlertControllerStyleAlert];
+        [a addAction:[UIAlertAction actionWithTitle:@"好" style:UIAlertActionStyleCancel handler:nil]];
+        [self presentViewController:a animated:YES completion:nil];
+        return;
+    }
+    UIAlertController *ac = [UIAlertController alertControllerWithTitle:@"选择悬浮球素材"
+        message:@"png 静态显示, gif 自动循环播放" preferredStyle:UIAlertControllerStyleActionSheet];
+    for (NSString *n in names) {
+        [ac addAction:[UIAlertAction actionWithTitle:n style:UIAlertActionStyleDefault handler:^(UIAlertAction *x) {
+            CFPreferencesSetAppValue(CFSTR("pbFloatAsset"), (__bridge CFPropertyListRef)n,
+                                     (__bridge CFStringRef)kDomain);
+            CFPreferencesAppSynchronize((__bridge CFStringRef)kDomain);
+            postReload();
+            [self reloadSpecifiers];
+        }]];
+    }
+    [ac addAction:[UIAlertAction actionWithTitle:@"自动(目录里第一个)" style:UIAlertActionStyleDefault handler:^(UIAlertAction *x) {
+        CFPreferencesSetAppValue(CFSTR("pbFloatAsset"), NULL, (__bridge CFStringRef)kDomain);
+        CFPreferencesAppSynchronize((__bridge CFStringRef)kDomain);
+        postReload();
+        [self reloadSpecifiers];
+    }]];
+    [ac addAction:[UIAlertAction actionWithTitle:@"取消" style:UIAlertActionStyleCancel handler:nil]];
+    /* iPad / 无 popover 锚点会直接崩, 必须给 sourceView */
+    ac.popoverPresentationController.sourceView = self.view;
+    ac.popoverPresentationController.sourceRect = CGRectMake(self.view.bounds.size.width * 0.5,
+                                                             self.view.bounds.size.height * 0.5, 1, 1);
+    ac.popoverPresentationController.permittedArrowDirections = 0;
+    [self presentViewController:ac animated:YES completion:nil];
+}
+
+- (void)resetPosition:(PSSpecifier *)sp {
+    CFPreferencesSetAppValue(CFSTR("pbFloatX"), NULL, (__bridge CFStringRef)kDomain);
+    CFPreferencesSetAppValue(CFSTR("pbFloatY"), NULL, (__bridge CFStringRef)kDomain);
+    CFPreferencesAppSynchronize((__bridge CFStringRef)kDomain);
+    postReload();
+}
+
+- (NSArray *)buildSpecifiers {
+    NSMutableArray *specs = [NSMutableArray array];
+    [specs addObject:[self groupSpec:@"播放器入口"
+        footer:@"开启后屏幕上常驻一颗悬浮球, 可拖动, 位置会自动记住。\n点击悬浮球呼出播放面板: 上一首 / 播放暂停 / 下一首 / 进度条, 全部走系统播放器(当前正在播放的音乐)。"]];
+    [specs addObject:[self switchSpec:@"启用悬浮球" key:@"pbFloatOn" def:@NO]];
+    [specs addObject:[self switchSpec:@"圆形裁剪" key:@"pbFloatRound" def:@YES]];
+
+    [specs addObject:[self groupSpec:@"悬浮球素材"
+        footer:[NSString stringWithFormat:@"素材目录:\n%@\n支持 png / gif / jpg。gif 会自动循环播放; 目录为空时显示占位音符球。", [self pbAssetDir]]]];
+
+    NSString *cur = nil;
+    id v = CFBridgingRelease(CFPreferencesCopyAppValue(CFSTR("pbFloatAsset"),
+                                                       (__bridge CFStringRef)kDomain));
+    if ([v isKindOfClass:NSString.class] && [v length]) cur = v;
+    [specs addObject:[self buttonSpec:[NSString stringWithFormat:@"选择素材%@",
+        cur.length ? [NSString stringWithFormat:@" (%@)", cur] : @" (自动)"]
+                               action:@selector(pickAsset:)]];
+    [specs addObject:[self numSlider:@"悬浮球大小" key:@"pbFloatSize" def:64 mn:36 mx:120]];
+    [specs addObject:[self buttonSpec:@"重置悬浮球位置" action:@selector(resetPosition:)]];
     return specs;
 }
 @end

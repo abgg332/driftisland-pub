@@ -11,6 +11,7 @@
 #import <os/log.h>
 #include <dispatch/dispatch.h>
 #include <vector>
+#import "DIPlayerEntry.h"   /* 3.0: 播放器入口(全局悬浮球 + 播放面板) */
 
 static NSString *const kDomain = @"com.abgg332.driftisland";
 static NSString *const kNotifyStr = @"com.abgg332.driftisland.reload";
@@ -62,7 +63,7 @@ static double expandTextY = DI_EXP_TEXT_BASE_Y;   // 上下偏移(pt, 下为正,
 static double expandTextScale = 100.0; // 文字大小(%, 100=原样)
 /* 2.8.86: 构建戳 —— 之前横幅打的是 SpringBoard 自己的 CFBundleShortVersionString(恒 1.0),
    日志里根本看不出装的是哪一版。所有诊断行都带这个戳, 下轮日志一眼定位。 */
-#define DI_BUILD_VER @"2.9.74.2"
+#define DI_BUILD_VER @"3.0"
 static BOOL gRecordingActive = NO; // 保留: 岛素材总闸条件
 static NSString *diElementId(UIView *host);
 static BOOL diMiniMusicActive(UIView *host); // 2.6.3: 前置(遮罩层使用)
@@ -12280,6 +12281,8 @@ static void diPrefsRefreshNow(void) {
         diRestyleAllLockPlatters();
         /* 2.9.33: 启动开关 / 强制深色 一改, 已登记对象立刻重刷 */
         diGLFReloadAndReapply();
+        /* 3.0: 播放器入口(悬浮球开关/素材/大小一改立即生效) */
+        diPlayerEntryReload();
     } @catch (NSException *e) {
         RLog(@"偏好刷新异常(已吞): %@ — %@", e.name, e.reason);
     }
@@ -15384,6 +15387,11 @@ __attribute__((constructor)) static void init(void) {
                                dispatch_get_main_queue(), ^{ @try { diHostPubInstall(); } @catch (...) {} });
                 diStartFlowTicker(); // 流光常驻驱动(岛静止时也能流动)
                 diStartBarFlowTicker(); // 2.5.11: 横条流光心跳(与文字同一套相位驱动)
+                /* 3.0: 播放器入口 —— 等 SpringBoard 的 scene 就绪再挂悬浮球 */
+                dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.5 * NSEC_PER_SEC)),
+                               dispatch_get_main_queue(), ^{
+                    @try { diPlayerEntryReload(); } @catch (__unused NSException *e) {}
+                });
             } @catch (NSException *e) {
                 RLog(@"启动初始化异常: %@ — %@", e.name, e.reason);
             }
