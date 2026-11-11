@@ -65,7 +65,7 @@ static double expandTextY = DI_EXP_TEXT_BASE_Y;   // 上下偏移(pt, 下为正,
 static double expandTextScale = 100.0; // 文字大小(%, 100=原样)
 /* 2.8.86: 构建戳 —— 之前横幅打的是 SpringBoard 自己的 CFBundleShortVersionString(恒 1.0),
    日志里根本看不出装的是哪一版。所有诊断行都带这个戳, 下轮日志一眼定位。 */
-#define DI_BUILD_VER @"3.0.6"
+#define DI_BUILD_VER @"3.0.7"
 static BOOL gRecordingActive = NO; // 保留: 岛素材总闸条件
 static NSString *diElementId(UIView *host);
 static BOOL diMiniMusicActive(UIView *host); // 2.6.3: 前置(遮罩层使用)
@@ -15521,14 +15521,17 @@ static void diNPDumpDomain(void) {
 @interface DIArtMaskState : NSObject
 @property (nonatomic, strong) CAShapeLayer *mask;
 @property (nonatomic, strong) CALayer *origMask;   /* 必须强引用: 换掉后系统层没人持有, 弱引用会变 nil 还原不回去 */
+@property (nonatomic, assign) CGFloat origRadius;
+@property (nonatomic, assign) BOOL origClip;
+@property (nonatomic, assign) CATransform3D origTransform;
+@property (nonatomic, assign) CGSize lastSize;
 @end
 @implementation DIArtMaskState
 @end
 
 /* 每个播放器根视图的扫描缓存: CC 的 view 树很大, 不能每次 layout 都全量扫 */
 @interface DIArtRootState : NSObject
-@property (nonatomic, weak) UIView *art;
-@property (nonatomic, weak) UIView *applied;
+@property (nonatomic, strong) NSArray<UIView *> *arts;
 @property (nonatomic, assign) CFTimeInterval scanTS;
 @end
 @implementation DIArtRootState
@@ -15542,22 +15545,83 @@ static CFTimeInterval gDIArtPrefTS = 0;
 static BOOL gDIArtTreeLogged = NO;
 static BOOL gDIArtHooked = NO;
 static NSString *gDIArtLastDesc = nil;
-static CFTimeInterval gDIJitterLogTS = 0;
 static NSHashTable *gDIArtRoots = nil;
 static void (*gDIArtOrigNPViewLayout)(id, SEL) = NULL;
 static void (*gDIArtOrigCCVCLayout)(id, SEL) = NULL;
 
 static BOOL diArtPrefOn(void) {
     CFTimeInterval now = CFAbsoluteTimeGetCurrent();
-    if (now - gDIArtPrefTS > 1.0) {
+    if (now - gDIArtPrefTS > 0.5) {
         gDIArtPrefTS = now;
+        /* 3.0.7: 设置页写的是另一个进程, SpringBoard 这边 CFPreferences 有缓存, 不
+           Synchronize 会一直拿到旧值 —— 这就是"开关明明开了/关了却不生效"的直接原因。 */
+        CFPreferencesAppSynchronize(CFSTR("com.local.playerexact"));
         id v = CFBridgingRelease(CFPreferencesCopyAppValue(CFSTR("ArtworkRotationEnabled"),
                                                           CFSTR("com.local.playerexact")));
-        gDIArtOn = [v isKindOfClass:NSNumber.class] ? [v boolValue] : NO;
+        BOOL on = [v isKindOfClass:NSNumber.class] ? [v boolValue] : NO;
+        if (on != gDIArtOn) RLog(@"[封面] 开关 → %d", on);
+        gDIArtOn = on;
     }
     return gDIArtOn;
 }
-static void diArtForceRefresh(void) { gDIArtPrefTS = 0; diArtPrefOn(); }
+static void diArtForceRefresh(void) {
+    gDIArtPrefTS = 0;
+    CFPreferencesAppSynchronize(CFSTR("com.local.playerexact"));
+    diArtPrefOn();
+}
+
+/* 内置播放器自己的旋转开关(导出 C++ 符号)。它的 flag 一旦为 1, 每次 update 都会给
+   封面挂旋转动画, 我们写的偏好键它根本不看 —— 所以这里直接调它的 setter 关掉,
+   旋转完全由本 tweak 负责, 开关才能真正控制"转 / 不转"。 */
+static void (*gNPRSetRotation)(BOOL) = NULL;
+static BOOL gNPRLooked = NO;
+static void diArtDisableNPRSpin(void) {
+    if (!gNPRLooked) {
+        gNPRLooked = YES;
+        void *h = dlopen(NULL, RTLD_NOW);
+        gNPRSetRotation = (void (*)(BOOL))dlsym(h, "__Z28NPRSetArtworkRotationEnabledb");
+        if (!gNPRSetRotation) gNPRSetRotation = (void (*)(BOOL))dlsym(h, "_Z28NPRSetArtworkRotationEnabledb");
+        if (!gNPRSetRotation) {
+            /* 播放器若是 RTLD_LOCAL 注入的, RTLD_DEFAULT 搜不到 —— 按镜像名再拿一次 handle */
+            const char *found = NULL;
+            for (int i = 0; i < _dyld_image_count(); i++) {
+                const char *nm = _dyld_get_image_name(i);
+                if (nm && strstr(nm, "NativePlayerOriginal")) { found = nm; break; }
+            }
+            if (found) {
+                void *ph = dlopen(found, RTLD_NOW | RTLD_NOLOAD);
+                if (ph) {
+                    gNPRSetRotation = (void (*)(BOOL))dlsym(ph, "__Z28NPRSetArtworkRotationEnabledb");
+                    if (!gNPRSetRotation)
+                        gNPRSetRotation = (void (*)(BOOL))dlsym(ph, "_Z28NPRSetArtworkRotationEnabledb");
+                }
+                RLog(@"[封面] 播放器镜像 %s → 旋转开关 %@", found, gNPRSetRotation ? @"已接管" : @"未导出");
+            }
+        }
+        if (!gNPRSetRotation) RLog(@"[封面] 播放器内置旋转开关未导出, 退化为逐帧清理动画");
+    }
+    if (gNPRSetRotation) {
+        @try { gNPRSetRotation(NO); } @catch (__unused NSException *e) {}
+    }
+}
+
+/* 递归摘掉图层树上的旋转/循环动画 —— 播放器的旋转不一定挂在封面自身,
+   常常挂在里面那层 imageView 上, 只查 view.layer 会漏。 */
+static void diArtStripSpin(CALayer *layer, int depth) {
+    if (!layer || depth > 5) return;
+    NSArray<NSString *> *keys = [layer.animationKeys copy];
+    for (NSString *k in keys) {
+        CAAnimation *a = [layer animationForKey:k];
+        if (!a) continue;
+        BOOL spin = [a isKindOfClass:CABasicAnimation.class]
+                 && [((CABasicAnimation *)a).keyPath containsString:@"rotation"];
+        if (spin || a.repeatCount > 1000.0f || a.repeatCount == HUGE_VALF || a.autoreverses) {
+            [layer removeAnimationForKey:k];
+        }
+    }
+    NSArray<CALayer *> *subs = [layer.sublayers copy];
+    for (CALayer *s in subs) diArtStripSpin(s, depth + 1);
+}
 
 /* 3×2 / 3×2B: 变体键优先(B 档模块尺寸写的是 4x2), 没有变体再看 ModuleSizes */
 static BOOL diArtIs3x2(void) {
@@ -15585,39 +15649,37 @@ static BOOL diArtIs3x2(void) {
 static BOOL diArtNameIsArtwork(NSString *cn) {
     if (!cn.length) return NO;
     if ([cn containsString:@"Activity"] || [cn containsString:@"Flipping"]) return NO;
+    if ([cn containsString:@"Blur"] || [cn containsString:@"Shadow"] || [cn containsString:@"Gradient"]) return NO;
     return [cn containsString:@"Artwork"] || [cn containsString:@"AlbumArt"];
 }
 
-/* 在播放器视图里找封面: 先按类名找(优先), 没有再按"最大的方形 UIImageView"兜底。
-   只取一个, 避免把背景模糊图/图标也裁成圆形。 */
-static UIView *diArtFindIn(UIView *root) {
-    if (!root) return nil;
-    UIView *named = nil, *image = nil;
-    CGFloat namedArea = 0, imageArea = 0;
+/* 收集播放器里的所有封面: 3×2 展开态是四宫格, 会有 3~4 个封面同时存在,
+   以前只取最大的那一个, 所以"图一那种布局"永远只有一张变圆。
+   判据: 类名带 Artwork / 接近正方形 / 不能是铺满整块的背景图。 */
+static NSArray<UIView *> *diArtCollectIn(UIView *root) {
+    NSMutableArray *out = [NSMutableArray array];
+    if (!root) return out;
     CGFloat rootArea = root.bounds.size.width * root.bounds.size.height;
     NSMutableArray *stack = [NSMutableArray arrayWithObject:root];
-    int budget = 600;
+    int budget = 800;
     while (stack.count && budget-- > 0) {
         UIView *v = stack.lastObject; [stack removeLastObject];
         if (v != root && !v.hidden && v.alpha > 0.05) {
             CGSize s = v.bounds.size;
-            if (s.width >= 24 && s.height >= 24 && s.width <= 500 && s.height <= 500) {
+            if (s.width >= 18 && s.height >= 18 && s.width <= 600 && s.height <= 600) {
                 CGFloat ratio = s.width / MAX(1.0, s.height);
                 CGFloat area = s.width * s.height;
-                /* 面积超过父容器 60% 的多半是整块背景/模糊底, 不是封面 */
-                BOOL tooBig = rootArea > 1 && area > rootArea * 0.6;
-                if (ratio > 0.55 && ratio < 1.8 && !tooBig) {
-                    if (diArtNameIsArtwork(NSStringFromClass(v.class)) && area > namedArea) {
-                        namedArea = area; named = v;
-                    } else if ([v isKindOfClass:UIImageView.class] && ((UIImageView *)v).image && area > imageArea) {
-                        imageArea = area; image = v;
-                    }
+                BOOL tooBig = rootArea > 1 && area > rootArea * 0.55;
+                if (!tooBig && ratio > 0.7 && ratio < 1.45 && diArtNameIsArtwork(NSStringFromClass(v.class))) {
+                    [out addObject:v];
+                    if (out.count >= 6) break;
+                    continue;   /* 命中封面就不再往里钻, 免得把它内部的 imageView 也当封面 */
                 }
             }
         }
         for (UIView *c in v.subviews) [stack addObject:c];
     }
-    return named ?: image;
+    return out;
 }
 
 static void diArtApply(UIView *v, BOOL on) {
@@ -15625,11 +15687,19 @@ static void diArtApply(UIView *v, BOOL on) {
     CALayer *layer = v.layer;
     DIArtMaskState *st = objc_getAssociatedObject(v, kDIArtStateKey);
     if (!on) {
+        /* 关: 蒙版还原、圆角还原、旋转动画(含播放器自己挂的)全部摘掉 → 回到方形静止 */
         if (st) {
             [layer removeAnimationForKey:@"di.art.spin"];
             if (layer.mask == st.mask) layer.mask = st.origMask;
+            layer.cornerRadius = st.origRadius;
+            layer.masksToBounds = st.origClip;
+            if (!CATransform3DIsIdentity(st.origTransform)) layer.transform = st.origTransform;
+            else if (!CATransform3DIsIdentity(layer.transform)) layer.transform = CATransform3DIdentity;
             objc_setAssociatedObject(v, kDIArtStateKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        } else if (!CATransform3DIsIdentity(layer.transform)) {
+            layer.transform = CATransform3DIdentity;
         }
+        diArtStripSpin(layer, 0);
         return;
     }
     CGRect b = v.bounds;
@@ -15637,65 +15707,135 @@ static void diArtApply(UIView *v, BOOL on) {
     if (!st) {
         st = [DIArtMaskState new];
         st.origMask = layer.mask;
+        st.origRadius = layer.cornerRadius;
+        st.origClip = layer.masksToBounds;
+        st.origTransform = layer.transform;
         objc_setAssociatedObject(v, kDIArtStateKey, st, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
     }
     if (!st.mask) {
         st.mask = [CAShapeLayer layer];
         st.mask.name = @"di.player.art.circle";
     }
-    /* 先把 frame 定死再给 path —— 与遮罩那边同一个坑: CALayer 设 frame 会连带改
-       position/bounds/transform, 顺序反了圆会被拉成椭圆。 */
-    st.mask.frame = b;
-    st.mask.path = [UIBezierPath bezierPathWithOvalInRect:CGRectInset(b, 0.5, 0.5)].CGPath;
-    if (layer.mask != st.mask) layer.mask = st.mask;
-    /* 旋转动画留给内置播放器(同一个开关), 这里只补蒙版, 避免两套旋转抢 transform */
-    NSString *desc = [NSString stringWithFormat:@"%@ %.0fx%.0f",
-                      NSStringFromClass(v.class), b.size.width, b.size.height];
-    if (![desc isEqualToString:gDIArtLastDesc]) {
-        gDIArtLastDesc = desc;
-        RLog(@"[封面] 圆形蒙版已挂 %@", desc);
+    if (!CGSizeEqualToSize(st.lastSize, b.size) || layer.mask != st.mask) {
+        /* 先把 frame 定死再给 path —— CALayer 设 frame 会连带改 position/bounds/transform,
+           顺序反了圆会被拉成椭圆。 */
+        st.lastSize = b.size;
+        CGFloat side = MIN(b.size.width, b.size.height);
+        CGRect circle = CGRectMake((b.size.width - side) / 2.0, (b.size.height - side) / 2.0, side, side);
+        st.mask.frame = b;
+        st.mask.path = [UIBezierPath bezierPathWithOvalInRect:CGRectInset(circle, 0.5, 0.5)].CGPath;
+        layer.mask = st.mask;
+        NSString *desc = [NSString stringWithFormat:@"%@ %.0fx%.0f", NSStringFromClass(v.class),
+                          b.size.width, b.size.height];
+        if (![desc isEqualToString:gDIArtLastDesc]) {
+            gDIArtLastDesc = desc;
+            RLog(@"[封面] 圆形蒙版已挂 %@", desc);
+        }
+    }
+    /* 旋转由本 tweak 驱动(播放器内置旋转已被关掉), 10 秒一圈, 线性匀速 */
+    if (![layer animationForKey:@"di.art.spin"]) {
+        CABasicAnimation *sp = [CABasicAnimation animationWithKeyPath:@"transform.rotation.z"];
+        sp.fromValue = @0.0;
+        sp.toValue = @(M_PI * 2.0);
+        sp.duration = 10.0;
+        sp.repeatCount = HUGE_VALF;
+        sp.removedOnCompletion = NO;
+        sp.fillMode = kCAFillModeForwards;
+        sp.timingFunction = [CAMediaTimingFunction functionWithName:kCAMediaTimingFunctionLinear];
+        [layer addAnimation:sp forKey:@"di.art.spin"];
     }
 }
 
-/* 3×2 抖动: 只摘"传送按钮"上的循环动画。
-   判据: repeatCount 无限 / autoreverses(来回摆) —— 一次性动画(按下高亮/展开过渡)不动。 */
-static void diArtKillJitter(UIView *root) {
-    if (!diArtIs3x2()) return;
-    static NSMutableSet *logged = nil;
-    if (!logged) logged = [NSMutableSet set];
+/* 3×2 抖动:
+   ① 传送按钮所属图层树上的循环/旋转动画全部摘掉(以前只查按钮自身的那一层,
+      播放器/系统把动画挂到里面 imageView 上就漏了);
+   ② 布局稳定后把按钮 frame 钉住: 3×2 下系统的约束解算和播放器的 setFrame 会
+      互相修正, 每次差值不到 1.5pt, 肉眼看就是"一抖一抖"。钉住即消失;
+   ③ 所有修改都在关掉隐式动画的事务里做, 避免钉的过程本身产生过渡动画。 */
+static BOOL gDIPinning = NO;
+
+static UIView *diArtTransportOf(UIView *root) {
+    UIView *tc = nil;
+    @try {
+        id o = [root valueForKey:@"_transportControlsView"];
+        if ([o isKindOfClass:UIView.class]) tc = o;
+    } @catch (__unused NSException *e) {}
+    if (tc) return tc;
     NSMutableArray *stack = [NSMutableArray arrayWithObject:root];
-    int budget = 700;
-    CFTimeInterval now = CFAbsoluteTimeGetCurrent();
+    int budget = 400;
     while (stack.count && budget-- > 0) {
         UIView *v = stack.lastObject; [stack removeLastObject];
-        NSString *cn = NSStringFromClass(v.class);
-        BOOL transport = [cn containsString:@"Transport"] || [cn containsString:@"PlayPause"]
-                      || [cn containsString:@"Skip"] || [cn containsString:@"Previous"]
-                      || [cn containsString:@"NextButton"] || [cn containsString:@"PlayButton"];
-        if (transport) {
-            if (![logged containsObject:cn]) {
-                [logged addObject:cn];
-                RLog(@"[抖动] 3×2 按钮 %@ 动画=%@", cn,
-                     [v.layer.animationKeys componentsJoinedByString:@","] ?: @"(无)");
-            }
-            NSArray<NSString *> *keys = v.layer.animationKeys;
-            for (NSString *k in keys) {
-                CAAnimation *a = [v.layer animationForKey:k];
-                if (!a) continue;
-                BOOL spin = [a isKindOfClass:CABasicAnimation.class]
-                         && [((CABasicAnimation *)a).keyPath containsString:@"rotation"];
-                if (spin || a.repeatCount > 1000.0f || a.repeatCount == HUGE_VALF || a.autoreverses) {
-                    [v.layer removeAnimationForKey:k];
-                    if (now - gDIJitterLogTS > 5.0) {
-                        gDIJitterLogTS = now;
-                        RLog(@"[抖动] 3×2 摘掉 %@ 的动画 %@ (repeat=%.0f auto=%d spin=%d)",
-                             cn, k, a.repeatCount, (int)a.autoreverses, (int)spin);
-                    }
-                }
-            }
-        }
+        if ([NSStringFromClass(v.class) containsString:@"TransportControls"]) return v;
         for (UIView *c in v.subviews) [stack addObject:c];
     }
+    return nil;
+}
+
+static void diArtPinOne(UIView *v) {
+    CGRect f = v.frame;
+    NSValue *saved = objc_getAssociatedObject(v, kDIJitterFrameKey);
+    if (!saved) {
+        objc_setAssociatedObject(v, kDIJitterFrameKey, [NSValue valueWithCGRect:f],
+                                 OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        return;
+    }
+    CGRect old = saved.CGRectValue;
+    CGFloat dx = fabs(CGRectGetMidX(f) - CGRectGetMidX(old));
+    CGFloat dy = fabs(CGRectGetMidY(f) - CGRectGetMidY(old));
+    if (dx < 1.5 && dy < 1.5) {
+        if (!CGRectEqualToRect(old, f)) {
+            [CATransaction begin];
+            [CATransaction setDisableActions:YES];
+            v.frame = old;
+            [CATransaction commit];
+            static int fixed = 0;
+            if (fixed < 12) {
+                fixed++;
+                RLog(@"[抖动] 钉住 %@ (%.1f,%.1f)→(%.1f,%.1f)",
+                     NSStringFromClass(v.class), f.origin.x, f.origin.y, old.origin.x, old.origin.y);
+            }
+        }
+    } else {
+        /* 真的换了布局(横屏/换尺寸), 以新值为准 */
+        objc_setAssociatedObject(v, kDIJitterFrameKey, [NSValue valueWithCGRect:f],
+                                 OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    }
+}
+
+/* 递归到按钮内部: 抖的往往不是按钮本身, 而是里面的图标视图被反复 layout */
+static void diArtPinWalk(UIView *v, int depth) {
+    if (!v || depth > 4) return;
+    NSString *cn = NSStringFromClass(v.class);
+    if ([cn containsString:@"Transport"] || [cn containsString:@"Button"] || [cn containsString:@"Glyph"]) {
+        diArtPinOne(v);
+    }
+    for (UIView *c in [v.subviews copy]) diArtPinWalk(c, depth + 1);
+}
+
+static void diArtPinTransport(UIView *tc) {
+    if (!tc || gDIPinning) return;
+    gDIPinning = YES;
+    for (UIView *v in [tc.subviews copy]) diArtPinWalk(v, 0);
+    gDIPinning = NO;
+}
+
+static void diArtKillJitter(UIView *root) {
+    if (!diArtIs3x2()) return;
+    UIView *tc = diArtTransportOf(root);
+    if (!tc) return;
+    static NSMutableSet *logged = nil;
+    if (!logged) logged = [NSMutableSet set];
+    NSString *key = NSStringFromClass(tc.class);
+    if (![logged containsObject:key]) {
+        [logged addObject:key];
+        RLog(@"[抖动] 3×2 传送容器 %@ 动画=%@", key,
+             [tc.layer.animationKeys componentsJoinedByString:@","] ?: @"(无)");
+    }
+    [CATransaction begin];
+    [CATransaction setDisableActions:YES];
+    diArtStripSpin(tc.layer, 0);
+    [CATransaction commit];
+    diArtPinTransport(tc);
 }
 
 /* 开关打开却一个封面候选都没找到时, 把播放器视图树记一次 —— 下一版按这个类名改 */
@@ -15726,39 +15866,44 @@ static void diArtPlayerPost(UIView *root) {
     if (!gDIArtRoots) gDIArtRoots = [NSHashTable weakObjectsHashTable];
     [gDIArtRoots addObject:root];
     BOOL on = diArtPrefOn();
+    /* 无论开还是关, 都把播放器内置旋转关掉: 它不看我们的偏好键, 开着就会
+       "开关关了照样转"。旋转统一由 diArtApply 负责。 */
+    diArtDisableNPRSpin();
     DIArtRootState *rs = objc_getAssociatedObject(root, kDIArtRootKey);
     if (!rs) {
         rs = [DIArtRootState new];
         objc_setAssociatedObject(root, kDIArtRootKey, rs, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
     }
     CFTimeInterval now = CFAbsoluteTimeGetCurrent();
-    UIView *art = rs.art;
-    /* 缓存失效条件: 没找到 / 离开窗口 / 超过 1.5s 重扫一次(换歌/换布局) */
-    if (!art || !art.window || now - rs.scanTS > 1.5) {
-        art = diArtFindIn(root);
-        rs.art = art;
+    NSArray<UIView *> *arts = rs.arts;
+    if (!arts || !arts.count || now - rs.scanTS > 1.0) {
+        arts = diArtCollectIn(root);
+        /* 上一轮挂过、这一轮不在的(换歌/换布局)先还原 */
+        for (UIView *old in rs.arts) {
+            if (![arts containsObject:old]) diArtApply(old, NO);
+        }
+        rs.arts = arts;
         rs.scanTS = now;
     }
-    if (rs.applied && rs.applied != art) {
-        diArtApply(rs.applied, NO);          /* 换目标: 旧的蒙版还原 */
-        rs.applied = nil;
-    }
-    if (art) {
-        diArtApply(art, on);
-        rs.applied = on ? art : nil;
-    } else if (on) {
-        diArtLogTree(root);
-    }
+    for (UIView *a in arts) diArtApply(a, on);
+    if (on && !arts.count) diArtLogTree(root);
     diArtKillJitter(root);
-    /* 钩子安装顺序不确定: 如果播放器的旋转钩子是在我们之后才包上来的, 它会在
-       我们这次清理之后再把动画挂回去。0.2s 后再扫一次, 保证清理一定落在最后。 */
+    /* 播放器的旋转/布局钩子安装顺序不确定, 可能在我们的清理之后又把动画挂回去。
+       0.1s 后再补一次, 保证"关=静止、3×2=不抖"是最后一次写。 */
     static CFTimeInterval lastSweep = 0;
     CFTimeInterval t = CFAbsoluteTimeGetCurrent();
-    if (diArtIs3x2() && t - lastSweep > 0.2) {
+    if (t - lastSweep > 0.25) {
         lastSweep = t;
-        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.05 * NSEC_PER_SEC)),
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.1 * NSEC_PER_SEC)),
                        dispatch_get_main_queue(), ^{
-            @try { if (root.window) diArtKillJitter(root); } @catch (__unused NSException *e) {}
+            @try {
+                if (!root.window) return;
+                diArtDisableNPRSpin();
+                NSArray<UIView *> *cur = objc_getAssociatedObject(root, kDIArtRootKey) ?
+                    ((DIArtRootState *)objc_getAssociatedObject(root, kDIArtRootKey)).arts : nil;
+                for (UIView *a in cur) diArtApply(a, diArtPrefOn());
+                diArtKillJitter(root);
+            } @catch (__unused NSException *e) {}
         });
     }
 }
@@ -15774,6 +15919,7 @@ static void diArtCCLayout(id self, SEL cmd) {
 
 static void diArtInstall(void) {
     if (gDIArtHooked) return;
+    diArtDisableNPRSpin();   /* 尽早接管播放器内置旋转, 避免第一次播放就已经在转 */
     Class npv = NSClassFromString(@"MRUNowPlayingView");
     Class ccv = NSClassFromString(@"MRUControlCenterViewController");
     if (!npv || !ccv) {
@@ -15812,8 +15958,15 @@ static void diArtInstall(void) {
 static void diArtChanged(CFNotificationCenterRef c, void *obs, CFStringRef name,
                          const void *obj, CFDictionaryRef info) {
     diArtForceRefresh();
+    diArtDisableNPRSpin();
     dispatch_async(dispatch_get_main_queue(), ^{
-        for (UIView *v in gDIArtRoots.allObjects) [v setNeedsLayout];
+        BOOL on = diArtPrefOn();
+        RLog(@"[封面] 开关变化 → %@", on ? @"圆 + 旋转" : @"方形 + 停止");
+        for (UIView *root in gDIArtRoots.allObjects) {
+            DIArtRootState *rs = objc_getAssociatedObject(root, kDIArtRootKey);
+            for (UIView *a in rs.arts) diArtApply(a, on);
+            [root setNeedsLayout];
+        }
     });
 }
 
