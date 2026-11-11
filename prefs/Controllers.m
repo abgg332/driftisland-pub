@@ -5556,48 +5556,115 @@ static void diwKillByComm(const char *comm) {
 
 
 
-/* ================= 2.9.75: 播放器入口页 =================
-   2.9.75 内置原生播放器(NativePlayerOriginal 0.3.21 修复版, 即控制中心播放器增强):
-   dylib 由 substrate 自动注入 SpringBoard, 这里只管它的总开关。
-   偏好域与播放器本体一致: com.local.playerexact 的 Enabled ——
-   注意不写漂流岛自己的域, 播放器只认这个域。 */
+/* ================= 3.0: 播放器入口页(完整移植原版「原生播放器调节」) =================
+   3.0 内置原生播放器(NativePlayerOriginal 0.3.21 修复版 = 控制中心播放器增强)。
+   原版设置面板的全部项在这里 1:1 复刻: 尺寸 8 档、封面背景、专辑图旋转、
+   禁止 N95 改图、隐藏投送图标、导入原参数、恢复默认 —— 键名/默认值与原版一致,
+   全部写 com.local.playerexact(播放器自己的域), 不写漂流岛的域。 */
 static NSString * const kNPDomain = @"com.local.playerexact";
 
-static BOOL diNPReadEnabled(void) {
-    CFPreferencesAppSynchronize((__bridge CFStringRef)kNPDomain);
-    id v = CFBridgingRelease(CFPreferencesCopyAppValue(CFSTR("Enabled"), (__bridge CFStringRef)kNPDomain));
-    return ([v isKindOfClass:NSNumber.class]) ? [v boolValue] : YES;
+static id diNPRead(NSString *key, NSString *dom) {
+    CFPreferencesAppSynchronize((__bridge CFStringRef)dom);
+    return CFBridgingRelease(CFPreferencesCopyAppValue((__bridge CFStringRef)key,
+                                                       (__bridge CFStringRef)dom));
 }
 
-static void diNPWriteEnabled(BOOL on) {
-    CFPreferencesSetAppValue(CFSTR("Enabled"), (on ? kCFBooleanTrue : kCFBooleanFalse),
-                             (__bridge CFStringRef)kNPDomain);
-    /* pending 键是播放器自己的 30 秒清理标记, 残留会让旧版误判启动失败, 顺手清掉 */
-    CFPreferencesSetAppValue(CFSTR("StartupPendingVersion"), NULL, (__bridge CFStringRef)kNPDomain);
-    CFPreferencesSetAppValue(CFSTR("StartupPendingToken"), NULL, (__bridge CFStringRef)kNPDomain);
-    CFPreferencesAppSynchronize((__bridge CFStringRef)kNPDomain);
+static void diNPWrite(NSString *key, id val, NSString *dom) {
+    CFPreferencesSetAppValue((__bridge CFStringRef)key, (__bridge CFPropertyListRef)val,
+                             (__bridge CFStringRef)dom);
+    CFPreferencesAppSynchronize((__bridge CFStringRef)dom);
+}
+
+/* 尺寸/功能共用的键表 —— 导入与重置都按这张表走(与原版面板同源) */
+static NSArray<NSString *> *diNPKeys(void) {
+    return @[ @"Size", @"ModuleSizes",
+              @"MusicArtworkBackgroundMode", @"MusicArtworkBlurRadius",
+              @"MusicArtworkGradientEnabled", @"ArtworkRotationEnabled",
+              @"BlockN95Artwork", @"HideRoutingIcon" ];
+}
+
+static BOOL diNPReadEnabled(void) {
+    id v = diNPRead(@"Enabled", kNPDomain);
+    return ([v isKindOfClass:NSNumber.class]) ? [v boolValue] : YES;
 }
 
 @implementation DIPlayerEntryPage
 
-- (id)readNPEnabled:(PSSpecifier *)sp {
-    return @(diNPReadEnabled());
+/* 本页所有 specifier 都带 defaults=com.local.playerexact, 这里按 specifier 的域读写,
+   不沿用基类的 kDomain(漂流岛自己的域) —— 播放器只认它自己的域。 */
+- (id)readPreferenceValue:(PSSpecifier *)spec {
+    NSString *key = [spec propertyForKey:@"key"];
+    NSString *dom = [spec propertyForKey:@"defaults"] ?: kNPDomain;
+    if (!key.length) return nil;
+    id v = diNPRead(key, dom);
+    if (v && ![v isKindOfClass:NSString.class] && ![v isKindOfClass:NSNumber.class]) v = nil;
+    return v ?: [spec propertyForKey:@"default"];
 }
 
+- (void)setPreferenceValue:(id)value specifier:(PSSpecifier *)spec {
+    NSString *key = [spec propertyForKey:@"key"];
+    NSString *dom = [spec propertyForKey:@"defaults"] ?: kNPDomain;
+    if (!key.length) return;
+    diNPWrite(key, value, dom);
+    /* 播放器监听的刷新通知: 改开关/尺寸后它自己重读, 不用注销 */
+    notify_post("com.local.playerexact/artwork-changed");
+}
+
+/* 播放器自己的开关(Enabled 默认 YES, 与基类 switchSpec 的 def 语义一致) */
+- (id)readNPEnabled:(PSSpecifier *)sp { return @(diNPReadEnabled()); }
 - (void)writeNPEnabled:(id)value specifier:(PSSpecifier *)sp {
-    diNPWriteEnabled([value boolValue]);
+    diNPWrite(@"Enabled", @([value boolValue]), kNPDomain);
+    /* pending 键是播放器 30 秒清理标记, 残留会被 0.3.20 误判成启动失败, 顺手清掉 */
+    diNPWrite(@"StartupPendingVersion", nil, kNPDomain);
+    diNPWrite(@"StartupPendingToken", nil, kNPDomain);
+    notify_post("com.local.playerexact/artwork-changed");
+}
+
+- (void)showMessage:(NSString *)title body:(NSString *)body {
+    UIAlertController *ac = [UIAlertController alertControllerWithTitle:title message:body
+        preferredStyle:UIAlertControllerStyleAlert];
+    [ac addAction:[UIAlertAction actionWithTitle:@"好" style:UIAlertActionStyleCancel handler:nil]];
+    [self presentViewController:ac animated:YES completion:nil];
+}
+
+/* 导入原播放器参数: 依次从 EvoCenter / 旧尺寸插件域把存在的键搬进当前域 */
+- (void)importPlayerPreferences:(PSSpecifier *)sp {
+    NSArray<NSString *> *sources = @[ @"com.jaysuen.evocenter", @"com.local.nativeplayerresize" ];
+    NSUInteger n = 0;
+    for (NSString *src in sources) {
+        for (NSString *key in diNPKeys()) {
+            id v = diNPRead(key, src);
+            if (!v) continue;
+            diNPWrite(key, v, kNPDomain);
+            n++;
+        }
+    }
+    notify_post("com.local.playerexact/artwork-changed");
+    [self reloadSpecifiers];
+    [self showMessage:@"导入完成"
+                 body:(n ? [NSString stringWithFormat:@"已导入 %lu 项参数。", (unsigned long)n]
+                         : @"没有找到可导入的旧参数(EvoCenter/旧尺寸插件未安装或未设置)。")];
+}
+
+/* 恢复默认: 删掉键(播放器内置默认: 2x2、封面背景开、其余关), 保留总开关 */
+- (void)resetPlayerPreferences:(PSSpecifier *)sp {
+    for (NSString *key in diNPKeys()) diNPWrite(key, nil, kNPDomain);
+    notify_post("com.local.playerexact/artwork-changed");
+    [self reloadSpecifiers];
+    [self showMessage:@"已恢复默认" body:@"尺寸 2 × 2、封面背景开、其余功能关。"];
 }
 
 - (void)doRespring:(PSSpecifier *)sp {
-    /* 与组件隐藏页同一套注销流程: 发 Darwin 通知由 SpringBoard 自己退, 后台兜底 kill */
+    /* 与组件隐藏页同一通道: 只发 Darwin 通知, SpringBoard 自己 exit(0) 由 launchd 拉起。
+       另外补一次 killall(有权限就当加速, 没有也无所谓)。 */
     notify_post("com.abgg332.driftisland.widget.respring");
-    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.8 * NSEC_PER_SEC)),
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.6 * NSEC_PER_SEC)),
                    dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
         diwKillByComm("chronod");
         diwKillByComm("SpringBoard");
     });
     UIAlertController *ac = [UIAlertController alertControllerWithTitle:@"正在注销"
-        message:@"屏幕会短暂黑一下, 播放器开关在桌面回来后生效。" preferredStyle:UIAlertControllerStyleAlert];
+        message:@"屏幕会短暂黑一下, 桌面回来后尺寸生效。" preferredStyle:UIAlertControllerStyleAlert];
     [ac addAction:[UIAlertAction actionWithTitle:@"好" style:UIAlertActionStyleCancel handler:nil]];
     [self presentViewController:ac animated:YES completion:nil];
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(2.5 * NSEC_PER_SEC)),
@@ -5606,17 +5673,55 @@ static void diNPWriteEnabled(BOOL on) {
     });
 }
 
+/* 播放器域的滑杆/开关(基类 switchSpec 写漂流岛域, 这里必须自建) */
+- (PSSpecifier *)npSwitch:(NSString *)name key:(NSString *)key def:(BOOL)def {
+    PSSpecifier *sp = [PSSpecifier preferenceSpecifierNamed:name target:self
+        set:@selector(setPreferenceValue:specifier:) get:@selector(readPreferenceValue:)
+        detail:nil cell:PSSwitchCell edit:nil];
+    [sp setProperty:key forKey:@"key"];
+    [sp setProperty:kNPDomain forKey:@"defaults"];
+    [sp setProperty:@(def) forKey:@"default"];
+    return sp;
+}
+
 - (NSArray *)buildSpecifiers {
     NSMutableArray *specs = [NSMutableArray array];
-    [specs addObject:[self groupSpec:@"播放器入口" footer:nil]];
 
+    [specs addObject:[self groupSpec:@"播放器入口"
+        footer:@"内置「原生播放器调节」0.3.21 修复版(控制中心原生播放器增强)。以下设置全部写播放器自己的偏好域, 开关即时生效。"]];
     PSSpecifier *sw = [PSSpecifier preferenceSpecifierNamed:@"启用原生播放器" target:self
         set:@selector(writeNPEnabled:specifier:) get:@selector(readNPEnabled:)
         detail:nil cell:PSSwitchCell edit:nil];
     [specs addObject:sw];
 
-    [specs addObject:[self groupSpec:@"使用说明"
-        footer:@"内置「原生播放器调节」(控制中心播放器增强, 已合入 0.3.21 启动修复): 在控制中心点住播放器即可展开原生播放器大窗。开关只写播放器自己的偏好域, 改动后点「注销生效」。"]];
+    /* ---- 尺寸(原版 8 档, 同一键 Size) ---- */
+    [specs addObject:[self groupSpec:@"播放器尺寸" footer:@"改尺寸后点最下面的「注销生效」。"]];
+    PSSpecifier *size = [PSSpecifier preferenceSpecifierNamed:@"播放器尺寸" target:self
+        set:@selector(setPreferenceValue:specifier:) get:@selector(readPreferenceValue:)
+        detail:NSClassFromString(@"PSListItemsController") cell:PSLinkListCell edit:nil];
+    [size setProperty:@"Size" forKey:@"key"];
+    [size setProperty:kNPDomain forKey:@"defaults"];
+    [size setProperty:@"2x2" forKey:@"default"];
+    [size setProperty:@[ @"2x2", @"2x3", @"3x2", @"3x2b", @"4x1", @"4x2", @"4x2b", @"4x3" ]
+               forKey:@"validValues"];
+    [size setProperty:@[ @"2 × 2", @"2 × 3", @"3 × 2", @"3 × 2（布局 B）",
+                         @"4 × 1", @"4 × 2", @"4 × 2（布局 B）", @"4 × 3" ]
+               forKey:@"validTitles"];
+    [specs addObject:size];
+
+    /* ---- 功能(原版 4 个开关) ---- */
+    [specs addObject:[self groupSpec:@"功能" footer:nil]];
+    [specs addObject:[self npSwitch:@"封面背景" key:@"MusicArtworkGradientEnabled" def:YES]];
+    [specs addObject:[self npSwitch:@"专辑图旋转" key:@"ArtworkRotationEnabled" def:NO]];
+    [specs addObject:[self npSwitch:@"禁止 N95 修改专辑图" key:@"BlockN95Artwork" def:NO]];
+    [specs addObject:[self npSwitch:@"隐藏投送图标" key:@"HideRoutingIcon" def:NO]];
+
+    /* ---- 原版参数管理 ---- */
+    [specs addObject:[self groupSpec:@"原插件参数"
+        footer:@"「导入」会从已装的 EvoCenter / 旧尺寸插件读取同样 8 个键; 「恢复默认」删除这 8 个键(总开关保留)。"]];
+    [specs addObject:[self buttonSpec:@"导入原播放器参数" action:@selector(importPlayerPreferences:)]];
+    [specs addObject:[self buttonSpec:@"恢复默认播放器参数" action:@selector(resetPlayerPreferences:)]];
+
     [specs addObject:[self groupSpec:nil footer:nil]];
     [specs addObject:[self buttonSpec:@"注销生效" action:@selector(doRespring:)]];
     return specs;

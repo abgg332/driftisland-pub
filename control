@@ -5,9 +5,9 @@ Depends: mobilesubstrate, preferenceloader
 Conflicts: com.yechen.bofangqi, com.jaysuen.evocenter, com.local.nativeplayerresize
 Replaces: com.yechen.bofangqi, com.local.nativeplayerresize
 Provides: com.yechen.bofangqi
-Version: 2.9.75
+Version: 3.0
 Architecture: iphoneos-arm64
-Description: 在灵动岛内加载视频背景。2.9.75: 基于 2.9.74.2 内置原生播放器(控制中心播放器增强 0.3.21 修复版, 设置内「播放器入口」开关)。
+Description: 在灵动岛内加载视频背景。3.0: 基于 2.9.74.2 内置原生播放器(控制中心播放器增强 0.3.21 修复版), 设置内「播放器入口」完整移植原版尺寸/功能/参数管理。
 Maintainer: 一条鱼的记忆
 Author: 一条鱼的记忆
 Section: Tweaks
