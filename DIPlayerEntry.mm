@@ -645,6 +645,9 @@ static void PBBuildBall(void) {
                                                         cornerRadius:r].CGPath;
     pbBall.hidden = NO;
     PBApplyAsset();
+    PBLog(@"悬浮球已挂载: %.0fx%.0f 中心=(%.0f,%.0f) window level=%.0f 素材=%@",
+          size, size, pbBall.center.x, pbBall.center.y, pbWin.windowLevel,
+          pbBallPath.length ? pbBallPath.lastPathComponent : @"占位");
 }
 
 static void PBDestroy(void) {
