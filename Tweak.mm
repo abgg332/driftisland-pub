@@ -62,7 +62,7 @@ static double expandTextY = DI_EXP_TEXT_BASE_Y;   // 上下偏移(pt, 下为正,
 static double expandTextScale = 100.0; // 文字大小(%, 100=原样)
 /* 2.8.86: 构建戳 —— 之前横幅打的是 SpringBoard 自己的 CFBundleShortVersionString(恒 1.0),
    日志里根本看不出装的是哪一版。所有诊断行都带这个戳, 下轮日志一眼定位。 */
-#define DI_BUILD_VER @"2.9.75"
+#define DI_BUILD_VER @"2.9.76"
 static BOOL gRecordingActive = NO; // 保留: 岛素材总闸条件
 static NSString *diElementId(UIView *host);
 static BOOL diMiniMusicActive(UIView *host); // 2.6.3: 前置(遮罩层使用)
@@ -3547,6 +3547,20 @@ static BOOL diMruSaysExpanded(void) {
     cached = raw || (lastExpandedAt > 0 && now - lastExpandedAt < 1.5);
     return cached;
 }
+/* ===== 2.9.76: state.plist 的"新鲜确认" —— 不带 1.5 秒迟滞 =====
+   diMruSaysExpanded 的迟滞是为"展开后别再挂回玻璃"服务的; 但展开起手我们要的
+   恰恰是反方向的判断: MRU 到底铺没铺上 66。刚收回 1.5 秒内再展开, 迟滞会
+   误报"已展开" → SB 又在 251x49 退场 → 小专辑转圈。这里读原始值。 */
+static BOOL diMruSaysExpandedFresh(void) {
+    NSString *dir = diMruSharedDir();
+    if (!dir.length) return NO;
+    NSString *p = [dir stringByAppendingPathComponent:@"state.plist"];
+    NSDictionary *attr = [[NSFileManager defaultManager] attributesOfItemAtPath:p error:NULL];
+    NSDate *md = attr[NSFileModificationDate];
+    if (!md || CFAbsoluteTimeGetCurrent() - md.timeIntervalSince1970 > 2.0) return NO;
+    NSDictionary *d = [NSDictionary dictionaryWithContentsOfFile:p];
+    return [d isKindOfClass:NSDictionary.class] && [d[@"expanded"] boolValue];
+}
 /* 我们自己玻璃内部的形状层也叫 kDIMaskLayerName, 清扫时必须放过它,
    否则"清残留"会把正在旋转的玻璃削成方形。 */
 static BOOL diInsideOwnMaskView(UIView *v) {
@@ -4138,7 +4152,37 @@ static BOOL diApplyMaskToCover(UIView *cover, UIImage *shape) {
            的前几百毫秒这边照样画了一块玻璃。
            这里补一条**本地**判据: 17 上宿主高 >=46 且宽 >=180 就是展开宿主
            (实测小岛恒为 166x37~189x37, 展开恒为 198x55), 立即整棵退场。 */
-        if (diIsIOS17Up() && bs.height >= 46.0 && bs.width >= 180.0) {
+        /* ===== 2.9.76: 展开起手的"MRU 未就绪保护" —— 两处退场闸门共用 =====
+           407 日志实锤: SB 在 251x49 就整棵退场, 而 MRU 的 66 玻璃要等宿主
+           长满 407x201 才铺(它中间只 apply 了寥寥几拍) —— 这 0.3~0.5 秒里
+           只剩原生小头像在转, 用户: "第一次展开还是小专辑转圈"。
+           现在只要正在播放、MRU 还没新鲜确认展开(state.plist), 两处退场都不走:
+           morphExpand 把这颗圆从 25.3 连续长到 66, MRU 一确认(写 expanded=1)
+           上面 2.9.74 的让位分支立刻接管。宽度 380 封顶 + 1.2 秒上限,
+           MRU 永远接不上时按老规矩退场, 不会把玻璃钉在展开岛上。 */
+        BOOL mruReady76 = NO, keepPainting76 = NO;
+        if (diIsIOS17Up()) {
+            mruReady76 = diMruSaysExpandedFresh();
+            BOOL playing76 = mrQueryOK ? musicPlaying
+                                       : AVAudioSession.sharedInstance.isOtherAudioPlaying;
+            static CFAbsoluteTime sKeep76T;
+            static __weak UIView *sKeep76V;
+            keepPainting76 = (playing76 && !mruReady76 && bs.width < 380.0
+                              && (self.glassOn || self.cacheCoverV != nil));
+            if (keepPainting76) {
+                if (sKeep76V != host) { sKeep76V = host; sKeep76T = CFAbsoluteTimeGetCurrent(); }
+                if (CFAbsoluteTimeGetCurrent() - sKeep76T > 1.2) keepPainting76 = NO;
+            } else { sKeep76V = nil; sKeep76T = 0; }
+            if (keepPainting76) {
+                static CFAbsoluteTime sKeepLogT;
+                if (CFAbsoluteTimeGetCurrent() - sKeepLogT > 3.0) {
+                    sKeepLogT = CFAbsoluteTimeGetCurrent();
+                    DLog(@"遮罩[17]: 宿主 %.0fx%.0f 过小岛尺寸但 MRU 未就绪 → 继续画变形圆",
+                         bs.width, bs.height);
+                }
+            }
+        }
+        if (diIsIOS17Up() && bs.height >= 46.0 && bs.width >= 180.0 && !keepPainting76) {
             if (_glassOn || _targets.count || !self.hidden) {
                 [self diTeardown];
                 static CFAbsoluteTime sExp2T;
@@ -4151,7 +4195,7 @@ static BOOL diApplyMaskToCover(UIView *cover, UIImage *shape) {
         }
         /* 展开大专辑在跨进程内容中；当前探针只有小门户坐标。
            即使小岛的玻璃被播放锁定，也不能在展开宿主上重显 25pt 的副本。 */
-        if (bs.width >= 280.0 && bs.height >= 120.0) {
+        if (bs.width >= 280.0 && bs.height >= 120.0 && !keepPainting76) {
             if (self.glassOn || !self.hidden) [self diTeardown];
             /* 2.8.86: 不再 pause display link —— pause 之后没有任何地方 resume,
                缩回小岛时这个实例就永远醒不过来(遮罩再也不出现)。 */
@@ -13510,6 +13554,11 @@ static void diHookHomeBarGrabberRetry(void) { diHookHomeGrabber(); }
 @property(nonatomic,strong) UIImageView *glassMask;
 @property(nonatomic,weak) CALayer *systemLayer;
 @property(nonatomic,assign) BOOL systemLayerHidden;
+/* ===== 2.9.76: 底图层 —— artwork.layer 自带的 contents/私有子层里还挂着一张
+   (模糊/放大)的底图, 圆玻璃只盖住圆形区域, 四角和周围露出来的就是用户说的
+   "专辑下面的透明蒙版"。展开态把它们也藏掉, teardown 时还原子层。 ===== */
+@property(nonatomic,strong) NSMutableArray<CALayer *> *baseLayers;
+@property(nonatomic,assign) BOOL baseHidden;
 /* ===== 2.8.83: 把系统那张专辑"彻底"藏掉 =====
    329 反馈: "有旋转有遮罩了, 但是还有个底的遮罩显示, 重复了; 下面还有个蒙版, 多余的"。
    日志实锤: `glass 创建 ... 系统层=无` —— MRUActivityArtworkView 没有 artworkLayer,
@@ -13824,8 +13873,23 @@ static CGRect diActivityVisibleRect(UIView *artwork, NSMutableString *diag) {
     return rect;
 }
 
+/* ===== 2.9.76: MRU 侧的"是否在播放" —— 暂停和播放中的收缩要区别对待:
+   播放中收起(切歌)系统自己在做交叉淡入, 我们的 66 要让路; 暂停收起
+   没有系统动画, 66 淡早了岛上就什么都没有(用户: "暂停后小岛不显示专辑")。 */
+static BOOL diMruIsPlayingCached(void) {
+    static CFAbsoluteTime sAt; static BOOL sPlaying;
+    CFAbsoluteTime now = CFAbsoluteTimeGetCurrent();
+    if (now - sAt > 0.5) {
+        sAt = now;
+        sPlaying = AVAudioSession.sharedInstance.isOtherAudioPlaying;
+    }
+    return sPlaying;
+}
 static void diActivityTeardown(UIView *artwork, DIActivityMaskState *state) {
     if (!state) return;
+    /* 2.9.76: 还原底图层 */
+    for (CALayer *sl in state.baseLayers) sl.hidden = NO;
+    state.baseLayers = nil; state.baseHidden = NO;
     [state.glass.layer removeAllAnimations];
     state.glassImage.maskView = nil;
     [state.glass removeFromSuperview];
@@ -14283,7 +14347,11 @@ static void diActivityApply(UIView *artwork) {
                    胶囊变小之前就彻底看不见。 ---- */
                 CGFloat t = 0.0;
                 if (mid74 && !grow74) {
-                    t = (hostH74 - 70.0) / (150.0 - 70.0);
+                    /* 2.9.76: 播放中收起按老窗口淡(系统自己有交叉淡入);
+                       暂停收起没有系统动画, 窗口改 45→70 —— 66 陪岛缩到胶囊
+                       边缘才消失, 不再出现"暂停后小岛不显示专辑"。 */
+                    if (diMruIsPlayingCached()) t = (hostH74 - 70.0) / (150.0 - 70.0);
+                    else                        t = (hostH74 - 45.0) / (70.0 - 45.0);
                     t = MIN(MAX(t, 0.0), 1.0);
                 } else if (mid74 && grow74) {
                     t = 1.0;
@@ -14312,6 +14380,15 @@ static void diActivityApply(UIView *artwork) {
         }
         /* 2.9.58: 不再"拆别人的大玻璃" —— 那颗 66 现在也按 23 画, 拆了又会被重画,
            只会造成一帧闪烁。各自按小岛尺寸画即可。 */
+        /* ===== 2.9.76: 宿主已明显大于小岛(展开途中/展开稳态) → 小玻璃闭嘴 =====
+           407 实锤: SB 在 251x49 退场后到 MRU 66 铺上之前, 这颗 23pt 玻璃
+           (带着旋转)就是用户看到的"小专辑转圈"。这段时间大圆由 SB 的变形
+           玻璃负责; 宿主回到小岛尺寸(宽<240 且高<60)再恢复。 */
+        if (ios17 && (hostH74 > 60.0 || gDIFormW > 240.0)) {
+            if (state && state.glass && state.glass.alpha > 0.02) state.glass.alpha = 0.0;
+            return;
+        }
+        if (state && state.glass && state.glass.alpha < 0.98) state.glass.alpha = 1.0;
         static CFAbsoluteTime sCmp17T; static CGSize sCmp17Sz;
         if (CFAbsoluteTimeGetCurrent() - sCmp17T > 8.0 || !CGSizeEqualToSize(sCmp17Sz, artwork.bounds.size)) {
             sCmp17T = CFAbsoluteTimeGetCurrent(); sCmp17Sz = artwork.bounds.size;
@@ -14485,6 +14562,44 @@ static void diActivityApply(UIView *artwork) {
     }
     if (state.systemLayer && !state.systemLayer.hidden) state.systemLayer.hidden = YES;
     if (state.shadow && !state.shadow.hidden) state.shadow.hidden = YES;
+    /* ===== 2.9.76: 底图层 —— "专辑下面的透明蒙版" =====
+       406 视频放大实锤: 展开态专辑圆的下方/四周露出一块更大、半透明的模糊
+       副本。diActivityHideSystem 只藏子视图, artwork.layer **自己的 contents**
+       和私有子层里的那张底图谁都没动 —— 圆玻璃只盖住圆形, 四角露出来的
+       就是它。展开态(拿到过专辑图)把整层藏掉; 小岛态不碰(16 一行不改)。 */
+    if (!collapsed && art && !state.baseHidden) {
+        state.baseHidden = YES;
+        NSMutableArray<CALayer *> *bl = [NSMutableArray array];
+        for (CALayer *sl in artwork.layer.sublayers) {
+            if (sl == state.glass.layer) continue;
+            [bl addObject:sl];
+            sl.hidden = YES;
+        }
+        state.baseLayers = bl;
+        if (artwork.layer.contents
+            && CFGetTypeID((__bridge CFTypeRef)artwork.layer.contents) == CGImageGetTypeID()) {
+            artwork.layer.contents = nil;
+        }
+        /* 父容器(accessory)里类名带 Shadow/Glow/Blur 的兄弟层 —— 系统的辉光/投影 */
+        NSMutableArray *gl = [NSMutableArray array];
+        for (UIView *sib in artwork.superview.subviews) {
+            if (sib == artwork) continue;
+            NSString *cn = NSStringFromClass(sib.class);
+            if ([cn containsString:@"Shadow"] || [cn containsString:@"Glow"] || [cn containsString:@"Blur"]) {
+                [gl addObject:sib];
+            }
+        }
+        state.hiddenViews = state.hiddenViews ?: [NSMutableArray array];
+        state.hiddenStates = state.hiddenStates ?: [NSMutableArray array];
+        for (UIView *v in gl) {
+            if ([state.hiddenViews containsObject:v]) continue;
+            [state.hiddenViews addObject:v];
+            [state.hiddenStates addObject:@(v.hidden)];
+            v.hidden = YES;
+        }
+        diMruFileLog([NSString stringWithFormat:@"hide 底图层 子层=%lu 辉光层=%lu",
+                      (unsigned long)bl.count, (unsigned long)gl.count]);
+    }
 
     BOOL rotOn = NO, rev = NO; double speed = 45.0;
     diMruRotParams(&rotOn, &rev, &speed);
@@ -14515,7 +14630,10 @@ static void diActivityApply(UIView *artwork) {
        玻璃跟着走就是正常的; 只有收起时 66 会留在小胶囊里当第二层, 那才需要淡掉。
        小岛那颗(23)任何时候都不淡 —— 它就是小岛唯一可见的专辑, 淡了就成了"偏移/发灰"。 */
     if (midZone74 && !smallArt && shrink74) {
-        CGFloat t = (hostH74 - 70.0) / (150.0 - 70.0);
+        CGFloat t;
+        /* 2.9.76: 暂停收起没有系统交叉淡入 —— 淡出窗口改 45→70 */
+        if (diMruIsPlayingCached()) t = (hostH74 - 70.0) / (150.0 - 70.0);
+        else                        t = (hostH74 - 45.0) / (70.0 - 45.0);
         t = MIN(MAX(t, 0.0), 1.0);
         if (fabs(state.glass.alpha - t) > 0.02) state.glass.alpha = t;
         state.wasMid = YES;
