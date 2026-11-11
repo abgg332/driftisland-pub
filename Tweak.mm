@@ -15845,6 +15845,55 @@ static void diTCSetFrame(id self, SEL cmd, CGRect f) {
     if (gDIOrigTCSetFrame) gDIOrigTCSetFrame(self, cmd, f);
 }
 
+/* ===== 3.0.11: 防死循环保险 =====
+   3.0.9/3.1.0/3.0.10 三连"无限安全模式" —— 崩溃点日志上拿不准(缓冲日志崩了就丢),
+   所以不再赌: 每次引导先看时间戳文件, 距上次引导 <90 秒 = 疑似刚崩过 → 本次启动
+   跳过 3.x 全部新钩子(模块背景/隐藏/传送栏拦截/MediaRemote 取图), 封面圆角旋转
+   (3.0.8 时代就稳定)照常。稳定 90 秒后再注销一次, 功能自动回来。
+   代价: 手动连注两次才会偶发关一轮, 换来"永远不会再无限安全模式"。 */
+static BOOL gDIPlayerSafeBoot = NO;
+
+static void diCrumb(NSString *s) {
+    /* 面包屑: 不走缓冲, 直接落盘 —— 崩了也在, 下次日志就能看到死在哪一步 */
+    @try {
+        RLog(@"[足迹] %@", s);
+        NSString *p = @"/var/mobile/Library/Logs/driftisland-crumb.log";
+        NSString *line = [NSString stringWithFormat:@"%@ %@\n",
+                          [NSDate date], s];
+        NSFileHandle *h = [NSFileHandle fileHandleForWritingAtPath:p];
+        if (h) {
+            [h seekToEndOfFile];
+            [h writeData:[line dataUsingEncoding:NSUTF8StringEncoding]];
+            [h closeFile];
+        } else {
+            [line writeToFile:p options:NSDataWritingAtomic error:NULL];
+        }
+    } @catch (__unused NSException *e) {}
+}
+
+static void diBootGuardCheck(void) {
+    @try {
+        NSString *p = @"/var/mobile/Library/Preferences/com.abgg332.driftisland.bootguard.plist";
+        double last = 0;
+        NSData *data = [NSData dataWithContentsOfFile:p];
+        if (data) {
+            NSDictionary *d = [NSPropertyListSerialization
+                propertyListWithData:data options:0 format:NULL error:NULL];
+            if ([d isKindOfClass:NSDictionary.class]) last = [d[@"ts"] doubleValue];
+        }
+        double now = [NSDate date].timeIntervalSince1970;
+        gDIPlayerSafeBoot = (last > 0 && now - last < 90.0);
+        if (gDIPlayerSafeBoot)
+            RLog(@"[保险] 距上次引导仅 %.0f 秒, 疑似刚崩过 → 本次启动关闭播放器新钩子", now - last);
+        else
+            RLog(@"[保险] 正常引导, 播放器功能全开");
+        NSData *out = [NSPropertyListSerialization
+            dataWithPropertyList:@{@"ts": @(now)}
+            format:NSPropertyListBinaryFormat_v1_0 options:0 error:NULL];
+        [out writeToFile:p options:NSDataWritingAtomic error:NULL];
+    } @catch (__unused NSException *e) { gDIPlayerSafeBoot = NO; }
+}
+
 /* 3.1.0: 定义在后面, 这里先声明 —— 播放器每次 layout 顺手把「未在播放」收掉 */
 static void diNPApplyHideForRoot(UIView *root);
 
@@ -15980,53 +16029,6 @@ static const void *kDIBgIVKey  = &kDIBgIVKey;
 static const void *kDIBgDimKey = &kDIBgDimKey;
 static const void *kDIBgLastKey = &kDIBgLastKey;   /* 3.0.10: 模块 VC 处理节流 */
 
-/* ===== 3.0.11: 防死循环保险 =====
-   3.0.9/3.1.0/3.0.10 三连"无限安全模式" —— 崩溃点日志上拿不准(缓冲日志崩了就丢),
-   所以不再赌: 每次引导先看时间戳文件, 距上次引导 <90 秒 = 疑似刚崩过 → 本次启动
-   跳过 3.x 全部新钩子(模块背景/隐藏/传送栏拦截/MediaRemote 取图), 封面圆角旋转
-   (3.0.8 时代就稳定)照常。稳定 90 秒后再注销一次, 功能自动回来。
-   代价: 手动连注两次才会偶发关一轮, 换来"永远不会再无限安全模式"。 */
-static BOOL gDIPlayerSafeBoot = NO;
-
-static void diCrumb(NSString *s) {
-    /* 面包屑: 不走缓冲, 直接落盘 —— 崩了也在, 下次日志就能看到死在哪一步 */
-    @try {
-        RLog(@"[足迹] %@", s);
-        NSString *p = @"/var/mobile/Library/Logs/driftisland-crumb.log";
-        NSString *line = [NSString stringWithFormat:@"%@ %@\n",
-                          [NSDate date], s];
-        NSFileHandle *h = [NSFileHandle fileHandleForWritingAtPath:p];
-        if (h) {
-            [h seekToEndOfFile];
-            [h writeData:[line dataUsingEncoding:NSUTF8StringEncoding]];
-            [h closeFile];
-        } else {
-            [line writeToFile:p atomically:YES];
-        }
-    } @catch (__unused NSException *e) {}
-}
-
-static void diBootGuardCheck(void) {
-    @try {
-        NSString *p = @"/var/mobile/Library/Preferences/com.abgg332.driftisland.bootguard.plist";
-        double last = 0;
-        NSData *data = [NSData dataWithContentsOfFile:p];
-        if (data) {
-            NSDictionary *d = [NSPropertyListSerialization
-                propertyListWithData:data options:0 format:NULL error:NULL];
-            if ([d isKindOfClass:NSDictionary.class]) last = [d[@"ts"] doubleValue];
-        }
-        double now = [NSDate date].timeIntervalSince1970;
-        gDIPlayerSafeBoot = (last > 0 && now - last < 90.0);
-        if (gDIPlayerSafeBoot)
-            RLog(@"[保险] 距上次引导仅 %.0f 秒, 疑似刚崩过 → 本次启动关闭播放器新钩子", now - last);
-        else
-            RLog(@"[保险] 正常引导, 播放器功能全开");
-        [NSPropertyListSerialization dataWithPropertyList:@{@"ts": @(now)}
-            format:NSPropertyListBinaryFormat_v1_0 options:0 error:NULL
-            writeToFile:p atomically:YES];
-    } @catch (__unused NSException *e) { gDIPlayerSafeBoot = NO; }
-}
 
 static NSHashTable *gDIBgHosts = nil;
 static UIImage *gDIBgImage = nil;
@@ -16135,7 +16137,7 @@ static void diNPApplyBackgroundTo(UIView *host, BOOL on) {
             dim.backgroundColor = [UIColor colorWithWhite:0 alpha:0.22].CGColor;
             dim.cornerRadius = r;
             dim.masksToBounds = YES;
-            [host.layer insertSublayer:dim aboveSublayer:bg];
+            [host.layer insertSublayer:dim above:bg];
             objc_setAssociatedObject(host, kDIBgDimKey, dim, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
         }
         bg.hidden = NO;
