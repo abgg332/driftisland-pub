@@ -140,27 +140,105 @@ static UIImage *PBPlaceholder(CGFloat side) {
     }];
 }
 
-#pragma mark - 系统播放器桥(MediaRemote)
+#pragma mark - 系统播放器桥
+
+/* 3.0.2: 修"点播放就安全模式" ——
+   411 日志 + 用户复现实锤: iOS 17 的 SpringBoard 里 MRMediaRemoteSendCommand 的
+   XPC 通道被拒(查询类 GetNowPlayingInfo 可用, 发送类命令不可用), 一调进程 abort。
+   改用 MPAVController —— SpringBoard 音量 HUD / 控制中心背后的控制器,
+   就在 SB 进程内工作, 方法名按候选列表探测, 每个动作都有兜底。 */
+
+static Class PBMPAVClass(void) {
+    static Class cls;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        void *h = dlopen("/System/Library/PrivateFrameworks/MediaPlayer.framework/MediaPlayer", RTLD_LAZY);
+        if (!h) h = dlopen("/System/Library/PrivateFrameworks/MPAVController.framework/MPAVController", RTLD_LAZY);
+        if (h) cls = objc_getClass("MPAVController");
+        if (!cls) cls = objc_getClass("MPAVController");
+        PBLog(@"MPAVController: %@(%@)", cls, cls ? @"可用" : @"不可用");
+    });
+    return cls;
+}
+
+/* 在实例上按候选顺序找第一个能响应的方法并调用 */
+static void PBInvoke(id obj, NSArray<NSString *> *names) {
+    if (!obj) return;
+    for (NSString *n in names) {
+        SEL sel = NSSelectorFromString(n);
+        if ([obj respondsToSelector:sel]) {
+            @try {
+                NSInvocation *inv = [NSInvocation invocationWithMethodSignature:
+                    [obj methodSignatureForSelector:sel]];
+                inv.target = obj;
+                inv.selector = sel;
+                [inv invoke];
+            } @catch (__unused NSException *e) {}
+            return;
+        }
+    }
+}
+
+static id PBMPAV(void) {
+    Class c = PBMPAVClass();
+    if (!c) return nil;
+    id out = nil;
+    @try {
+        SEL sel = NSSelectorFromString(@"sharedInstance");
+        NSMethodSignature *sg = [c methodSignatureForSelector:sel];
+        if (sg) {
+            NSInvocation *inv = [NSInvocation invocationWithMethodSignature:sg];
+            inv.target = c; inv.selector = sel;
+            [inv invoke];
+            [inv getReturnValue:&out];
+        }
+    } @catch (__unused NSException *e) { out = nil; }
+    return out;
+}
+
+static void PBSystemToggle(void) {
+    PBInvoke(PBMPAV(), @[@"togglePlayback", @"togglePlayPause", @"playPause"]);
+}
+static void PBSystemNext(void) {
+    PBInvoke(PBMPAV(), @[@"skipToNextTrack", @"nextTrack", @"skipForward", @"playNextTrack"]);
+}
+static void PBSystemPrev(void) {
+    PBInvoke(PBMPAV(), @[@"skipToPreviousTrack", @"previousTrack", @"skipBackward", @"playPreviousTrack"]);
+}
+static void PBSystemSeek(double sec) {
+    id mp = PBMPAV();
+    if (!mp) return;
+    for (NSString *n in @[@"setCurrentElapsedTimeToCurrentTrack:",
+                          @"setElapsedTime:", @"setCurrentElapsedTime:"]) {
+        SEL sel = NSSelectorFromString(n);
+        if ([mp respondsToSelector:sel]) {
+            @try {
+                NSInvocation *inv = [NSInvocation invocationWithMethodSignature:
+                    [mp methodSignatureForSelector:sel]];
+                double arg = sec;
+                inv.target = mp; inv.selector = sel;
+                [inv setArgument:&arg atIndex:2];
+                [inv invoke];
+            } @catch (__unused NSException *e) {}
+            return;
+        }
+    }
+}
 
 enum { PB_CMD_PLAY = 0, PB_CMD_PAUSE = 1, PB_CMD_TOGGLE = 2,
        PB_CMD_STOP = 3, PB_CMD_NEXT = 4, PB_CMD_PREV = 5 };
 
 static void  *pbMR = NULL;
-static void (*pbSendCmd)(int, CFDictionaryRef) = NULL;
 static void (*pbGetInfo)(dispatch_queue_t, void (^)(CFDictionaryRef)) = NULL;
-static void (*pbSetElapsed)(double) = NULL;
 static BOOL  pbMRLoaded = NO;
 
 static void PBLoadMR(void) {
     if (pbMRLoaded) return;
     pbMRLoaded = YES;
     pbMR = dlopen("/System/Library/PrivateFrameworks/MediaRemote.framework/MediaRemote", RTLD_LAZY);
-    if (!pbMR) { PBLog(@"MediaRemote 打不开, 播放键回落 MPMusicPlayerController"); return; }
-    pbSendCmd    = (void (*)(int, CFDictionaryRef))dlsym(pbMR, "MRMediaRemoteSendCommand");
-    pbGetInfo    = (void (*)(dispatch_queue_t, void (^)(CFDictionaryRef)))dlsym(pbMR, "MRMediaRemoteGetNowPlayingInfo");
-    pbSetElapsed = (void (*)(double))dlsym(pbMR, "MRMediaRemoteSetElapsedTime");
-    PBLog(@"MediaRemote 就绪: 命令=%d 信息=%d 定位=%d",
-          pbSendCmd != NULL, pbGetInfo != NULL, pbSetElapsed != NULL);
+    if (!pbMR) { PBLog(@"MediaRemote 打不开, 只显示歌名/封面"); return; }
+    pbGetInfo = (void (*)(dispatch_queue_t, void (^)(CFDictionaryRef)))dlsym(pbMR, "MRMediaRemoteGetNowPlayingInfo");
+    PBLog(@"MediaRemote 就绪: 信息=%d", pbGetInfo != NULL);
 }
 
 /* Now Playing 字典的键就是 MediaRemote 导出的 CFString 常量(名字与符号一致);
@@ -185,17 +263,6 @@ static NSString *PBKeyDuration(void) { return PBMRKey("kMRMediaRemoteNowPlayingI
 static NSString *PBKeyElapsed(void)  { return PBMRKey("kMRMediaRemoteNowPlayingInfoElapsedTime"); }
 static NSString *PBKeyRate(void)     { return PBMRKey("kMRMediaRemoteNowPlayingInfoPlaybackRate"); }
 static NSString *PBKeyArtwork(void)  { return PBMRKey("kMRMediaRemoteNowPlayingInfoArtworkData"); }
-
-static void PBSendCommand(int cmd) {
-    if (pbSendCmd) { pbSendCmd(cmd, NULL); return; }
-    @try {
-        MPMusicPlayerController *mp = [MPMusicPlayerController systemMusicPlayer];
-        if (cmd == PB_CMD_PLAY || cmd == PB_CMD_TOGGLE) [mp play];
-        else if (cmd == PB_CMD_PAUSE) [mp pause];
-        else if (cmd == PB_CMD_NEXT) [mp skipToNextItem];
-        else if (cmd == PB_CMD_PREV) [mp skipToPreviousItem];
-    } @catch (__unused NSException *e) {}
-}
 
 #pragma mark - 酷我音源(公开接口实测可用)
 
@@ -283,6 +350,7 @@ static void PBAddRecent(NSDictionary *song) {
     PBSaveList(NO, out);
 }
 
+
 #pragma mark - 全局状态 / 前置声明
 
 @class PBWindow;
@@ -362,12 +430,194 @@ static void PBOnlineSkip(BOOL next);
 - (void)tabTap:(UIButton *)b;
 - (void)searchGo:(UIButton *)b;
 - (void)searchField:(UITextField *)f;
-- (void)openKuwo:(UIButton *)b;
-- (void)openQQ:(UIButton *)b;
 - (void)rowDel:(UIButton *)b;
+- (void)rowLike:(UIButton *)b;
+- (void)lyricPan:(UIPanGestureRecognizer *)g;
 @end
 
 static PBBallController *pbCtrl = nil;
+
+#pragma mark - 桌面歌词(网易云 LRC)
+static UIView *pbLyric = nil;
+static UILabel *pbLyricLabel = nil;
+static NSArray<NSArray *> *pbLrcLines = nil;
+static NSString *pbLrcFor = nil;      /* 当前歌词属于哪首歌 */
+static NSTimer *pbLyricTimer = nil;
+
+
+/* 系统播放的当前歌名/歌手(PBRefresh 回调里缓存), 桌面歌词对系统播放也生效 */
+static NSString *pbNPTitle = nil, *pbNPArtist = nil;
+
+/* 歌词源: music.163.com 公开接口(实测可用) —— 按歌名+歌手搜 id, 再取 LRC 逐行时间轴 */
+
+static NSArray<NSArray *> *PBLrcParse(NSString *raw) {
+    /* 返回 @[ @[time(秒), text], ... ] 按时间升序 */
+    NSMutableArray *out = [NSMutableArray array];
+    NSMutableCharacterSet *skip = [NSMutableCharacterSet whitespaceCharacterSet];
+    [skip addCharactersInString:@"\r\n"];
+    for (NSString *rawLine in [raw componentsSeparatedByString:@"\n"]) {
+        NSString *line = [rawLine stringByTrimmingCharactersInSet:skip];
+        if (line.length < 10 || ![line hasPrefix:@"["]) continue;
+        NSRange close = [line rangeOfString:@"]"];
+        if (close.location == NSNotFound || close.location > 10) continue;
+        NSString *t = [line substringWithRange:NSMakeRange(1, close.location - 1)];
+        NSArray *parts = [t componentsSeparatedByString:@":"];
+        if (parts.count < 2) continue;
+        double mm = [parts[0] doubleValue], ss = [parts[1] doubleValue];
+        if (mm < 0 && ss < 0) continue;
+        double sec = mm * 60 + ss;
+        if (sec < 0.01) continue;
+        NSString *txt = [line substringFromIndex:NSMaxRange(close)];
+        txt = [txt stringByTrimmingCharactersInSet:skip];
+        if (!txt.length) continue;
+        [out addObject:@[@(sec), txt]];
+    }
+    [out sortUsingComparator:^NSComparisonResult(NSArray *a, NSArray *b) {
+        return [a[0] doubleValue] < [b[0] doubleValue] ? NSOrderedAscending : NSOrderedDescending;
+    }];
+    return out.count ? out : nil;
+}
+
+static void PBFetchLRC(NSString *title, NSString *artist) {
+    dispatch_async(dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
+        NSString *q = [NSString stringWithFormat:@"%@ %@", title ?: @"", artist ?: @""];
+        q = [q stringByAddingPercentEncodingWithAllowedCharacters:
+                [NSCharacterSet URLQueryAllowedCharacterSet]] ?: q;
+        NSString *surl = [NSString stringWithFormat:
+            @"http://music.163.com/api/search/get/web?s=%@&type=1&limit=1", q ?: @""];
+        NSMutableURLRequest *req = [NSMutableURLRequest requestWithURL:[NSURL URLWithString:surl]
+            cachePolicy:NSURLRequestReloadIgnoringLocalCacheData timeoutInterval:10.0];
+        [req setValue:@"http://music.163.com" forHTTPHeaderField:@"Referer"];
+        [req setValue:@"appver=2.0.2" forHTTPHeaderField:@"Cookie"];
+        __block NSString *songId = nil;
+        dispatch_semaphore_t sem = dispatch_semaphore_create(0);
+        [[NSURLSession.sharedSession dataTaskWithRequest:req
+            completionHandler:^(NSData *d, NSURLResponse *r, NSError *e) {
+            if (d.length) {
+                id j = [NSJSONSerialization JSONObjectWithData:d options:0 error:NULL];
+                NSArray *songs = j[@"result"][@"songs"];
+                if ([songs isKindOfClass:NSArray.class] && songs.count) {
+                    id sid = songs[0][@"id"];
+                    if ([sid isKindOfClass:NSNumber.class]) songId = ((NSNumber *)sid).stringValue;
+                }
+            }
+            dispatch_semaphore_signal(sem);
+        }] resume];
+        dispatch_semaphore_wait(sem, dispatch_time(DISPATCH_TIME_NOW, (int64_t)(11 * NSEC_PER_SEC)));
+        if (!songId.length) { PBLog(@"歌词: 没搜到 %@", title); return; }
+
+        NSString *lurl = [NSString stringWithFormat:
+            @"http://music.163.com/api/song/lyric?id=%@&lv=1&kv=1&tv=-1", songId];
+        NSMutableURLRequest *lreq = [NSMutableURLRequest requestWithURL:[NSURL URLWithString:lurl]
+            cachePolicy:NSURLRequestReloadIgnoringLocalCacheData timeoutInterval:10.0];
+        [lreq setValue:@"http://music.163.com" forHTTPHeaderField:@"Referer"];
+        [lreq setValue:@"appver=2.0.2" forHTTPHeaderField:@"Cookie"];
+        __block NSString *lrc = nil;
+        [[NSURLSession.sharedSession dataTaskWithRequest:lreq
+            completionHandler:^(NSData *d, NSURLResponse *r, NSError *e) {
+            if (d.length) {
+                id j = [NSJSONSerialization JSONObjectWithData:d options:0 error:NULL];
+                NSString *s = j[@"lrc"][@"lyric"];
+                if ([s isKindOfClass:NSString.class]) lrc = s;
+            }
+            dispatch_semaphore_signal(sem);
+        }] resume];
+        dispatch_semaphore_wait(sem, dispatch_time(DISPATCH_TIME_NOW, (int64_t)(11 * NSEC_PER_SEC)));
+        NSArray *lines = PBLrcParse(lrc);
+        dispatch_async(dispatch_get_main_queue(), ^{
+            pbLrcLines = lines;
+            PBLog(@"歌词: %@%@ (%lu 行)", lines ? @"" : @"没拿到 ", title ?: @"",
+                  (unsigned long)(lines ? lines.count : 0));
+        });
+    });
+}
+
+/* 找到 time 时刻应显示的歌词行 */
+static NSString *PBLrcLineAt(double t) {
+    if (!pbLrcLines.count) return nil;
+    __block NSString *hit = nil;
+    for (NSArray *l in pbLrcLines) {
+        if ([l[0] doubleValue] <= t + 0.15) hit = l[1];
+        else break;
+    }
+    return hit;
+}
+
+/* ---------- 桌面歌词视图(可拖动, 独立于面板) ---------- */
+static NSString *PBLyricNowText(void) {
+    NSString *title = nil, *artist = nil;
+    if (pbPlayer) {
+        title = pbOnlineNow[@"name"]; artist = pbOnlineNow[@"artist"];
+    } else {
+        title = pbNPTitle; artist = pbNPArtist;
+    }
+    if (!title.length) return nil;
+    /* 歌曲换了就重新拉歌词 */
+    NSString *key = [NSString stringWithFormat:@"%@|%@", title ?: @"", artist ?: @""];
+    if (![key isEqualToString:pbLrcFor]) {
+        pbLrcFor = key;
+        pbLrcLines = nil;
+        if (PBBool(@"pbLyricOn", YES)) PBFetchLRC(title, artist);
+    }
+    double t = pbPlayer ? 0 : pbElapsed;
+    if (pbPlayer) @try { t = CMTimeGetSeconds(pbPlayer.currentTime); } @catch (__unused NSException *e) {}
+    NSString *line = PBLrcLineAt(t);
+    if (line.length) return line;
+    return artist.length ? [NSString stringWithFormat:@"♪ %@ — %@", title, artist] : title;
+}
+
+static void PBLayoutLyric(void) {
+    if (!pbLyric || !pbWin) return;
+    CGFloat size = MAX(20.0, PBScalar(@"pbLyricSize", 15.0));
+    pbLyricLabel.font = [UIFont systemFontOfSize:size weight:UIFontWeightMedium];
+    CGRect wb = pbWin.bounds;
+    CGFloat xr = PBScalar(@"pbLyricX", 0.5), yr = PBScalar(@"pbLyricY", 0.86);
+    if (xr < 0 || xr > 1) xr = 0.5;
+    if (yr < 0 || yr > 1) yr = 0.86;
+    [pbLyric sizeToFit];
+    CGFloat w = MIN(pbLyricLabel.frame.size.width + 28, wb.size.width - 24);
+    CGFloat h = size + 16;
+    pbLyric.bounds = CGRectMake(0, 0, w, h);
+    pbLyric.center = CGPointMake(wb.size.width * xr, wb.size.height * yr);
+    pbLyric.layer.cornerRadius = h * 0.5;
+}
+
+static void PBBuildLyric(void) {
+    if (!pbWin) return;
+    if (!pbLyric) {
+        UIView *v = [[UIView alloc] initWithFrame:CGRectMake(0, 0, 200, 32)];
+        v.backgroundColor = [UIColor colorWithWhite:0 alpha:0.55];
+        v.layer.cornerCurve = kCACornerCurveContinuous;
+        UILabel *l = [UILabel new];
+        l.textColor = [UIColor colorWithRed:1.0 green:0.62 blue:0.72 alpha:1.0];
+        l.textAlignment = NSTextAlignmentCenter;
+        l.numberOfLines = 1;
+        l.font = [UIFont systemFontOfSize:15 weight:UIFontWeightMedium];
+        l.frame = v.bounds;
+        l.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
+        [v addSubview:l];
+        UIPanGestureRecognizer *pan = [[UIPanGestureRecognizer alloc] initWithTarget:pbCtrl
+                                                                            action:@selector(lyricPan:)];
+        [v addGestureRecognizer:pan];
+        [pbWin addSubview:v];
+        pbLyric = v;
+        pbLyricLabel = l;
+    }
+    BOOL on = PBBool(@"pbLyricOn", YES) && PBBool(@"pbFloatOn", NO);
+    pbLyric.hidden = !on;
+    if (on) {
+        PBLayoutLyric();
+        if (!pbLyricTimer) {
+            pbLyricTimer = [NSTimer scheduledTimerWithTimeInterval:0.3 repeats:YES block:^(NSTimer *tm) {
+                BOOL playing = pbPlayer ? (pbPlayer.rate > 0.01) : (pbRate > 0.01);
+                if (!playing) return;
+                NSString *txt = PBLyricNowText();
+                if (txt.length && ![pbLyricLabel.text isEqualToString:txt]) pbLyricLabel.text = txt;
+            }];
+        }
+    }
+}
+
 
 @implementation PBBallController
 - (void)pan:(UIPanGestureRecognizer *)g {
@@ -384,24 +634,29 @@ static PBBallController *pbCtrl = nil;
 - (void)closeTap:(UIButton *)b { PBClosePanel(); }
 - (void)prevTap {
     if (pbPlayer) { PBOnlineSkip(NO); return; }
-    PBSendCommand(PB_CMD_PREV);
+    PBSystemPrev();
 }
 - (void)nextTap {
     if (pbPlayer) { PBOnlineSkip(YES); return; }
-    PBSendCommand(PB_CMD_NEXT);
+    PBSystemNext();
 }
 - (void)playTap {
-    /* 3.0.1: 修安全模式 —— SpringBoard 进程里绝不调 MPMusicPlayerController
-       (内部依赖音乐 App 的 XPC 结构, SB 里一调就崩)。在线播放模式控制 AVPlayer,
-       否则一律走 MediaRemote 命令(408/409 实锤 SB 里可用)。 */
+    /* 3.0.2: 播放键走 MPAVController(系统最后一次播放的会话)或 AVPlayer(在线),
+       彻底不再碰 MRMediaRemoteSendCommand —— 411 实锤它把 SpringBoard 拖进安全模式 */
+    PBLog(@"播放键按下 (在线=%d)", pbPlayer != nil);
     if (pbPlayer) {
         @try {
-            if (pbPlayer.rate > 0.01) [pbPlayer pause];
-            else [pbPlayer play];
+            double dur = CMTimeGetSeconds(pbPlayer.currentItem.duration);
+            if (pbPlayer.rate > 0.01) { [pbPlayer pause]; }
+            else {
+                if (dur > 0.5 && CMTimeGetSeconds(pbPlayer.currentTime) >= dur - 0.3)
+                    [pbPlayer seekToTime:CMTimeMake(0, 1)];
+                [pbPlayer play];
+            }
         } @catch (__unused NSException *e) {}
         return;
     }
-    PBSendCommand(pbRate > 0.01 ? PB_CMD_PAUSE : PB_CMD_PLAY);
+    PBSystemToggle();
 }
 - (void)sliderDown:(UISlider *)s { pbDragging = YES; }
 - (void)sliderChanging:(UISlider *)s {
@@ -419,8 +674,7 @@ static PBBallController *pbCtrl = nil;
         } @catch (__unused NSException *e) {}
         return;
     }
-    double sec = s.value * pbDuration;
-    if (pbSetElapsed) pbSetElapsed(sec);
+    if (pbDuration > 0.5) PBSystemSeek(s.value * pbDuration);
     PBRefresh();
 }
 - (void)tabTap:(UIButton *)b { PBShowTab(b.tag); }
@@ -446,33 +700,31 @@ static PBBallController *pbCtrl = nil;
         if (pbList) [pbList reloadData];
     });
 }
-/* 深链跳转: QQ 音乐无公开接口, 打开对应 App */
-- (void)openURLStr:(NSString *)scheme fallback:(NSString *)fb {
-    @try {
-        NSURL *u = [NSURL URLWithString:scheme];
-        void (^blk)(BOOL) = ^(BOOL ok){ if (!ok && fb) {
-            [[UIApplication sharedApplication] openURL:[NSURL URLWithString:fb]
-                                               options:@{} completionHandler:nil];
-        }};
-        [[UIApplication sharedApplication] openURL:u options:@{} completionHandler:blk];
-        PBLog(@"深链跳转: %@", scheme);
-    } @catch (__unused NSException *e) {}
-}
-- (void)openKuwo:(UIButton *)b { [self openURLStr:@"kuwo://" fallback:nil]; }
-- (void)openQQ:(UIButton *)b {
-    NSString *kw = pbSearchField.text ?: @"";
-    if (kw.length)
-        [self openURLStr:[NSString stringWithFormat:@"qqmusic://qq.com/ui/search?keyword=%@", kw]
-                fallback:@"qqmusic://"];
-    else
-        [self openURLStr:@"qqmusic://" fallback:nil];
-}
+/* 3.0.2: 深链跳转按钮已按用户要求移除 —— 播放控制直接作用于"最后一次播放的播放器" */
 - (void)rowDel:(UIButton *)b {
     NSInteger row = b.tag;
     if (row < 0 || row >= (NSInteger)pbListItems.count) return;
     [pbListItems removeObjectAtIndex:row];
     PBSaveList(pbListIsLikes, pbListItems);
     if (pbList) [pbList reloadData];
+}
+- (void)lyricPan:(UIPanGestureRecognizer *)g {
+    if (!pbLyric || !pbWin) return;
+    CGPoint t = [g translationInView:pbWin];
+    [g setTranslation:CGPointZero inView:pbWin];
+    CGPoint c = pbLyric.center;
+    c.x += t.x; c.y += t.y;
+    CGRect wb = pbWin.bounds;
+    c.x = MIN(MAX(c.x, 40), wb.size.width - 40);
+    c.y = MIN(MAX(c.y, 30), wb.size.height - 30);
+    pbLyric.center = c;
+    if (g.state == UIGestureRecognizerStateEnded || g.state == UIGestureRecognizerStateCancelled) {
+        CFPreferencesSetAppValue(CFSTR("pbLyricX"), (__bridge CFPropertyListRef)@(c.x / wb.size.width),
+                                 (__bridge CFStringRef)PB_DOMAIN);
+        CFPreferencesSetAppValue(CFSTR("pbLyricY"), (__bridge CFPropertyListRef)@(c.y / wb.size.height),
+                                 (__bridge CFStringRef)PB_DOMAIN);
+        CFPreferencesAppSynchronize((__bridge CFStringRef)PB_DOMAIN);
+    }
 }
 - (void)rowLike:(UIButton *)b {
     NSInteger row = b.tag;
@@ -500,20 +752,20 @@ static PBBallController *pbCtrl = nil;
     if (!c) {
         c = [[UITableViewCell alloc] initWithStyle:UITableViewCellStyleSubtitle reuseIdentifier:idv];
         c.backgroundColor = UIColor.clearColor;
-        c.textLabel.textColor = UIColor.whiteColor;
+        c.textLabel.textColor = [UIColor colorWithRed:0.29 green:0.23 blue:0.27 alpha:1.0];
         c.textLabel.font = [UIFont systemFontOfSize:15 weight:UIFontWeightMedium];
-        c.detailTextLabel.textColor = [UIColor colorWithWhite:1 alpha:0.5];
+        c.detailTextLabel.textColor = [UIColor colorWithRed:0.62 green:0.54 blue:0.60 alpha:1.0];
         c.detailTextLabel.font = [UIFont systemFontOfSize:12];
-        c.imageView.tintColor = [UIColor colorWithWhite:1 alpha:0.6];
+        c.imageView.tintColor = [UIColor colorWithRed:1.0 green:0.50 blue:0.66 alpha:0.85];
         UIButton *like = [UIButton buttonWithType:UIButtonTypeSystem];
         like.frame = CGRectMake(0, 0, 40, 40);
         [like setImage:[UIImage systemImageNamed:@"heart"] forState:UIControlStateNormal];
-        like.tintColor = [UIColor colorWithWhite:1 alpha:0.55];
+        like.tintColor = [UIColor colorWithRed:1.0 green:0.50 blue:0.66 alpha:0.85];
         [like addTarget:pbCtrl action:@selector(rowLike:) forControlEvents:UIControlEventTouchUpInside];
         UIButton *del = [UIButton buttonWithType:UIButtonTypeSystem];
         del.frame = CGRectMake(0, 0, 40, 40);
         [del setImage:[UIImage systemImageNamed:@"xmark"] forState:UIControlStateNormal];
-        del.tintColor = [UIColor colorWithWhite:1 alpha:0.4];
+        del.tintColor = [UIColor colorWithRed:0.62 green:0.54 blue:0.60 alpha:0.8];
         [del addTarget:pbCtrl action:@selector(rowDel:) forControlEvents:UIControlEventTouchUpInside];
         c.accessoryView = like;   /* 初始挂收藏按钮, 行内按 tab 切换 */
         objc_setAssociatedObject(c, "pbLikeBtn", like, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
@@ -648,6 +900,7 @@ static void PBRefresh(void) {
         if (![d isKindOfClass:NSDictionary.class]) d = nil;
         NSString *title  = [d[PBKeyTitle()] isKindOfClass:NSString.class] ? d[PBKeyTitle()] : nil;
         NSString *artist = [d[PBKeyArtist()] isKindOfClass:NSString.class] ? d[PBKeyArtist()] : nil;
+        pbNPTitle = title; pbNPArtist = artist;   /* 桌面歌词用 */
         pbDuration = [d[PBKeyDuration()] doubleValue];
         pbElapsed  = [d[PBKeyElapsed()] doubleValue];
         pbRate     = [d[PBKeyRate()] doubleValue];
@@ -705,6 +958,12 @@ static void PBPlaySong(NSDictionary *song) {
         PBLog(@"在线播放: %@ - %@ (rid=%@)", song[@"name"], song[@"artist"], rid);
         if (pbTabNow != 0) PBShowTab(0);
         PBRefresh();
+        /* 桌面歌词: 立刻换歌 + 拉新歌词 */
+        if (pbLyric && pbLyricLabel) {
+            pbLrcFor = nil;
+            pbLyricLabel.text = [NSString stringWithFormat:@"♪ %@ — %@",
+                                 song[@"name"], song[@"artist"]];
+        }
     } @catch (NSException *e) {
         PBLog(@"在线播放异常: %@ — %@", e.name, e.reason);
     }
@@ -718,8 +977,8 @@ static void PBShowTab(NSInteger idx) {
         [b setTitleColor:(i == idx) ? UIColor.whiteColor
                         : [UIColor colorWithWhite:1 alpha:0.45]
               forState:UIControlStateNormal];
-        b.backgroundColor = (i == idx) ? [UIColor colorWithWhite:1 alpha:0.14]
-                                       : UIColor.clearColor;
+        b.backgroundColor = (i == idx) ? [UIColor colorWithRed:1.0 green:0.50 blue:0.66 alpha:0.9]
+                                       : [UIColor colorWithWhite:1 alpha:0.55];
     }
     pbPageNow.hidden    = (idx != 0);
     pbPageSearch.hidden = (idx != 1);
@@ -748,29 +1007,37 @@ static void PBBuildPanel(void) {
     CGFloat cw = MIN(wb.size.width - 32.0, 360.0);
     CGFloat ch = MIN(wb.size.height - 70.0, 500.0);
     CGFloat cx = (wb.size.width - cw) * 0.5, cy = (wb.size.height - ch) * 0.5;
-    UIColor *sub = [UIColor colorWithWhite:1 alpha:0.5];
-    UIColor *txt = UIColor.whiteColor;
+    /* 3.0.2: 可爱粉紫主题 —— 奶白底 + 樱花粉强调 + 淡紫点缀 */
+    UIColor *accent = [UIColor colorWithRed:1.00 green:0.50 blue:0.66 alpha:1.0];   /* #FF80A8 */
+    UIColor *txt    = [UIColor colorWithRed:0.29 green:0.23 blue:0.27 alpha:1.0];   /* #4A3B44 */
+    UIColor *sub    = [UIColor colorWithRed:0.62 green:0.54 blue:0.60 alpha:1.0];   /* #9E8A99 */
 
     UIView *dim = [[UIView alloc] initWithFrame:wb];
-    dim.backgroundColor = [UIColor colorWithWhite:0 alpha:0.45];
+    dim.backgroundColor = [UIColor colorWithWhite:0 alpha:0.35];
     dim.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
     [dim addGestureRecognizer:[[UITapGestureRecognizer alloc] initWithTarget:pbCtrl
                                                                      action:@selector(dimTap:)]];
     [pbWin addSubview:dim];
 
     UIView *card = [[UIView alloc] initWithFrame:CGRectMake(cx, cy, cw, ch)];
-    card.layer.cornerRadius = 26;
+    card.layer.cornerRadius = 30;
     card.layer.cornerCurve = kCACornerCurveContinuous;
     card.clipsToBounds = YES;
-    /* 3.0.1: 修安全模式 —— SpringBoard 里不用 UIVisualEffectView, 纯色深底 */
-    card.backgroundColor = [UIColor colorWithWhite:0.09 alpha:0.97];
+    /* 3.0.1: SB 里不用 UIVisualEffectView; 3.0.2 奶白→淡紫渐变 */
+    CAGradientLayer *grad = [CAGradientLayer layer];
+    grad.frame = card.bounds;
+    grad.colors = @[(id)[UIColor colorWithRed:1.00 green:0.945 blue:0.96 alpha:1.0].CGColor,
+                    (id)[UIColor colorWithRed:0.945 green:0.92 blue:1.00 alpha:1.0].CGColor];
+    grad.startPoint = CGPointMake(0, 0);
+    grad.endPoint = CGPointMake(1, 1);
+    [card.layer insertSublayer:grad atIndex:0];
 
-    UILabel *head = PBMakeLabel(@"播放器", [UIFont systemFontOfSize:13 weight:UIFontWeightMedium],
-                                [UIColor colorWithWhite:1 alpha:0.5]);
+    UILabel *head = PBMakeLabel(@"♪ 播放器", [UIFont systemFontOfSize:13 weight:UIFontWeightMedium],
+                                accent);
     head.frame = CGRectMake(20, 12, cw - 80, 18);
     [card addSubview:head];
 
-    UIButton *close = PBMakeIcon(@"xmark", 14, [UIColor colorWithWhite:1 alpha:0.7]);
+    UIButton *close = PBMakeIcon(@"xmark", 14, sub);
     close.frame = CGRectMake(cw - 42, 8, 36, 30);
     [close addTarget:pbCtrl action:@selector(closeTap:) forControlEvents:UIControlEventTouchUpInside];
     [card addSubview:close];
@@ -799,9 +1066,9 @@ static void PBBuildPanel(void) {
     UIImageView *coverV = [[UIImageView alloc] initWithFrame:CGRectMake(24, 8, 92, 92)];
     coverV.contentMode = UIViewContentModeScaleAspectFill;
     coverV.clipsToBounds = YES;
-    coverV.layer.cornerRadius = 18;
+    coverV.layer.cornerRadius = 24;
     coverV.layer.cornerCurve = kCACornerCurveContinuous;
-    coverV.backgroundColor = [UIColor colorWithWhite:1 alpha:0.06];
+    coverV.backgroundColor = [UIColor colorWithWhite:1 alpha:0.75];
     coverV.image = pbBallImg ?: PBPlaceholder(92);
     [p0 addSubview:coverV];
 
@@ -810,38 +1077,16 @@ static void PBBuildPanel(void) {
     t.textAlignment = NSTextAlignmentLeft;
     [p0 addSubview:t];
 
-    UILabel *a = PBMakeLabel(@"点播放键或搜索歌曲", [UIFont systemFontOfSize:13], sub);
+    UILabel *a = PBMakeLabel(@"点播放键继续上次播放 · 搜索找歌即点即播",
+                             [UIFont systemFontOfSize:12], sub);
     a.frame = CGRectMake(130, 44, cw - 150, 18);
     a.textAlignment = NSTextAlignmentLeft;
     [p0 addSubview:a];
 
-    /* 深链: 打开酷我 / QQ 音乐 App */
-    UIButton *kuwoB = [UIButton buttonWithType:UIButtonTypeSystem];
-    kuwoB.frame = CGRectMake(130, 66, 100, 26);
-    kuwoB.layer.cornerRadius = 13;
-    kuwoB.layer.borderWidth = 1;
-    kuwoB.layer.borderColor = [UIColor colorWithWhite:1 alpha:0.25].CGColor;
-    kuwoB.tintColor = txt;
-    kuwoB.titleLabel.font = [UIFont systemFontOfSize:11];
-    [kuwoB setTitle:@"酷我音乐" forState:UIControlStateNormal];
-    [kuwoB addTarget:pbCtrl action:@selector(openKuwo:) forControlEvents:UIControlEventTouchUpInside];
-    [p0 addSubview:kuwoB];
-
-    UIButton *qqB = [UIButton buttonWithType:UIButtonTypeSystem];
-    qqB.frame = CGRectMake(238, 66, 100, 26);
-    qqB.layer.cornerRadius = 13;
-    qqB.layer.borderWidth = 1;
-    qqB.layer.borderColor = [UIColor colorWithWhite:1 alpha:0.25].CGColor;
-    qqB.tintColor = txt;
-    qqB.titleLabel.font = [UIFont systemFontOfSize:11];
-    [qqB setTitle:@"QQ音乐" forState:UIControlStateNormal];
-    [qqB addTarget:pbCtrl action:@selector(openQQ:) forControlEvents:UIControlEventTouchUpInside];
-    [p0 addSubview:qqB];
-
-    UISlider *sl = [[UISlider alloc] initWithFrame:CGRectMake(28, 122, cw - 56, 28)];
+    UISlider *sl = [[UISlider alloc] initWithFrame:CGRectMake(28, 118, cw - 56, 28)];
     sl.minimumValue = 0; sl.maximumValue = 1; sl.value = 0;
-    sl.minimumTrackTintColor = [UIColor colorWithWhite:1 alpha:0.9];
-    sl.maximumTrackTintColor = [UIColor colorWithWhite:1 alpha:0.22];
+    sl.minimumTrackTintColor = accent;
+    sl.maximumTrackTintColor = [accent colorWithAlphaComponent:0.22];
     [sl addTarget:pbCtrl action:@selector(sliderDown:) forControlEvents:UIControlEventTouchDown];
     [sl addTarget:pbCtrl action:@selector(sliderChanging:) forControlEvents:UIControlEventValueChanged];
     [sl addTarget:pbCtrl action:@selector(sliderUp:) forControlEvents:
@@ -866,8 +1111,8 @@ static void PBBuildPanel(void) {
 
     UIButton *play = [UIButton buttonWithType:UIButtonTypeSystem];
     play.frame = CGRectMake(cw * 0.5 - 28, by - 4, 56, 56);
-    play.backgroundColor = UIColor.whiteColor;
-    play.tintColor = UIColor.blackColor;
+    play.backgroundColor = accent;
+    play.tintColor = UIColor.whiteColor;
     play.layer.cornerRadius = 28;
     [play setImage:[UIImage systemImageNamed:@"play.fill"] forState:UIControlStateNormal];
     [play setPreferredSymbolConfiguration:
@@ -888,11 +1133,11 @@ static void PBBuildPanel(void) {
     [card addSubview:p1];
 
     UITextField *sf = [[UITextField alloc] initWithFrame:CGRectMake(16, 8, cw - 92, 36)];
-    sf.placeholder = @"搜索歌曲 / 歌手 (酷我音源)";
+    sf.placeholder = @"🌸 搜歌名或歌手";
     sf.font = [UIFont systemFontOfSize:14];
     sf.textColor = txt;
-    sf.backgroundColor = [UIColor colorWithWhite:1 alpha:0.10];
-    sf.layer.cornerRadius = 10;
+    sf.backgroundColor = [UIColor colorWithWhite:1 alpha:0.72];
+    sf.layer.cornerRadius = 12;
     sf.leftView = [[UIView alloc] initWithFrame:CGRectMake(0, 0, 10, 10)];
     sf.leftViewMode = UITextFieldViewModeAlways;
     sf.returnKeyType = UIReturnKeySearch;
@@ -904,8 +1149,8 @@ static void PBBuildPanel(void) {
     UIButton *go = [UIButton buttonWithType:UIButtonTypeSystem];
     go.frame = CGRectMake(cw - 70, 8, 56, 36);
     go.layer.cornerRadius = 10;
-    go.backgroundColor = [UIColor colorWithWhite:1 alpha:0.16];
-    go.tintColor = txt;
+    go.backgroundColor = [UIColor colorWithRed:1.0 green:0.50 blue:0.66 alpha:0.9];
+    go.tintColor = UIColor.whiteColor;
     go.titleLabel.font = [UIFont systemFontOfSize:13 weight:UIFontWeightMedium];
     [go setTitle:@"搜索" forState:UIControlStateNormal];
     [go addTarget:pbCtrl action:@selector(searchGo:) forControlEvents:UIControlEventTouchUpInside];
@@ -921,7 +1166,7 @@ static void PBBuildPanel(void) {
     UITableView *lv = [[UITableView alloc] initWithFrame:CGRectMake(0, 70, cw, ch - 70)
                                     style:UITableViewStylePlain];
     lv.backgroundColor = UIColor.clearColor;
-    lv.separatorColor = [UIColor colorWithWhite:1 alpha:0.10];
+    lv.separatorColor = [[UIColor colorWithRed:1.0 green:0.50 blue:0.66 alpha:1.0] colorWithAlphaComponent:0.12];
     lv.delegate = pbCtrl;
     lv.dataSource = pbCtrl;
     lv.rowHeight = 46;
@@ -1018,7 +1263,9 @@ static BOOL PBEnsureWindow(void) {
     UIViewController *vc = [UIViewController new];
     vc.view.backgroundColor = UIColor.clearColor;
     w.rootViewController = vc;
-    w.hidden = NO;
+    /* 3.0.2: 修"点搜索栏没键盘" —— 之前只 hidden=NO, 窗口不是 keyWindow,
+       UITextField becomeFirstResponder 无效。makeKeyAndVisible 让键盘能弹起。 */
+    [w makeKeyAndVisible];
     pbWin = w;
     return YES;
 }
@@ -1073,6 +1320,7 @@ static void PBBuildBall(void) {
                                                         cornerRadius:r].CGPath;
     pbBall.hidden = NO;
     PBApplyAsset();
+    PBBuildLyric();
     PBLog(@"悬浮球已挂载: %.0fx%.0f 中心=(%.0f,%.0f) window level=%.0f 素材=%@",
           size, size, pbBall.center.x, pbBall.center.y, pbWin.windowLevel,
           pbBallPath.length ? pbBallPath.lastPathComponent : @"占位");
@@ -1082,6 +1330,8 @@ static void PBDestroy(void) {
     PBClosePanel();
     pbRetrying = NO; pbRetryCount = 0;
     if (pbPlayer) { @try { [pbPlayer pause]; } @catch (__unused NSException *e) {} pbPlayer = nil; pbOnlineNow = nil; }
+    if (pbLyricTimer) { [pbLyricTimer invalidate]; pbLyricTimer = nil; }
+    if (pbLyric) { [pbLyric removeFromSuperview]; pbLyric = nil; pbLyricLabel = nil; }
     if (pbBall) {
         [pbBall removeFromSuperview];
         pbBall = nil; pbBallIV = nil; pbBallImg = nil; pbBallPath = nil;

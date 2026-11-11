@@ -5624,6 +5624,11 @@ static void diwKillByComm(const char *comm) {
     [specs addObject:[self switchSpec:@"启用悬浮球" key:@"pbFloatOn" def:@NO]];
     [specs addObject:[self switchSpec:@"圆形裁剪" key:@"pbFloatRound" def:@YES]];
 
+    [specs addObject:[self groupSpec:@"桌面歌词"
+        footer:@"屏幕下方的悬浮歌词条, 可拖动, 位置自动记住。在线播放自动带逐行歌词(网易云词源); 播放系统音乐时显示歌名与歌手。"]];
+    [specs addObject:[self switchSpec:@"启用桌面歌词" key:@"pbLyricOn" def:@YES]];
+    [specs addObject:[self numSlider:@"歌词大小" key:@"pbLyricSize" def:15 mn:12 mx:24]];
+
     [specs addObject:[self groupSpec:@"悬浮球素材"
         footer:[NSString stringWithFormat:@"素材目录:\n%@\n支持 png / gif / jpg。gif 会自动循环播放; 目录为空时显示占位音符球。", [self pbAssetDir]]]];
 
