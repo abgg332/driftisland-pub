@@ -65,7 +65,7 @@ static double expandTextY = DI_EXP_TEXT_BASE_Y;   // 上下偏移(pt, 下为正,
 static double expandTextScale = 100.0; // 文字大小(%, 100=原样)
 /* 2.8.86: 构建戳 —— 之前横幅打的是 SpringBoard 自己的 CFBundleShortVersionString(恒 1.0),
    日志里根本看不出装的是哪一版。所有诊断行都带这个戳, 下轮日志一眼定位。 */
-#define DI_BUILD_VER @"3.0.7"
+#define DI_BUILD_VER @"3.0.8"
 static BOOL gRecordingActive = NO; // 保留: 岛素材总闸条件
 static NSString *diElementId(UIView *host);
 static BOOL diMiniMusicActive(UIView *host); // 2.6.3: 前置(遮罩层使用)
@@ -15646,6 +15646,8 @@ static BOOL diArtIs3x2(void) {
     return [cache hasPrefix:@"3x2"];
 }
 
+#define kDIBgTag 0x44494247
+
 static BOOL diArtNameIsArtwork(NSString *cn) {
     if (!cn.length) return NO;
     if ([cn containsString:@"Activity"] || [cn containsString:@"Flipping"]) return NO;
@@ -15661,19 +15663,30 @@ static NSArray<UIView *> *diArtCollectIn(UIView *root) {
     if (!root) return out;
     CGFloat rootArea = root.bounds.size.width * root.bounds.size.height;
     NSMutableArray *stack = [NSMutableArray arrayWithObject:root];
-    int budget = 800;
+    int budget = 2600;   /* 3.0.8: 控制中心整棵树 1000+ 视图, 800 会提前截断, 四宫格扫不到 */
     while (stack.count && budget-- > 0) {
         UIView *v = stack.lastObject; [stack removeLastObject];
+        if (v.tag == kDIBgTag) continue;   /* 跳过我们自己铺的背景层 */
         if (v != root && !v.hidden && v.alpha > 0.05) {
             CGSize s = v.bounds.size;
             if (s.width >= 18 && s.height >= 18 && s.width <= 600 && s.height <= 600) {
                 CGFloat ratio = s.width / MAX(1.0, s.height);
                 CGFloat area = s.width * s.height;
                 BOOL tooBig = rootArea > 1 && area > rootArea * 0.55;
-                if (!tooBig && ratio > 0.7 && ratio < 1.45 && diArtNameIsArtwork(NSStringFromClass(v.class))) {
-                    [out addObject:v];
-                    if (out.count >= 6) break;
-                    continue;   /* 命中封面就不再往里钻, 免得把它内部的 imageView 也当封面 */
+                if (!tooBig && ratio > 0.72 && ratio < 1.4) {
+                    NSString *cn = NSStringFromClass(v.class);
+                    /* 3.0.8: 3×2 展开后的四宫格(猜你喜欢/已播单曲…)不是 MRUArtworkView,
+                       而是建议 cell 里的普通 UIImageView —— 以前只认类名, 所以图一那四张
+                       永远不变圆。这里补一条"尺寸够大的方形 UIImageView"兜底。 */
+                    BOOL named = diArtNameIsArtwork(cn);
+                    BOOL img = [v isKindOfClass:UIImageView.class]
+                            && ((UIImageView *)v).image != nil
+                            && s.width >= 38 && s.height >= 38;
+                    if (named || img) {
+                        [out addObject:v];
+                        if (out.count >= 8) break;
+                        continue;   /* 命中封面就不再往里钻, 免得把它内部的 imageView 也当封面 */
+                    }
                 }
             }
         }
@@ -15744,6 +15757,110 @@ static void diArtApply(UIView *v, BOOL on) {
         sp.timingFunction = [CAMediaTimingFunction functionWithName:kCAMediaTimingFunctionLinear];
         [layer addAnimation:sp forKey:@"di.art.spin"];
     }
+}
+
+/* ===== 3.0.8: 「封面背景」铺满 =====
+   原版渐变只铺了很小一块(用户看到"一点点颜色"), 且位置依赖播放器自己的 layout。
+   这里直接取当前专辑图, 在播放器最底层铺一层 aspectFill + 模糊 + 暗化, 跟着
+   root.bounds 自适应 —— 打开开关就是整块背景都是专辑图。 */
+@interface DIBgState : NSObject
+@property (nonatomic, strong) UIView *bg;
+@property (nonatomic, strong) UIImageView *img;
+@property (nonatomic, strong) UIImage *image;
+@property (nonatomic, assign) CFTimeInterval lastTS;
+@end
+@implementation DIBgState
+@end
+
+static const void *kDIBgKey = &kDIBgKey;
+static BOOL gDIBgOn = NO;
+static CFTimeInterval gDIBgTS = 0;
+
+static BOOL diArtBgOn(void) {
+    CFTimeInterval now = CFAbsoluteTimeGetCurrent();
+    if (now - gDIBgTS > 0.5) {
+        gDIBgTS = now;
+        CFPreferencesAppSynchronize(CFSTR("com.local.playerexact"));
+        id v = CFBridgingRelease(CFPreferencesCopyAppValue(CFSTR("MusicArtworkGradientEnabled"),
+                                                          CFSTR("com.local.playerexact")));
+        gDIBgOn = [v isKindOfClass:NSNumber.class] ? [v boolValue] : YES;
+    }
+    return gDIBgOn;
+}
+
+static UIImage *diArtImageOf(UIView *root) {
+    NSMutableArray *stack = [NSMutableArray arrayWithObject:root];
+    int budget = 1600;
+    while (stack.count && budget-- > 0) {
+        UIView *v = stack.lastObject; [stack removeLastObject];
+        if (v.tag == kDIBgTag) continue;          /* 别取到自己铺的背景图 */
+        if ([v isKindOfClass:UIImageView.class]) {
+            UIImage *im = ((UIImageView *)v).image;
+            if (im && im.size.width >= 40 && im.size.height >= 40) return im;
+        }
+        for (UIView *c in v.subviews) [stack addObject:c];
+    }
+    return nil;
+}
+
+static void diArtApplyBackground(UIView *root, BOOL on) {
+    DIBgState *st = objc_getAssociatedObject(root, kDIBgKey);
+    if (!on) {
+        if (st) {
+            [st.bg removeFromSuperview];
+            objc_setAssociatedObject(root, kDIBgKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        }
+        return;
+    }
+    CFTimeInterval now = CFAbsoluteTimeGetCurrent();
+    /* layout 一秒可能跑几十次, 取图要遍历整棵树 —— 节流到 2 秒, 否则主线程被拖慢,
+       展开动画反而更抖 */
+    if (st && st.image && now - st.lastTS < 2.0) {
+        if (st.bg.superview != root) [root insertSubview:st.bg atIndex:0];
+        st.bg.frame = root.bounds;
+        return;
+    }
+    UIImage *img = diArtImageOf(root);
+    if (!img) return;
+    if (!st) {
+        st = [DIBgState new];
+        UIView *bg = [[UIView alloc] initWithFrame:root.bounds];
+        bg.tag = kDIBgTag;
+        bg.userInteractionEnabled = NO;
+        bg.clipsToBounds = YES;
+        bg.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
+
+        UIImageView *iv = [[UIImageView alloc] initWithFrame:bg.bounds];
+        iv.contentMode = UIViewContentModeScaleAspectFill;
+        iv.clipsToBounds = YES;
+        iv.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
+        [bg addSubview:iv];
+
+        UIVisualEffectView *blur = [[UIVisualEffectView alloc]
+            initWithEffect:[UIBlurEffect effectWithStyle:UIBlurEffectStyleSystemUltraThinMaterialDark]];
+        blur.frame = bg.bounds;
+        blur.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
+        [bg addSubview:blur];
+
+        UIView *dim = [[UIView alloc] initWithFrame:bg.bounds];
+        dim.backgroundColor = [UIColor colorWithWhite:0 alpha:0.30];
+        dim.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
+        [bg addSubview:dim];
+
+        st.bg = bg;
+        st.img = iv;
+        objc_setAssociatedObject(root, kDIBgKey, st, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        RLog(@"[封面] 背景层已铺 %@ %.0fx%.0f", NSStringFromClass(root.class),
+             root.bounds.size.width, root.bounds.size.height);
+    }
+    st.lastTS = now;
+    if (st.image != img) {
+        st.image = img;
+        st.img.image = img;
+    }
+    if (st.bg.superview != root) [root insertSubview:st.bg atIndex:0];
+    else [root sendSubviewToBack:st.bg];
+    st.bg.frame = root.bounds;
 }
 
 /* 3×2 抖动:
@@ -15828,13 +15945,22 @@ static void diArtKillJitter(UIView *root) {
     NSString *key = NSStringFromClass(tc.class);
     if (![logged containsObject:key]) {
         [logged addObject:key];
-        RLog(@"[抖动] 3×2 传送容器 %@ 动画=%@", key,
-             [tc.layer.animationKeys componentsJoinedByString:@","] ?: @"(无)");
+        RLog(@"[抖动] 3×2 传送容器 %@ 动画=%@ frame=%@", key,
+             [tc.layer.animationKeys componentsJoinedByString:@","] ?: @"(无)",
+             NSStringFromCGRect(tc.frame));
     }
     [CATransaction begin];
     [CATransaction setDisableActions:YES];
     diArtStripSpin(tc.layer, 0);
     [CATransaction commit];
+    /* 3.0.8: 3×2 的坐标是 1/3 分数(13.666/30.333), 按钮图标每帧重新光栅化时
+       会有半像素抖动; 3×2B 是 1/4 份, 落在整像素上所以不抖。把这一小块光栅化
+       一次, 之后每帧直接复用位图 —— 按钮区没有需要逐帧刷新的内容。 */
+    if (!tc.layer.shouldRasterize) {
+        tc.layer.shouldRasterize = YES;
+        tc.layer.rasterizationScale = [UIScreen mainScreen].scale;
+        RLog(@"[抖动] 3×2 按钮区已光栅化 (scale=%.1f)", (double)tc.layer.rasterizationScale);
+    }
     diArtPinTransport(tc);
 }
 
@@ -15887,6 +16013,10 @@ static void diArtPlayerPost(UIView *root) {
     }
     for (UIView *a in arts) diArtApply(a, on);
     if (on && !arts.count) diArtLogTree(root);
+    /* 3.0.8: 封面背景整块铺满(原版渐变只铺了一小块) —— 与旋转开关无关 */
+    if (root.bounds.size.width > 40 && root.bounds.size.height > 40) {
+        diArtApplyBackground(root, diArtBgOn());
+    }
     diArtKillJitter(root);
     /* 播放器的旋转/布局钩子安装顺序不确定, 可能在我们的清理之后又把动画挂回去。
        0.1s 后再补一次, 保证"关=静止、3×2=不抖"是最后一次写。 */
