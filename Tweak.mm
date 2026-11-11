@@ -16030,7 +16030,7 @@ static void diNPDumpCrashEvidence(void) {
                 NSArray *lines = [txt componentsSeparatedByCharactersInSet:
                                   [NSCharacterSet newlineCharacterSet]];
                 int shown = 0;
-                for (NSString *ln in lines) {
+                for (__strong NSString *ln in lines) {
                     BOOL key = [ln containsString:@"Exception Type"] || [ln containsString:@"Exception Codes"]
                             || [ln containsString:@"Termination Reason"] || [ln containsString:@"Termination Description"]
                             || [ln containsString:@"Triggered by Thread"] || [ln containsString:@"crashed"];
@@ -16595,7 +16595,7 @@ static void diArtChanged(CFNotificationCenterRef c, void *obs, CFStringRef name,
     if (gDIStage < 3) {
         gDIStage = 3;
         gDIPlayerSafeBoot = NO;
-        CFPreferencesSetAppValue(CFSTR("FeatureStage"), @3, CFSTR("com.abgg332.driftisland"));
+        CFPreferencesSetAppValue(CFSTR("FeatureStage"), (__bridge CFPropertyListRef)@3, CFSTR("com.abgg332.driftisland"));
         CFPreferencesAppSynchronize(CFSTR("com.abgg332.driftisland"));
         RLog(@"[保险] 设置有改动 → 功能档位恢复全开(下次引导生效)");
     }
