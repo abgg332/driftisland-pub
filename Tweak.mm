@@ -65,7 +65,7 @@ static double expandTextY = DI_EXP_TEXT_BASE_Y;   // 上下偏移(pt, 下为正,
 static double expandTextScale = 100.0; // 文字大小(%, 100=原样)
 /* 2.8.86: 构建戳 —— 之前横幅打的是 SpringBoard 自己的 CFBundleShortVersionString(恒 1.0),
    日志里根本看不出装的是哪一版。所有诊断行都带这个戳, 下轮日志一眼定位。 */
-#define DI_BUILD_VER @"3.0.8"
+#define DI_BUILD_VER @"3.0.9"
 static BOOL gRecordingActive = NO; // 保留: 岛素材总闸条件
 static NSString *diElementId(UIView *host);
 static BOOL diMiniMusicActive(UIView *host); // 2.6.3: 前置(遮罩层使用)
@@ -15646,8 +15646,6 @@ static BOOL diArtIs3x2(void) {
     return [cache hasPrefix:@"3x2"];
 }
 
-#define kDIBgTag 0x44494247
-
 static BOOL diArtNameIsArtwork(NSString *cn) {
     if (!cn.length) return NO;
     if ([cn containsString:@"Activity"] || [cn containsString:@"Flipping"]) return NO;
@@ -15663,30 +15661,19 @@ static NSArray<UIView *> *diArtCollectIn(UIView *root) {
     if (!root) return out;
     CGFloat rootArea = root.bounds.size.width * root.bounds.size.height;
     NSMutableArray *stack = [NSMutableArray arrayWithObject:root];
-    int budget = 2600;   /* 3.0.8: 控制中心整棵树 1000+ 视图, 800 会提前截断, 四宫格扫不到 */
+    int budget = 800;
     while (stack.count && budget-- > 0) {
         UIView *v = stack.lastObject; [stack removeLastObject];
-        if (v.tag == kDIBgTag) continue;   /* 跳过我们自己铺的背景层 */
         if (v != root && !v.hidden && v.alpha > 0.05) {
             CGSize s = v.bounds.size;
             if (s.width >= 18 && s.height >= 18 && s.width <= 600 && s.height <= 600) {
                 CGFloat ratio = s.width / MAX(1.0, s.height);
                 CGFloat area = s.width * s.height;
                 BOOL tooBig = rootArea > 1 && area > rootArea * 0.55;
-                if (!tooBig && ratio > 0.72 && ratio < 1.4) {
-                    NSString *cn = NSStringFromClass(v.class);
-                    /* 3.0.8: 3×2 展开后的四宫格(猜你喜欢/已播单曲…)不是 MRUArtworkView,
-                       而是建议 cell 里的普通 UIImageView —— 以前只认类名, 所以图一那四张
-                       永远不变圆。这里补一条"尺寸够大的方形 UIImageView"兜底。 */
-                    BOOL named = diArtNameIsArtwork(cn);
-                    BOOL img = [v isKindOfClass:UIImageView.class]
-                            && ((UIImageView *)v).image != nil
-                            && s.width >= 38 && s.height >= 38;
-                    if (named || img) {
-                        [out addObject:v];
-                        if (out.count >= 8) break;
-                        continue;   /* 命中封面就不再往里钻, 免得把它内部的 imageView 也当封面 */
-                    }
+                if (!tooBig && ratio > 0.7 && ratio < 1.45 && diArtNameIsArtwork(NSStringFromClass(v.class))) {
+                    [out addObject:v];
+                    if (out.count >= 6) break;
+                    continue;   /* 命中封面就不再往里钻, 免得把它内部的 imageView 也当封面 */
                 }
             }
         }
@@ -15759,117 +15746,23 @@ static void diArtApply(UIView *v, BOOL on) {
     }
 }
 
-/* ===== 3.0.8: 「封面背景」铺满 =====
-   原版渐变只铺了很小一块(用户看到"一点点颜色"), 且位置依赖播放器自己的 layout。
-   这里直接取当前专辑图, 在播放器最底层铺一层 aspectFill + 模糊 + 暗化, 跟着
-   root.bounds 自适应 —— 打开开关就是整块背景都是专辑图。 */
-@interface DIBgState : NSObject
-@property (nonatomic, strong) UIView *bg;
-@property (nonatomic, strong) UIImageView *img;
-@property (nonatomic, strong) UIImage *image;
-@property (nonatomic, assign) CFTimeInterval lastTS;
+/* ===== 3.0.9: 3×2 传送栏"瞬跳"修复 =====
+   实测(把你发的录屏按 60fps 逐帧量): 上一首 / 播放暂停 / 下一首 三个按钮会整条同时
+   上跳约 5pt, 停 1~2 帧又落回, 半秒到一秒一次 —— 这就是肉眼看到的"一抖一抖"。
+   图层上没有任何动画, 按钮自身 frame 也一直没变; 变的是"传送容器"被某次布局改了
+   一下 frame, 下一帧又改回去。所以不去猜播放器内部逻辑, 只把这一个容器的位置钉住:
+     · 尺寸不变 + 位移 <= 12pt + 父视图尺寸没变  → 判为抖动, 回滚到稳定值;
+     · 尺寸变了 / 位移更大 / 父视图尺寸变了(换布局、横竖屏) → 视为真的要挪, 更新基准。
+   只作用于 3×2 档位, 其它布局和其它视图一律不碰。 */
+static const void *kDITCStateKey = &kDITCStateKey;
+
+@interface DITCState : NSObject
+@property (nonatomic, assign) CGRect stable;      /* 稳定 frame(父坐标系) */
+@property (nonatomic, assign) CGSize parentSize;  /* 基准时的父视图尺寸 */
+@property (nonatomic, assign) int  fixed;
 @end
-@implementation DIBgState
+@implementation DITCState
 @end
-
-static const void *kDIBgKey = &kDIBgKey;
-static BOOL gDIBgOn = NO;
-static CFTimeInterval gDIBgTS = 0;
-
-static BOOL diArtBgOn(void) {
-    CFTimeInterval now = CFAbsoluteTimeGetCurrent();
-    if (now - gDIBgTS > 0.5) {
-        gDIBgTS = now;
-        CFPreferencesAppSynchronize(CFSTR("com.local.playerexact"));
-        id v = CFBridgingRelease(CFPreferencesCopyAppValue(CFSTR("MusicArtworkGradientEnabled"),
-                                                          CFSTR("com.local.playerexact")));
-        gDIBgOn = [v isKindOfClass:NSNumber.class] ? [v boolValue] : YES;
-    }
-    return gDIBgOn;
-}
-
-static UIImage *diArtImageOf(UIView *root) {
-    NSMutableArray *stack = [NSMutableArray arrayWithObject:root];
-    int budget = 1600;
-    while (stack.count && budget-- > 0) {
-        UIView *v = stack.lastObject; [stack removeLastObject];
-        if (v.tag == kDIBgTag) continue;          /* 别取到自己铺的背景图 */
-        if ([v isKindOfClass:UIImageView.class]) {
-            UIImage *im = ((UIImageView *)v).image;
-            if (im && im.size.width >= 40 && im.size.height >= 40) return im;
-        }
-        for (UIView *c in v.subviews) [stack addObject:c];
-    }
-    return nil;
-}
-
-static void diArtApplyBackground(UIView *root, BOOL on) {
-    DIBgState *st = objc_getAssociatedObject(root, kDIBgKey);
-    if (!on) {
-        if (st) {
-            [st.bg removeFromSuperview];
-            objc_setAssociatedObject(root, kDIBgKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-        }
-        return;
-    }
-    CFTimeInterval now = CFAbsoluteTimeGetCurrent();
-    /* layout 一秒可能跑几十次, 取图要遍历整棵树 —— 节流到 2 秒, 否则主线程被拖慢,
-       展开动画反而更抖 */
-    if (st && st.image && now - st.lastTS < 2.0) {
-        if (st.bg.superview != root) [root insertSubview:st.bg atIndex:0];
-        st.bg.frame = root.bounds;
-        return;
-    }
-    UIImage *img = diArtImageOf(root);
-    if (!img) return;
-    if (!st) {
-        st = [DIBgState new];
-        UIView *bg = [[UIView alloc] initWithFrame:root.bounds];
-        bg.tag = kDIBgTag;
-        bg.userInteractionEnabled = NO;
-        bg.clipsToBounds = YES;
-        bg.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
-
-        UIImageView *iv = [[UIImageView alloc] initWithFrame:bg.bounds];
-        iv.contentMode = UIViewContentModeScaleAspectFill;
-        iv.clipsToBounds = YES;
-        iv.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
-        [bg addSubview:iv];
-
-        UIVisualEffectView *blur = [[UIVisualEffectView alloc]
-            initWithEffect:[UIBlurEffect effectWithStyle:UIBlurEffectStyleSystemUltraThinMaterialDark]];
-        blur.frame = bg.bounds;
-        blur.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
-        [bg addSubview:blur];
-
-        UIView *dim = [[UIView alloc] initWithFrame:bg.bounds];
-        dim.backgroundColor = [UIColor colorWithWhite:0 alpha:0.30];
-        dim.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
-        [bg addSubview:dim];
-
-        st.bg = bg;
-        st.img = iv;
-        objc_setAssociatedObject(root, kDIBgKey, st, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-        RLog(@"[封面] 背景层已铺 %@ %.0fx%.0f", NSStringFromClass(root.class),
-             root.bounds.size.width, root.bounds.size.height);
-    }
-    st.lastTS = now;
-    if (st.image != img) {
-        st.image = img;
-        st.img.image = img;
-    }
-    if (st.bg.superview != root) [root insertSubview:st.bg atIndex:0];
-    else [root sendSubviewToBack:st.bg];
-    st.bg.frame = root.bounds;
-}
-
-/* 3×2 抖动:
-   ① 传送按钮所属图层树上的循环/旋转动画全部摘掉(以前只查按钮自身的那一层,
-      播放器/系统把动画挂到里面 imageView 上就漏了);
-   ② 布局稳定后把按钮 frame 钉住: 3×2 下系统的约束解算和播放器的 setFrame 会
-      互相修正, 每次差值不到 1.5pt, 肉眼看就是"一抖一抖"。钉住即消失;
-   ③ 所有修改都在关掉隐式动画的事务里做, 避免钉的过程本身产生过渡动画。 */
-static BOOL gDIPinning = NO;
 
 static UIView *diArtTransportOf(UIView *root) {
     UIView *tc = nil;
@@ -15888,56 +15781,54 @@ static UIView *diArtTransportOf(UIView *root) {
     return nil;
 }
 
-static void diArtPinOne(UIView *v) {
-    CGRect f = v.frame;
-    NSValue *saved = objc_getAssociatedObject(v, kDIJitterFrameKey);
-    if (!saved) {
-        objc_setAssociatedObject(v, kDIJitterFrameKey, [NSValue valueWithCGRect:f],
-                                 OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-        return;
-    }
-    CGRect old = saved.CGRectValue;
-    CGFloat dx = fabs(CGRectGetMidX(f) - CGRectGetMidX(old));
-    CGFloat dy = fabs(CGRectGetMidY(f) - CGRectGetMidY(old));
-    if (dx < 1.5 && dy < 1.5) {
-        if (!CGRectEqualToRect(old, f)) {
-            [CATransaction begin];
-            [CATransaction setDisableActions:YES];
-            v.frame = old;
-            [CATransaction commit];
-            static int fixed = 0;
-            if (fixed < 12) {
-                fixed++;
-                RLog(@"[抖动] 钉住 %@ (%.1f,%.1f)→(%.1f,%.1f)",
-                     NSStringFromClass(v.class), f.origin.x, f.origin.y, old.origin.x, old.origin.y);
+static void (*gDIOrigTCSetFrame)(id, SEL, CGRect) = NULL;
+
+/* 钩在传送容器的 setFrame: 上 —— 不管是谁、从哪条路径改它的位置, 都在落地前过一遍 */
+static void diTCSetFrame(id self, SEL cmd, CGRect f) {
+    @try {
+        UIView *v = (UIView *)self;
+        CGSize ps = v.superview ? v.superview.bounds.size : CGSizeZero;
+        DITCState *st = objc_getAssociatedObject(v, kDITCStateKey);
+        if (!st) {
+            st = [DITCState new];
+            st.stable = f;
+            st.parentSize = ps;
+            objc_setAssociatedObject(v, kDITCStateKey, st, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        } else if (CGSizeEqualToSize(st.parentSize, ps) && CGSizeEqualToSize(st.stable.size, f.size)) {
+            CGFloat dy = f.origin.y - st.stable.origin.y;
+            CGFloat dx = f.origin.x - st.stable.origin.x;
+            BOOL moved = (fabs(dy) > 0.05 || fabs(dx) > 0.05);
+            if (moved && diArtIs3x2() && fabs(dy) <= 12.0 && fabs(dx) <= 12.0) {
+                if (st.fixed < 24) {
+                    st.fixed++;
+                    RLog(@"[抖动] 拦下传送栏瞬跳 dy=%.2f dx=%.2f → 保持 (%.1f,%.1f)",
+                         dy, dx, st.stable.origin.x, st.stable.origin.y);
+                }
+                f = st.stable;
+            } else if (moved) {
+                st.stable = f;      /* 真的换布局, 以新值为准 */
+                st.parentSize = ps;
             }
+        } else {
+            st.stable = f;
+            st.parentSize = ps;
         }
-    } else {
-        /* 真的换了布局(横屏/换尺寸), 以新值为准 */
-        objc_setAssociatedObject(v, kDIJitterFrameKey, [NSValue valueWithCGRect:f],
-                                 OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-    }
-}
-
-/* 递归到按钮内部: 抖的往往不是按钮本身, 而是里面的图标视图被反复 layout */
-static void diArtPinWalk(UIView *v, int depth) {
-    if (!v || depth > 4) return;
-    NSString *cn = NSStringFromClass(v.class);
-    if ([cn containsString:@"Transport"] || [cn containsString:@"Button"] || [cn containsString:@"Glyph"]) {
-        diArtPinOne(v);
-    }
-    for (UIView *c in [v.subviews copy]) diArtPinWalk(c, depth + 1);
-}
-
-static void diArtPinTransport(UIView *tc) {
-    if (!tc || gDIPinning) return;
-    gDIPinning = YES;
-    for (UIView *v in [tc.subviews copy]) diArtPinWalk(v, 0);
-    gDIPinning = NO;
+    } @catch (__unused NSException *e) {}
+    if (gDIOrigTCSetFrame) gDIOrigTCSetFrame(self, cmd, f);
 }
 
 static void diArtKillJitter(UIView *root) {
     if (!diArtIs3x2()) return;
+    /* 首轮 diArtInstall 时 MediaRemoteUI 可能还没加载, 这里补挂一次 */
+    static BOOL tcTried = NO;
+    if (!tcTried) {
+        Class tcc = NSClassFromString(@"MRUNowPlayingTransportControlsView");
+        if (tcc) {
+            tcTried = YES;
+            MSHookMessageEx(tcc, @selector(setFrame:), (IMP)diTCSetFrame, (IMP *)&gDIOrigTCSetFrame);
+            RLog(@"[抖动] 传送栏 setFrame 补挂 %@", gDIOrigTCSetFrame ? @"成功" : @"失败");
+        }
+    }
     UIView *tc = diArtTransportOf(root);
     if (!tc) return;
     static NSMutableSet *logged = nil;
@@ -15945,23 +15836,35 @@ static void diArtKillJitter(UIView *root) {
     NSString *key = NSStringFromClass(tc.class);
     if (![logged containsObject:key]) {
         [logged addObject:key];
-        RLog(@"[抖动] 3×2 传送容器 %@ 动画=%@ frame=%@", key,
-             [tc.layer.animationKeys componentsJoinedByString:@","] ?: @"(无)",
-             NSStringFromCGRect(tc.frame));
+        RLog(@"[抖动] 3×2 传送容器 %@ 动画=%@ frame=%@ 父=%@",
+             key, [tc.layer.animationKeys componentsJoinedByString:@","] ?: @"(无)",
+             NSStringFromCGRect(tc.frame), NSStringFromClass(tc.superview.class));
     }
     [CATransaction begin];
     [CATransaction setDisableActions:YES];
     diArtStripSpin(tc.layer, 0);
     [CATransaction commit];
-    /* 3.0.8: 3×2 的坐标是 1/3 分数(13.666/30.333), 按钮图标每帧重新光栅化时
-       会有半像素抖动; 3×2B 是 1/4 份, 落在整像素上所以不抖。把这一小块光栅化
-       一次, 之后每帧直接复用位图 —— 按钮区没有需要逐帧刷新的内容。 */
-    if (!tc.layer.shouldRasterize) {
-        tc.layer.shouldRasterize = YES;
-        tc.layer.rasterizationScale = [UIScreen mainScreen].scale;
-        RLog(@"[抖动] 3×2 按钮区已光栅化 (scale=%.1f)", (double)tc.layer.rasterizationScale);
+    /* 兜底: 万一瞬跳是从 setCenter / bounds 进来的(没走 setFrame:), 布局结束后再校一次 */
+    DITCState *st = objc_getAssociatedObject(tc, kDITCStateKey);
+    if (st && tc.superview) {
+        CGRect f = tc.frame;
+        CGSize ps = tc.superview.bounds.size;
+        CGFloat dy = f.origin.y - st.stable.origin.y;
+        if (CGSizeEqualToSize(ps, st.parentSize) && CGSizeEqualToSize(f.size, st.stable.size)
+            && fabs(dy) > 0.05 && fabs(dy) <= 12.0) {
+            [CATransaction begin];
+            [CATransaction setDisableActions:YES];
+            tc.frame = st.stable;
+            [CATransaction commit];
+            static int fixed2 = 0;
+            if (fixed2 < 12) {
+                fixed2++;
+                RLog(@"[抖动] 布局后校正传送栏 dy=%.2f (父=%@ %.0fx%.0f)",
+                     dy, NSStringFromClass(tc.superview.class),
+                     ps.width, ps.height);
+            }
+        }
     }
-    diArtPinTransport(tc);
 }
 
 /* 开关打开却一个封面候选都没找到时, 把播放器视图树记一次 —— 下一版按这个类名改 */
@@ -16013,10 +15916,6 @@ static void diArtPlayerPost(UIView *root) {
     }
     for (UIView *a in arts) diArtApply(a, on);
     if (on && !arts.count) diArtLogTree(root);
-    /* 3.0.8: 封面背景整块铺满(原版渐变只铺了一小块) —— 与旋转开关无关 */
-    if (root.bounds.size.width > 40 && root.bounds.size.height > 40) {
-        diArtApplyBackground(root, diArtBgOn());
-    }
     diArtKillJitter(root);
     /* 播放器的旋转/布局钩子安装顺序不确定, 可能在我们的清理之后又把动画挂回去。
        0.1s 后再补一次, 保证"关=静止、3×2=不抖"是最后一次写。 */
@@ -16078,10 +15977,16 @@ static void diArtInstall(void) {
         if (!gDIArtOrigCCVCLayout) gDIArtOrigCCVCLayout = (void (*)(id, SEL))before;
         any = YES;
     }
+    /* 3.0.9: 传送容器 setFrame 接管(3×2 按钮瞬跳的唯一落点) */
+    Class tcc = NSClassFromString(@"MRUNowPlayingTransportControlsView");
+    if (tcc) {
+        MSHookMessageEx(tcc, @selector(setFrame:), (IMP)diTCSetFrame, (IMP *)&gDIOrigTCSetFrame);
+        if (!gDIOrigTCSetFrame) RLog(@"[抖动] 传送栏 setFrame 接管失败, 仅用布局后校正");
+    }
     if (any) {
         gDIArtHooked = YES;
-        RLog(@"[封面] 钩子已装 (NowPlayingView=%d CCVC=%d 开关=%d)",
-             npv != nil, ccv != nil, diArtPrefOn());
+        RLog(@"[封面] 钩子已装 (NowPlayingView=%d CCVC=%d 开关=%d 传送栏=%d)",
+             npv != nil, ccv != nil, diArtPrefOn(), tcc != nil);
     }
 }
 
