@@ -9,6 +9,7 @@
 #import <dlfcn.h>
 #include <mach-o/dyld.h>
 #include <string.h>
+#include <notify.h>
 #import <substrate.h>
 #import <os/log.h>
 #include <dispatch/dispatch.h>
@@ -64,7 +65,7 @@ static double expandTextY = DI_EXP_TEXT_BASE_Y;   // 上下偏移(pt, 下为正,
 static double expandTextScale = 100.0; // 文字大小(%, 100=原样)
 /* 2.8.86: 构建戳 —— 之前横幅打的是 SpringBoard 自己的 CFBundleShortVersionString(恒 1.0),
    日志里根本看不出装的是哪一版。所有诊断行都带这个戳, 下轮日志一眼定位。 */
-#define DI_BUILD_VER @"3.0.3"
+#define DI_BUILD_VER @"3.0.4"
 static BOOL gRecordingActive = NO; // 保留: 岛素材总闸条件
 static NSString *diElementId(UIView *host);
 static BOOL diMiniMusicActive(UIView *host); // 2.6.3: 前置(遮罩层使用)
@@ -15408,6 +15409,100 @@ static void diNPProbe(void) {
     }
 }
 
+/* ============ 3.0.4: 播放器"到底走到哪一步"全链路诊断 ============
+   3.0.3 的日志证明: 激活键对、主 dylib 也注入了, 但设置照样无效 —— 说明它卡在
+   启动函数的后半段(runtime 校验 / hook 安装)。这几条日志一次把下列事实全部量化:
+     ① Runtime/Layout 到底有没有被它 dlopen 上(镜像表);
+     ② 我们按它的路径手动 dlopen 时能不能成功, 失败原因是什么;
+     ③ 它该 hook 的那几个方法, IMP 现在指向系统镜像还是已被替换(判断 hook 装没装);
+     ④ 整个偏好域的内容(看它有没有写 StartupPending, 即启动跑到哪一步)。 */
+static NSString *diNPAppSupportDir(void) {
+    Dl_info info;
+    if (!dladdr((void *)&diNPProbe, &info) || !info.dli_fname) return nil;
+    NSString *p = [NSString stringWithUTF8String:info.dli_fname];
+    /* <root>/Library/MobileSubstrate/DynamicLibraries/xxx.dylib → 删 4 层回到 <root> */
+    for (int i = 0; i < 4; i++) p = [p stringByDeletingLastPathComponent];
+    if (!p.length) return nil;
+    return [p stringByAppendingPathComponent:@"Library/Application Support/NativePlayerOriginal"];
+}
+
+static void diNPImages(void) {
+    uint32_t n = _dyld_image_count();
+    NSMutableArray *hit = [NSMutableArray array];
+    for (uint32_t i = 0; i < n; i++) {
+        const char *nm = _dyld_get_image_name(i);
+        if (nm && (strstr(nm, "NPROriginal") || strstr(nm, "NativePlayerOriginal")))
+            [hit addObject:[NSString stringWithUTF8String:nm]];
+    }
+    RLog(@"[播放器][诊断] 已加载播放器镜像 %lu 个: %@", (unsigned long)hit.count,
+         hit.count ? [hit componentsJoinedByString:@" | "] : @"无");
+}
+
+static void diNPProbeRuntime(void) {
+    NSFileManager *fm = [NSFileManager defaultManager];
+    NSString *dir = diNPAppSupportDir();
+    BOOL exist = dir && [fm fileExistsAtPath:dir];
+    RLog(@"[播放器][诊断] 资源目录=%@ 存在=%@", dir ?: @"(nil)", exist ? @"是" : @"否");
+    if (!exist) {
+        RLog(@"[播放器][诊断] 资源目录不存在, 播放器必定在 dlopen 这一步失败");
+        return;
+    }
+    NSArray *fs = [fm contentsOfDirectoryAtPath:dir error:NULL];
+    RLog(@"[播放器][诊断] 目录内容=%@", [fs componentsJoinedByString:@","] ?: @"(空)");
+    for (NSString *fn in @[ @"NPROriginalRuntime.dylib", @"NPROriginalRuntime3x2B.dylib",
+                            @"NPROriginalLayout.dylib", @"NPROriginalLayout3x2B.dylib" ]) {
+        NSString *full = [dir stringByAppendingPathComponent:fn];
+        void *h = dlopen(full.UTF8String, RTLD_NOW);
+        if (!h) {
+            const char *e = dlerror();
+            RLog(@"[播放器][诊断] dlopen %@ 失败: %s", fn, e ? e : "(无错误信息)");
+            continue;
+        }
+        void *s1 = dlsym(h, "CCFAllowedSizesForModuleIdentifier");
+        void *s2 = dlsym(h, "EVOPref");
+        RLog(@"[播放器][诊断] dlopen %@ 成功 CCFAllowedSizes=%p EVOPref=%p", fn, s1, s2);
+    }
+}
+
+/* 判断它的 hook 装没装: 没装 = IMP 还在系统镜像里; 装了 = IMP 会被换成不在任何镜像里的蹦床。
+   返回值 = 已确认被替换的方法数(0 = 播放器一个 hook 都没装上)。 */
+static int diNPHookCheck(void) {
+    int hooked = 0;
+    NSArray *pairs = @[ @[@"MRUNowPlayingViewController", @"layoutSubviews"],
+                        @[@"MRUControlCenterViewController", @"layoutSubviews"],
+                        @[@"MRUNowPlayingView", @"layoutSubviews"],
+                        @[@"CCUIModuleCollectionViewController", @"willOpenExpandedModule:"] ];
+    for (NSArray *p in pairs) {
+        NSString *cn = p[0], *sn = p[1];
+        Class c = NSClassFromString(cn);
+        if (!c) { RLog(@"[播放器][hook] 类 %@ 不存在", cn); continue; }
+        Method m = class_getInstanceMethod(c, NSSelectorFromString(sn));
+        if (!m) { RLog(@"[播放器][hook] %@ 无方法 %@", cn, sn); continue; }
+        IMP imp = method_getImplementation(m);
+        Dl_info di;
+        const char *img = "";
+        if (dladdr((void *)imp, &di) && di.dli_fname) img = di.dli_fname;
+        BOOL sys = (strstr(img, "/System/") != NULL) || (strstr(img, "SpringBoard.app") != NULL);
+        if (!sys) hooked++;
+        RLog(@"[播放器][hook] %@ %@ → %s%s", cn, sn, img[0] ? img : "(无镜像)",
+             sys ? "" : " [已替换]");
+    }
+    return hooked;
+}
+
+static void diNPDumpDomain(void) {
+    CFStringRef dom = CFSTR("com.local.playerexact");
+    CFPreferencesAppSynchronize(dom);
+    NSArray *keys = CFBridgingRelease(CFPreferencesCopyKeyList(dom, kCFPreferencesCurrentUser, kCFPreferencesAnyHost));
+    if (!keys.count) { RLog(@"[播放器][域] 空"); return; }
+    RLog(@"[播放器][域] 共 %lu 个键", (unsigned long)keys.count);
+    for (NSString *k in keys) {
+        if (![k isKindOfClass:NSString.class]) continue;
+        id v = CFBridgingRelease(CFPreferencesCopyAppValue((__bridge CFStringRef)k, dom));
+        RLog(@"[播放器][域] %@ = %@", k, v ?: @"(nil)");
+    }
+}
+
 __attribute__((constructor)) static void init(void) {
     @autoreleasepool {
         /* 2.7.15: 版本标记写死在这里, 不依赖 CFBundleShortVersionString ——
@@ -15445,10 +15540,52 @@ __attribute__((constructor)) static void init(void) {
         /* 3.0.3: 内置播放器自检 —— 同步补激活键(万一本 dylib 的构造器排在播放器之前, 这一写就能救回来),
            再在第 2/6 秒各探一次: 播放器到底有没有被注入, 没有就手动 dlopen 并把 dlerror 记下来。 */
         @try { diNPHealPrefs(); } @catch (NSException *e) { RLog(@"[播放器] 补写激活键异常: %@", e.reason); }
-        for (int npSec : {2, 6})
+        for (int npSec : {2, 8, 20})
             dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)npSec * NSEC_PER_SEC),
                            dispatch_get_main_queue(), ^{
-                @try { diNPHealPrefs(); diNPProbe(); }
+                @try {
+                    RLog(@"[播放器][诊断] ==== 第 %d 秒 ====", npSec);
+                    diNPHealPrefs();
+                    diNPProbe();
+                    diNPImages();
+                    if (npSec >= 8) {
+                        int hk = diNPHookCheck();
+                        diNPDumpDomain();
+                        if (npSec == 8) {
+                            diNPProbeRuntime();
+                            if (hk == 0) {
+                                /* 播放器的钩子是挂在 com.apple.springboard.finishedstartup 的 dispatch 块里的。
+                                   如果它注册得比通知晚(或通知早于注入), 那个块永远不会跑, 表现就是"什么都不生效"。
+                                   它自己有 once 保护(0xd27), 重发这条通知最多让它空转一次, 不会重复 hook。 */
+                                if (!NSClassFromString(@"MRUNowPlayingViewController")) {
+                                    /* iOS 16 上 MediaRemoteUI 是懒加载的: 控制中心没开过时这些类还不存在,
+                                       播放器就算跑到 hook 那一步也只会拿到 nil 类 → 静默跳过。先把框架拉起来。 */
+                                    RLog(@"[播放器][修复] MRUNowPlayingViewController 此刻不存在 → 提前 dlopen MediaRemoteUI");
+                                    const char *fws[3] = {
+                                        "/System/Library/PrivateFrameworks/MediaRemoteUI.framework/MediaRemoteUI",
+                                        "/System/Library/PrivateFrameworks/ControlCenterUI.framework/ControlCenterUI",
+                                        "/System/Library/PrivateFrameworks/MediaRemote.framework/MediaRemote"
+                                    };
+                                    for (int fi = 0; fi < 3; fi++) {
+                                        void *h = dlopen(fws[fi], RTLD_NOW | RTLD_GLOBAL);
+                                        if (h) RLog(@"[播放器][修复] 已加载 %s", fws[fi]);
+                                        else { const char *e = dlerror(); RLog(@"[播放器][修复] 加载失败 %s → %s", fws[fi], e ? e : "?"); }
+                                    }
+                                    RLog(@"[播放器][修复] 加载后 MRUNowPlayingViewController=%@",
+                                         NSClassFromString(@"MRUNowPlayingViewController") ? @"存在" : @"仍不存在");
+                                }
+                                RLog(@"[播放器][修复] 一个 hook 都没装上 → 补发 com.apple.springboard.finishedstartup 让启动块重跑");
+                                notify_post("com.apple.springboard.finishedstartup");
+                                dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(3 * NSEC_PER_SEC)),
+                                               dispatch_get_main_queue(), ^{
+                                    RLog(@"[播放器][修复] 补发后复查:");
+                                    diNPHookCheck();
+                                    diNPDumpDomain();
+                                });
+                            }
+                        }
+                    }
+                }
                 @catch (NSException *e) { RLog(@"[播放器] 自检异常: %@", e.reason); }
             });
         /* 2.8.78: 接收 MediaRemoteUI 的打点 + 把遮罩素材导出给那个进程 */
