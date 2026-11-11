@@ -65,7 +65,7 @@ static double expandTextY = DI_EXP_TEXT_BASE_Y;   // 上下偏移(pt, 下为正,
 static double expandTextScale = 100.0; // 文字大小(%, 100=原样)
 /* 2.8.86: 构建戳 —— 之前横幅打的是 SpringBoard 自己的 CFBundleShortVersionString(恒 1.0),
    日志里根本看不出装的是哪一版。所有诊断行都带这个戳, 下轮日志一眼定位。 */
-#define DI_BUILD_VER @"3.1.0"
+#define DI_BUILD_VER @"3.0.10"
 static BOOL gRecordingActive = NO; // 保留: 岛素材总闸条件
 static NSString *diElementId(UIView *host);
 static BOOL diMiniMusicActive(UIView *host); // 2.6.3: 前置(遮罩层使用)
@@ -15783,36 +15783,64 @@ static UIView *diArtTransportOf(UIView *root) {
 
 static void (*gDIOrigTCSetFrame)(id, SEL, CGRect) = NULL;
 
-/* 钩在传送容器的 setFrame: 上 —— 不管是谁、从哪条路径改它的位置, 都在落地前过一遍 */
+/* 3.0.10 无限注销的根因修复 —— 3.0.9 的拦截有三处致命伤:
+     ① 启动早期传送栏还是 {0,-13.67},{0,44} 这种 0 宽占位 frame, 第一笔就被当成了
+        "稳定基准"; 之后所有合法小位移全部被判成"瞬跳"钉回去, 系统布局和我们互相
+        打架, 主线程高频空转, SpringBoard 被 watchdog 反复击杀 → 无限注销;
+     ② diArtKillJitter 里还有一处"布局进行中直接写 frame"的兜底 —— 布局 pass 里改
+        其它视图的 frame, 系统下一帧又改回来, 同样是打架源(本版整体删除);
+     ③ 没有任何限流 —— 就算判断错了也会无限次跟布局系统死磕。
+   本版三道保险:
+     ① 基准只认"非零尺寸"的 frame(宽>=30 高>=20 且父视图>=50), 占位 frame 一律
+        放行并更新基准, 永远不当基准;
+     ② 拦截必须同时满足: 视图有 window + 未隐藏 + alpha>0.5 + 3×2 档位;
+     ③ 全局 10 秒窗口最多拦 40 次, 超限一律放行 —— 判错了也磕不动布局系统。 */
+static CFTimeInterval gDITCWindowTS = 0;
+static int          gDITCWindowCount = 0;
+
 static void diTCSetFrame(id self, SEL cmd, CGRect f) {
     @try {
         UIView *v = (UIView *)self;
         CGSize ps = v.superview ? v.superview.bounds.size : CGSizeZero;
-        DITCState *st = objc_getAssociatedObject(v, kDITCStateKey);
-        if (!st) {
-            st = [DITCState new];
-            st.stable = f;
-            st.parentSize = ps;
-            objc_setAssociatedObject(v, kDITCStateKey, st, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-        } else if (CGSizeEqualToSize(st.parentSize, ps) && CGSizeEqualToSize(st.stable.size, f.size)) {
-            CGFloat dy = f.origin.y - st.stable.origin.y;
-            CGFloat dx = f.origin.x - st.stable.origin.x;
-            BOOL moved = (fabs(dy) > 0.05 || fabs(dx) > 0.05);
-            if (moved && diArtIs3x2() && fabs(dy) <= 12.0 && fabs(dx) <= 12.0) {
-                if (st.fixed < 24) {
-                    st.fixed++;
-                    RLog(@"[抖动] 拦下传送栏瞬跳 dy=%.2f dx=%.2f → 保持 (%.1f,%.1f)",
-                         dy, dx, st.stable.origin.x, st.stable.origin.y);
+        BOOL sizeOk = (f.size.width >= 30.0 && f.size.height >= 20.0
+                       && ps.width >= 50.0 && ps.height >= 50.0);
+        BOOL visOk  = (v.window != nil && !v.hidden && v.alpha > 0.5);
+        if (sizeOk && visOk) {
+            DITCState *st = objc_getAssociatedObject(v, kDITCStateKey);
+            if (!st || st.stable.size.width < 30.0) {
+                /* 首个合格 frame / 之前记的是占位 frame → 以本笔为基准, 不拦 */
+                if (!st) {
+                    st = [DITCState new];
+                    objc_setAssociatedObject(v, kDITCStateKey, st, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
                 }
-                f = st.stable;
-            } else if (moved) {
-                st.stable = f;      /* 真的换布局, 以新值为准 */
+                st.stable = f;
+                st.parentSize = ps;
+                st.fixed = 0;
+            } else if (CGSizeEqualToSize(st.parentSize, ps) && CGSizeEqualToSize(st.stable.size, f.size)) {
+                CGFloat dy = f.origin.y - st.stable.origin.y;
+                CGFloat dx = f.origin.x - st.stable.origin.x;
+                BOOL moved = (fabs(dy) > 0.05 || fabs(dx) > 0.05);
+                CFTimeInterval now = CFAbsoluteTimeGetCurrent();
+                if (now - gDITCWindowTS > 10.0) { gDITCWindowTS = now; gDITCWindowCount = 0; }
+                if (moved && diArtIs3x2() && fabs(dy) <= 12.0 && fabs(dx) <= 12.0
+                    && gDITCWindowCount < 40) {
+                    gDITCWindowCount++;
+                    if (st.fixed < 24) {
+                        st.fixed++;
+                        RLog(@"[抖动] 拦下传送栏瞬跳 dy=%.2f dx=%.2f → 保持 (%.1f,%.1f)",
+                             dy, dx, st.stable.origin.x, st.stable.origin.y);
+                    }
+                    f = st.stable;
+                } else if (moved) {
+                    st.stable = f;      /* 真的换布局, 以新值为准 */
+                    st.parentSize = ps;
+                }
+            } else {
+                st.stable = f;
                 st.parentSize = ps;
             }
-        } else {
-            st.stable = f;
-            st.parentSize = ps;
         }
+        /* 尺寸/可见性不合格 → 完全放行, 不建基准不拦截 */
     } @catch (__unused NSException *e) {}
     if (gDIOrigTCSetFrame) gDIOrigTCSetFrame(self, cmd, f);
 }
@@ -15847,27 +15875,9 @@ static void diArtKillJitter(UIView *root) {
     [CATransaction setDisableActions:YES];
     diArtStripSpin(tc.layer, 0);
     [CATransaction commit];
-    /* 兜底: 万一瞬跳是从 setCenter / bounds 进来的(没走 setFrame:), 布局结束后再校一次 */
-    DITCState *st = objc_getAssociatedObject(tc, kDITCStateKey);
-    if (st && tc.superview) {
-        CGRect f = tc.frame;
-        CGSize ps = tc.superview.bounds.size;
-        CGFloat dy = f.origin.y - st.stable.origin.y;
-        if (CGSizeEqualToSize(ps, st.parentSize) && CGSizeEqualToSize(f.size, st.stable.size)
-            && fabs(dy) > 0.05 && fabs(dy) <= 12.0) {
-            [CATransaction begin];
-            [CATransaction setDisableActions:YES];
-            tc.frame = st.stable;
-            [CATransaction commit];
-            static int fixed2 = 0;
-            if (fixed2 < 12) {
-                fixed2++;
-                RLog(@"[抖动] 布局后校正传送栏 dy=%.2f (父=%@ %.0fx%.0f)",
-                     dy, NSStringFromClass(tc.superview.class),
-                     ps.width, ps.height);
-            }
-        }
-    }
+    /* 3.0.10: 删除 3.0.9 的"布局后校正传送栏"兜底 —— 在布局 pass 里直接写别的视图
+       的 frame, 系统下一帧又改回来, 两边反复打架是无限注销的第二处根源。
+       瞬跳拦截统一由上面的 setFrame: 接管(带基准/可见性/限流三道保险)负责。 */
 }
 
 /* 开关打开却一个封面候选都没找到时, 把播放器视图树记一次 —— 下一版按这个类名改 */
@@ -15967,6 +15977,7 @@ static void diArtCCLayout(id self, SEL cmd) {
    视图树 —— 3.0.8 插进播放器里导致它每次 layout 都被重新排列, 整块布局都乱了。 */
 static const void *kDIBgIVKey  = &kDIBgIVKey;
 static const void *kDIBgDimKey = &kDIBgDimKey;
+static const void *kDIBgLastKey = &kDIBgLastKey;   /* 3.0.10: 模块 VC 处理节流 */
 
 static NSHashTable *gDIBgHosts = nil;
 static UIImage *gDIBgImage = nil;
@@ -16012,36 +16023,45 @@ static void diNPFetchArtwork(void) {
     diNPLoadMediaRemote();
     if (!gMRGetNowPlayingInfo) return;
     gMRGetNowPlayingInfo(dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^(CFDictionaryRef info) {
-        NSData *data = nil;
-        if (info) {
-            CFStringRef key = (gMRArtworkKeyPtr && *gMRArtworkKeyPtr) ? *gMRArtworkKeyPtr : NULL;
-            if (key) {
-                id v = (__bridge id)CFDictionaryGetValue(info, key);
-                if ([v isKindOfClass:NSData.class] && [((NSData *)v) length] > 64) data = v;
+        /* 3.0.10: 回调在后台队列, 整体兜 @try + autoreleasepool —— 这里出任何异常
+           都不能带崩 SpringBoard(上一版就是启动 2~8 秒之间崩死循环) */
+        @autoreleasepool { @try {
+            NSData *data = nil;
+            if (info) {
+                CFStringRef key = (gMRArtworkKeyPtr && *gMRArtworkKeyPtr) ? *gMRArtworkKeyPtr : NULL;
+                if (key) {
+                    id v = (__bridge id)CFDictionaryGetValue(info, key);
+                    if ([v isKindOfClass:NSData.class] && [((NSData *)v) length] > 64) data = v;
+                }
             }
-        }
-        UIImage *img = data ? [UIImage imageWithData:data] : nil;
-        dispatch_async(dispatch_get_main_queue(), ^{
-            if (img == gDIBgImage) return;
-            gDIBgImage = img;
-            diNPRefreshBackgrounds();
-            RLog(@"[背景] 专辑图 %@", img ? [NSString stringWithFormat:@"%.0fx%.0f", img.size.width, img.size.height]
-                                         : @"(无, 未在播放)");
-        });
+            UIImage *img = data ? [UIImage imageWithData:data] : nil;
+            dispatch_async(dispatch_get_main_queue(), ^{
+                @try {
+                    if (img == gDIBgImage) return;
+                    gDIBgImage = img;
+                    diNPRefreshBackgrounds();
+                    RLog(@"[背景] 专辑图 %@", img ? [NSString stringWithFormat:@"%.0fx%.0f", img.size.width, img.size.height]
+                                                 : @"(无, 未在播放)");
+                } @catch (__unused NSException *e) {}
+            });
+        } @catch (__unused NSException *e) {} }
     });
 }
 
 /* ---------- 背景层 ---------- */
 static void diNPApplyBackgroundTo(UIView *host, BOOL on) {
-    if (![host isKindOfClass:UIView.class]) return;
-    UIImageView *iv = objc_getAssociatedObject(host, kDIBgIVKey);
-    UIView *dim = objc_getAssociatedObject(host, kDIBgDimKey);
-    if (!on || !gDIBgImage) {
-        iv.hidden = YES;
-        dim.hidden = YES;
-        return;
-    }
-    if (!iv) {
+    @try {
+        if (![host isKindOfClass:UIView.class] || !host.window) return;
+        UIImageView *iv = objc_getAssociatedObject(host, kDIBgIVKey);
+        UIView *dim = objc_getAssociatedObject(host, kDIBgDimKey);
+        if (!on || !gDIBgImage) {
+            iv.hidden = YES;
+            dim.hidden = YES;
+            return;
+        }
+        CGSize hs = host.bounds.size;
+        if (hs.width < 40 || hs.height < 40) return;   /* 3.0.10: 占位尺寸不铺 */
+        if (!iv) {
         iv = [[UIImageView alloc] initWithFrame:host.bounds];
         iv.contentMode = UIViewContentModeScaleAspectFill;
         iv.clipsToBounds = YES;
@@ -16063,14 +16083,15 @@ static void diNPApplyBackgroundTo(UIView *host, BOOL on) {
         iv.layer.cornerRadius = r;
         RLog(@"[背景] 已铺到 %@ %.0fx%.0f (圆角 %.1f)",
              NSStringFromClass(host.class), host.bounds.size.width, host.bounds.size.height, r);
-    }
-    iv.hidden = NO;
-    dim.hidden = NO;
-    if (!CGRectEqualToRect(iv.frame, host.bounds)) {
-        iv.frame = host.bounds;
-        dim.frame = host.bounds;
-    }
-    if (iv.image != gDIBgImage) iv.image = gDIBgImage;
+        }
+        iv.hidden = NO;
+        dim.hidden = NO;
+        if (!CGRectEqualToRect(iv.frame, host.bounds)) {
+            iv.frame = host.bounds;
+            dim.frame = host.bounds;
+        }
+        if (iv.image != gDIBgImage) iv.image = gDIBgImage;
+    } @catch (__unused NSException *e) {}
 }
 
 static void diNPRefreshBackgrounds(void) {
@@ -16126,6 +16147,9 @@ static void diNPHandleModuleVC(id vc) {
     }
     if (!card) card = [(UIViewController *)vc view];
     if (![card isKindOfClass:UIView.class] || !card.window) return;
+    /* 3.0.10: 启动早期卡片的占位尺寸(0x0 / 极小)一律不处理, 等真正排出来再说 */
+    CGSize cs = card.bounds.size;
+    if (cs.width < 40 || cs.height < 40) return;
 
     if (!gDIBgHosts) gDIBgHosts = [NSHashTable weakObjectsHashTable];
     [gDIBgHosts addObject:card];
@@ -16146,7 +16170,19 @@ static void diNPHandleModuleVC(id vc) {
 
 static void diNPModuleLayout(id self, SEL cmd) {
     if (gDIOrigModuleLayout) gDIOrigModuleLayout(self, cmd);
-    @try { diNPHandleModuleVC(self); } @catch (__unused NSException *e) {}
+    /* 3.0.10: 绝不在 viewWillLayoutSubviews 里同步改视图树/发 XPC —— 挪到下一轮
+       runloop, 且每个 VC 节流 0.5s。布局进行中插 subview + 高频 CFPreferences/MediaRemote
+       调用是上一版启动即崩的主要嫌疑, 全部异步化兜底。 */
+    @try {
+        CFTimeInterval now = CFAbsoluteTimeGetCurrent();
+        NSNumber *last = objc_getAssociatedObject(self, kDIBgLastKey);
+        if (last && now - last.doubleValue < 0.5) return;
+        objc_setAssociatedObject(self, kDIBgLastKey, @(now), OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        id vc = self;
+        dispatch_async(dispatch_get_main_queue(), ^{
+            @try { diNPHandleModuleVC(vc); } @catch (__unused NSException *e) {}
+        });
+    } @catch (__unused NSException *e) {}
 }
 
 static void diNPMediaChanged(CFNotificationCenterRef c, void *obs, CFStringRef name,
@@ -16155,7 +16191,7 @@ static void diNPMediaChanged(CFNotificationCenterRef c, void *obs, CFStringRef n
     CFTimeInterval now = CFAbsoluteTimeGetCurrent();
     if (now - last < 0.4) return;
     last = now;
-    diNPFetchArtwork();
+    @try { diNPFetchArtwork(); } @catch (__unused NSException *e) {}
 }
 
 static void diArtInstall(void) {
@@ -16218,17 +16254,19 @@ static void diArtChanged(CFNotificationCenterRef c, void *obs, CFStringRef name,
     gDIBgPrefTS = 0;               /* 3.1.0: 背景/隐藏未在播放的开关立刻重读 */
     gDIBgFetchTS = 0;
     dispatch_async(dispatch_get_main_queue(), ^{
-        BOOL on = diArtPrefOn();
-        RLog(@"[封面] 开关变化 → %@", on ? @"圆 + 旋转" : @"方形 + 停止");
-        diNPRefreshBackgrounds();
-        for (UIView *host in gDIBgHosts.allObjects) {
-            diNPHideNotPlayingLabels(host, diNPPrefFlag(@"HideNotPlaying", NO));
-        }
-        for (UIView *root in gDIArtRoots.allObjects) {
-            DIArtRootState *rs = objc_getAssociatedObject(root, kDIArtRootKey);
-            for (UIView *a in rs.arts) diArtApply(a, on);
-            [root setNeedsLayout];
-        }
+        @try {
+            BOOL on = diArtPrefOn();
+            RLog(@"[封面] 开关变化 → %@", on ? @"圆 + 旋转" : @"方形 + 停止");
+            diNPRefreshBackgrounds();
+            for (UIView *host in gDIBgHosts.allObjects) {
+                diNPHideNotPlayingLabels(host, diNPPrefFlag(@"HideNotPlaying", NO));
+            }
+            for (UIView *root in gDIArtRoots.allObjects) {
+                DIArtRootState *rs = objc_getAssociatedObject(root, kDIArtRootKey);
+                for (UIView *a in rs.arts) diArtApply(a, on);
+                [root setNeedsLayout];
+            }
+        } @catch (NSException *e) { RLog(@"[封面] 刷新异常: %@", e.reason); }
     });
 }
 
