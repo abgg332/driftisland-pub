@@ -15866,7 +15866,7 @@ static void diCrumb(NSString *s) {
             [h writeData:[line dataUsingEncoding:NSUTF8StringEncoding]];
             [h closeFile];
         } else {
-            [line writeToFile:p options:NSDataWritingAtomic error:NULL];
+            [line writeToFile:p atomically:YES encoding:NSUTF8StringEncoding error:NULL];
         }
     } @catch (__unused NSException *e) {}
 }
