@@ -62,7 +62,7 @@ static double expandTextY = DI_EXP_TEXT_BASE_Y;   // 上下偏移(pt, 下为正,
 static double expandTextScale = 100.0; // 文字大小(%, 100=原样)
 /* 2.8.86: 构建戳 —— 之前横幅打的是 SpringBoard 自己的 CFBundleShortVersionString(恒 1.0),
    日志里根本看不出装的是哪一版。所有诊断行都带这个戳, 下轮日志一眼定位。 */
-#define DI_BUILD_VER @"2.9.76"
+#define DI_BUILD_VER @"2.9.77"
 static BOOL gRecordingActive = NO; // 保留: 岛素材总闸条件
 static NSString *diElementId(UIView *host);
 static BOOL diMiniMusicActive(UIView *host); // 2.6.3: 前置(遮罩层使用)
@@ -3500,24 +3500,6 @@ static BOOL diIslandStateMini(void) {
     return cached;
 }
 
-/* 2.9.64: 播报新鲜(≤1 秒)且明确说"展开"、而宿主尺寸还够着小岛窗口 = 正在展开过渡。
-   注意与 diIslandStateMini 的区别: 那个 3 秒新鲜度(暂停时播报过期也返回 NO),
-   这个只认 1 秒内的明确 expand —— 暂停时播报过期, 这里返回 NO, 不影响暂停遮罩。 */
-static BOOL diIslandFreshExpand(void) {
-    static CFAbsoluteTime lastCheck; static BOOL cached;
-    CFAbsoluteTime now = CFAbsoluteTimeGetCurrent();
-    if (now - lastCheck < 0.3) return cached;
-    lastCheck = now;
-    NSString *dir = diMruSharedDir();
-    if (!dir.length) { cached = NO; return NO; }
-    NSDictionary *d = [NSDictionary dictionaryWithContentsOfFile:
-                       [dir stringByAppendingPathComponent:@"island.plist"]];
-    if (![d isKindOfClass:NSDictionary.class]) { cached = NO; return NO; }
-    if (now - [d[@"t"] doubleValue] > 1.0) { cached = NO; return NO; }
-    cached = [d[@"expand"] boolValue] && ![d[@"mini"] boolValue];
-    return cached;
-}
-
 /* ===== 2.8.86: 展开态由 MRU 亲口告诉我们 =====
    332/333 日志的死结: 展开后 SpringBoard 这边宿主的 bounds 一直停在 198x55
    (展开的内容是它内部那块 407x489 的跨进程 scene), 所以 2.8.84 的
@@ -3546,20 +3528,6 @@ static BOOL diMruSaysExpanded(void) {
     if (raw) lastExpandedAt = now;
     cached = raw || (lastExpandedAt > 0 && now - lastExpandedAt < 1.5);
     return cached;
-}
-/* ===== 2.9.76: state.plist 的"新鲜确认" —— 不带 1.5 秒迟滞 =====
-   diMruSaysExpanded 的迟滞是为"展开后别再挂回玻璃"服务的; 但展开起手我们要的
-   恰恰是反方向的判断: MRU 到底铺没铺上 66。刚收回 1.5 秒内再展开, 迟滞会
-   误报"已展开" → SB 又在 251x49 退场 → 小专辑转圈。这里读原始值。 */
-static BOOL diMruSaysExpandedFresh(void) {
-    NSString *dir = diMruSharedDir();
-    if (!dir.length) return NO;
-    NSString *p = [dir stringByAppendingPathComponent:@"state.plist"];
-    NSDictionary *attr = [[NSFileManager defaultManager] attributesOfItemAtPath:p error:NULL];
-    NSDate *md = attr[NSFileModificationDate];
-    if (!md || CFAbsoluteTimeGetCurrent() - md.timeIntervalSince1970 > 2.0) return NO;
-    NSDictionary *d = [NSDictionary dictionaryWithContentsOfFile:p];
-    return [d isKindOfClass:NSDictionary.class] && [d[@"expanded"] boolValue];
 }
 /* 我们自己玻璃内部的形状层也叫 kDIMaskLayerName, 清扫时必须放过它,
    否则"清残留"会把正在旋转的玻璃削成方形。 */
@@ -4054,20 +4022,20 @@ static BOOL diApplyMaskToCover(UIView *cover, UIImage *shape) {
                (>=180x46 / >70 高)加"MRU 确认过的展开信号"交给 MRU。 */
         }
 
-        /* ===== 2.9.41: 展开态一律听 MRU 的 =====
-           2.9.40 用"宿主说小岛"去覆盖 MRU 的展开信号 —— 但 17 展开后宿主 bounds
-           仍停在 ~198x55(展开内容在内部 407x489 的 scene 里), 于是展开时被误判成小岛,
-           SpringBoard 又画了一块玻璃 → 用户截图一里专辑下面那块模糊斑。
-           收缩态的误报已经由 MRU 侧修掉(island.plist 判形态 + 让位时写 expanded=NO),
-           这里直接恢复 2.8.86 原判据。 */
-        /* ===== 2.9.61: 17 上不再读这个标志 —— 彻底分离两通道 =====
-           392 日志实锤死法: 展开确认后 MRU 写 expanded=1 → 这边收掉小岛玻璃;
-           用户缩回岛后, 那颗 66 大头像不再被 layout, MRU 的 apply 不跑 →
-           expanded=1 没人清、心跳还在续期 → 这边被压住 10~20 秒不画玻璃
-           (表现就是"展开生效时缩回来就变大; 展开没生效时缩回来正常")。
-           17 上本地下闸门已齐: 宿主 ≥180x46(198x55 展开宿主)/高>70/宽>240
-           全是本地判定, 不需要跨进程信号。 expanded 标志从此只给 16 用。 */
-        if (!diIsIOS17Up() && diMruSaysExpanded()) {
+        /* ===== 2.8.86: 展开态一律由 MRU 负责, 这边整棵退场 =====
+           判据不再看宿主尺寸(展开时宿主还是 198x55), 而是听 MRU 的 state.plist。
+           展开期间每帧都走这里: 一旦系统又重新挂了 mask 或我们又画了玻璃,
+           立刻收掉 —— 这就是"偶尔还会显示"的根本原因(总是慢半拍、抓不到)。
+           不 pause link, 缩回小岛时第一帧就能恢复。 */
+        BOOL mruExpanded = diMruSaysExpanded();
+        /* 2.9.77: 17 恢复读这个信号 —— 这是两个通道之间唯一的握手:
+           "MRU 确认展开 → 小岛通道立刻放手"。2.9.40 的 diIslandStateMini 否决权
+           在 17 上必须去掉: 展开起手时播报还写着小岛尺寸, 带着否决权 SB 就永远
+           不让位, 小玻璃滞留在展开岛里(就是"转圈的小专辑")。
+           收缩方向不会再被滞留的 YES 压住: MRU 的 compact 分支第一拍就写 NO,
+           1 秒扫描器也兜底清理(392 的老病根早已不存在)。 */
+        if (mruExpanded && !diIsIOS17Up() && diIslandStateMini()) mruExpanded = NO;
+        if (mruExpanded) {
             if (_glassOn || _targets.count || !self.hidden) {
                 [self diTeardown];
                 static CFAbsoluteTime sExpT;
@@ -4087,115 +4055,27 @@ static BOOL diApplyMaskToCover(UIView *cover, UIImage *shape) {
         BOOL playingX = mrQueryOK ? musicPlaying : AVAudioSession.sharedInstance.isOtherAudioPlaying;
         if (playingX) self.lastPlayT = nowX;
         BOOL lockMask = self.glassOn && (nowX - self.lastPlayT < 30.0);
-        /* ===== 2.9.42: 17 上取消"锁死玻璃" =====
-           401 反馈: 展开时那块多出来的蒙版"偶尔还会出现", 要求彻底删掉。
-           锁死(2.8.39)的本意是切歌/展开过渡时别闪一下方形, 但它让玻璃在宿主
-           已经变成展开卡片后还要多停 0.3~1 秒 —— 那 0.3 秒就是用户看到的那块。
-           17 上一律即时让位: 一旦判定不是小岛/正在形变, 立刻还原 + 收玻璃。
-           16 保持原样(用户确认 16 正常, 不动)。 */
-        if (diIsIOS17Up()) lockMask = NO;
 
         CALayer *pl = host.layer.presentationLayer;
         CGSize bs = pl ? pl.bounds.size : host.bounds.size;
-        /* ===== 2.9.73: "MRU 已经展开"这一条比宿主尺寸快得多 =====
-           403 日志 + 视频逐帧实锤: 展开那一下我们探的这个宿主实例一直是 189x37
-           (屏幕上的岛其实已经 407x197 了, 那是另一个容器实例), 它要等 0.5~1 秒后
-           自己变成 407x197 才整棵退场。这中间小岛那颗 24.9pt 的玻璃一直画在
-           左上角 —— 逐帧量过: 圆心 (17.5,19.5)、边长 18pt, 正好是小岛槽位
-           (8,7)/22pt 的位置, 而展开态封面在 (17,26)/66pt。所以"展开时专辑小了
-           一下然后变大"里那颗小圆就是它。
-           MRU 一旦确认头像变成 66 就会把 expanded 写进 state.plist —— 这是"岛
-           真的展开了"最快的信号, 直接照它让位, 不再等宿主尺寸。
-           暂停时播放位为 NO, 不走这条(pauseMorph 要继续保住小岛玻璃)。 */
-        if (diIsIOS17Up() && playingX && diMruSaysExpanded()) {
-            /* 2.9.74: 不再要求 _glassOn —— 让位之后下一个 layout 会把玻璃重新挂上,
-               402/404 日志里"立即让位"后面紧跟四十多条"遮罩挂上(玻璃)"就是这么来的。
-               这里每次都记 mruHoldT, 交接窗口内挂载守卫一律不放行。 */
-            self.mruHoldT = CFAbsoluteTimeGetCurrent();
-            self.mruClearT = 0;
-            if (_glassOn || _targets.count || !self.hidden) {
-                static CFAbsoluteTime sMrueT;
-                if (CFAbsoluteTimeGetCurrent() - sMrueT > 1.0) {
-                    sMrueT = CFAbsoluteTimeGetCurrent();
-                    DLog(@"遮罩[17]: MRU 已确认展开(宿主 %.0fx%.0f 还未跟上) → 立即让位", bs.width, bs.height);
-                }
-                [self diRestorePainted];
-                self.glassOn = NO;
-                if (gDISBGlassOn) { gDISBGlassOn = 0; diWriteIslandPlist(); }
-                self.loggedShow = NO;
-                self.bigT = CFAbsoluteTimeGetCurrent();
-                self.stableFrm = 0;
-            }
-            return;
-        }
-        /* MRU 说"不是展开"要连续 0.3 秒才算数 —— 展开起手那一两拍它自己也会写 NO,
-           单拍采信会把玻璃又挂回去(就是那颗转圈的小专辑)。 */
-        if (self.mruHoldT > 0) {
-            if (!diMruSaysExpanded()) {
-                CFAbsoluteTime nw = CFAbsoluteTimeGetCurrent();
-                if (self.mruClearT <= 0) self.mruClearT = nw;
-                if (nw - self.mruClearT >= 0.3) { self.mruHoldT = 0; self.mruClearT = 0; }
-            } else {
-                self.mruClearT = 0;
-            }
-        }
-        /* ===== 2.9.46: 删掉 2.9.42 的"形变中全程让位" =====
-           那条判据是"模型层 vs 呈现层差 1pt 就算在形变", 但 17 的小岛**本身**一直在
-           做宽度动画: 日志里 127x37 ↔ 179/189x37 每几秒一轮(波形/配件进出), 于是
-           玻璃被反复拆掉又挂回 —— 用户看到的就是"要么显示回原来的, 要么就重叠"。
-           收起时那块大黑块另用"明显缩小"判据处理(见下面 shrink17, 已限定只从大形态
-           回缩才触发), 这里整段删除。 */
-        /* ===== 2.9.42: 17 展开态宿主 = 198x55, 小岛 = 166x37 =====
-           401 反馈: 展开时那块多出来的蒙版"偶尔还会出现"。17 上展开后宿主 bounds
-           停在小岛样的 198x55(展开内容在内部 scene 里), 2.9.41 只靠 MRU 的
-           state.plist 判形态, 而 MRU 那边写盘有延迟/被 66pt 判据干扰 —— 于是展开
-           的前几百毫秒这边照样画了一块玻璃。
-           这里补一条**本地**判据: 17 上宿主高 >=46 且宽 >=180 就是展开宿主
-           (实测小岛恒为 166x37~189x37, 展开恒为 198x55), 立即整棵退场。 */
-        /* ===== 2.9.76: 展开起手的"MRU 未就绪保护" —— 两处退场闸门共用 =====
-           407 日志实锤: SB 在 251x49 就整棵退场, 而 MRU 的 66 玻璃要等宿主
-           长满 407x201 才铺(它中间只 apply 了寥寥几拍) —— 这 0.3~0.5 秒里
-           只剩原生小头像在转, 用户: "第一次展开还是小专辑转圈"。
-           现在只要正在播放、MRU 还没新鲜确认展开(state.plist), 两处退场都不走:
-           morphExpand 把这颗圆从 25.3 连续长到 66, MRU 一确认(写 expanded=1)
-           上面 2.9.74 的让位分支立刻接管。宽度 380 封顶 + 1.2 秒上限,
-           MRU 永远接不上时按老规矩退场, 不会把玻璃钉在展开岛上。 */
-        BOOL mruReady76 = NO, keepPainting76 = NO;
-        if (diIsIOS17Up()) {
-            mruReady76 = diMruSaysExpandedFresh();
-            BOOL playing76 = mrQueryOK ? musicPlaying
-                                       : AVAudioSession.sharedInstance.isOtherAudioPlaying;
-            static CFAbsoluteTime sKeep76T;
-            static __weak UIView *sKeep76V;
-            keepPainting76 = (playing76 && !mruReady76 && bs.width < 380.0
-                              && (self.glassOn || self.cacheCoverV != nil));
-            if (keepPainting76) {
-                if (sKeep76V != host) { sKeep76V = host; sKeep76T = CFAbsoluteTimeGetCurrent(); }
-                if (CFAbsoluteTimeGetCurrent() - sKeep76T > 1.2) keepPainting76 = NO;
-            } else { sKeep76V = nil; sKeep76T = 0; }
-            if (keepPainting76) {
-                static CFAbsoluteTime sKeepLogT;
-                if (CFAbsoluteTimeGetCurrent() - sKeepLogT > 3.0) {
-                    sKeepLogT = CFAbsoluteTimeGetCurrent();
-                    DLog(@"遮罩[17]: 宿主 %.0fx%.0f 过小岛尺寸但 MRU 未就绪 → 继续画变形圆",
-                         bs.width, bs.height);
-                }
-            }
-        }
-        if (diIsIOS17Up() && bs.height >= 46.0 && bs.width >= 180.0 && !keepPainting76) {
+        /* ===== 2.9.77: 17 本地展开宿主闸门(2.9.42 判据原样) =====
+           小岛恒 166x37~189x37, 展开宿主 198x55 —— 高>=46 且宽>=180 就是展开宿主,
+           立即整棵退场, 小岛玻璃绝不滞留在展开岛上。暂停形变最高 220x45(h<=45)
+           不受影响; lockMask 只保护小岛尺寸, 不拦这条(展开态归 MRU)。 */
+        if (diIsIOS17Up() && bs.height >= 46.0 && bs.width >= 180.0) {
             if (_glassOn || _targets.count || !self.hidden) {
                 [self diTeardown];
                 static CFAbsoluteTime sExp2T;
                 if (CFAbsoluteTimeGetCurrent() - sExp2T > 3.0) {
                     sExp2T = CFAbsoluteTimeGetCurrent();
-                    DLog(@"遮罩[17]: 宿主 %.0fx%.0f 判为展开(>=180x46) → 整棵退场", bs.width, bs.height);
+                    DLog(@"遮罩[17]: 宿主 %.0fx%.0f 判为展开宿主 → 让位(MRU 负责)", bs.width, bs.height);
                 }
             }
             return;
         }
         /* 展开大专辑在跨进程内容中；当前探针只有小门户坐标。
            即使小岛的玻璃被播放锁定，也不能在展开宿主上重显 25pt 的副本。 */
-        if (bs.width >= 280.0 && bs.height >= 120.0 && !keepPainting76) {
+        if (bs.width >= 280.0 && bs.height >= 120.0) {
             if (self.glassOn || !self.hidden) [self diTeardown];
             /* 2.8.86: 不再 pause display link —— pause 之后没有任何地方 resume,
                缩回小岛时这个实例就永远醒不过来(遮罩再也不出现)。 */
@@ -4226,7 +4106,6 @@ static BOOL diApplyMaskToCover(UIView *cover, UIImage *shape) {
                 }
                 if (self.glassOn || !self.hidden) {
                     [self diRestorePainted];
-                    if (self.glassOn) { gDISBGlassOn = 0; diWriteIslandPlist(); }   /* 2.9.68: 收玻璃也算放手, MRU 该接手 */
                     self.glassOn = NO;
                     if (!self.hidden) self.hidden = YES;
                     self.stableFrm = 0;
@@ -4251,62 +4130,10 @@ static BOOL diApplyMaskToCover(UIView *cover, UIImage *shape) {
            "展开岛偶尔还会显示那个蒙版"), 变大即立即收玻璃, 不等稳定。 */
         BOOL growing = (bs.width - self.lastBW > 2.0) || (bs.height - self.lastBH > 1.5);
         BOOL sizeChanged = (fabs(bs.width - self.lastBW) > 1.2 || fabs(bs.height - self.lastBH) > 1.2);
-        /* 2.9.67: 连续变大帧数 —— "刚注销完第一次长按会变小"的判据。
-           398 反馈: 重启后第一次长按展开, 小岛会先出现一颗 25pt 的小玻璃再变大。
-           根因是 2.9.64 那道"播报说展开就别新挂小玻璃"的闸门依赖 island.plist,
-           刚注销时文件还没被写过 → diIslandFreshExpand 返回 NO → 闸门失效,
-           展开起手照样挂了一颗小圆。改成同时看物理信号: 连续 2 帧在变大 = 正在展开。 */
-        if (growing) self.growStreak++; else self.growStreak = 0;
-        /* ===== 2.9.46: 17 上只有"进出展开"才算形变 =====
-           小岛自己在 127x37 与 189x37 之间来回(波形/配件进出), 旧判据把这当成
-           "变大/明显缩小", 每几秒就拆一次玻璃 → 原图闪现/两份重叠。
-           这里用高度 60pt 当分界(小岛 ≤41, 展开 ≥198), 小岛内部变化一律按"原地重画"。 */
-        BOOL bigPrev = (self.lastBH >= 60.0);
-        BOOL bigNow = (bs.height >= 60.0);
-        BOOL bigChange = bigNow || bigPrev;
-        /* 2.9.67: 17 上"宽度已经越过小岛上限(208)"也算形变 —— 398 反馈"刚注销完
-           第一次长按会变小": 展开起手时小岛里那颗 25pt 小玻璃一直挂到 240 宽才让位,
-           于是岛已经在长大, 专辑还是小小一颗。宽度 >212 就按"展开起手"处理, 直接
-           让位给原生内容, 等 MRU 的 66 接管。小岛内部(≤208)的波形进出不受影响。 */
-        if (diIsIOS17Up() && bs.width > 212.0) {
-            /* 暂停/瞬断时不算展开起手 —— 那条路要让 pauseMorph 保住玻璃(见下)。 */
-            BOOL playingNow = mrQueryOK ? musicPlaying
-                                        : AVAudioSession.sharedInstance.isOtherAudioPlaying;
-            /* 2.9.72: 展开变形段(208 < 宽 < 400, 高 < 192)不再一过 212 就让位。
-               让位之后 MRU 的 66 要等宿主 407 才铺, 中间半秒多岛上只剩它那颗
-               23pt 小头像 —— 402 视频里"先显示小的再变大"。这段由下面的
-               morphExpand 接着画, 玻璃边长跟着宿主一起长。 */
-            BOOL morphZone = self.glassOn && bs.width < 400.0 && bs.height < 192.0;
-            if (playingNow && !morphZone) bigChange = YES;
-        }
-        /* 17 上"从大形态明显缩小"= 收起起手, 立即让位(小岛内部收缩不算) */
-        BOOL shrink17 = diIsIOS17Up() && bigPrev
-            && (self.lastBW - bs.width > 8.0 || self.lastBH - bs.height > 8.0);
-        /* 2.9.72: 收起变形段(宽 208..400、高 <192)不整块让位 —— 旧代码一检测到
-           "从大形态明显缩小"就 diTeardown, 让小岛专辑在半大不小的岛里闪一下原生
-           方形再回位(用户: "收回小岛的专辑显示偏移然后才正常")。这段改由下面的
-           morphExpand 接着画, 玻璃跟着岛体一起缩回小岛槽位。 */
-        if (shrink17 && self.glassOn && bs.width >= 208.0 && bs.width < 400.0
-            && bs.height < 192.0) {
-            shrink17 = NO;
-        }
         self.lastBW = bs.width; self.lastBH = bs.height;
         if (sizeChanged) self.stableFrm = 0;
         else if (self.stableFrm < 2) self.stableFrm++;
-        if (shrink17) {
-            /* 401 反馈: 收起时会先看到一大块再回原位。收起起手就把玻璃和被藏的
-               系统专辑层全部还原, 让系统按它自己的内容做形变。 */
-            if (self.glassOn || !self.hidden || self.hiddenViews.count) {
-                [self diTeardown];
-                static CFAbsoluteTime sShT;
-                if (CFAbsoluteTimeGetCurrent() - sShT > 2.0) {
-                    sShT = CFAbsoluteTimeGetCurrent();
-                    DLog(@"遮罩[17]: 岛在收起(%.0fx%.0f) → 立即让位", bs.width, bs.height);
-                }
-            }
-            return;
-        }
-        if (growing && (!diIsIOS17Up() || bigChange) && (self.glassOn || !self.hidden)) {
+        if (growing && (self.glassOn || !self.hidden)) {
             /* 2.8.39: 锁死时展开起手也不拆 —— 玻璃保持在原位(展开动画结束后
                由展开态挂载路径重定位到展开方块层), 用户看到遮罩从头到尾不断。 */
             if (lockMask) {
@@ -4316,7 +4143,6 @@ static BOOL diApplyMaskToCover(UIView *cover, UIImage *shape) {
             }
             /* 展开起手: 立即收玻璃 + 还原系统专辑, 并记住"不再参与"直到缩回 */
             [self diRestorePainted];
-            if (self.glassOn) { gDISBGlassOn = 0; diWriteIslandPlist(); }   /* 2.9.68: 展开起手放手 → MRU 必须立刻接手 */
             self.glassOn = NO;
             self.loggedShow = NO;
             if (!self.hidden) self.hidden = YES;
@@ -4339,41 +4165,6 @@ static BOOL diApplyMaskToCover(UIView *cover, UIImage *shape) {
         BOOL isMini = (bs.height >= 24 && bs.height <= 62
                        && bs.width >= 100 && bs.width <= 208
                        && bs.width > bs.height * 1.55);
-        /* ===== 2.9.72: 展开变形段(小岛 → 展开)由 SB 接着画, 玻璃跟着长大 =====
-           402 日志 + 视频逐帧实锤(首次展开, 22:07:43~44):
-             · 宿主逐帧 197x37 → 201x38 → 205x38 → **210x39(gate=0)** → 232x42 …
-               → 407x198, 整个过程 ~1 秒;
-             · isMini 上限 208 → 一过 208 SB 就整块放手; 而 MRU 那边的 66 玻璃要等
-               宿主到 407 才铺(它读的是展开态那颗 66 头像);
-             · 中间这 0.6~0.9 秒, 岛上显示的是 MRU 里那颗 23pt 的小岛头像 ——
-               视频实测直径 ≈24pt, 稳定展开后 0.3 秒才跳成 60pt。
-           用户说的"首次展开专辑先显示小的然后变大"就是这一段。
-           现在把这段"宽高连续变大"的过渡帧算进小岛形态: SB 继续画, 玻璃边长按宿主
-           宽度从 25.3 线性长到 66(与 MRU 展开态的 66 对齐), 到 400 宽再交给 MRU。
-           只在"本来就在画小岛玻璃"时接(`glassOn || cacheCoverV`), 冷启动不抢。 */
-        BOOL morphExpand = NO;
-        if (diIsIOS17Up() && !isMini && enabled && maskOn && !gRecordingActive
-            && bs.width > 208.0 && bs.width < 400.0
-            && bs.height >= 34.0 && bs.height < 192.0
-            && bs.width > bs.height * 1.25
-            && (self.glassOn || self.cacheCoverV != nil)) {
-            morphExpand = YES;
-            isMini = YES;          /* 走同一条小岛绘制路径(封面候选/藏层/绘玻璃) */
-        }
-        /* ===== 2.9.66: 暂停形变时保住小岛玻璃(修"暂停专辑变大"回归) =====
-           397 日志实锤: 暂停瞬间小岛会加宽到 209x40 → 220x45(播放键换成暂停键那一帧),
-           越过 isMini 的 208 上限 → gate=0 → shapeOnly 里 lockMask 在 17 上是 NO
-           → diRestorePainted + glassOn=NO, SB 玻璃拆掉; 而 MRU 那颗 66 玻璃还在
-           (island.plist 停在"展开"没人改), 于是 37pt 的小岛里嵌了一颗 66pt 的专辑
-           —— 用户视频里"暂停专辑变大"就是这个。
-           这里只在"17 + 已有玻璃 + 当前没在播放(暂停/切歌瞬断)"时放宽宽度上限到 236,
-           让 SB 玻璃跟着形变活下来; 播放中的展开起手照旧按 208 收紧(展开仍归 MRU)。 */
-        BOOL playingAtGate = mrQueryOK ? musicPlaying
-                                       : AVAudioSession.sharedInstance.isOtherAudioPlaying;
-        BOOL pauseMorph = diIsIOS17Up() && self.glassOn && !playingAtGate
-                          && bs.height >= 24 && bs.height <= 70
-                          && bs.width >= 100 && bs.width <= 236
-                          && bs.width > bs.height * 1.55;
         /* 2.8.39: 展开态重新参与(308: "展开岛什么的不要影响, 一直显示遮罩")。
            窗口 = 媒体展开宿主实测 407x201 / 330x72 系; 收紧高度下限 120 挡掉
            来电展开(330x72 高 72)和一切过渡中间帧(259x98 / 313x131 都 < 120 或宽超),
@@ -4391,7 +4182,7 @@ static BOOL diApplyMaskToCover(UIView *cover, UIImage *shape) {
                      (isMini || isExpand) ? @"参与" : @"跳过", isMini, isExpand, maskOn);
             }
         }
-        BOOL gate = enabled && maskOn && !gRecordingActive && (isMini || isExpand || pauseMorph);
+        BOOL gate = enabled && maskOn && !gRecordingActive && (isMini || isExpand);
         if (diIsIOS17Up()) {
             static CFAbsoluteTime sGT; static int sLastGate = -1; static CGFloat sGW, sGH;
             CFAbsoluteTime gn = CFAbsoluteTimeGetCurrent();
@@ -4400,33 +4191,6 @@ static BOOL diApplyMaskToCover(UIView *cover, UIImage *shape) {
                 DLog(@"遮罩[17]: 宿主=%.0fx%.0f 小岛=%d 展开=%d 开=%d 掩码=%d 录屏=%d gate=%d",
                      bs.width, bs.height, isMini, isExpand, enabled, maskOn, gRecordingActive, gate);
             }
-        }
-        /* ===== 2.9.74: 已交接给 MRU → 这个实例闭嘴 =====
-           展开/收起动画期间 SpringBoard 的小岛容器会被系统淡出并放大, 我们的玻璃
-           是它的兄弟视图, 不会跟着淡 —— 留在原地就是"展开大岛里那颗环绕转圈的小专辑"。
-           交接窗口内直接返回: 不新挂、不重画、不校准。 */
-        if (diIsIOS17Up() && self.mruHoldT > 0) return;
-        /* ===== 2.9.65: 过渡帧锁住玻璃边长(修"从小岛展开时专辑抖一下") =====
-           396 日志实锤: 展开起手 + 波形进出时宿主会在 127x37 / 137x42 / 191x41 /
-           193x37 之间来回跳, 每一跳封面候选都变(边长 25.3 ↔ 30.4, 圆心上下 3pt),
-           玻璃跟着跳 = 用户看到的"小岛专辑抖一下"。
-           这里在"尺寸还在变"的帧把当前边长锁住(圆心仍跟随, 位置是平滑的),
-           稳定 2 帧后解锁, 让下一次校准照常生效。 */
-        if (diIsIOS17Up() && isMini && !morphExpand) {
-            if (self.glassOn && sizeChanged && self.lastGlassSide > 1.0) {
-                if (self.freezeSide <= 0) {
-                    self.freezeSide = self.lastGlassSide;
-                    static CFAbsoluteTime sFzT;
-                    if (CFAbsoluteTimeGetCurrent() - sFzT > 3.0) {
-                        sFzT = CFAbsoluteTimeGetCurrent();
-                        DLog(@"遮罩[17]: 过渡帧锁边长 %.1fpt (宿主 %.0fx%.0f)", self.freezeSide, bs.width, bs.height);
-                    }
-                }
-            } else if (self.freezeSide > 0 && self.stableFrm >= 2) {
-                self.freezeSide = 0;
-            }
-        } else if (self.freezeSide > 0) {
-            self.freezeSide = 0;
         }
         /* ===== 2.8.84: 展开态彻底交给 MediaRemoteUI，SpringBoard 侧全部退出 =====
            331 反馈: 头像下方多出一个心形模糊光斑（用户圈出来的"多出来的蒙版"）。
@@ -4437,7 +4201,7 @@ static BOOL diApplyMaskToCover(UIView *cover, UIImage *shape) {
            展开岛的头像遮罩已由 MRU 内的自绘玻璃负责，这里必须彻底退出：
            宿主一旦超过小岛尺寸（高>70 或宽>240），摘 mask + 拆玻璃 + 隐藏探针，
            缩回小岛后再由正常流程重画。 */
-        if ((bs.height > 70.0 || bs.width > 240.0) && !morphExpand) {
+        if (bs.height > 70.0 || bs.width > 240.0) {
             if (!self.hidden || _glassOn || _targets.count) {
                 static CFAbsoluteTime sBigT;
                 if (CFAbsoluteTimeGetCurrent() - sBigT > 3.0) {
@@ -4457,11 +4221,6 @@ static BOOL diApplyMaskToCover(UIView *cover, UIImage *shape) {
             if (_link.preferredFramesPerSecond != 30) _link.preferredFramesPerSecond = 30;
             return;
         }
-        /* 2.9.64: 展开过渡期不再新挂小号玻璃 —— 395: 长按展开偶发"专辑很小然后正常":
-           过渡中宿主还够着 isMini 窗口, 按 26x22 门户缓存画出一颗 25pt 小圆。
-           展开态由 MRU 接管, 播报新鲜且说展开时 SB 别再新挂(已挂的玻璃照旧跟随)。 */
-        if (diIsIOS17Up() && isMini && !self.glassOn
-            && (diIslandFreshExpand() || self.growStreak >= 2)) return;
         /* 2.8.15: 音乐岛关卡 —— 只有"正在放歌"的岛才继续(通知岛/头像一律不遮)。 */
         if (gate && !diIsNowPlayingHostCached(host)) {
             /* ===== 2.9.40: 17 的结构兜底 =====
@@ -4487,32 +4246,6 @@ static BOOL diApplyMaskToCover(UIView *cover, UIImage *shape) {
                             DLog(@"[17] 音乐岛兜底放行: 封面=%@ %.0fx%.0f 宿主=%.0fx%.0f",
                                  NSStringFromClass(cv17.class), cr17.size.width, cr17.size.height,
                                  bs.width, bs.height);
-                        }
-                    }
-                } else {
-                    /* 2.9.64: 暂停/切歌瞬断保持遮罩 —— 395 实锤: 16:30:11 与 16:30:42
-                       暂停时 playing17=NO → 老逻辑 teardown: SB 玻璃拆掉 + 系统门户层
-                       还原, 而 MRU 那颗 23 玻璃还挂着 → 两层专辑叠出"暂停变大偏移";
-                       切歌瞬间播放态短暂为 NO → "切换先变回原来的"。
-                       2.9.66: 放宽到"封面层还在就算音乐岛" —— 397 里暂停时玻璃已经被
-                       前一步的形变拆掉过, 单靠 glassOn 救不回来, 小岛就裸着系统专辑。
-                       已画着玻璃、或宿主里仍有 12~50pt 的专辑封面层 → 认定是音乐岛
-                       (暂停不等于通知岛); 真被通知替换时封面层消失, glassMiss 自然收。 */
-                    BOOL keepPause = self.glassOn;
-                    if (!keepPause) {
-                        CGRect crP = CGRectZero;
-                        UIView *cvP = diFindAlbumCoverView(host, &crP);
-                        CGFloat mnP = MIN(crP.size.width, crP.size.height);
-                        CGFloat mxP = MAX(crP.size.width, crP.size.height);
-                        keepPause = (cvP && mnP >= 12.0 && mxP <= 50.0);
-                    }
-                    if (keepPause) {
-                        ok17 = YES;
-                        static CFAbsoluteTime sPzT;
-                        if (CFAbsoluteTimeGetCurrent() - sPzT > 5.0) {
-                            sPzT = CFAbsoluteTimeGetCurrent();
-                            DLog(@"[17] 暂停/瞬断: 封面层仍在, 保持遮罩 宿主=%.0fx%.0f 玻璃=%d",
-                                 bs.width, bs.height, (int)self.glassOn);
                         }
                     }
                 }
@@ -4551,7 +4284,6 @@ static BOOL diApplyMaskToCover(UIView *cover, UIImage *shape) {
                 if (lockMask) return;
                 if (self.glassOn || !self.hidden) {
                     [self diRestorePainted];
-                    if (self.glassOn) { gDISBGlassOn = 0; diWriteIslandPlist(); }   /* 2.9.68: 收玻璃也算放手, MRU 该接手 */
                     self.glassOn = NO;
                     self.loggedShow = NO;
                     self.hidden = YES;
@@ -4693,7 +4425,6 @@ static BOOL diApplyMaskToCover(UIView *cover, UIImage *shape) {
         CGRect coverRect = CGRectZero;
         UIView *coverV = nil;
         BOOL freshScan = NO;
-        CGRect prevCover = self.cacheCoverRect;
         {
             /* 2.8.17: 缓存策略收紧 —— 以前 1.5s 重扫一次, 重扫时如果正好赶上
                我们刚把某层藏掉, 候选就会漂到别处(287 的"两边闪")。
@@ -4725,91 +4456,6 @@ static BOOL diApplyMaskToCover(UIView *cover, UIImage *shape) {
             }
             if (!coverV) coverV = self.cacheCoverV;
             if (CGRectIsEmpty(coverRect)) coverRect = self.cacheCoverRect;
-        }
-        /* 2.9.70: 小岛态几何守卫 —— 修"小岛专辑从别的地方先显示一下再回正常"。
-           收缩(展开→小岛)的第一帧, cacheCoverRect 里存的还是展开态那一大块
-           (或者展开途中 MRU 的 66 框), 按它取中心画 24pt 小圆, 圆心会落在偏右
-           二三十点的地方, 稳定 1~2 帧后才重扫校正 —— 用户看到的就是"小岛专辑
-           从其他地方冒出来再跳回原位"。这里只在小岛态做廉价校验:
-           短边 10~56、长边 ≤56、圆心在宿主内 → 接受并记为"小岛槽位";
-           否则一律沿用上次合法槽位(没有就用左槽默认 8pt 内边距、垂直居中)。
-           注意: 不拦 isExpand/过渡帧, 展开态走 MRU, 不受影响。 */
-        if (diIsIOS17Up() && isMini && !CGRectIsEmpty(coverRect)) {
-            CGFloat mnc = MIN(coverRect.size.width, coverRect.size.height);
-            CGFloat mxc = MAX(coverRect.size.width, coverRect.size.height);
-            CGPoint cc0 = CGPointMake(CGRectGetMidX(coverRect), CGRectGetMidY(coverRect));
-            BOOL sane = (mnc >= 10.0 && mxc <= 56.0
-                         && cc0.x >= 2.0 && cc0.y >= 2.0
-                         && cc0.x <= bs.width - 2.0 && cc0.y <= bs.height - 2.0);
-            /* ===== 2.9.73: 过渡帧"原位不动" =====
-               403 视频逐帧实锤(第一次收回, 1.57~1.73 秒): 岛在 407x197 → 189x37 之间
-               缩的那几帧里, 这里会按**当前还在半大的宿主高度**重算槽位
-               (h=61 时 y=(61-30)/2=15, h=97 时 y=33), 玻璃就被摆到岛的偏下方、
-               边长也按 30 取 —— 用户看到的"专辑显示大的在下面, 然后才正常"。
-               系统的小岛槽位是固定的(左槽 x=8、垂直居中), 收缩过程中它并不会移动;
-               所以尺寸还在变的帧一律沿用上次确认过的槽位, 只有稳定 2 帧后才接受新扫描。 */
-            BOOL slotSettled = (!sizeChanged && self.stableFrm >= 2);
-            if (sane && slotSettled) {
-                self.miniCoverRect = coverRect;
-                self.miniSlotHostH = bs.height;      /* 2.9.75: 记下稳定态高度 */
-            } else if (!CGRectIsEmpty(self.miniCoverRect)) {
-                coverRect = self.miniCoverRect;
-                self.cacheCoverRect = coverRect;
-            } else {
-                CGRect keep = self.miniCoverRect;
-                if (CGRectIsEmpty(keep)) {
-                    /* 2.9.75: 冷启动/注销后第一次收缩时还没有确认过的槽位 ——
-                       以前用**当前**宿主高度算(收缩半途 h=51/45/40 各算一次),
-                       圆就跟着一帧一帧往下挪, 用户看到"小岛先偏移一下才正常"。
-                       现在: 宿主还明显高于小岛(>42)就用上次学到的稳定高度,
-                       没学到就用 37(实测小岛高度), 全程只算一次, 不再抖动。 */
-                    CGFloat hh = bs.height;
-                    if (hh > 42.0) hh = (self.miniSlotHostH > 20.0) ? self.miniSlotHostH : 37.0;
-                    CGFloat d = MIN(hh - 10.0, 30.0);
-                    if (d < 14.0) d = 14.0;
-                    keep = CGRectMake(8.0, (hh - d) * 0.5, d, d);
-                }
-                static CFAbsoluteTime sKeepT;
-                if (CFAbsoluteTimeGetCurrent() - sKeepT > 3.0) {
-                    sKeepT = CFAbsoluteTimeGetCurrent();
-                    DLog(@"遮罩[17]: 小岛候选不合理 %@ 岛=%.0fx%.0f → 沿用槽位 %@",
-                         NSStringFromCGRect(coverRect), bs.width, bs.height,
-                         NSStringFromCGRect(keep));
-                }
-                coverRect = keep;
-                self.cacheCoverRect = keep;
-            }
-        }
-        /* 2.9.63: 小岛态封面候选漂移守卫 —— 用户报"小岛暂停了会变大偏移"。
-           小岛稳定后封面门户位置是固定的(左槽 26x22@8,7); 暂停/系统重建会触发
-           重扫, 一旦挑到别的层(尺寸 >34pt 或中心挪了 >10pt), 玻璃就会画大/画偏。
-           宿主尺寸没变时一律沿用旧位, 连续 3 次重扫仍漂移才接受新位
-           (真换位置不会一直被拒, 假漂移最多错 12 秒)。 */
-        if (freshScan && coverV && !CGRectIsEmpty(prevCover) && !CGRectIsEmpty(coverRect)
-            && diIsIOS17Up() && isMini
-            && fabs(bs.width - self.cacheBW) <= 2.0 && fabs(bs.height - self.cacheBH) <= 2.0) {
-            CGPoint nc = CGPointMake(coverRect.origin.x + coverRect.size.width * 0.5,
-                                     coverRect.origin.y + coverRect.size.height * 0.5);
-            CGPoint oc = CGPointMake(prevCover.origin.x + prevCover.size.width * 0.5,
-                                     prevCover.origin.y + prevCover.size.height * 0.5);
-            BOOL bigger = (coverRect.size.width > 34.0 || coverRect.size.height > 34.0);
-            BOOL moved = (fabs(nc.x - oc.x) > 10.0 || fabs(nc.y - oc.y) > 10.0);
-            static int sDriftHits; static CFAbsoluteTime sDriftT;
-            if (bigger || moved) {
-                sDriftHits++;
-                if (sDriftHits < 3) {
-                    CGRect driftNew = coverRect;
-                    coverRect = prevCover;
-                    self.cacheCoverRect = prevCover;
-                    if (CFAbsoluteTimeGetCurrent() - sDriftT > 5.0) {
-                        sDriftT = CFAbsoluteTimeGetCurrent();
-                        DLog(@"遮罩[17]: 小岛封面候选漂移 新%@ 旧%@ → 沿用旧位(连续%d次)",
-                             NSStringFromCGRect(driftNew), NSStringFromCGRect(prevCover), sDriftHits);
-                    }
-                }
-            } else {
-                sDriftHits = 0;
-            }
         }
         /* 2.8.18: 换封面视图**不再**整体 teardown。
            288 日志 16:01:21→16:01:22 就是活证据: 同一首歌唱着, 封面从
@@ -4888,9 +4534,6 @@ static BOOL diApplyMaskToCover(UIView *cover, UIImage *shape) {
             _loggedNoArtTip = NO;
         }
 
-        /* 2.9.72: 展开/收起变形段拿不到新图时, 保持上一帧的玻璃就好, 绝不退回
-           "系统蒙版" —— 那会在半大的岛上裁出一块模糊背景(331 的心形光斑)。 */
-        if (morphExpand && !wantGlass) return;
         if (wantGlass) {
             /* 摘掉可能还挂在系统层上的旧蒙版, 玻璃全权接管 */
             if (_targets.count) {
@@ -4934,52 +4577,6 @@ static BOOL diApplyMaskToCover(UIView *cover, UIImage *shape) {
             }
             CGRect glassRect = coverRect;
             if (!CGRectIsEmpty(sqRect)) glassRect = CGRectUnion(glassRect, sqRect);
-            /* ===== 2.9.41: 17 小岛态把玻璃夹进宿主 =====
-               17 上报的封面视图常常是 66pt(跨进程 scene 的尺寸), 直接按它画玻璃会
-               在小岛上铺一大块、被岛体裁掉一角 —— 就是截图二里那块粉红模糊斑。
-               小岛态强制: 边长 ≤ 岛高(留 5%), 且整块必须落在宿主内。 */
-            if (diIsIOS17Up() && isMini) {
-                CGFloat maxSide = MIN(bs.width, bs.height) * 0.95;
-                if (glassRect.size.width > maxSide || glassRect.size.height > maxSide) {
-                    CGFloat side = MIN(MAX(glassRect.size.width, glassRect.size.height), maxSide);
-                    CGPoint gc = CGPointMake(CGRectGetMidX(glassRect), CGRectGetMidY(glassRect));
-                    glassRect = CGRectMake(gc.x - side * 0.5, gc.y - side * 0.5, side, side);
-                    static CFAbsoluteTime sClampT;
-                    if (CFAbsoluteTimeGetCurrent() - sClampT > 3.0) {
-                        sClampT = CFAbsoluteTimeGetCurrent();
-                        DLog(@"遮罩[17]: 玻璃夹紧 %.0fx%.0f → %.0fx%.0f 岛=%.0fx%.0f",
-                             coverRect.size.width, coverRect.size.height,
-                             glassRect.size.width, glassRect.size.height, bs.width, bs.height);
-                    }
-                }
-                CGFloat minX = 2.0, maxX = bs.width - glassRect.size.width - 2.0;
-                CGFloat minY = 2.0, maxY = bs.height - glassRect.size.height - 2.0;
-                if (maxX >= minX) glassRect.origin.x = MIN(MAX(glassRect.origin.x, minX), maxX);
-                if (maxY >= minY) glassRect.origin.y = MIN(MAX(glassRect.origin.y, minY), maxY);
-            }
-            /* ===== 2.9.72: 展开变形段按宿主宽度长大 =====
-               两端都是实测值: 小岛 25.3pt(26x22 门户按 115% 取正方形) /
-               展开 66pt(MRU 展开态那颗 66 头像)。中间按宿主宽度 208→400 线性插值,
-               左上角锚定不变(小岛槽位 (8,7) 与展开封面左上角是同一个点)。
-               这样展开全程只有一颗圆, 直径 25 → 66 连续变化, 不再"小的跳成大的"。 */
-            if (morphExpand) {
-                CGFloat prog = (bs.width - 208.0) / (400.0 - 208.0);
-                prog = MIN(MAX(prog, 0.0), 1.0);
-                CGFloat mside = 25.3 + (66.0 - 25.3) * prog;
-                /* 2.9.75: 左上角用**确定值**插值, 不再跟 coverRect 走。
-                   coverRect 是系统门户这一帧的实时 frame, 变形过程中它会轻微漂移
-                   (405 视频: 每次切换完小岛的圆都比最终位置偏 3~7px 再归位)。
-                   实测两端: 小岛槽位 (8,7) / 展开封面 (17,26), 中间线性过渡,
-                   全程只有一条平滑轨迹, 落定即原位。 */
-                CGFloat sx = 8.0, sy = 7.0;
-                if (!CGRectIsEmpty(self.miniCoverRect)) {
-                    sx = self.miniCoverRect.origin.x;
-                    sy = self.miniCoverRect.origin.y;
-                }
-                CGFloat mx = sx + (17.0 - sx) * prog;
-                CGFloat my = sy + (26.0 - sy) * prog;
-                glassRect = CGRectMake(mx, my, mside, mside);
-            }
             [self diPaintGlassAt:glassRect over:coverV art:gSharedArt];
             /* 2.8.15: 系统布局会周期性把岛内容分支 bringSubviewToFront(动画层对抗旧行为),
                玻璃一旦被压到系统专辑下面就成了"遮罩没生效"。
@@ -5005,8 +4602,6 @@ static BOOL diApplyMaskToCover(UIView *cover, UIImage *shape) {
             }
             _coverV = coverV;
             _glassOn = YES;
-            /* 2.9.68: 告诉 MRU"小岛这块我画着, 你别插手"; 2.9.69: 立即送达 */
-            if (!gDISBGlassOn) { gDISBGlassOn = 1; diWriteIslandPlist(); }
             if (!self.loggedShow) {
                 self.loggedShow = YES;
                 DLog(@"遮罩挂上(玻璃): 封面=%@ %.0fx%.0f@(%.0f,%.0f) 方块=%@ %.0fx%.0f 岛=%.0fx%.0f 素材=%@ 旋转=%@(%.0f°/s 角度%.0f°)",
@@ -5020,29 +4615,12 @@ static BOOL diApplyMaskToCover(UIView *cover, UIImage *shape) {
             return;
         }
 
-        /* ===== 2.9.41: 17 上不再走"系统层 mask 兜底" =====
-           MediaRemote 取图失败的瞬间, 老路会把封面父容器(展开态是那块模糊背景)
-           按遮罩形状裁出来 —— 用户截图一(展开)和截图二(小岛)里那块粉红模糊斑
-           就是它。17 上宁可这一帧不画, 也不挂任何系统蒙版。 */
-        if (diIsIOS17Up()) {
-            if (_glassOn || _targets.count) [self diTeardown];
-            static CFAbsoluteTime sNoArtT;
-            if (CFAbsoluteTimeGetCurrent() - sNoArtT > 3.0) {
-                sNoArtT = CFAbsoluteTimeGetCurrent();
-                DLog(@"遮罩[17]: 未拿到专辑图, 不走系统蒙版兜底(让位) 宿主=%d 小岛=%d",
-                     (int)diIslandStateMini(), (int)isMini);
-            }
-            return;
-        }
-
         /* 没拿到专辑图: 退出玻璃模式 —— 还原系统封面, 回到系统层 mask 兜底 */
         if (_glassOn) {
             [self diRestorePainted];
             self.hidden = YES;
             self.transform = CGAffineTransformIdentity;
             _glassOn = NO;
-            gDISBGlassOn = 0;          /* 2.9.68: 没图让位 → MRU 接手 */
-            diWriteIslandPlist();
             self.loggedShow = NO;      /* 让下面重新打一条系统 mask 的挂上日志 */
         }
 
@@ -13575,10 +13153,6 @@ static void diHookHomeBarGrabberRetry(void) { diHookHomeGrabber(); }
 @property(nonatomic,strong) UIImage *lastArt;
 @property(nonatomic,assign) CGFloat spinSpeed;
 @property(nonatomic,assign) BOOL spinRev;
-/* 2.9.74: 这颗玻璃是否经历过"小岛↔展开"的半途(过渡区)。
-   经历过 → 它已经淡到 0, 收缩态里就**保持隐藏**, 不走 teardown
-   (还原系统层就是那块"多出来的蒙版"); 没经历过(冷启动/切歌残留) → 照旧拆。 */
-@property(nonatomic,assign) BOOL wasMid;
 @end
 @implementation DIActivityMaskState @end
 static char kDIActivityMaskState;
@@ -13873,18 +13447,6 @@ static CGRect diActivityVisibleRect(UIView *artwork, NSMutableString *diag) {
     return rect;
 }
 
-/* ===== 2.9.76: MRU 侧的"是否在播放" —— 暂停和播放中的收缩要区别对待:
-   播放中收起(切歌)系统自己在做交叉淡入, 我们的 66 要让路; 暂停收起
-   没有系统动画, 66 淡早了岛上就什么都没有(用户: "暂停后小岛不显示专辑")。 */
-static BOOL diMruIsPlayingCached(void) {
-    static CFAbsoluteTime sAt; static BOOL sPlaying;
-    CFAbsoluteTime now = CFAbsoluteTimeGetCurrent();
-    if (now - sAt > 0.5) {
-        sAt = now;
-        sPlaying = AVAudioSession.sharedInstance.isOtherAudioPlaying;
-    }
-    return sPlaying;
-}
 static void diActivityTeardown(UIView *artwork, DIActivityMaskState *state) {
     if (!state) return;
     /* 2.9.76: 还原底图层 */
@@ -14086,18 +13648,6 @@ static BOOL diMruCompactSiblingExists(UIView *artwork) {
 
 /* 2.8.82: 自绘玻璃 —— 图 + 同一张遮罩 + 同速旋转, 系统那张层只藏起来。
    这是小岛 2.8.13 起一直在用、已验证有效的那套观感, 这里在 MediaRemoteUI 内复刻。 */
-/* ===== 2.9.74: 宿主(NowPlaying 容器)当前高度 =====
-   展开态宿主恒 ≥190 高, 小岛态 ≤45 高; 中间 48~172 只出现在"小岛↔展开"的
-   动画途中, 过渡区的淡入淡出全部按这个高度算系数。 */
-static CGFloat diActivityHostHeight(UIView *artwork) {
-    for (UIView *a = artwork.superview; a && a != artwork.window; a = a.superview) {
-        if ([NSStringFromClass(a.class) containsString:@"NowPlaying"]) {
-            CALayer *pl = a.layer.presentationLayer;
-            return pl ? pl.bounds.size.height : a.bounds.size.height;
-        }
-    }
-    return 0;
-}
 static void diActivityApply(UIView *artwork) {
     if (!NSThread.isMainThread || ![artwork isKindOfClass:UIView.class]) return;
     DIActivityMaskState *state = objc_getAssociatedObject(artwork, &kDIActivityMaskState);
@@ -14131,8 +13681,6 @@ static void diActivityApply(UIView *artwork) {
        比任何形态阈值都稳(小岛自己弹一下只有几个点, 不会误判)。 */
     BOOL growingForm = (gDIFormPW > 1.0 && gDIFormPH > 1.0 && gDIFormW > 1.0
                         && (gDIFormW - gDIFormPW > 24.0 || gDIFormH - gDIFormPH > 12.0));
-    BOOL shrinkingForm = (gDIFormPW > 1.0 && gDIFormPH > 1.0 && gDIFormW > 1.0
-                          && (gDIFormPW - gDIFormW > 24.0 || gDIFormPH - gDIFormH > 12.0));
     BOOL compact = ios17 && (smallArt || sibling || (formNow == 1 && !growingForm)
                              || (formNow < 0 && diMruIslandCompact(artwork)));
     /* ===== 2.9.66: 播报停摆 + 现场收缩 → 按收缩处理(修"暂停专辑变大") =====
@@ -14171,126 +13719,10 @@ static void diActivityApply(UIView *artwork) {
            露出的就是系统那颗小专辑 —— 用户反复说的"第一次展开显示小专辑"。 */
         compact = YES;
     }
-    /* ===== 2.9.68: 与 SpringBoard 的"谁在画"交接 —— 彻底分离, 互不干扰 =====
-       399 日志 + 视频实锤: 展开起手那一刻**两边同时放手**——
-         · SpringBoard 按小岛尺寸判, 宿主一到 213 宽就撤掉自己的玻璃;
-         · MRU 这边播报还写着"小岛/过渡", 2.9.67 的规则把 66 判成收缩拆掉。
-       于是 0.1~0.3 秒岛上什么都没有, 露出系统那颗很小的原生专辑, 等宿主长到
-       240x70 才重铺 66 —— 用户: "展开又还是会触发小专辑然后变大 / 底闪一下"。
-       现在用播报里的 sb 位(SpringBoard 当前是否正画着这块岛的玻璃)来分工:
-         · sb=1 → 小岛归 SpringBoard, MRU 的 66 一律让位(不会叠出"变大");
-         · sb=0 → SpringBoard 放手了, MRU 必须接手 —— 这时不再因为"宿主还小"
-           就拆 66, 只有播报明确说"还停在 189x37 这种小岛原尺寸"才让位。 */
-    static CFAbsoluteTime sNoSBSince = 0;
-    static CFAbsoluteTime sMiniSince = 0;
-    BOOL keepBig = NO;
-    /* 2.9.69: 去掉 formNow>=-1 的限制 —— 399 里"展开先空白一下"最容易出现在
-       播报还没写过的时刻(刚注销/刚重开屏), 那时 formNow=-2, 2.9.68 的交接逻辑
-       整段被跳过, 66 照样被老规则拆掉。现在没播报也照样听 sb 的。 */
-    if (ios17 && !smallArt) {
-        if (gDIFormSB) {
-            sNoSBSince = 0; sMiniSince = 0;
-            if (formNow != 0) compact = YES;   /* SpringBoard 在画 → MRU 让位 */
-        } else if (formNow != 0) {
-            CGFloat fw = gDIFormW, fh = gDIFormH;
-            BOOL stillMini = (formNow == 1 && fw > 1 && fh > 1 && fw < 200.0 && fh < 45.0);
-            CFAbsoluteTime t68 = CFAbsoluteTimeGetCurrent();
-            if (stillMini) {
-                /* 2.9.72: 播报已经确认"还停在小岛原尺寸"就不再留 66 —— 只有还在
-                   变大(展开起手)的 0.35 秒给一点宽限。旧版给满 1 秒, 暂停那一瞬
-                   sb=0 时那颗 66 会在 37pt 的小岛里挂一整秒(用户: 暂停专辑那么大)。 */
-                if (!sMiniSince) sMiniSince = t68;
-                sNoSBSince = 0;
-                if (growingForm && t68 - sMiniSince < 0.35) {
-                    keepBig = YES;
-                } else {
-                    compact = YES;             /* 真还停在小岛原尺寸: 让位 */
-                }
-            } else {
-                sMiniSince = 0;
-                if (!sNoSBSince) sNoSBSince = t68;
-                /* 兜底: 播报一直说 sb=0 却 1.2 秒都没有展开尺寸 → 别把 66 永挂 */
-                keepBig = (t68 - sNoSBSince < 1.2);
-            }
-        } else { sNoSBSince = 0; sMiniSince = 0; }
-    } else { sNoSBSince = 0; sMiniSince = 0; }
-    if (keepBig) compact = NO;
-    /* ===== 2.9.70: 收缩途中的"让位硬判据" =====
-       400 日志实锤: 展开→小岛这段播报按 268x60 → 231x52 → 189x37 递减,
-       而 2.9.69 的交接逻辑在 sb=0 时会给 66 最多 1.2 秒宽限, 这颗 66 挂在
-       展开态残留头像上、位置在屏幕中间 —— 用户看到的就是"返回小岛时专辑
-       先从别的地方显示, 过一下才回到正常位置"。
-       判据: 播报尺寸比上一拍明显变小(宽 -24 或 高 -12) 且不是"确认展开" →
-       立刻按收缩处理, 不让 keepBig 保留大玻璃。展开动画只会变大, 不会误伤。 */
-    if (ios17 && !smallArt && formNow != 0 && shrinkingForm) {
-        compact = YES;
-        keepBig = NO;
-    }
-    /* ===== 2.9.71: 过渡途中"这颗大头像就是岛上正在显示的那颗" —— 一律不拆 =====
-       401 日志 + 视频实锤(20:53:50 展开 / 20:53:10 收回):
-         · 播报停在过渡帧(-1), 宿主只有 158x56 / 132x41(小岛尺寸);
-         · MRU 里却有一颗 66x66 的大头像贴在展开位 {{21.67,24},{66,66}};
-         · 2.9.70 的"过渡帧按宿主尺寸让位"把它判成收缩 → 拆玻璃。
-       拆掉玻璃时系统那几层又被我们藏着, 岛上直接变全黑, 两秒后才重建 ——
-       用户看到的"展开从小一下变大""收回小岛专辑偏一下才正常"就是这个空洞。
-       现在: 只要是 66 的大头像、又没有可见的小头像(sibling=0), 它就是岛上
-       正在显示的那颗, 让它跟着岛体动画走 —— 不拆、不重铺、不换尺寸。
-       上限 0.9 秒: 真正的"展开态残留 66"最多多留 0.9 秒, 之后回到原来的规则。 */
-    {
-        static CFAbsoluteTime sHoldBigT = 0;
-        static __weak UIView *sHoldBigV = nil;
-        /* 2.9.72: 只在"播报缺失/过期/过渡帧"(formNow<0)时挂住。formNow==1(取消
-           确认停在小岛)时绝不挂 —— 那会在暂停(小岛 189x37)里留一颗 66 的专辑。 */
-        BOOL holdBig = (ios17 && compact && !smallArt && !sibling && artSide >= 56.0
-                        && formNow < 0);
-        if (holdBig) {
-            if (sHoldBigV != artwork) { sHoldBigV = artwork; sHoldBigT = CFAbsoluteTimeGetCurrent(); }
-            if (CFAbsoluteTimeGetCurrent() - sHoldBigT > 0.9) holdBig = NO;
-        } else { sHoldBigV = nil; sHoldBigT = 0; }
-        if (holdBig) { compact = NO; keepBig = YES; }
-    }
+    /* ===== 2.9.77: 2.9.68~71 的"sb 交接/宽限/holdBig"全部删除 =====
+       双通道彻底分离后 MRU 只有一条规则: 播报确认展开(或过渡帧)才留 66,
+       其余一律让位。不存在"SpringBoard 在画我就让、放手我就接"的协商。 */
     BOOL expConfirmed = (formNow == 0);
-    /* ===== 2.9.74: 半途区(小岛 ↔ 展开) —— 只让"一颗圆"淡入淡出 =====
-       404 反馈三连: "切回小岛多了一个图层""展开大岛有个小专辑环绕转圈"
-       "那个多出来的蒙版又显示出来了"。逐帧看下来都是同一条:
-       这段 0.2~0.4 秒里两边的玻璃各画各的 ——
-         · 展开: 小岛容器的玻璃不跟着系统淡出, 停在原地转圈(旋转开着);
-         · 收回: 66 那颗玻璃被"先别拆"留住, 岛已经缩成小胶囊, 它还挂在里面。
-       现在按宿主高度算一个 0→1 的系数: 宿主还在小岛尺寸时圆不可见, 长到展开尺寸
-       才完全显现; 收回时反过来。整段不拆、不还原系统层(还原出来的就是那块
-       "多出来的蒙版"), 也就不存在"从别处飞过来"。 */
-    CGFloat hostH74 = ios17 ? diActivityHostHeight(artwork) : 0;
-    BOOL mid74 = (ios17 && !smallArt && hostH74 > 48.0 && hostH74 < 172.0);
-    /* ===== 2.9.75: 方向按"这个头像自己"的宿主高度算 =====
-       2.9.74 用的是进程级 static, 小头像/大头像两个实例互相覆盖, 方向经常判反
-       (展开被判成收起 → 玻璃被淡成 0 → 岛上空白)。改成每个头像各记一份。 */
-    BOOL grow74 = NO, shrink74 = NO;
-    {
-        static NSMapTable *sPrevHMap;
-        if (!sPrevHMap) sPrevHMap = [NSMapTable mapTableWithKeyOptions:NSPointerFunctionsWeakMemory
-                                                         valueOptions:NSPointerFunctionsStrongMemory];
-        NSNumber *pv = [sPrevHMap objectForKey:artwork];
-        CGFloat prevH = pv ? pv.doubleValue : 0;
-        if (hostH74 > 1.0) {
-            if (prevH > 1.0) {
-                grow74   = (hostH74 > prevH + 2.0);
-                shrink74 = (hostH74 < prevH - 2.0);
-            }
-            [sPrevHMap setObject:@(hostH74) forKey:artwork];
-        }
-    }
-    /* 小岛那颗(23)也要跟着交班: 宿主在过渡区时它的 alpha 从 1 降到 0 ——
-       两颗圆交错淡入淡出, 就不会出现"大岛里还挂着一颗小的在转"。 */
-    BOOL midZone74 = (ios17 && hostH74 > 48.0 && hostH74 < 172.0);
-    /* ===== 2.9.75: 宿主已经长到展开尺寸时, 不管文件还写着什么, 都按展开处理 =====
-       405 视频逐帧: 岛已经撑满、内容却在模糊里空着(左上角一块黑) 0.1 秒。
-       那一刻 compact 还是上一拍"小岛"的旧值, 这颗 66 的玻璃被当作残留淡成 0;
-       等文件翻成展开才重新显现 —— 用户看到的就是"展开先空白再正常"。 */
-    if (ios17 && !smallArt && hostH74 >= 172.0) compact = NO;
-    if (mid74) {
-        compact = !grow74;      /* 变大半途当展开(写 YES, SB 闭嘴), 变小半途当收缩 */
-        keepBig = grow74;
-    }
     if (ios17)
         /* 2.9.60: 只有"确认过的展开"才向 SB 报展开 —— 切歌瞬间 66 残留被判
            非收缩但还没过确认期, 这时若报 YES, SB 16 侧刚恢复的小岛玻璃会被
@@ -14323,79 +13755,21 @@ static void diActivityApply(UIView *artwork) {
     }
     if (!want) { diActivityTeardown(artwork, state); return; }
 
-    /* ===== 2.9.55: 17 收缩态里有两颗头像, 按尺寸分开处理 =====
-       387 日志实锤(17, 宿主 189x37):
-         · 11:02:47	MRUActivityAccessoryView[22x22] → artwork 23x23  ← 小岛真正显示的那颗
-         · 11:02:49	MRUActivityAccessoryView[66x66] → artwork 66x66  ← 展开态那颗
-       岛收回后, 展开那颗(66x66)还会被 layout 到, 玻璃跟着铺 66pt —— 这就是用户说的
-       "切换下一首放大就回不去了"。所以: 小岛态只给 23 那颗画, 大的立刻拆掉。
-       16 完全不进这条分支(compact 恒 false)。 */
+    /* ===== 2.9.77: 2.9.40 原味 —— 收缩态 MRU 完全不参与 =====
+       小岛显示整体归 SpringBoard 的玻璃(2.9.40 这套在 17 上"怎么切换都正常");
+       MRU 只在确认展开时画 66。这里拆干净并还原系统层, 不留任何过渡残党
+       (2.9.58~76 的"给 23 铺玻璃 / 淡出陪缩 / 先别拆 / 小玻璃闭嘴"全部删除)。 */
     if (compact) {
         diMruWriteExpandState(NO, artwork.bounds.size);   /* 别让旧 YES 续期 */
-        if (!smallArt) {
-            /* ===== 2.9.74: 收缩半途 —— 让这颗圆跟着缩、跟着淡 =====
-               2.9.73 的"先别拆"是把它整颗 66 留在原地(用户: "多了一个图层/蒙版");
-               直接拆又会还原系统层(那块按展开尺寸摆, "大的在下面")。
-               现在折中: 不拆、不还原, 只按宿主高度把 alpha 从 1 淡到 0,
-               岛缩到小胶囊时这颗大玻璃已经看不见了, 剩下的交给小岛那颗。 */
-            if (state && state.glass && ios17) {
-                /* ===== 2.9.75: 只有"确实在收缩"才淡; 展开方向恒全显 =====
-                   405 逐帧: 收起末端岛只有 40 高, 这颗 66 却还半透明挂着,
-                   和小岛那颗叠在一起 —— 用户说的"小岛偏移一点才正常"。
-                   现在: 宿主人还在长大(展开起手) → alpha 保持 1, 直接交给 MRU;
-                   只有宿主在往小缩时才按高度淡出, 而且窗口收紧到 150→70,
-                   胶囊变小之前就彻底看不见。 ---- */
-                CGFloat t = 0.0;
-                if (mid74 && !grow74) {
-                    /* 2.9.76: 播放中收起按老窗口淡(系统自己有交叉淡入);
-                       暂停收起没有系统动画, 窗口改 45→70 —— 66 陪岛缩到胶囊
-                       边缘才消失, 不再出现"暂停后小岛不显示专辑"。 */
-                    if (diMruIsPlayingCached()) t = (hostH74 - 70.0) / (150.0 - 70.0);
-                    else                        t = (hostH74 - 45.0) / (70.0 - 45.0);
-                    t = MIN(MAX(t, 0.0), 1.0);
-                } else if (mid74 && grow74) {
-                    t = 1.0;
-                }
-                if (fabs(state.glass.alpha - t) > 0.02) state.glass.alpha = t;
-                if (state.systemLayer && !state.systemLayer.hidden) state.systemLayer.hidden = YES;
-                if (state.shadow && !state.shadow.hidden) state.shadow.hidden = YES;
-                if (mid74) state.wasMid = YES;
-                return;      /* 不拆、不还原 —— 一还原就是那块"多出来的蒙版" */
-            }
-            /* 2.9.59: 回到"拆掉"(2.9.58 的"就地画 23"会错位 —— 391 日志
-               可见={{21.5,21.5},{23,23}}, 那是 66 残留框的居中点, 不是原生专辑位置)。
-               小岛的遮罩由那颗 23 头像负责, 这颗大头像没有确认过的展开证据就还原。 */
-            if (state) diActivityTeardown(artwork, state);
-            static CFAbsoluteTime sBig17T;
-            if (CFAbsoluteTimeGetCurrent() - sBig17T > 5.0) {
-                sBig17T = CFAbsoluteTimeGetCurrent();
-                CGRect inWin = artwork.window
-                    ? [artwork convertRect:artwork.bounds toView:artwork.window] : CGRectZero;
-                diMruFileLog([NSString stringWithFormat:
-                              @"小岛态: 拆掉展开残留的大头像 头像 %.0fx%.0f 屏幕%@ (文件=%d 小头像=%d)",
-                              artwork.bounds.size.width, artwork.bounds.size.height,
-                              NSStringFromCGRect(inWin), formNow, (int)sibling]);
-            }
-            return;
-        }
-        /* 2.9.58: 不再"拆别人的大玻璃" —— 那颗 66 现在也按 23 画, 拆了又会被重画,
-           只会造成一帧闪烁。各自按小岛尺寸画即可。 */
-        /* ===== 2.9.76: 宿主已明显大于小岛(展开途中/展开稳态) → 小玻璃闭嘴 =====
-           407 实锤: SB 在 251x49 退场后到 MRU 66 铺上之前, 这颗 23pt 玻璃
-           (带着旋转)就是用户看到的"小专辑转圈"。这段时间大圆由 SB 的变形
-           玻璃负责; 宿主回到小岛尺寸(宽<240 且高<60)再恢复。 */
-        if (ios17 && (hostH74 > 60.0 || gDIFormW > 240.0)) {
-            if (state && state.glass && state.glass.alpha > 0.02) state.glass.alpha = 0.0;
-            return;
-        }
-        if (state && state.glass && state.glass.alpha < 0.98) state.glass.alpha = 1.0;
-        static CFAbsoluteTime sCmp17T; static CGSize sCmp17Sz;
-        if (CFAbsoluteTimeGetCurrent() - sCmp17T > 8.0 || !CGSizeEqualToSize(sCmp17Sz, artwork.bounds.size)) {
-            sCmp17T = CFAbsoluteTimeGetCurrent(); sCmp17Sz = artwork.bounds.size;
+        if (state) diActivityTeardown(artwork, state);
+        static CFAbsoluteTime sCmp77T; static CGSize sCmp77Sz;
+        if (CFAbsoluteTimeGetCurrent() - sCmp77T > 8.0 || !CGSizeEqualToSize(sCmp77Sz, artwork.bounds.size)) {
+            sCmp77T = CFAbsoluteTimeGetCurrent(); sCmp77Sz = artwork.bounds.size;
             diMruFileLog([NSString stringWithFormat:
-                          @"小岛态: 给可见头像铺玻璃 头像 %.0fx%.0f (宿主判据=%d)",
+                          @"小岛态: MRU 全部让位归 SpringBoard 头像 %.0fx%.0f (文件=%d)",
                           artwork.bounds.size.width, artwork.bounds.size.height, formNow]);
         }
+        return;
     }
 
     /* 2.9.63: 这条分支现在只在"播报缺失/过期"(formNow<0)且大头像无收缩证据时走,
@@ -14409,7 +13783,7 @@ static void diActivityApply(UIView *artwork) {
        现在: 文件新鲜但尺寸卡在中间(=-1) → 认定是展开/收起的动画帧,
        保留现有玻璃继续走, 玻璃按头像自身 bounds 铺(见下面 box 那段)。
        只有"文件根本没有/已过期"(=-2)才按保守让位拆掉。 */
-    if (ios17 && !smallArt && !compact && !expConfirmed && formNow != -1 && !keepBig) {
+    if (ios17 && !compact && !expConfirmed && formNow != -1) {
         if (state) diActivityTeardown(artwork, state);
         static CFAbsoluteTime sHoldT;
         if (CFAbsoluteTimeGetCurrent() - sHoldT > 5.0) {
@@ -14432,18 +13806,8 @@ static void diActivityApply(UIView *artwork) {
        动画一结束窗口补满, 玻璃才"变大" —— 用户: "展开到大的时候会触发
        专辑很小然后才变大"。播报为"展开"(0)或"过渡帧"(-1)时,
        直接按头像自己的 bounds 铺(展开态恒 66x66), 玻璃跟岛体一起缩放, 不再重铺。 */
-    if (ios17 && (formNow == 0 || formNow == -1 || keepBig)) box = artwork.bounds;
+    if (ios17 && (formNow == 0 || formNow == -1)) box = artwork.bounds;
     BOOL collapsed = ios17 && (MIN(box.size.width, box.size.height) < 42);
-    /* ===== 2.9.70: 收缩态直接铺头像自己(修"返回小岛时专辑先从别处显示") =====
-       400 日志里收缩过渡帧的祖先窗口会在 189x37 ↔ 268x60 之间跳动, 求交出来的
-       box 原点是偏的, 玻璃就先画在偏右/偏上的位置, 稳定后才被系统布局拉回原位。
-       收缩态真正显示专辑的就是这颗 23pt 头像本身, 它的 bounds 就是最终位置 ——
-       直接满铺, 系统怎么动画都跟着走, 不再自己算窗口。 */
-    if (ios17 && collapsed
-        && artwork.bounds.size.width > 4.0 && artwork.bounds.size.height > 4.0
-        && MIN(artwork.bounds.size.width, artwork.bounds.size.height) < 42.0) {
-        box = artwork.bounds;
-    }
     /* 16 保持 2.9.33 的老判据(按 bounds), 不用窗口 */
     if (ios17) diMruWriteExpandState(!collapsed, box.size);
     if (collapsed && MIN(box.size.width, box.size.height) < 12) {
@@ -14454,9 +13818,9 @@ static void diActivityApply(UIView *artwork) {
     static NSString *lastChain; static CGRect lastBox;
     if (ios17 && (!CGRectEqualToRect(lastBox, box) || ![lastChain isEqualToString:chain])) {
         lastBox = box; lastChain = [chain copy];
-        diMruFileLog([NSString stringWithFormat:@"窗口 bounds=%@ 可见=%@ 收缩=%d 形=%d sb=%d 保大=%d 宿主=%.0fx%.0f | %@",
+        diMruFileLog([NSString stringWithFormat:@"窗口 bounds=%@ 可见=%@ 收缩=%d 形=%d 宿主=%.0fx%.0f | %@",
                       NSStringFromCGRect(artwork.bounds), NSStringFromCGRect(box),
-                      (int)collapsed, formNow, gDIFormSB, (int)keepBig,
+                      (int)collapsed, formNow,
                       gDIFormW, gDIFormH, chain.length ? chain : @"(无收缩祖先)"]);
     }
 
@@ -14620,27 +13984,9 @@ static void diActivityApply(UIView *artwork) {
         state.spinSpeed = speed; state.spinRev = rev;
         diMruFileLog([NSString stringWithFormat:@"spin 开=%@ 速度=%.0f°/s 反转=%d", rotOn ? @"是" : @"否", speed, rev]);
     }
-    /* ===== 2.9.74: 半途区按宿主高度淡入 —— 小岛尺寸时不可见, 长满了才全显 =====
-       这样"展开"看到的是同一颗圆在卡片里渐渐长出来, 而不是一颗 66 的专辑
-       先贴在还很小的卡片上(视频里那块"大到溢出左边"的模糊块)。 */
-    /* ===== 2.9.75: 展开方向一律全显, 只有收起方向才淡出 =====
-       405 逐帧: 展开头两帧岛已经撑满, 左上角却是一块空白 —— 2.9.74 在这里把
-       66 的玻璃按宿主高度从 0 淡上来, 宿主还没长大的那几帧 alpha≈0, 视频里就是
-       "展开先空白再出现专辑"。展开方向不需要淡: 系统自己会给整块内容做交叉淡入,
-       玻璃跟着走就是正常的; 只有收起时 66 会留在小胶囊里当第二层, 那才需要淡掉。
-       小岛那颗(23)任何时候都不淡 —— 它就是小岛唯一可见的专辑, 淡了就成了"偏移/发灰"。 */
-    if (midZone74 && !smallArt && shrink74) {
-        CGFloat t;
-        /* 2.9.76: 暂停收起没有系统交叉淡入 —— 淡出窗口改 45→70 */
-        if (diMruIsPlayingCached()) t = (hostH74 - 70.0) / (150.0 - 70.0);
-        else                        t = (hostH74 - 45.0) / (70.0 - 45.0);
-        t = MIN(MAX(t, 0.0), 1.0);
-        if (fabs(state.glass.alpha - t) > 0.02) state.glass.alpha = t;
-        state.wasMid = YES;
-    } else {
-        if (state.glass.alpha < 0.999) state.glass.alpha = 1.0;
-        if (!midZone74) state.wasMid = NO;
-    }
+    /* 2.9.77: 2.9.74~76 的淡入淡出删除 —— 展开通道的玻璃恒全显(alpha=1),
+       小岛态整棵让位, 两边没有任何"半途"状态。 */
+
     diMruReport(@"apply", [NSString stringWithFormat:@"%@ 旋转=%@", NSStringFromCGRect(box),
         rotOn ? [NSString stringWithFormat:@"%.0f°/s", speed] : @"关"]);
 }
