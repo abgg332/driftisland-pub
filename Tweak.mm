@@ -69,7 +69,7 @@ static double expandTextY = DI_EXP_TEXT_BASE_Y;   // 上下偏移(pt, 下为正,
 static double expandTextScale = 100.0; // 文字大小(%, 100=原样)
 /* 2.8.86: 构建戳 —— 之前横幅打的是 SpringBoard 自己的 CFBundleShortVersionString(恒 1.0),
    日志里根本看不出装的是哪一版。所有诊断行都带这个戳, 下轮日志一眼定位。 */
-#define DI_BUILD_VER @"3.0.25"
+#define DI_BUILD_VER @"3.0.26"
 static BOOL gRecordingActive = NO; // 保留: 岛素材总闸条件
 static NSString *diElementId(UIView *host);
 static BOOL diMiniMusicActive(UIView *host); // 2.6.3: 前置(遮罩层使用)
@@ -3504,6 +3504,10 @@ static BOOL diMaskStatOf(NSString *path, double *outMtime, unsigned long long *o
 @implementation DIMaskView
 
 static NSString *const kDIMaskLayerName = @"DriftIslandAlbumMask";
+/* 3.0.26: 「启用遮罩」的素材覆盖层名(实现在后面, 这里前置声明供玻璃用) */
+#define kDIArtMaskOverlayName @"di.art.mask.overlay"
+static BOOL gDIArtMaskEnabled;
+static UIImage *diArtMaskAsset(void);
 static char kCoverOrigMaskKey;
 /* 2.7.45: 目标层归属谁的探针 —— 防止小岛/展开两个 DIMaskView 互相摘对方的蒙版 */
 static char kMaskOwnerKey;
@@ -4122,6 +4126,38 @@ static BOOL diApplyMaskToCover(UIView *cover, UIImage *shape) {
     if (art && _artView.layer.contents != (__bridge id)art.CGImage) {
         _artView.layer.contents = (__bridge id)art.CGImage;
         _artView.layer.contentsGravity = kCAGravityResizeAspectFill;
+    }
+
+    /* ===== 3.0.26: 「启用遮罩」—— 素材铺在旋转小头像上面 =====
+       播放歌曲时小岛上的小专辑头像就是这块玻璃; 把「专辑遮罩」选好的素材
+       作为覆盖层叠进来, 随 _artView 一起转(不加第二组旋转参数)。
+       开关关/素材没选好 → 覆盖层直接摘掉。 */
+    if (gDIArtMaskEnabled) {
+        UIImage *mk = diArtMaskAsset();
+        CALayer *ov = nil;
+        for (CALayer *sl in _artView.layer.sublayers)
+            if ([sl.name isEqualToString:kDIArtMaskOverlayName]) { ov = sl; break; }
+        if (mk && mk.CGImage) {
+            if (!ov) {
+                ov = [CALayer layer];
+                ov.name = kDIArtMaskOverlayName;
+                ov.zPosition = 10;
+                [_artView.layer addSublayer:ov];
+                RLog(@"[启用遮罩] 素材已叠到旋转小头像上 (%.0fx%.0f)",
+                     mk.size.width, mk.size.height);
+            }
+            if (!CGRectEqualToRect(ov.frame, _artView.bounds)) ov.frame = _artView.bounds;
+            if (ov.contents != (__bridge id)mk.CGImage) {
+                ov.contents = (__bridge id)mk.CGImage;
+                ov.contentsGravity = kCAGravityResizeAspectFill;
+                ov.contentsScale = UIScreen.mainScreen.scale;
+            }
+        } else if (ov) {
+            [ov removeFromSuperlayer];
+        }
+    } else {
+        for (CALayer *sl in _artView.layer.sublayers)
+            if ([sl.name isEqualToString:kDIArtMaskOverlayName]) { [sl removeFromSuperlayer]; break; }
     }
 
     CALayer *ml = _artView.layer.mask;
@@ -16145,14 +16181,13 @@ static const CFTimeInterval kDISpinDur = 10.0;
 /* 幂等: 尺寸没变、蒙版还是我们那片、旋转还在 → 一个字都不写。
    3.0.16 及以前每轮布局都重设 mask.frame/path, 3×2 网格里那张图每秒被重建两三次,
    肉眼就是"小专辑头像闪一下"。 */
-/* ===== 3.0.24: 播放器封面铺遮罩素材 =====
-   用户要求: 把「专辑遮罩」选好的素材也用到播放器的旋转专辑图上 —— 内容换成素材图,
-   圆蒙版和旋转沿用现有那套(不引入第二组旋转参数)。开关写在播放器自己的域
-   (ArtworkMaskEnabled); 素材直接用 diExportMaskSoon 导出的 mask.png(选素材后会
-   自动重导, 这里按 mtime+大小指纹感知, 0.5 秒节流)。 */
-static char kDIArtMaskOrigC, kDIArtMaskOrigG, kDIArtMaskOrigView, kDIArtMaskApplied;
+/* ===== 3.0.26: 「启用遮罩」改铺到小岛旋转小头像(自绘玻璃) =====
+   3.0.24/3.0.25 把素材铺到控制中心展开态封面上, 用户实测方向错了:
+   "你把遮罩加错了, 你加到展开的头像去了, 我要的是播放歌曲的时候小专辑头像的上面"。
+   现在改为: 素材作为覆盖层叠进自绘玻璃的旋转载体 _artView(见 diPaintGlassAt),
+   跟小头像一起转, 不引入第二组旋转参数。素材仍用 diExportMaskSoon 导出的
+   mask.png(选素材后自动重导, 按 mtime+大小指纹感知, 0.5 秒节流)。 */
 static BOOL gDIArtMaskEnabled = NO;      /* 缓存, 由 diNPLoadPrefsSync/diNPTickPrefs 维护 */
-static void diArtMaskRestore(UIView *v, CALayer *layer);   /* 前置: Cover 的无素材分支要调 */
 
 static UIImage *diArtMaskAsset(void) {
     static UIImage *img = nil;
@@ -16172,91 +16207,12 @@ static UIImage *diArtMaskAsset(void) {
     img = [UIImage imageWithContentsOfFile:path];
     return img;
 }
-/* 把素材铺到封面内容上(幂等: contents 指针一样就一个字不写)。首次铺前记原样。 */
-/* 3.0.25: 找到真正画专辑图的视图。
-   438 证明: 对 MRUArtworkView.layer 写 contents 没有任何效果 —— 专辑图是它内部的
-   子视图画的, 写在父层上的内容永远被子视图盖住("打开遮罩没有套上")。
-   优先级: 自己是 UIImageView 且有图 → 自己; 否则找树里第一个有图的 UIImageView;
-   都没有 → 退回父层 contents(老路径, 至少 3×2 网格里无子视图的格子图仍有效)。 */
-static UIView *diArtMaskTargetView(UIView *v) {
-    if ([v isKindOfClass:UIImageView.class] && ((UIImageView *)v).image) return v;
-    NSMutableArray *q = [NSMutableArray arrayWithObject:v];
-    int guard = 0;
-    while (q.count && guard++ < 60) {
-        UIView *x = q.firstObject; [q removeObjectAtIndex:0];
-        if (x != v && [x isKindOfClass:UIImageView.class] && ((UIImageView *)x).image) return x;
-        for (UIView *c in x.subviews) [q addObject:c];
-    }
-    return v;
-}
-static void diArtMaskCover(UIView *v, CALayer *layer) {
-    if (!v || !layer) return;
-    UIImage *mk = diArtMaskAsset();
-    if (!mk || !mk.CGImage) {
-        if ([objc_getAssociatedObject(v, &kDIArtMaskApplied) isEqual:@YES]) {
-            diArtMaskRestore(v, layer);
-        }
-        return;
-    }
-    UIView *tv = diArtMaskTargetView(v);
-    CALayer *tl = tv.layer;
-    if (![objc_getAssociatedObject(v, &kDIArtMaskApplied) isEqual:@YES]) {
-        objc_setAssociatedObject(v, &kDIArtMaskOrigC, tl.contents ?: [NSNull null],
-                                 OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-        objc_setAssociatedObject(v, &kDIArtMaskOrigG, tl.contentsGravity ?: [NSNull null],
-                                 OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-        objc_setAssociatedObject(v, &kDIArtMaskOrigView, tv, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-        objc_setAssociatedObject(v, &kDIArtMaskApplied, @YES, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-        static NSMutableSet *loggedOnce;
-        static dispatch_once_t once;
-        dispatch_once(&once, ^{ loggedOnce = [NSMutableSet new]; });
-        NSString *k = NSStringFromClass(tv.class);
-        if (![loggedOnce containsObject:k]) {
-            [loggedOnce addObject:k];
-            RLog(@"[播放器遮罩] 已铺上 → 目标=%@ %.0fx%.0f (宿主 %@)",
-                 k, tv.bounds.size.width, tv.bounds.size.height, NSStringFromClass(v.class));
-        }
-    }
-    /* 系统换曲/重建子视图时目标会变: 目标变了就把记录迁过去, 旧目标还原 */
-    if (objc_getAssociatedObject(v, &kDIArtMaskOrigView) != tv) {
-        UIView *old = objc_getAssociatedObject(v, &kDIArtMaskOrigView);
-        if (old && [objc_getAssociatedObject(old, &kDIArtMaskApplied) isEqual:@YES]) {
-            /* 防串: 旧目标自己也被盖过就别乱还 */
-        } else if (old) {
-            id oc = objc_getAssociatedObject(v, &kDIArtMaskOrigC);
-            old.layer.contents = (oc && oc != [NSNull null]) ? oc : nil;
-        }
-        objc_setAssociatedObject(v, &kDIArtMaskOrigC, tl.contents ?: [NSNull null],
-                                 OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-        objc_setAssociatedObject(v, &kDIArtMaskOrigG, tl.contentsGravity ?: [NSNull null],
-                                 OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-        objc_setAssociatedObject(v, &kDIArtMaskOrigView, tv, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-    }
-    if (tl.contents != (__bridge id)mk.CGImage) {
-        tl.contents = (__bridge id)mk.CGImage;
-        tl.contentsGravity = kCAGravityResizeAspectFill;
-        tl.contentsScale = 1.0;
-    }
-}
-static void diArtMaskRestore(UIView *v, CALayer *layer) {
-    if (!v || !layer) return;
-    if (![objc_getAssociatedObject(v, &kDIArtMaskApplied) isEqual:@YES]) return;
-    UIView *tv = objc_getAssociatedObject(v, &kDIArtMaskOrigView) ?: v;
-    id oc = objc_getAssociatedObject(v, &kDIArtMaskOrigC);
-    id og = objc_getAssociatedObject(v, &kDIArtMaskOrigG);
-    tv.layer.contents = (oc && oc != [NSNull null]) ? oc : nil;
-    tv.layer.contentsGravity = (og && og != [NSNull null]) ? og : kCAGravityResize;
-    objc_setAssociatedObject(v, &kDIArtMaskOrigView, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-    objc_setAssociatedObject(v, &kDIArtMaskApplied, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-}
 
 static void diArtDress(UIView *v) {
     if (!v || !v.layer) return;
     CALayer *layer = v.layer;
     CGRect b = v.bounds;
     if (b.size.width < 8 || b.size.height < 8) return;
-    /* 3.0.24: 铺遮罩素材(在所有幂等分支之前 —— contents 的检查很廉价) */
-    if (gDIArtMaskEnabled) diArtMaskCover(v, layer);
     DIArtMaskState *st = objc_getAssociatedObject(v, kDIArtStateKey);
     if (!st) {
         st = [DIArtMaskState new];
@@ -16340,10 +16296,6 @@ static void diArtApply(UIView *v, BOOL on) {
         /* 3.0.15: 删掉"没记录也要把 transform 拍回单位阵" —— 系统给没被我们收集到的
            格子挂的原生旋转就是这么被永久拍停的(用户反馈"旋转有时候会停")。 */
         diArtStripSpin(layer, 0, 5);
-        /* 3.0.24: 旋转/圆蒙版关了, 但「启用遮罩」还开着 → 封面内容保持素材图;
-           遮罩也关了才把原封面还原回去。 */
-        if (gDIArtMaskEnabled) diArtMaskCover(v, layer);
-        else diArtMaskRestore(v, layer);
         return;
     }
     diArtDress(v);
@@ -16941,10 +16893,7 @@ static void diArtFlushRun(void) {
         @try {
             if (!a.window || a.hidden || a.alpha < 0.05) continue;
             if (!diArtInControlCenter(a)) continue;
-            /* 3.0.25: 「启用遮罩」不再被「专辑旋转」挡住 —— 只开遮罩时走 mask-only:
-               只换内容, 不挂圆蒙版不转。 */
             if (diArtPrefOn()) diArtDress(a);
-            else if (gDIArtMaskEnabled) diArtMaskCover(a, a.layer);
         } @catch (__unused NSException *e) {}
     }
 }
@@ -17753,8 +17702,7 @@ static void diArtAVLayout(id self, SEL cmd) {
         /* 3.0.19: 去掉 diArtIs3x2() 限制 —— 3×2 只是"要不要动传送栏"的判据, 与封面
            无关。用户实测 3×2 展开已经正常, 但 4×2 / 其他尺寸的展开不转, 就是因为
            这里把非 3×2 全挡掉了。 */
-        /* 3.0.25: 只开「启用遮罩」不开「专辑旋转」时也要进来(mask-only)。 */
-        if (!diArtPrefOn() && !gDIArtMaskEnabled) return;
+        if (!diArtPrefOn()) return;
         UIView *v = (UIView *)self;
         if (!v.window || v.hidden || v.alpha < 0.05) return;
         if (!diArtInControlCenter(v)) return;   /* 锁屏 / 灵动岛不碰 */
