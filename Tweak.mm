@@ -65,7 +65,7 @@ static double expandTextY = DI_EXP_TEXT_BASE_Y;   // 上下偏移(pt, 下为正,
 static double expandTextScale = 100.0; // 文字大小(%, 100=原样)
 /* 2.8.86: 构建戳 —— 之前横幅打的是 SpringBoard 自己的 CFBundleShortVersionString(恒 1.0),
    日志里根本看不出装的是哪一版。所有诊断行都带这个戳, 下轮日志一眼定位。 */
-#define DI_BUILD_VER @"3.0.14"
+#define DI_BUILD_VER @"3.0.15"
 static BOOL gRecordingActive = NO; // 保留: 岛素材总闸条件
 static NSString *diElementId(UIView *host);
 static BOOL diMiniMusicActive(UIView *host); // 2.6.3: 前置(遮罩层使用)
@@ -15525,6 +15525,7 @@ static void diNPDumpDomain(void) {
 @property (nonatomic, assign) BOOL origClip;
 @property (nonatomic, assign) CATransform3D origTransform;
 @property (nonatomic, assign) CGSize lastSize;
+@property (nonatomic, assign) CFTimeInterval spinTS;   /* 3.0.15: 旋转起始时刻, 重挂时按相位续上 */
 @end
 @implementation DIArtMaskState
 @end
@@ -15625,24 +15626,9 @@ static void diArtStripSpin(CALayer *layer, int depth, int maxDepth) {
     for (CALayer *s in subs) diArtStripSpin(s, depth + 1, maxDepth);
 }
 
-/* 3.0.14: 只清旋转动画的全树清理 —— 3.0.13 用严格版清整棵树, 把系统给
-   传送按钮/图标挂的循环动画也清了, 每 1 秒"按钮抖一下 + 专辑转圈从头开始"。
-   这里只摘 keyPath 含 rotation 的, 且跳过我们自己的 di.art.spin。 */
-static void diArtStripRotationOnly(CALayer *layer, int depth, int maxDepth) {
-    if (!layer || depth > maxDepth) return;
-    NSArray<NSString *> *keys = [layer.animationKeys copy];
-    for (NSString *k in keys) {
-        if ([k isEqualToString:@"di.art.spin"]) continue;
-        CAAnimation *a = [layer animationForKey:k];
-        if (!a) continue;
-        if ([a isKindOfClass:CABasicAnimation.class]
-            && [((CABasicAnimation *)a).keyPath containsString:@"rotation"]) {
-            [layer removeAnimationForKey:k];
-        }
-    }
-    NSArray<CALayer *> *subs = [layer.sublayers copy];
-    for (CALayer *s in subs) diArtStripRotationOnly(s, depth + 1, maxDepth);
-}
+/* 3.0.15: 删除 3.0.14 的 diArtStripRotationOnly(全树只清 rotation)。它在运行中会把
+   系统给"没有被我们收集到的格子"挂的原生旋转一并摘掉 —— 用户看到的小专辑"转着转着
+   停住/闪一下"就是这个。旋转现在只由 diArtApply 内部管理, 全树一律不再动。 */
 
 /* 3×2 / 3×2B: 变体键优先(B 档模块尺寸写的是 4x2), 没有变体再看 ModuleSizes */
 static BOOL diArtIs3x2(void) {
@@ -15750,9 +15736,9 @@ static void diArtApply(UIView *v, BOOL on) {
             if (!CATransform3DIsIdentity(st.origTransform)) layer.transform = st.origTransform;
             else if (!CATransform3DIsIdentity(layer.transform)) layer.transform = CATransform3DIdentity;
             objc_setAssociatedObject(v, kDIArtStateKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-        } else if (!CATransform3DIsIdentity(layer.transform)) {
-            layer.transform = CATransform3DIdentity;
         }
+        /* 3.0.15: 删掉"没记录也要把 transform 拍回单位阵" —— 系统给没被我们收集到的
+           格子挂的原生旋转就是这么被永久拍停的(用户反馈"旋转有时候会停")。 */
         diArtStripSpin(layer, 0, 5);
         return;
     }
@@ -15776,9 +15762,14 @@ static void diArtApply(UIView *v, BOOL on) {
         st.lastSize = b.size;
         CGFloat side = MIN(b.size.width, b.size.height);
         CGRect circle = CGRectMake((b.size.width - side) / 2.0, (b.size.height - side) / 2.0, side, side);
+        /* 3.0.15: 尺寸/蒙版一律在"无隐式动画"的事务里写。之前每次 layout 改蒙版都带着
+           系统动画, 肉眼就是"专辑闪一下、尺寸抖一下"。 */
+        [CATransaction begin];
+        [CATransaction setDisableActions:YES];
         st.mask.frame = b;
         st.mask.path = [UIBezierPath bezierPathWithOvalInRect:CGRectInset(circle, 0.5, 0.5)].CGPath;
         layer.mask = st.mask;
+        [CATransaction commit];
         NSString *desc = [NSString stringWithFormat:@"%@ %.0fx%.0f", NSStringFromClass(v.class),
                           b.size.width, b.size.height];
         if (![desc isEqualToString:gDIArtLastDesc]) {
@@ -15786,7 +15777,8 @@ static void diArtApply(UIView *v, BOOL on) {
             RLog(@"[封面] 圆形蒙版已挂 %@", desc);
         }
     }
-    /* 旋转由本 tweak 驱动(播放器内置旋转已被关掉), 10 秒一圈, 线性匀速 */
+    /* 旋转由本 tweak 驱动(播放器内置旋转已被关掉), 10 秒一圈, 线性匀速。
+       3.0.15: 动画被系统摘掉后重挂时按相位续上, 不再"从 12 点重新开始"。 */
     if (![layer animationForKey:@"di.art.spin"]) {
         CABasicAnimation *sp = [CABasicAnimation animationWithKeyPath:@"transform.rotation.z"];
         sp.fromValue = @0.0;
@@ -15796,6 +15788,9 @@ static void diArtApply(UIView *v, BOOL on) {
         sp.removedOnCompletion = NO;
         sp.fillMode = kCAFillModeForwards;
         sp.timingFunction = [CAMediaTimingFunction functionWithName:kCAMediaTimingFunctionLinear];
+        CFTimeInterval tn = CACurrentMediaTime();
+        if (st.spinTS > 0) sp.beginTime = tn - fmod(tn - st.spinTS, sp.duration);
+        else st.spinTS = tn;
         [layer addAnimation:sp forKey:@"di.art.spin"];
     }
 }
@@ -15835,7 +15830,7 @@ static UIView *diArtTransportOf(UIView *root) {
     return nil;
 }
 
-static void (*gDIOrigTCSetFrame)(id, SEL, CGRect) = NULL;
+static __attribute__((unused)) void (*gDIOrigTCSetFrame)(id, SEL, CGRect) = NULL;
 
 /* 3.0.10 无限注销的根因修复 —— 3.0.9 的拦截有三处致命伤:
      ① 启动早期传送栏还是 {0,-13.67},{0,44} 这种 0 宽占位 frame, 第一笔就被当成了
@@ -15852,7 +15847,7 @@ static void (*gDIOrigTCSetFrame)(id, SEL, CGRect) = NULL;
 static CFTimeInterval gDITCWindowTS = 0;
 static int          gDITCWindowCount = 0;
 
-static void diTCSetFrame(id self, SEL cmd, CGRect f) {
+static __attribute__((unused)) void diTCSetFrame(id self, SEL cmd, CGRect f) {
     @try {
         UIView *v = (UIView *)self;
         CGSize ps = v.superview ? v.superview.bounds.size : CGSizeZero;
@@ -16098,6 +16093,9 @@ static void diArtKillJitter(UIView *root) {
         tcTried = YES;
         diArtInstallGated();   /* 3.0.13: 内部自带档位/引导满8秒门控 */
     }
+    /* 3.0.15: 这里以前会递归清传送栏子树上的循环/自反动画(diArtStripSpin), 每轮布局都来
+       一次 —— 系统的按钮出现/高亮动画被拦腰摘掉, 就是用户看到的"3×2 按钮一抖一下"。
+       已经全部删除: 传送栏的图层动画一律不碰。 */
     UIView *tc = diArtTransportOf(root);
     if (!tc) return;
     static NSMutableSet *logged = nil;
@@ -16105,17 +16103,10 @@ static void diArtKillJitter(UIView *root) {
     NSString *key = NSStringFromClass(tc.class);
     if (![logged containsObject:key]) {
         [logged addObject:key];
-        RLog(@"[抖动] 3×2 传送容器 %@ 动画=%@ frame=%@ 父=%@",
+        RLog(@"[抖动] 3×2 传送容器 %@ 动画=%@ frame=%@ 父=%@ (3.0.15 起不清理)",
              key, [tc.layer.animationKeys componentsJoinedByString:@","] ?: @"(无)",
              NSStringFromCGRect(tc.frame), NSStringFromClass(tc.superview.class));
     }
-    [CATransaction begin];
-    [CATransaction setDisableActions:YES];
-    diArtStripSpin(tc.layer, 0, 5);
-    [CATransaction commit];
-    /* 3.0.10: 删除 3.0.9 的"布局后校正传送栏"兜底 —— 在布局 pass 里直接写别的视图
-       的 frame, 系统下一帧又改回来, 两边反复打架是无限注销的第二处根源。
-       瞬跳拦截统一由上面的 setFrame: 接管(带基准/可见性/限流三道保险)负责。 */
 }
 
 /* 开关打开却一个封面候选都没找到时, 把播放器视图树记一次 —— 下一版按这个类名改 */
@@ -16173,6 +16164,8 @@ static void diDumpExpandedTreeOnce(UIView *root) {
     RLog(@"[树] 已导出展开态视图树 %d 节点 → %@", n, path);
 }
 
+static void diNPBackgroundTick(UIView *root);   /* 3.0.15: 定义在下面的 3.1.0 段 */
+
 static void diArtPlayerPost(UIView *root) {
     if (![root isKindOfClass:UIView.class]) return;
     /* 灵动岛那套(MRUActivityNowPlayingView)可能继承自 MRUNowPlayingView, 会顺带命中
@@ -16181,31 +16174,32 @@ static void diArtPlayerPost(UIView *root) {
     if (!gDIArtRoots) gDIArtRoots = [NSHashTable weakObjectsHashTable];
     [gDIArtRoots addObject:root];
     BOOL on = diArtPrefOn();
+    /* 3.0.15: 专辑背景跟着"播放器视图"走 —— 播放器视图本身就是各尺寸下的可见卡片
+       (3×2 小卡 / 展开卡), 背景铺在它的 bounds 上, 换尺寸自动跟随, 不用再去猜卡片。
+       只在图层层面插子层, 不动任何视图/约束。 */
+    @try { diNPBackgroundTick(root); } @catch (__unused NSException *e) {}
     /* 无论开还是关, 都把播放器内置旋转关掉: 它不看我们的偏好键, 开着就会
-       "开关关了照样转"。旋转统一由 diArtApply 负责。 */
-    diArtDisableNPRSpin();
+       "开关关了照样转"。旋转统一由 diArtApply 负责。
+       3.0.15: 只在第一次调用(以前每轮布局都调, 那个 setter 在被别的插件接管时
+       会顺手触发它自己的刷新 —— 1Hz 的"抖一下"嫌疑之一)。 */
+    {
+        static BOOL nprDone = NO;
+        if (!nprDone) { nprDone = YES; diArtDisableNPRSpin(); }
+    }
     DIArtRootState *rs = objc_getAssociatedObject(root, kDIArtRootKey);
     if (!rs) {
         rs = [DIArtRootState new];
         objc_setAssociatedObject(root, kDIArtRootKey, rs, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
     }
     CFTimeInterval now = CFAbsoluteTimeGetCurrent();
-    /* 3.0.14: 全树"只清旋转"(深度 9, 2 秒节流) —— 内置播放器给没被收集到的格子
-       也挂原生旋转, 只清已收集封面会漏。只摘 rotation 类动画, 不碰按钮/图标动画;
-       更不动我们自己的 di.art.spin(否则每秒转圈重置)。 */
-    static CFTimeInterval lastRootStrip = 0;
-    if (now - lastRootStrip > 2.0) {
-        lastRootStrip = now;
-        diArtStripRotationOnly(root.layer, 0, 9);
-    }
+    /* 3.0.15: 删掉 3.0.14 那句"每 2 秒全树只清 rotation 动画" —— 它清的是系统给
+       没被收集到的格子挂的原生旋转, 也是"专辑转着转着停了"的直接原因。 */
     gDIArtSawEmptyTile = NO;
     NSArray<UIView *> *arts = rs.arts;
     if (!arts || !arts.count || now - rs.scanTS > 1.0) {
         arts = diArtCollectIn(root);
-        /* 上一轮挂过、这一轮不在的(换歌/换布局)先还原 */
-        for (UIView *old in rs.arts) {
-            if (![arts containsObject:old]) diArtApply(old, NO);
-        }
+        /* 3.0.15: 这一轮没收集到的旧封面不再"还原"(diArtApply:NO) —— 3×2 换页/换曲时
+           视图会短暂离开收集结果, 一还原一重挂就是"转圈从起点重来 + 闪一下"。 */
         rs.arts = arts;
         rs.scanTS = now;
         if (!gDIArtSawEmptyTile) rs.recollects = 0;   /* 这轮没空格子, 重置重扫链 */
@@ -16284,15 +16278,19 @@ static void diArtCCLayout(id self, SEL cmd) {
 static const void *kDIBgIVKey  = &kDIBgIVKey;
 static const void *kDIBgDimKey = &kDIBgDimKey;
 static const void *kDIBgLastKey = &kDIBgLastKey;   /* 3.0.10: 模块 VC 处理节流 */
+static const void *kDIBgRKey    = &kDIBgRKey;      /* 3.0.15: 缓存圆角 */
+static const void *kDIBgSizeKey = &kDIBgSizeKey;   /* 3.0.15: 缓存 host 尺寸 */
 
-
-static NSHashTable *gDIBgHosts = nil;
+static NSHashTable *gDIBgHosts = nil;       /* 模块内容容器(隐藏未在播放用) */
+static NSHashTable *gDIBgPlayers = nil;     /* 3.0.15: 背景宿主 = 播放器视图(各尺寸的可见卡片) */
 static UIImage *gDIBgImage = nil;
 static NSData *gDIBgData = nil;          /* 3.0.14: 专辑图原始数据, 换曲判定用 */
 static CFTimeInterval gDIBgFetchTS = 0;
+static CFTimeInterval gDIBgLastReqTS = 0;   /* 3.0.15: 取图请求节流 */
 static CFTimeInterval gDIBgPrefTS = 0;
 static BOOL gDIBgOnCache = YES;
 static BOOL gDIHideNP = NO;
+static dispatch_source_t gDIBgTimer = NULL; /* 3.0.15: 换曲轮询(通知不可靠时的兜底) */
 
 static BOOL diNPPrefFlag(NSString *key, BOOL def) {
     id v = CFBridgingRelease(CFPreferencesCopyAppValue((__bridge CFStringRef)key,
@@ -16310,6 +16308,7 @@ static void diNPTickPrefs(void) {
 
 /* ---------- MediaRemote: 取当前专辑图 ---------- */
 static void (*gMRGetNowPlayingInfo)(dispatch_queue_t, void (^)(CFDictionaryRef)) = NULL;
+static void (*gMRRegisterNotes)(dispatch_queue_t) = NULL;
 static CFStringRef *gMRArtworkKeyPtr = NULL;
 static BOOL gMRTried = NO;
 
@@ -16320,15 +16319,26 @@ static void diNPLoadMediaRemote(void) {
     if (!h) h = dlopen(NULL, RTLD_NOW);
     if (!h) return;
     *(void **)&gMRGetNowPlayingInfo = dlsym(h, "MRMediaRemoteGetNowPlayingInfo");
+    *(void **)&gMRRegisterNotes = dlsym(h, "MRMediaRemoteRegisterForNowPlayingNotifications");
     gMRArtworkKeyPtr = (CFStringRef *)dlsym(h, "kMRMediaRemoteNowPlayingInfoArtworkData");
+    /* 3.0.15: 不注册的话 kMRMediaRemoteNowPlayingInfoDidChangeNotification 根本不会
+       投递到 Darwin 通知中心 —— 这是"切歌背景不跟着换"的根因之一。 */
+    if (gMRRegisterNotes) {
+        @try { gMRRegisterNotes(dispatch_get_main_queue()); RLog(@"[背景] 已向 MediaRemote 注册播放通知"); }
+        @catch (__unused NSException *e) {}
+    }
     if (!gMRGetNowPlayingInfo)
         RLog(@"[背景] MediaRemote 取不到 MRMediaRemoteGetNowPlayingInfo, 背景暂不可用");
 }
 
 static void diNPRefreshBackgrounds(void);
+static void diNPStartBgTimer(void);   /* 3.0.15: 定义在模块容器钩子之后 */
 
 static void diNPFetchArtwork(void) {
     if (gDIStage < 1) return;   /* 档位 0: 不取图 */
+    CFTimeInterval rnow = CFAbsoluteTimeGetCurrent();
+    if (rnow - gDIBgLastReqTS < 0.8) return;   /* 3.0.15: 通知+轮询+布局三路都会来, 合并 */
+    gDIBgLastReqTS = rnow;
     diNPLoadMediaRemote();
     diCrumb(@"取图: MediaRemote 已备, 即将发起请求");
     if (!gMRGetNowPlayingInfo) { diCrumb(@"取图: 符号缺失, 放弃"); return; }
@@ -16375,95 +16385,52 @@ static void diNPFetchArtwork(void) {
    管理子视图的次序/约束, 我们插进去它下一轮布局就重排/崩溃。改用 CALayer 子层:
    插到 host.layer 最底层, 渲染效果一样, 但完全绕开 UIKit 的视图管理簿记。
 
-   3.0.14: 背景要"跟卡片走" ——
-     · 折叠态内容容器 263x170、圆角=0(圆角其实在播放器的底层卡片上) → 显示直角;
-     · 展开态内容容器是 356x932 的全屏长条 → 背景铺满就"太长"。
-   所以铺之前先找"看得见的圆角卡片"(祖先或内容视图里的圆角子视图), 背景按它的
-   矩形和圆角铺; 找不到才退回内容容器 + 估算圆角。 */
-static UIView *diNPFindRoundedCard(UIView *host) {
-    if (!host) return nil;
-    CGFloat hostArea = host.bounds.size.width * host.bounds.size.height;
-    UIView *best = nil; CGFloat bestScore = -1;
-    /* ① 祖先链(最多 3 层): 模块的底层卡片一般在内容容器外面 */
-    UIView *a = host.superview;
-    for (int i = 0; a && i < 3; i++, a = a.superview) {
-        CGFloat r = a.layer.cornerRadius;
-        CGSize s = a.bounds.size;
-        CGFloat area = s.width * s.height;
-        if (r >= 6.0 && s.width >= 100 && s.height >= 100
-            && (hostArea <= 1 || area <= hostArea * 1.25)) {
-            CGFloat score = area + r * 2;
-            if (score > bestScore) { bestScore = score; best = a; }
-        }
-    }
-    if (best) return best;
-    /* ② 内容视图里的可见卡片: 名字带 Background 的系统模块背景优先,
-          其次才是"圆角够大"的子视图(展开态可见卡片) */
-    UIView *named = nil; CGFloat namedScore = -1;
-    NSMutableArray *q = [NSMutableArray arrayWithObject:host];
-    int budget = 500;
-    while (q.count && budget-- > 0) {
-        UIView *v = q.firstObject; [q removeObjectAtIndex:0];
-        if (v != host && !v.hidden && v.alpha > 0.05) {
-            CGFloat r = v.layer.cornerRadius;
-            CGSize s = v.bounds.size;
-            CGFloat area = s.width * s.height;
-            CGFloat ratio = s.width / MAX(1.0, s.height);
-            BOOL sized = (s.width >= 100 && s.height >= 100
-                          && hostArea > 1 && area >= hostArea * 0.30 && area <= hostArea * 1.05
-                          && ratio > 0.35 && ratio < 1.8);
-            if (sized) {
-                NSString *cn = NSStringFromClass(v.class);
-                if ([cn containsString:@"Background"] || [cn containsString:@"Platter"]) {
-                    if (area > namedScore) { namedScore = area; named = v; }
-                }
-                if (r >= 6.0) {
-                    CGFloat score = area + r * 2;
-                    if (score > bestScore) { bestScore = score; best = v; }
-                }
-            }
-        }
-        for (UIView *c in v.subviews) [q addObject:c];
-    }
-    return named ?: best;
-}
-
-/* 背景该铺的矩形(host 坐标系)与圆角 */
-static void diNPBackgroundGeometry(UIView *host, CGRect *outRect, CGFloat *outRadius, NSString **outSrc) {
-    CGRect rect = host.bounds;
+   3.0.15: 背景矩形不再"找卡片" —— 直接铺满宿主(播放器视图)的 bounds。
+   播放器视图本身就是当前尺寸下的可见卡片: 3×2 小卡、展开大卡、折叠态, 尺寸一变
+   它跟着变, 背景实时跟随, 也就不会再出现"展开显示太长 / 起点偏下 / 直角"这三种错位。
+   圆角单独找: 最近的、能包住宿主的祖先圆角, 或宿主内部铺满的材质层圆角, 都没有才估算。 */
+static CGFloat diNPRadiusFor(UIView *host, NSString **outSrc) {
     CGFloat r = host.layer.cornerRadius;
-    NSString *srcName = @"内容容器";
-    if (r < 6.0 && host.superview && host.superview.layer.cornerRadius >= 6.0) {
-        r = host.superview.layer.cornerRadius;
-        srcName = NSStringFromClass(host.superview.class);
-    }
-    UIView *card = diNPFindRoundedCard(host);
-    if (card) {
-        CGRect f = [card convertRect:card.bounds toView:host];
-        CGRect ix = CGRectIntersection(f, host.bounds);
-        if (ix.size.width >= 60 && ix.size.height >= 60) rect = ix;
-        CGFloat cr = card.layer.cornerRadius;
-        if (cr < 6.0) {
-            /* 卡片自己没圆角 → 看它里面的圆角层(系统背景卡常把圆角挂在内层) */
-            NSMutableArray *q = [NSMutableArray arrayWithObject:card];
-            int budget = 200;
-            while (q.count && budget-- > 0) {
-                UIView *v = q.firstObject; [q removeObjectAtIndex:0];
-                if (v != card && v.layer.cornerRadius > cr) cr = v.layer.cornerRadius;
-                for (UIView *c in v.subviews) [q addObject:c];
+    NSString *src = (r >= 6.0) ? NSStringFromClass(host.class) : nil;
+    CGFloat hostArea = host.bounds.size.width * host.bounds.size.height;
+    if (!src) {
+        /* ① 最近的、把宿主整个包住的祖先 —— 卡片圆角通常挂在容器/材质层上 */
+        UIView *a = host.superview;
+        for (int i = 0; a && i < 4; i++, a = a.superview) {
+            CGFloat cr = a.layer.cornerRadius;
+            CGSize s = a.bounds.size;
+            if (cr >= 6.0 && (hostArea <= 1 || s.width * s.height >= hostArea * 0.9)) {
+                r = cr;
+                src = NSStringFromClass(a.class);
+                break;
             }
         }
-        if (cr >= 6.0) r = cr;
-        srcName = NSStringFromClass(card.class);
     }
-    if (r < 6.0) {
-        CGFloat side = MIN(rect.size.width, rect.size.height);
+    if (!src) {
+        /* ② 卡片把圆角挂在内层材质视图(MTMaterialView 之类)上 */
+        NSMutableArray *q = [NSMutableArray arrayWithObject:host];
+        int budget = 200;
+        while (q.count && budget-- > 0) {
+            UIView *v = q.firstObject; [q removeObjectAtIndex:0];
+            if (v != host && !v.hidden) {
+                CGFloat cr = v.layer.cornerRadius;
+                CGSize s = v.bounds.size;
+                if (cr >= 6.0 && hostArea > 1 && s.width * s.height >= hostArea * 0.85) {
+                    r = cr;
+                    src = NSStringFromClass(v.class);
+                    break;
+                }
+            }
+            for (UIView *c in v.subviews) [q addObject:c];
+        }
+    }
+    if (!src || r < 6.0) {
+        CGFloat side = MIN(host.bounds.size.width, host.bounds.size.height);
         r = MIN(MAX(side * 0.16, 18.0), 40.0);
-        srcName = @"估算";
+        src = @"估算";
     }
-    *outRect = rect;
-    *outRadius = r;
-    if (outSrc) *outSrc = srcName;
+    if (outSrc) *outSrc = src;
+    return r;
 }
 
 static void diNPApplyBackgroundTo(UIView *host, BOOL on) {
@@ -16476,56 +16443,83 @@ static void diNPApplyBackgroundTo(UIView *host, BOOL on) {
             dim.hidden = YES;
             return;
         }
-        CGSize hs = host.bounds.size;
-        if (hs.width < 40 || hs.height < 40) return;   /* 占位尺寸不铺 */
+        CGRect rect = host.bounds;
+        if (rect.size.width < 40 || rect.size.height < 40) return;   /* 占位尺寸不铺 */
 
-        CGRect rect; CGFloat r; NSString *srcName = nil;
-        /* 3.0.14: 先量几何再建层 —— 圆角/尺寸都跟可见卡片走 */
-        @try { diNPBackgroundGeometry(host, &rect, &r, &srcName); }
-        @catch (__unused NSException *e) { rect = host.bounds; r = 22.0; srcName = @"兜底"; }
+        /* 3.0.15: 圆角只在"尺寸变了 / 还没有层"时重算并缓存 —— 每次都走祖先链+子树
+           太贵, 而且会让背景在布局抖动时反复改圆角。 */
+        NSValue *sz = objc_getAssociatedObject(host, kDIBgSizeKey);
+        CGFloat r = [objc_getAssociatedObject(host, kDIBgRKey) doubleValue];
+        BOOL needGeo = (!bg || !sz || !CGSizeEqualToSize(sz.CGSizeValue, rect.size));
+        NSString *srcName = nil;
+        if (needGeo) {
+            @try { r = diNPRadiusFor(host, &srcName); }
+            @catch (__unused NSException *e) { r = 22.0; srcName = @"兜底"; }
+            objc_setAssociatedObject(host, kDIBgRKey, @(r), OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+            objc_setAssociatedObject(host, kDIBgSizeKey, [NSValue valueWithCGSize:rect.size],
+                                     OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+            static int geoLogs = 0;
+            if (geoLogs < 10) {
+                geoLogs++;
+                RLog(@"[背景] 几何: %.0fx%.0f 圆角%.1f (来源 %@, 宿主 %@)",
+                     rect.size.width, rect.size.height, r, srcName ?: @"?",
+                     NSStringFromClass(host.class));
+            }
+        }
+        if (r < 6.0) r = 22.0;
 
+        /* 3.0.15: 所有图层写入都关掉隐式动画 —— 之前 frame 变化会跟着外面的 UIView
+           动画块一起"滑"过去, 就是用户看到的"切歌/展开时背景拖着闪"。 */
+        [CATransaction begin];
+        [CATransaction setDisableActions:YES];
         if (!bg) {
-            diCrumb([NSString stringWithFormat:@"背景: 创建子层 %@ %.0fx%.0f 圆角%.1f (来源 %@)",
-                     NSStringFromClass(host.class), rect.size.width, rect.size.height, r, srcName ?: @"?"]);
+            diCrumb([NSString stringWithFormat:@"背景: 创建子层 %@ %.0fx%.0f 圆角%.1f",
+                     NSStringFromClass(host.class), rect.size.width, rect.size.height, r]);
             bg = [CALayer layer];
             bg.contentsGravity = kCAGravityResizeAspectFill;
             bg.masksToBounds = YES;
-            bg.cornerRadius = r;
             [host.layer insertSublayer:bg atIndex:0];
             objc_setAssociatedObject(host, kDIBgIVKey, bg, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
 
             dim = [CALayer layer];
             dim.backgroundColor = [UIColor colorWithWhite:0 alpha:0.22].CGColor;
-            dim.cornerRadius = r;
             dim.masksToBounds = YES;
             [host.layer insertSublayer:dim above:bg];
             objc_setAssociatedObject(host, kDIBgDimKey, dim, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
         }
         bg.hidden = NO;
         dim.hidden = NO;
-        /* 圆角跟随(折叠↔展开切换、卡片样式变化) */
-        if (fabs(bg.cornerRadius - r) > 0.5) {
-            bg.cornerRadius = r;
-            dim.cornerRadius = r;
-        }
+        bg.cornerRadius = r;
+        dim.cornerRadius = r;
         if (!CGRectEqualToRect(bg.frame, rect)) {
             bg.frame = rect;
             dim.frame = rect;
-            static int geoLogs = 0;
-            if (geoLogs < 8) {
-                geoLogs++;
-                RLog(@"[背景] 几何: %.0fx%.0f @(%.0f,%.0f) 圆角%.1f (来源 %@)",
-                     rect.size.width, rect.size.height, rect.origin.x, rect.origin.y, r, srcName ?: @"?");
-            }
         }
         if (bg.contents != (__bridge id)gDIBgImage.CGImage)
             bg.contents = (__bridge id)gDIBgImage.CGImage;
+        [CATransaction commit];
     } @catch (NSException *e) { diCrumb([NSString stringWithFormat:@"背景: 异常 %@", e.reason]); }
+}
+
+/* 3.0.15: 每次播放器布局都调一次 —— 背景尺寸跟着宿主走, 换尺寸当帧生效 */
+static void diNPBackgroundTick(UIView *root) {
+    if (!root || !root.window) return;
+    diNPTickPrefs();
+    if (!gDIBgPlayers) gDIBgPlayers = [NSHashTable weakObjectsHashTable];
+    [gDIBgPlayers addObject:root];
+    if (!gDIBgOnCache) { diNPApplyBackgroundTo(root, NO); return; }
+    diNPApplyBackgroundTo(root, gDIBgImage != nil);
+    /* 图还没拿到时也别每帧都发 XPC */
+    CFTimeInterval now = CFAbsoluteTimeGetCurrent();
+    if (now - gDIBgFetchTS > 2.0) {
+        gDIBgFetchTS = now;
+        diNPFetchArtwork();
+    }
 }
 
 static void diNPRefreshBackgrounds(void) {
     diNPTickPrefs();
-    for (UIView *host in gDIBgHosts.allObjects) {
+    for (UIView *host in gDIBgPlayers.allObjects) {
         diNPApplyBackgroundTo(host, gDIBgOnCache);
     }
 }
@@ -16591,19 +16585,25 @@ static void diNPHandleModuleVC(id vc) {
     [gDIBgHosts addObject:card];
 
     diNPTickPrefs();
+    diNPStartBgTimer();
     diNPHideNotPlayingLabels(card, gDIHideNP);
 
     if (gDIBgOnCache) {
-        /* 3.0.14: 之前只在"还没有图"时才取 —— 一旦拿到第一张就再也不更新,
-           切歌背景纹丝不动。改成每 2 秒复核一次, 靠数据比对决定要不要重铺。 */
+        /* 3.0.15: 取图交给 1.5 秒轮询 + 通知, 这里只做兜底(没有播放器宿主时才铺容器) */
         CFTimeInterval fnow = CFAbsoluteTimeGetCurrent();
         if (fnow - gDIBgFetchTS > 2.0) {
             gDIBgFetchTS = fnow;
             diNPFetchArtwork();
         }
-        diCrumb(@"模块: 铺背景前");
-        diNPApplyBackgroundTo(card, YES);
-        diCrumb(@"模块: 铺背景后");
+        if (!gDIBgPlayers || gDIBgPlayers.count == 0) {
+            CGFloat ratio = cs.height > 1 ? cs.width / cs.height : 1.0;
+            /* 容器可能比可见卡片高很多(展开态整条), 只有形状像卡片时才兜底铺 */
+            if (ratio > 0.4 && ratio < 2.6 && cs.width <= 460 && cs.height <= 460) {
+                diCrumb(@"模块: 铺背景前(容器兜底)");
+                diNPApplyBackgroundTo(card, YES);
+                diCrumb(@"模块: 铺背景后");
+            }
+        }
     } else {
         diNPApplyBackgroundTo(card, NO);
     }
@@ -16623,6 +16623,33 @@ static void diNPInstallMediaObserver(void) {
             CFNotificationSuspensionBehaviorDeliverImmediately);
         RLog(@"[背景] 换歌通知已监听");
     } @catch (__unused NSException *e) { gDIMediaObserved = NO; }
+}
+
+/* 3.0.15: 换曲轮询 —— 通知在 iOS 16 上经常收不到(没注册/被系统吞掉), 之前背景只在
+   "模块重新布局"时才会复核, 用户放歌时布局不动 → 背景永远停在上一首。这里 1.5 秒
+   问一次现在播放什么, 拿到的 artworkData 和手上的一样就什么都不做(不重铺不闪)。 */
+static void diNPStartBgTimer(void) {
+    if (gDIBgTimer) return;
+    if (gDIStage < 1) return;
+    dispatch_source_t t = dispatch_source_create(DISPATCH_SOURCE_TYPE_TIMER, 0, 0,
+                                                dispatch_get_main_queue());
+    if (!t) return;
+    dispatch_source_set_timer(t,
+                              dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.5 * NSEC_PER_SEC)),
+                              (uint64_t)(1.5 * NSEC_PER_SEC),
+                              (uint64_t)(0.3 * NSEC_PER_SEC));
+    dispatch_source_set_event_handler(t, ^{
+        @try {
+            if (gDIStage < 1) return;
+            diNPTickPrefs();
+            if (!gDIBgOnCache) return;
+            if (!gDIBgPlayers || gDIBgPlayers.count == 0) return;
+            diNPFetchArtwork();
+        } @catch (__unused NSException *e) {}
+    });
+    gDIBgTimer = t;
+    dispatch_resume(t);
+    RLog(@"[背景] 换曲轮询已启动(1.5s)");
 }
 
 static void diNPModuleLayout(id self, SEL cmd) {
@@ -16720,6 +16747,7 @@ static void diArtInstallGated(void) {
     gDIStageHooksDone = YES;
     diCrumb([NSString stringWithFormat:@"安装: 高危钩子开始(档位 %d)", gDIStage]);
     diNPInstallMediaObserver();   /* 3.0.14: 换歌通知兜底注册 */
+    diNPStartBgTimer();           /* 3.0.15: 换曲轮询(通知不可靠) */
 
     if (needModule) {
         if (mvc) {
@@ -16732,17 +16760,12 @@ static void diArtInstallGated(void) {
             RLog(@"[背景] 模块容器钩子 %@", gDIOrigModuleLayout ? @"已装" : @"失败");
         }
     }
-    if (needTC) {
-        {
-            diCrumb(@"安装: 传送栏 setFrame 钩子前");
-            MSHookMessageEx(tcc, @selector(setFrame:), (IMP)diTCSetFrame, (IMP *)&gDIOrigTCSetFrame);
-            diCrumb(@"安装: 传送栏 setFrame 钩子后");
-            if (!gDIOrigTCSetFrame) RLog(@"[抖动] 传送栏 setFrame 接管失败, 仅用布局后校正");
-            else RLog(@"[抖动] 传送栏 setFrame 接管已装(档位=%d)", gDIStage);
-        }
-    } else {
-        RLog(@"[保险] 档位=%d: 传送栏 setFrame 钩子不装(崩溃降档)", gDIStage);
-    }
+    /* 3.0.15: 传送栏 setFrame: 接管彻底停用。
+       用户连续四轮反馈"3×2 按钮还是会抖一下", 而 3.0.10~3.0.14 的日志里这个钩子
+       一次都没真正拦下过瞬跳(没有一条 [抖动] 拦下...) —— 它没在修问题, 只在跟系统
+       布局抢 frame。现在完全不碰传送栏的任何 frame/动画, 由系统自己排。 */
+    RLog(@"[抖动] 传送栏 setFrame 接管已停用(3.0.15: 不再改写系统 frame, 档位=%d)", gDIStage);
+    (void)tcc;
 }
 
 
