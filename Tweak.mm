@@ -16070,13 +16070,20 @@ static BOOL diArtIs3x2(void) {
     return [cache hasPrefix:@"3x2"];
 }
 
-/* ===== 3.0.28: 3×1 布局 —— 按 4×1 的排版, 只是收紧 =====
-   原生播放器只认 2x2…4x3 这几档网格, "3x1" 不是合法模块尺寸, 所以设置页选 3x1 时
-   模块尺寸仍按 4x1 放, 只把 PlayerGridVariant 写成 "3x1"(见 prefs diNPApplySize)。
-   内容收紧在这里做: 每次播放器布局完, 变体是 3x1 就把内容整体压到 80% 宽并居中
-   (高度/位置/功能全不动) —— 等比缩窄, 观感就是"比 4×1 紧一点"。
-   两个入口都挂: MRUNowPlayingView.layoutSubviews(常规) + 控制器
-   viewDidLayoutSubviews(布局链尾, 播放器自己的 hook 在后再跑也能压住)。 */
+/* ===== 3.0.29: 3×1 布局 —— 只把网格里这个模块的框收窄 =====
+   3.0.28 是在 MRUNowPlayingView.layoutSubviews 里把内容压到 80%, 可那个视图在
+   **展开态也存在**(356x568), 于是展开也被一起压小 —— 用户: "你把我展开里面都改了,
+   我只需要我画的框那样缩短就行, 其他不要动"。
+   现在:
+     · 只碰"网格态"模块(容器高 20~130pt; 展开态高 300+ 一律跳过);
+     · 目标宽 = 0.75 × 4格宽 − 4pt(格间隙修正)。实测满宽 356 → 263, 正好等于
+       3×2 布局的模块宽(日志里 3 格模块就是 263) —— 即用户说的"取 3×2 的长,
+       4×1 的高";
+     · 改的是模块容器 CCUIContentModuleContainerView(含背景胶囊)的 frame: 左边缘
+       不动(内容整体左移一点点), 高度不动, 内部由播放器按新宽度自己重排;
+     · 网格布局会重设 frame, 所以在容器自己的 layoutSubviews(父级刚设完 frame、
+       同一帧提交前)纠正, 集合控制器布局链尾再兜一次。
+*/
 static NSString *diNPLayoutKey(void) {
     static NSString *cache = nil;
     static CFTimeInterval ts = 0;
@@ -16099,74 +16106,86 @@ static NSString *diNPLayoutKey(void) {
     return cache;
 }
 
-static void diNP31Tighten(UIView *root) {
-    if (!root) return;
-    CGFloat w = root.bounds.size.width;
-    if (w < 220.0) return;                  /* 只处理控制中心展开的 4×1 模块 */
-    if ([NSStringFromClass(root.class) containsString:@"Activity"]) return;   /* 灵动岛不碰 */
-    CGFloat target = w * 0.80;
-    CGFloat nx = (w - target) * 0.5;
-    BOOL wrote = NO;
-    for (UIView *c in [root.subviews copy]) {
-        if (c.hidden || c.alpha < 0.05) continue;
-        CGRect f = c.frame;
-        if (f.size.width < w * 0.5 || f.size.width > w * 1.02) continue;
-        if (fabs(f.size.width - target) < 0.5 && fabs(f.origin.x - nx) < 0.5) continue;
-        c.frame = CGRectMake(nx, f.origin.y, target, f.size.height);
-        wrote = YES;
+/* 这个容器里(或子树里)有没有播放器 —— 只处理播放器模块, 天气/其他模块一概不碰 */
+static BOOL diNP31HasNowPlaying(UIView *v, int depth) {
+    if (!v || depth > 7) return NO;
+    if ([NSStringFromClass(v.class) hasPrefix:@"MRUNowPlayingView"]) return YES;
+    for (UIView *c in v.subviews) if (diNP31HasNowPlaying(c, depth + 1)) return YES;
+    return NO;
+}
+/* 只收网格态(高 20~130); 展开态(300+) 直接返回, 一个像素都不动 */
+static void diNP31FitBox(UIView *box) {
+    if (!box) return;
+    CGRect f = box.frame;
+    if (f.size.width < 200.0) return;
+    if (f.size.height < 20.0 || f.size.height > 130.0) return;
+    CGFloat target = f.size.width * 0.75 - 4.0;
+    if (target < 150.0) return;
+    if (fabs(f.size.width - target) < 1.0) return;
+    box.frame = CGRectMake(f.origin.x, f.origin.y, target, f.size.height);
+    static CFAbsoluteTime sT = 0;
+    CFAbsoluteTime now = CFAbsoluteTimeGetCurrent();
+    if (now - sT > 3.0) {
+        sT = now;
+        RLog(@"[3x1] 模块框 %.0fx%.0f → %.0fx%.0f", f.size.width, f.size.height,
+             target, f.size.height);
     }
-    if (wrote) {
-        static CFAbsoluteTime sT;
-        if (CFAbsoluteTimeGetCurrent() - sT > 5.0) {
-            sT = CFAbsoluteTimeGetCurrent();
-            RLog(@"[3x1] 收紧内容: 模块宽 %.0f → %.0f", w, target);
-        }
+}
+static void diNP31Walk(UIView *v, int depth) {
+    if (!v || depth > 8) return;
+    if ([NSStringFromClass(v.class) isEqualToString:@"CCUIContentModuleContainerView"]
+        && diNP31HasNowPlaying(v, 0)) {
+        diNP31FitBox(v);
     }
+    for (UIView *c in v.subviews) diNP31Walk(c, depth + 1);
 }
 
-static void (*gDIOrigNPViewLayout)(id, SEL) = NULL;
-static void diNP31ViewLayout(id self, SEL cmd) {
-    if (gDIOrigNPViewLayout) gDIOrigNPViewLayout(self, cmd);
+/* 容器自己的 layoutSubviews: 父级刚把 frame 设成满宽, 这里同一帧内改回来 */
+static void (*gDIOrigCMCLayout)(id, SEL) = NULL;
+static void diNP31CMCLayout(id self, SEL cmd) {
+    if (gDIOrigCMCLayout) gDIOrigCMCLayout(self, cmd);
     @try {
         if (![diNPLayoutKey() isEqualToString:@"3x1"]) return;
-        diNP31Tighten((UIView *)self);
+        UIView *v = (UIView *)self;
+        if (!diNP31HasNowPlaying(v, 0)) return;
+        diNP31FitBox(v);
     } @catch (__unused NSException *e) {}
 }
-static void (*gDIOrigNPVCViewLayout)(id, SEL) = NULL;
+/* 集合控制器布局链尾兜底: 覆盖"容器没被重新布局、但父级改了 frame"的情况 */
+static void (*gDIOrigCVCViewLayout)(id, SEL) = NULL;
 static void diNP31VCViewLayout(id self, SEL cmd) {
-    if (gDIOrigNPVCViewLayout) gDIOrigNPVCViewLayout(self, cmd);
+    if (gDIOrigCVCViewLayout) gDIOrigCVCViewLayout(self, cmd);
     @try {
         if (![diNPLayoutKey() isEqualToString:@"3x1"]) return;
         UIViewController *vc = (UIViewController *)self;
-        diNP31Tighten(vc.isViewLoaded ? vc.view : nil);
+        if (vc.isViewLoaded) diNP31Walk(vc.view, 0);
     } @catch (__unused NSException *e) {}
 }
 static void diNPInstall3x1Hook(void) {
-    static BOOL doneV = NO, doneVC = NO;
-    if (doneV && doneVC) return;
-    Class vc = NSClassFromString(@"MRUNowPlayingView");
-    if (vc && !doneV) {
-        doneV = YES;
+    static BOOL doneBox = NO, doneVC = NO;
+    if (doneBox && doneVC) return;
+    Class box = NSClassFromString(@"CCUIContentModuleContainerView");
+    if (box && !doneBox) {
+        doneBox = YES;
         @try {
-            Method m = class_getInstanceMethod(vc, @selector(layoutSubviews));
+            Method m = class_getInstanceMethod(box, @selector(layoutSubviews));
             IMP before = m ? method_getImplementation(m) : NULL;
-            MSHookMessageEx(vc, @selector(layoutSubviews), (IMP)diNP31ViewLayout,
-                            (IMP *)&gDIOrigNPViewLayout);
-            if (!gDIOrigNPViewLayout) gDIOrigNPViewLayout = (void (*)(id, SEL))before;
-            RLog(@"[3x1] MRUNowPlayingView 布局钩子 %@", gDIOrigNPViewLayout ? @"已装" : @"失败");
+            MSHookMessageEx(box, @selector(layoutSubviews), (IMP)diNP31CMCLayout,
+                            (IMP *)&gDIOrigCMCLayout);
+            if (!gDIOrigCMCLayout) gDIOrigCMCLayout = (void (*)(id, SEL))before;
+            RLog(@"[3x1] 模块容器布局钩子 %@", gDIOrigCMCLayout ? @"已装" : @"失败");
         } @catch (__unused NSException *e) {}
     }
-    Class vcc = NSClassFromString(@"MRUNowPlayingViewController");
+    Class vcc = NSClassFromString(@"CCUIModuleCollectionViewController");
     if (vcc && !doneVC) {
         doneVC = YES;
         @try {
             Method m = class_getInstanceMethod(vcc, @selector(viewDidLayoutSubviews));
             IMP before = m ? method_getImplementation(m) : NULL;
             MSHookMessageEx(vcc, @selector(viewDidLayoutSubviews), (IMP)diNP31VCViewLayout,
-                            (IMP *)&gDIOrigNPVCViewLayout);
-            if (!gDIOrigNPVCViewLayout) gDIOrigNPVCViewLayout = (void (*)(id, SEL))before;
-            RLog(@"[3x1] MRUNowPlayingViewController 布局钩子 %@",
-                 gDIOrigNPVCViewLayout ? @"已装" : @"失败");
+                            (IMP *)&gDIOrigCVCViewLayout);
+            if (!gDIOrigCVCViewLayout) gDIOrigCVCViewLayout = (void (*)(id, SEL))before;
+            RLog(@"[3x1] 集合控制器布局钩子 %@", gDIOrigCVCViewLayout ? @"已装" : @"失败");
         } @catch (__unused NSException *e) {}
     }
 }
