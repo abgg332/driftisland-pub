@@ -13,6 +13,7 @@
 #include <signal.h>
 #include <string.h>
 #include <notify.h>
+#include "../DIVersion.h"   /* 3.0.28: 版本号唯一来源(与 Tweak.mm 共用) */
 
 /* 2.2.25: 字体颜色相关页面统一背景 —— 之前色块页/预览卡/调色页各用各的灰白,
    视觉上"分裂"。现在统一: 页面 = 分组灰底, 卡片 = 白底圆角, 输入框 = 浅灰。 */
@@ -21,8 +22,8 @@
 #define DI_FIELD_BG  [UIColor tertiarySystemGroupedBackgroundColor]
 
 static NSString *const kDomain = @"com.abgg332.driftisland";
-/* 2.6.25: 设置页底部显示的版本号 */
-static NSString *const DI_VERSION_STR = @"2.9.60";
+/* 2.6.25: 设置页底部显示的版本号 —— 3.0.28 起统一取 DIVersion.h, 不再单独写死 */
+static NSString *const DI_VERSION_STR = DI_VERSION;
 /* 2.6.10: 专辑光晕遮罩 —— 与 Tweak 侧 DIAlbumMask.h 保持一致 */
 static NSString *const kDIAlbumMaskKey = @"diAlbumMaskAsset";
 static NSString *const kDIMaskRoot = @"/var/mobile/灵动岛/遮罩素材";
@@ -5651,6 +5652,11 @@ static void diNPApplySize(NSString *size) {
     if ([size isEqualToString:@"3x2b"]) {   /* 布局 B: 模块按 4x2 放, 变体交给 PlayerGridVariant */
         moduleSize = @"4x2";
         variant = @"3x2b";
+    } else if ([size isEqualToString:@"3x1"]) {
+        /* 3.0.28: 原生播放器不认识 3x1 模块尺寸 —— 模块仍按 4x1 放, 变体写 3x1;
+           内容收紧由 tweak 侧完成(MRUNowPlayingView 布局后左右各缩 10%)。 */
+        moduleSize = @"4x1";
+        variant = @"3x1";
     }
     sizes[kNPModuleID] = moduleSize;
     diNPWrite(@"ModuleSizes", sizes, kNPDomain);
@@ -5824,10 +5830,10 @@ static void diNPEnsureActivation(void) {
     [size setProperty:@"Size" forKey:@"key"];
     [size setProperty:kNPDomain forKey:@"defaults"];
     [size setProperty:@"2x2" forKey:@"default"];
-    [size setProperty:@[ @"2x2", @"2x3", @"3x2", @"3x2b", @"4x1", @"4x2", @"4x2b", @"4x3" ]
+    [size setProperty:@[ @"2x2", @"2x3", @"3x2", @"3x2b", @"3x1", @"4x1", @"4x2", @"4x2b", @"4x3" ]
                forKey:@"validValues"];
     [size setProperty:@[ @"2 × 2", @"2 × 3", @"3 × 2", @"3 × 2（布局 B）",
-                         @"4 × 1", @"4 × 2", @"4 × 2（布局 B）", @"4 × 3" ]
+                         @"3 × 1", @"4 × 1", @"4 × 2", @"4 × 2（布局 B）", @"4 × 3" ]
                forKey:@"validTitles"];
     [specs addObject:size];
 
@@ -5837,14 +5843,8 @@ static void diNPEnsureActivation(void) {
     /* 3.1.0: 参考 CCUIPlayer 的 HideNotPlaying —— 打开后隐藏模块里的「未在播放」文字 */
     [specs addObject:[self npSwitch:@"隐藏未在" key:@"HideNotPlaying" def:NO]];
     [specs addObject:[self npRotateSwitch]];
-    /* 3.0.24: 「禁止 N95 修改专辑图」删除(用不上); 「隐藏投送图标」改名「隐藏投送」;
-       下面新增「启用遮罩」+「遮罩素材」 —— 3.0.27 起素材经 params.plist 交给
-       MediaRemoteUI, 只铺在"没展开时播放歌曲"的旋转小专辑头像上(旧遮罩总开关
-       关着也能单独用), 展开态不铺; 不带旋转那组参数(旋转沿用「专辑旋转」)。 */
+    /* 3.0.24: 「禁止 N95 修改专辑图」删除(用不上); 「隐藏投送图标」改名「隐藏投送」。 */
     [specs addObject:[self npSwitch:@"隐藏投送" key:@"HideRoutingIcon" def:NO]];
-    [specs addObject:[self npSwitch:@"启用遮罩" key:@"ArtworkMaskEnabled" def:NO]];
-    PSSpecifier *maskLink = [self linkSpec:@"遮罩素材" detail:[DIMaskPicker class]];
-    [specs addObject:maskLink];
 
     /* ---- 原版参数管理 ---- */
     [specs addObject:[self groupSpec:@"原插件参数" footer:nil]];
@@ -5876,9 +5876,9 @@ static void diNPEnsureActivation(void) {
     NSMutableArray *specs = [NSMutableArray array];
     [specs addObject:[self groupSpec:@"播放器尺寸" footer:nil]];
 
-    NSArray<NSString *> *vals = @[ @"2x2", @"2x3", @"3x2", @"3x2b", @"4x1", @"4x2", @"4x2b", @"4x3" ];
+    NSArray<NSString *> *vals = @[ @"2x2", @"2x3", @"3x2", @"3x2b", @"3x1", @"4x1", @"4x2", @"4x2b", @"4x3" ];
     NSArray<NSString *> *titles = @[ @"2 × 2", @"2 × 3", @"3 × 2", @"3 × 2（布局 B）",
-                                     @"4 × 1", @"4 × 2", @"4 × 2（布局 B）", @"4 × 3" ];
+                                     @"3 × 1", @"4 × 1", @"4 × 2", @"4 × 2（布局 B）", @"4 × 3" ];
     NSString *cur = diNPCurrentSize();
 
     for (NSUInteger i = 0; i < vals.count && i < titles.count; i++) {

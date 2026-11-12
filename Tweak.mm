@@ -17,6 +17,7 @@
 #import <substrate.h>
 #import <os/log.h>
 #include <dispatch/dispatch.h>
+#include "DIVersion.h"   /* 3.0.28: 版本号唯一来源(与 prefs 共用) */
 #include <vector>
 
 static NSString *const kDomain = @"com.abgg332.driftisland";
@@ -69,7 +70,7 @@ static double expandTextY = DI_EXP_TEXT_BASE_Y;   // 上下偏移(pt, 下为正,
 static double expandTextScale = 100.0; // 文字大小(%, 100=原样)
 /* 2.8.86: 构建戳 —— 之前横幅打的是 SpringBoard 自己的 CFBundleShortVersionString(恒 1.0),
    日志里根本看不出装的是哪一版。所有诊断行都带这个戳, 下轮日志一眼定位。 */
-#define DI_BUILD_VER @"3.0.27"
+#define DI_BUILD_VER DI_VERSION   /* 3.0.28: 唯一来源 DIVersion.h */
 static BOOL gRecordingActive = NO; // 保留: 岛素材总闸条件
 static NSString *diElementId(UIView *host);
 static BOOL diMiniMusicActive(UIView *host); // 2.6.3: 前置(遮罩层使用)
@@ -5679,18 +5680,9 @@ static void diExportMaskForMRU(void) {
             } else {
                 [fm removeItemAtPath:mine error:NULL];
             }
-            /* 3.0.27: 「启用遮罩」(原生播放页) — MRU 小岛态小头像的独立闸门,
-               旧遮罩总开关关着也能用 */
-            BOOL artmaskOn = NO;
-            {
-                id v = CFBridgingRelease(CFPreferencesCopyAppValue(
-                    CFSTR("ArtworkMaskEnabled"), CFSTR("com.local.playerexact")));
-                artmaskOn = [v respondsToSelector:@selector(boolValue)] ? [v boolValue] : NO;
-            }
             NSDictionary *params = @{@"rot": @(maskRotateOn), @"rev": @(maskRotateReverse),
                                      @"speed": @(maskRotateSpeed), @"active": @(active),
                                      @"mask": path.lastPathComponent ?: @"",
-                                     @"artmask": @(artmaskOn),
                                      /* 2.8.85: 展开定义 —— MRU 内的歌词/歌名位置与大小 */
                                      @"etOn": @(expandTextOn), @"etX": @(expandTextX),
                                      @"etY": @(expandTextY), @"etScale": @(expandTextScale),
@@ -13847,7 +13839,6 @@ static char kDIActivityMaskState;
 static NSHashTable<UIView *> *gDIActivityArtworks;
 static UIImage *gDIActivityShape;
 static BOOL gDIActivityEnabled;
-static BOOL gDIActivityArtmask;   /* 3.0.27: 「启用遮罩」(ArtworkMaskEnabled, 经 params.plist) */
 static int gDIActivityHit;   /* 2.8.79: 成功接管次数, 0 说明整条链路没走到 */
 static IMP gDIActivityOrigLayout, gDIActivityOrigMove, gDIActivityOrigVisibility, gDIActivityOrigInit;
 
@@ -13890,25 +13881,6 @@ static void diMruRotParams(BOOL *on, BOOL *rev, double *speed) {
         }
     }
     *on = cOn; *rev = cRev; *speed = cSpeed;
-}
-/* 3.0.27: 「启用遮罩」(原生播放页) — 与 rot 同一份 params.plist, 1 秒缓存读 */
-static BOOL diMruArtmaskOn(void) {
-    static BOOL cOn = NO;
-    static CFAbsoluteTime last = 0;
-    static NSString *lastSig;
-    CFAbsoluteTime now = CFAbsoluteTimeGetCurrent();
-    if (last == 0 || now - last > 1.0) {
-        last = now;
-        NSString *p = [diMruSelfDir() stringByAppendingPathComponent:@"params.plist"];
-        NSDictionary *attr = [[NSFileManager defaultManager] attributesOfItemAtPath:p error:NULL];
-        NSString *sig = [NSString stringWithFormat:@"%@_%@", attr[NSFileModificationDate], attr[NSFileSize]];
-        if (![sig isEqual:lastSig]) {
-            lastSig = sig;
-            NSDictionary *d = [NSDictionary dictionaryWithContentsOfFile:p];
-            cOn = ([d isKindOfClass:NSDictionary.class] && [d[@"artmask"] boolValue]);
-        }
-    }
-    return cOn;
 }
 static void diMruFileLog(NSString *line) {
     static dispatch_once_t once;
@@ -14387,18 +14359,6 @@ static CGFloat diActivityHostHeight(UIView *artwork) {
 static void diActivityApply(UIView *artwork) {
     if (!NSThread.isMainThread || ![artwork isKindOfClass:UIView.class]) return;
     DIActivityMaskState *state = objc_getAssociatedObject(artwork, &kDIActivityMaskState);
-    /* 3.0.27: 「启用遮罩」开关跟随(1Hz 缓存读 params.plist, 便宜) —— 拨开关后
-       最多 1 秒生效, 不依赖 reload 通知有没有送到 */
-    {
-        BOOL am = diMruArtmaskOn();
-        if (am != gDIActivityArtmask) {
-            gDIActivityArtmask = am;
-            gDIActivityEnabled = diMruPrefOn() || am;
-            if (am && !gDIActivityShape) gDIActivityShape = diActivityLoadShape();
-            diMruFileLog([NSString stringWithFormat:@"启用遮罩: 开关=%d → 玻璃闸门=%d (旧遮罩=%d)",
-                          (int)am, (int)gDIActivityEnabled, (int)diMruPrefOn()]);
-        }
-    }
     BOOL sized = artwork.bounds.size.width > 20 && artwork.bounds.size.height > 20;
     BOOL ios17 = diIsIOS17Up();
     /* ===== 2.9.48: 17 上小岛态 MRU 一律不参与 —— 用头像自身尺寸做硬判据 =====
@@ -14613,13 +14573,6 @@ static void diActivityApply(UIView *artwork) {
         want = NO;
     }
     if (!want) { diActivityTeardown(artwork, state); return; }
-    /* 3.0.27: 「启用遮罩」单独开(旧遮罩总开关关) —— 只管"没展开时播放歌曲"的那颗
-       旋转小头像: 头像短边 >40pt(= 展开态 66 / 过渡残影)一律让位还原。
-       小岛态 16=23 / 17=23 都 ≤40, 不受影响。 */
-    if (gDIActivityArtmask && !diMruPrefOn() && !compact && artSide > 40.0) {
-        if (state) diActivityTeardown(artwork, state);
-        return;
-    }
 
     /* ===== 2.9.55: 17 收缩态里有两颗头像, 按尺寸分开处理 =====
        387 日志实锤(17, 宿主 189x37):
@@ -15369,8 +15322,7 @@ static void diActivityInstallTextHook(void) {
 }
 
 static void diActivityReload(void) {
-    gDIActivityArtmask = diMruArtmaskOn();
-    gDIActivityEnabled = diMruPrefOn() || gDIActivityArtmask;   /* 3.0.27: 「启用遮罩」也能开玻璃 */
+    gDIActivityEnabled = diMruPrefOn();
     logEnabled = pBool(@"logging", NO);
     gMaskGen++;
     gDIActivityShape = gDIActivityEnabled ? diActivityLoadShape() : nil;
@@ -16118,6 +16070,107 @@ static BOOL diArtIs3x2(void) {
     return [cache hasPrefix:@"3x2"];
 }
 
+/* ===== 3.0.28: 3×1 布局 —— 按 4×1 的排版, 只是收紧 =====
+   原生播放器只认 2x2…4x3 这几档网格, "3x1" 不是合法模块尺寸, 所以设置页选 3x1 时
+   模块尺寸仍按 4x1 放, 只把 PlayerGridVariant 写成 "3x1"(见 prefs diNPApplySize)。
+   内容收紧在这里做: 每次播放器布局完, 变体是 3x1 就把内容整体压到 80% 宽并居中
+   (高度/位置/功能全不动) —— 等比缩窄, 观感就是"比 4×1 紧一点"。
+   两个入口都挂: MRUNowPlayingView.layoutSubviews(常规) + 控制器
+   viewDidLayoutSubviews(布局链尾, 播放器自己的 hook 在后再跑也能压住)。 */
+static NSString *diNPLayoutKey(void) {
+    static NSString *cache = nil;
+    static CFTimeInterval ts = 0;
+    CFTimeInterval now = CFAbsoluteTimeGetCurrent();
+    if (cache && now - ts < 2.0) return cache;
+    NSString *cur = nil;
+    id v = CFBridgingRelease(CFPreferencesCopyAppValue(CFSTR("PlayerGridVariant"),
+                                                      CFSTR("com.local.playerexact")));
+    if ([v isKindOfClass:NSString.class] && [v length]) cur = v;
+    if (!cur.length) {
+        id dict = CFBridgingRelease(CFPreferencesCopyAppValue(CFSTR("ModuleSizes"),
+                                                             CFSTR("com.local.playerexact")));
+        if ([dict isKindOfClass:NSDictionary.class]) {
+            id s = dict[@"com.apple.mediaremote.controlcenter.nowplaying"];
+            if ([s isKindOfClass:NSString.class]) cur = s;
+        }
+    }
+    cache = cur ?: @"";
+    ts = now;
+    return cache;
+}
+
+static void diNP31Tighten(UIView *root) {
+    if (!root) return;
+    CGFloat w = root.bounds.size.width;
+    if (w < 220.0) return;                  /* 只处理控制中心展开的 4×1 模块 */
+    if ([NSStringFromClass(root.class) containsString:@"Activity"]) return;   /* 灵动岛不碰 */
+    CGFloat target = w * 0.80;
+    CGFloat nx = (w - target) * 0.5;
+    BOOL wrote = NO;
+    for (UIView *c in [root.subviews copy]) {
+        if (c.hidden || c.alpha < 0.05) continue;
+        CGRect f = c.frame;
+        if (f.size.width < w * 0.5 || f.size.width > w * 1.02) continue;
+        if (fabs(f.size.width - target) < 0.5 && fabs(f.origin.x - nx) < 0.5) continue;
+        c.frame = CGRectMake(nx, f.origin.y, target, f.size.height);
+        wrote = YES;
+    }
+    if (wrote) {
+        static CFAbsoluteTime sT;
+        if (CFAbsoluteTimeGetCurrent() - sT > 5.0) {
+            sT = CFAbsoluteTimeGetCurrent();
+            RLog(@"[3x1] 收紧内容: 模块宽 %.0f → %.0f", w, target);
+        }
+    }
+}
+
+static void (*gDIOrigNPViewLayout)(id, SEL) = NULL;
+static void diNP31ViewLayout(id self, SEL cmd) {
+    if (gDIOrigNPViewLayout) gDIOrigNPViewLayout(self, cmd);
+    @try {
+        if (![diNPLayoutKey() isEqualToString:@"3x1"]) return;
+        diNP31Tighten((UIView *)self);
+    } @catch (__unused NSException *e) {}
+}
+static void (*gDIOrigNPVCViewLayout)(id, SEL) = NULL;
+static void diNP31VCViewLayout(id self, SEL cmd) {
+    if (gDIOrigNPVCViewLayout) gDIOrigNPVCViewLayout(self, cmd);
+    @try {
+        if (![diNPLayoutKey() isEqualToString:@"3x1"]) return;
+        UIViewController *vc = (UIViewController *)self;
+        diNP31Tighten(vc.isViewLoaded ? vc.view : nil);
+    } @catch (__unused NSException *e) {}
+}
+static void diNPInstall3x1Hook(void) {
+    static BOOL doneV = NO, doneVC = NO;
+    if (doneV && doneVC) return;
+    Class vc = NSClassFromString(@"MRUNowPlayingView");
+    if (vc && !doneV) {
+        doneV = YES;
+        @try {
+            Method m = class_getInstanceMethod(vc, @selector(layoutSubviews));
+            IMP before = m ? method_getImplementation(m) : NULL;
+            MSHookMessageEx(vc, @selector(layoutSubviews), (IMP)diNP31ViewLayout,
+                            (IMP *)&gDIOrigNPViewLayout);
+            if (!gDIOrigNPViewLayout) gDIOrigNPViewLayout = (void (*)(id, SEL))before;
+            RLog(@"[3x1] MRUNowPlayingView 布局钩子 %@", gDIOrigNPViewLayout ? @"已装" : @"失败");
+        } @catch (__unused NSException *e) {}
+    }
+    Class vcc = NSClassFromString(@"MRUNowPlayingViewController");
+    if (vcc && !doneVC) {
+        doneVC = YES;
+        @try {
+            Method m = class_getInstanceMethod(vcc, @selector(viewDidLayoutSubviews));
+            IMP before = m ? method_getImplementation(m) : NULL;
+            MSHookMessageEx(vcc, @selector(viewDidLayoutSubviews), (IMP)diNP31VCViewLayout,
+                            (IMP *)&gDIOrigNPVCViewLayout);
+            if (!gDIOrigNPVCViewLayout) gDIOrigNPVCViewLayout = (void (*)(id, SEL))before;
+            RLog(@"[3x1] MRUNowPlayingViewController 布局钩子 %@",
+                 gDIOrigNPVCViewLayout ? @"已装" : @"失败");
+        } @catch (__unused NSException *e) {}
+    }
+}
+
 static BOOL diArtNameIsArtwork(NSString *cn) {
     if (!cn.length) return NO;
     if ([cn containsString:@"Activity"] || [cn containsString:@"Flipping"]) return NO;
@@ -16210,15 +16263,6 @@ static const CFTimeInterval kDISpinDur = 10.0;
 /* 幂等: 尺寸没变、蒙版还是我们那片、旋转还在 → 一个字都不写。
    3.0.16 及以前每轮布局都重设 mask.frame/path, 3×2 网格里那张图每秒被重建两三次,
    肉眼就是"小专辑头像闪一下"。 */
-/* ===== 3.0.27: 「启用遮罩」(原生播放页, ArtworkMaskEnabled) — 只管小岛未展开时
-   播放歌曲的那颗旋转小专辑头像 =====
-   440 实锤: 小头像由 MediaRemoteUI 进程渲染(MRUActivityArtworkView + MRU 玻璃),
-   SpringBoard 这边铺什么都被跨进程门户盖住 —— 3.0.24/25/26 铺的展开封面、SB 玻璃
-   覆盖层全都不在显示链路上, 用户"还是没加上"。现在的实现: SpringBoard 把开关经
-   params.plist(artmask 键)带给 MRU; MRU 侧玻璃闸门改成 diMruPrefOn() || artmask
-   —— 旧遮罩总开关关着也能用; 且 artmask 单独开时**只在小岛态铺**(展开态一律让位
-   还原), "不要其他地方"。素材沿用 diActivityLoadShape 读的 mask.png(选素材自动
-   重导), 旋转沿用 params.plist 里的 rot 那组, 不引入第二组旋转参数。 */
 
 static void diArtDress(UIView *v) {
     if (!v || !v.layer) return;
@@ -17125,10 +17169,8 @@ static void diNPLoadPrefsSync(void) {
     if (now - firstCall < 15.0) return;
     BOOL on = diNPPrefFlagRaw(@"MusicArtworkGradientEnabled", YES);
     BOOL hid = diNPPrefFlagRaw(@"HideNotPlaying", NO);
-    BOOL mask = diNPPrefFlagRaw(@"ArtworkMaskEnabled", NO);
     diNPPrefCachePut(@"MusicArtworkGradientEnabled", on);
     diNPPrefCachePut(@"HideNotPlaying", hid);
-    diNPPrefCachePut(@"ArtworkMaskEnabled", mask);
     gDIBgOnCache = on;
     gDIHideNP = hid;
 }
@@ -17144,19 +17186,11 @@ static void diNPTickPrefs(void) {
     dispatch_async(q, ^{
         BOOL on = diNPPrefFlagRaw(@"MusicArtworkGradientEnabled", YES);
         BOOL hid = diNPPrefFlagRaw(@"HideNotPlaying", NO);
-        BOOL mask = diNPPrefFlagRaw(@"ArtworkMaskEnabled", NO);
         diNPPrefCachePut(@"MusicArtworkGradientEnabled", on);
         diNPPrefCachePut(@"HideNotPlaying", hid);
-        diNPPrefCachePut(@"ArtworkMaskEnabled", mask);
-        /* 3.0.27: 「启用遮罩」变了 → 立刻把开关导给 MRU(params.plist artmask 键),
-           并保证 mask.png 在它的容器里 —— 不依赖旧遮罩那套导出时机。 */
-        static BOOL sLastMask = NO; static BOOL sMaskInit = NO;
-        BOOL changed = !sMaskInit || (mask != sLastMask);
-        sLastMask = mask; sMaskInit = YES;
         dispatch_async(dispatch_get_main_queue(), ^{
             gDIBgOnCache = on;
             gDIHideNP = hid;
-            if (changed) diExportMaskSoon();
         });
     });
 }
@@ -17653,6 +17687,7 @@ static void diNPStartBgTimer(void) {
 
 static void diNPModuleLayout(id self, SEL cmd) {
     if (gDIOrigModuleLayout) gDIOrigModuleLayout(self, cmd);
+    diNPInstall3x1Hook();   /* 3.0.28: 类晚加载时在这里补装(已装则立即返回) */
     /* 3.0.10: 绝不在 viewWillLayoutSubviews 里同步改视图树/发 XPC —— 挪到下一轮
        runloop, 且每个 VC 节流 0.5s。 */
     @try {
@@ -17890,6 +17925,7 @@ static void diArtInstallGated(void) {
     gDIStageHooksDone = YES;
     diArtInstallAVHook();
     diCrumb([NSString stringWithFormat:@"安装: 高危钩子开始(档位 %d)", gDIStage]);
+    diNPInstall3x1Hook();   /* 3.0.28: 3×1 布局收紧(类不存在时在模块布局时会再试) */
     diNPInstallMediaObserver();   /* 3.0.14: 换歌通知兜底注册 */
     diNPStartBgTimer();           /* 3.0.15: 换曲轮询(通知不可靠) */
 
