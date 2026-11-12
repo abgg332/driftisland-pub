@@ -65,7 +65,7 @@ static double expandTextY = DI_EXP_TEXT_BASE_Y;   // 上下偏移(pt, 下为正,
 static double expandTextScale = 100.0; // 文字大小(%, 100=原样)
 /* 2.8.86: 构建戳 —— 之前横幅打的是 SpringBoard 自己的 CFBundleShortVersionString(恒 1.0),
    日志里根本看不出装的是哪一版。所有诊断行都带这个戳, 下轮日志一眼定位。 */
-#define DI_BUILD_VER @"3.0.16"
+#define DI_BUILD_VER @"3.0.17"
 static BOOL gRecordingActive = NO; // 保留: 岛素材总闸条件
 static NSString *diElementId(UIView *host);
 static BOOL diMiniMusicActive(UIView *host); // 2.6.3: 前置(遮罩层使用)
@@ -15688,6 +15688,7 @@ static BOOL diArtInChrome(UIView *v) {
 }
 
 static BOOL gDIArtSawEmptyTile = NO;   /* 3.0.13: 这轮扫描里看到了"该当封面但图还没加载完"的格子 */
+static NSHashTable *gDIArtKnown = nil; /* 3.0.17: 见过的封面(弱引用), 持续维护 */
 
 static NSArray<UIView *> *diArtCollectIn(UIView *root) {
     NSMutableArray *out = [NSMutableArray array];
@@ -15744,6 +15745,70 @@ static void diNoImplicitActions(CALayer *l) {
                    @"transform": [NSNull null], @"backgroundColor": [NSNull null] };
 }
 
+/* 3.0.17: 全局相位时钟 —— 旋转动画被系统摘掉、视图换实例、展开/折叠重建后重挂时,
+   一律按"全局时间"算角度, 所以重挂那一刻画面不跳(不会从 12 点重来)。
+   参考实现(用户给的 musicRotation.dylib)是 hook 类的 layoutSubviews 直接挂,
+   天然每帧都在, 所以从不会"转着转着停了"; 这里把同样的覆盖能力做进 dress 里。 */
+static CFTimeInterval gDISpinEpoch = 0;
+static const CFTimeInterval kDISpinDur = 10.0;
+
+/* 幂等: 尺寸没变、蒙版还是我们那片、旋转还在 → 一个字都不写。
+   3.0.16 及以前每轮布局都重设 mask.frame/path, 3×2 网格里那张图每秒被重建两三次,
+   肉眼就是"小专辑头像闪一下"。 */
+static void diArtDress(UIView *v) {
+    if (!v || !v.layer) return;
+    CALayer *layer = v.layer;
+    CGRect b = v.bounds;
+    if (b.size.width < 8 || b.size.height < 8) return;
+    DIArtMaskState *st = objc_getAssociatedObject(v, kDIArtStateKey);
+    if (!st) {
+        st = [DIArtMaskState new];
+        st.origMask = layer.mask;
+        st.origRadius = layer.cornerRadius;
+        st.origClip = layer.masksToBounds;
+        st.origTransform = layer.transform;
+        objc_setAssociatedObject(v, kDIArtStateKey, st, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        /* 第一次接管这张封面时, 把播放器自己挂的旋转(常在内部 imageView 那层)清掉 ——
+           不清就是"我们的 10 秒一圈 + 它的若干秒一圈"叠在一起, 转速翻倍还会卡顿。
+           只清这一棵树(封面内部), 与传送栏/按钮无关。 */
+        diArtStripSpin(layer, 0, 5);
+    }
+    if (!st.mask) {
+        st.mask = [CAShapeLayer layer];
+        st.mask.name = @"di.player.art.circle";
+        diNoImplicitActions(st.mask);
+    }
+    /* 只有"尺寸真的变了"或"系统把我们那片 mask 换掉了"才重建 —— 其余情况跳过 */
+    if (layer.mask != st.mask || !CGSizeEqualToSize(st.lastSize, b.size)) {
+        st.lastSize = b.size;
+        CGFloat side = MIN(b.size.width, b.size.height);
+        CGRect circle = CGRectMake((b.size.width - side) / 2.0, (b.size.height - side) / 2.0, side, side);
+        st.mask.frame = b;
+        st.mask.path = [UIBezierPath bezierPathWithOvalInRect:CGRectInset(circle, 0.5, 0.5)].CGPath;
+        layer.mask = st.mask;
+        NSString *desc = [NSString stringWithFormat:@"%@ %.0fx%.0f", NSStringFromClass(v.class),
+                          b.size.width, b.size.height];
+        if (![desc isEqualToString:gDIArtLastDesc]) {
+            gDIArtLastDesc = desc;
+            RLog(@"[封面] 圆形蒙版已挂 %@", desc);
+        }
+    }
+    if (![layer animationForKey:@"di.art.spin"]) {
+        CFTimeInterval tn = CACurrentMediaTime();
+        if (gDISpinEpoch <= 0) gDISpinEpoch = tn;
+        CABasicAnimation *sp = [CABasicAnimation animationWithKeyPath:@"transform.rotation.z"];
+        sp.fromValue = @0.0;
+        sp.toValue = @(M_PI * 2.0);
+        sp.duration = kDISpinDur;
+        sp.repeatCount = HUGE_VALF;
+        sp.removedOnCompletion = NO;
+        sp.fillMode = kCAFillModeForwards;
+        sp.timingFunction = [CAMediaTimingFunction functionWithName:kCAMediaTimingFunctionLinear];
+        sp.beginTime = tn - fmod(tn - gDISpinEpoch, kDISpinDur);   /* 相位续上 */
+        [layer addAnimation:sp forKey:@"di.art.spin"];
+    }
+}
+
 static void diArtApply(UIView *v, BOOL on) {
     if (!v || !v.layer) return;
     CALayer *layer = v.layer;
@@ -15764,54 +15829,7 @@ static void diArtApply(UIView *v, BOOL on) {
         diArtStripSpin(layer, 0, 5);
         return;
     }
-    CGRect b = v.bounds;
-    if (b.size.width < 8 || b.size.height < 8) return;
-    if (!st) {
-        st = [DIArtMaskState new];
-        st.origMask = layer.mask;
-        st.origRadius = layer.cornerRadius;
-        st.origClip = layer.masksToBounds;
-        st.origTransform = layer.transform;
-        objc_setAssociatedObject(v, kDIArtStateKey, st, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-    }
-    if (!st.mask) {
-        st.mask = [CAShapeLayer layer];
-        st.mask.name = @"di.player.art.circle";
-        diNoImplicitActions(st.mask);
-    }
-    if (!CGSizeEqualToSize(st.lastSize, b.size) || layer.mask != st.mask) {
-        /* 先把 frame 定死再给 path —— CALayer 设 frame 会连带改 position/bounds/transform,
-           顺序反了圆会被拉成椭圆。 */
-        st.lastSize = b.size;
-        CGFloat side = MIN(b.size.width, b.size.height);
-        CGRect circle = CGRectMake((b.size.width - side) / 2.0, (b.size.height - side) / 2.0, side, side);
-        /* 3.0.16: 蒙版 frame/path 在自带 actions=null 的层上写, 不再开事务。 */
-        st.mask.frame = b;
-        st.mask.path = [UIBezierPath bezierPathWithOvalInRect:CGRectInset(circle, 0.5, 0.5)].CGPath;
-        layer.mask = st.mask;
-        NSString *desc = [NSString stringWithFormat:@"%@ %.0fx%.0f", NSStringFromClass(v.class),
-                          b.size.width, b.size.height];
-        if (![desc isEqualToString:gDIArtLastDesc]) {
-            gDIArtLastDesc = desc;
-            RLog(@"[封面] 圆形蒙版已挂 %@", desc);
-        }
-    }
-    /* 旋转由本 tweak 驱动(播放器内置旋转已被关掉), 10 秒一圈, 线性匀速。
-       3.0.15: 动画被系统摘掉后重挂时按相位续上, 不再"从 12 点重新开始"。 */
-    if (![layer animationForKey:@"di.art.spin"]) {
-        CABasicAnimation *sp = [CABasicAnimation animationWithKeyPath:@"transform.rotation.z"];
-        sp.fromValue = @0.0;
-        sp.toValue = @(M_PI * 2.0);
-        sp.duration = 10.0;
-        sp.repeatCount = HUGE_VALF;
-        sp.removedOnCompletion = NO;
-        sp.fillMode = kCAFillModeForwards;
-        sp.timingFunction = [CAMediaTimingFunction functionWithName:kCAMediaTimingFunctionLinear];
-        CFTimeInterval tn = CACurrentMediaTime();
-        if (st.spinTS > 0) sp.beginTime = tn - fmod(tn - st.spinTS, sp.duration);
-        else st.spinTS = tn;
-        [layer addAnimation:sp forKey:@"di.art.spin"];
-    }
+    diArtDress(v);
 }
 
 /* ===== 3.0.9: 3×2 传送栏"瞬跳"修复 =====
@@ -16217,6 +16235,7 @@ static void diArtPlayerPost(UIView *root) {
        (3×2 小卡 / 展开卡), 背景铺在它的 bounds 上, 换尺寸自动跟随, 不用再去猜卡片。
        只在图层层面插子层, 不动任何视图/约束。 */
     @try { diNPBackgroundTick(root); } @catch (__unused NSException *e) {}
+    diArtInstallAVHook();   /* 3.0.17: 类晚出现时在这里补装, 幂等 */
     /* 无论开还是关, 都把播放器内置旋转关掉: 它不看我们的偏好键, 开着就会
        "开关关了照样转"。旋转统一由 diArtApply 负责。
        3.0.15: 只在第一次调用(以前每轮布局都调, 那个 setter 在被别的插件接管时
@@ -16258,7 +16277,19 @@ static void diArtPlayerPost(UIView *root) {
             });
         }
     }
-    for (UIView *a in arts) diArtApply(a, on);
+    if (on) {
+        /* 3.0.17: 累积"见过的封面" —— 3×2 换页/换曲时视图会短暂离开收集结果,
+           以前一离开就没人再管它(或下一轮重挂 mask 闪一下)。现在只要见过一次就
+           一直维护, 直到视图真的离开窗口。dress 是幂等的, 尺寸没变什么都不写。 */
+        if (!gDIArtKnown) gDIArtKnown = [NSHashTable weakObjectsHashTable];
+        for (__strong UIView *a in arts) [gDIArtKnown addObject:a];
+        for (__strong UIView *a in gDIArtKnown.allObjects) {
+            if (!a.window || a.hidden || a.alpha < 0.05) continue;
+            @try { diArtDress(a); } @catch (__unused NSException *e) {}
+        }
+    } else {
+        for (__strong UIView *a in arts) diArtApply(a, NO);
+    }
     if (on && !arts.count) diArtLogTree(root);
     diArtKillJitter(root);
     /* 3.0.12: 「隐藏未在播放」恢复 —— 但不再在布局 pass 里同步走树:
@@ -16276,24 +16307,10 @@ static void diArtPlayerPost(UIView *root) {
     }
     /* 3.0.12: 展开态自动导出一次完整视图树(只为定位"有些封面没覆盖"), 写盘不刷屏 */
     diDumpExpandedTreeOnce(root);
-    /* 播放器的旋转/布局钩子安装顺序不确定, 可能在我们的清理之后又把动画挂回去。
-       0.1s 后再补一次, 保证"关=静止、3×2=不抖"是最后一次写。 */
-    static CFTimeInterval lastSweep = 0;
-    CFTimeInterval t = CFAbsoluteTimeGetCurrent();
-    if (t - lastSweep > 0.25) {
-        lastSweep = t;
-        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.1 * NSEC_PER_SEC)),
-                       dispatch_get_main_queue(), ^{
-            @try {
-                if (!root.window) return;
-                diArtDisableNPRSpin();
-                NSArray<UIView *> *cur = objc_getAssociatedObject(root, kDIArtRootKey) ?
-                    ((DIArtRootState *)objc_getAssociatedObject(root, kDIArtRootKey)).arts : nil;
-                for (UIView *a in cur) diArtApply(a, diArtPrefOn());
-                diArtKillJitter(root);
-            } @catch (__unused NSException *e) {}
-        });
-    }
+    /* 3.0.17: 删掉"0.1 秒后再补一次(每 0.25s 触发)"。它在布局回调之后再往图层写一遍,
+       等于把系统这一帧排好的排版动画打断重来 —— 3×2 那条传送栏的按钮就是这样
+       "抖一下"。现在旋转/蒙版全部由 MRUArtworkView 的 layoutSubviews 钩子负责,
+       天然每帧都在, 不需要事后补。 */
 }
 
 static void diArtNPLayout(id self, SEL cmd) {
@@ -16350,6 +16367,8 @@ static void diNPTickPrefs(void) {
 static void (*gMRGetNowPlayingInfo)(dispatch_queue_t, void (^)(CFDictionaryRef)) = NULL;
 static void (*gMRRegisterNotes)(dispatch_queue_t) = NULL;
 static CFStringRef *gMRArtworkKeyPtr = NULL;
+static CFStringRef *gMRRateKeyPtr = NULL;      /* 3.0.17: 播放速率, 判断"暂停/停止" */
+static CFStringRef *gMRTitleKeyPtr = NULL;
 static BOOL gMRTried = NO;
 
 static void diNPLoadMediaRemote(void) {
@@ -16361,6 +16380,8 @@ static void diNPLoadMediaRemote(void) {
     *(void **)&gMRGetNowPlayingInfo = dlsym(h, "MRMediaRemoteGetNowPlayingInfo");
     *(void **)&gMRRegisterNotes = dlsym(h, "MRMediaRemoteRegisterForNowPlayingNotifications");
     gMRArtworkKeyPtr = (CFStringRef *)dlsym(h, "kMRMediaRemoteNowPlayingInfoArtworkData");
+    gMRRateKeyPtr = (CFStringRef *)dlsym(h, "kMRMediaRemoteNowPlayingInfoPlaybackRate");
+    gMRTitleKeyPtr = (CFStringRef *)dlsym(h, "kMRMediaRemoteNowPlayingInfoTitle");
     /* 3.0.15: 不注册的话 kMRMediaRemoteNowPlayingInfoDidChangeNotification 根本不会
        投递到 Darwin 通知中心 —— 这是"切歌背景不跟着换"的根因之一。 */
     if (gMRRegisterNotes) {
@@ -16392,6 +16413,33 @@ static void diNPFetchArtwork(void) {
                     id v = (__bridge id)CFDictionaryGetValue(info, key);
                     if ([v isKindOfClass:NSData.class] && [((NSData *)v) length] > 64) data = v;
                 }
+            }
+            /* 3.0.17: 「背景要跟专辑头像一样」—— 歌曲暂停/停止后背景必须回到默认。
+               以前只认 artworkData, 而暂停时这首曲子的图还在, 于是背景一直挂着。
+               现在读 PlaybackRate: 有值且 <= 0 就是停/暂停, 直接清空。 */
+            BOOL playing = YES;
+            if (info) {
+                if (gMRRateKeyPtr && *gMRRateKeyPtr) {
+                    id rv = (__bridge id)CFDictionaryGetValue(info, *gMRRateKeyPtr);
+                    if ([rv isKindOfClass:NSNumber.class]) playing = ([rv doubleValue] > 0.01);
+                } else if (gMRTitleKeyPtr && *gMRTitleKeyPtr) {
+                    id tv = (__bridge id)CFDictionaryGetValue(info, *gMRTitleKeyPtr);
+                    playing = (tv != NULL);
+                }
+            } else {
+                playing = NO;   /* 连 now playing 都没有 = 没有在放 */
+            }
+            if (!playing) {
+                dispatch_async(dispatch_get_main_queue(), ^{
+                    @try {
+                        if (!gDIBgImage && !gDIBgData) return;
+                        gDIBgImage = nil;
+                        gDIBgData = nil;
+                        diNPRefreshBackgrounds();
+                        RLog(@"[背景] 暂停/停止 → 收起专辑背景, 恢复默认外观");
+                    } @catch (__unused NSException *e) {}
+                });
+                return;
             }
             /* 3.0.16: 先比数据再解码 —— 轮询变快以后每次都解一张 600x600 太重 */
             NSData *prev = gDIBgData;
@@ -16617,7 +16665,17 @@ static void diNPHideNotPlayingLabels(UIView *root, BOOL hide) {
                 if (v.hidden != hide) v.hidden = hide;
             }
         }
-        for (UIView *c in v.subviews) [stack addObject:c];
+        for (UIView *c in v.subviews) {
+            /* 3.0.17: 不往传送栏/音量/进度这些控件子树里钻 —— 在那里写 hidden 会让
+               系统判定需要重排, 3×2 的 5 个按钮就跟着"抖一下"。这些子树里也不会有
+               "未在播放"文案。 */
+            NSString *cn = NSStringFromClass(c.class);
+            if ([cn containsString:@"Transport"] || [cn containsString:@"Stepper"]
+                || [cn containsString:@"Slider"] || [cn containsString:@"VolumeControls"]
+                || [cn containsString:@"TimeControls"] || [cn containsString:@"CAPackage"]
+                || [cn containsString:@"Header"] || [cn containsString:@"Button"]) continue;
+            [stack addObject:c];
+        }
     }
 }
 
@@ -16771,9 +16829,122 @@ static void diNPMediaChanged(CFNotificationCenterRef c, void *obs, CFStringRef n
     }
 }
 
+/* ===== 3.0.17: 直接接管 MRUArtworkView 自身 =====
+   用户给的参考实现(musicRotation.dylib)只做一件事: hook 目标类的 layoutSubviews,
+   在里面给 self 挂圆形 mask + transform.rotation.z。它"完整"是因为挂在"类"上 ——
+   每个实例、每次换尺寸都会自动处理, 不存在"扫不到"。
+   我们之前是"遍历视图树按特征收集", 3×2 网格里格子图一换实例就漏, 一秒后重扫到又
+   重挂 mask, 就是"有些尺寸会闪 / 有些缺失"。现在同样 hook 类, 收集只作兜底。 */
+static void (*gDIOrigAVLayout)(id, SEL) = NULL;
+static BOOL gDIArtAVTried = NO;
+
+static BOOL diArtInControlCenter(UIView *v) {
+    /* 按"窗口"判定最干净: 3×2 那套在 SBControlCenterWindow 里; 锁屏/灵动岛是
+       SBLockScreen*/SBAperture 窗口 —— 那些地方的头像有自己的遮罩素材, 绝不能碰。 */
+    UIWindow *w = v.window;
+    if (w) {
+        NSString *wn = NSStringFromClass(w.class);
+        if ([wn containsString:@"ControlCenter"]) return YES;
+        if ([wn containsString:@"LockScreen"] || [wn containsString:@"Aperture"]
+            || [wn containsString:@"SystemAperture"]) return NO;
+    }
+    UIView *a = v.superview;
+    for (int i = 0; a && i < 10; i++, a = a.superview) {
+        NSString *cn = NSStringFromClass(a.class);
+        if ([cn containsString:@"MRUControlCenter"]) return YES;
+        if ([cn containsString:@"Activity"] || [cn containsString:@"Aperture"]) return NO;
+    }
+    return NO;
+}
+
+static void diArtAVLayout(id self, SEL cmd) {
+    if (gDIOrigAVLayout) gDIOrigAVLayout(self, cmd);
+    @try {
+        if (gDIStage < 1) return;
+        if (!diArtIs3x2()) return;
+        if (!diArtPrefOn()) return;
+        UIView *v = (UIView *)self;
+        if (!v.window || v.hidden || v.alpha < 0.05) return;
+        if (!diArtInControlCenter(v)) return;   /* 锁屏 / 灵动岛不碰 */
+        diArtDress(v);
+    } @catch (__unused NSException *e) {}
+}
+
+/* ===== 3.0.17: 按钮抖动只读定位 =====
+   3.0.16 的 [抖动2] 证明: 5 个按钮在两套 frame 之间来回(A=44x44 紧排,
+   B=37.5x37.5 且 y 漂到 43~46), 说明是"某个调用方每隔两三秒重新触发了一次
+   传送栏的布局动画"。这里只读不改: hook 按钮的 setFrame/setTransform/
+   setHighlighted, 把调用者(镜像+符号)写进日志, 最多 40 条。 */
+static void (*gDIOrigTBSetFrame)(id, SEL, CGRect) = NULL;
+static void (*gDIOrigTBSetTransform)(id, SEL, CGAffineTransform) = NULL;
+static void (*gDIOrigTBSetHighlighted)(id, SEL, BOOL) = NULL;
+static int gDITBLogs = 0;
+
+static void diTraceCaller(const char *tag) {
+    void *bt[12];
+    int n = backtrace(bt, 12);
+    for (int i = 1; i < n; i++) {
+        Dl_info di;
+        if (!dladdr(bt[i], &di)) continue;
+        const char *sym = di.dli_sname ? di.dli_sname : "?";
+        if (strstr(sym, "DriftIsland") || strstr(sym, "diTrace")) continue;
+        const char *fn = di.dli_fname ? di.dli_fname : "?";
+        const char *base = strrchr(fn, '/');
+        /* 注意: RLog 走 NSString 格式化, 不认 %s —— 必须转成对象, 否则把 char* 当
+           id 用会直接崩 SpringBoard。 */
+        NSString *tagS = tag ? [NSString stringWithUTF8String:tag] : @"?";
+        NSString *fnS = [NSString stringWithUTF8String:(base ? base + 1 : fn)];
+        NSString *symS = [NSString stringWithUTF8String:sym];
+        RLog(@"[抖动3] %@ ← %@ %@", tagS, fnS ?: @"?", symS ?: @"?");
+        return;
+    }
+    RLog(@"[抖动3] %@ ← (无符号)", tag ? [NSString stringWithUTF8String:tag] : @"?");
+}
+
+static void diTBSetFrame(id self, SEL cmd, CGRect f) {
+    if (gDITBLogs < 40 && diArtIs3x2()) { gDITBLogs++; diTraceCaller("TB.setFrame"); }
+    if (gDIOrigTBSetFrame) gDIOrigTBSetFrame(self, cmd, f);
+}
+static void diTBSetTransform(id self, SEL cmd, CGAffineTransform t) {
+    if (gDITBLogs < 40 && diArtIs3x2()) { gDITBLogs++; diTraceCaller("TB.setTransform"); }
+    if (gDIOrigTBSetTransform) gDIOrigTBSetTransform(self, cmd, t);
+}
+static void diTBSetHighlighted(id self, SEL cmd, BOOL h) {
+    if (gDITBLogs < 40 && diArtIs3x2()) { gDITBLogs++; diTraceCaller("TB.setHighlighted"); }
+    if (gDIOrigTBSetHighlighted) gDIOrigTBSetHighlighted(self, cmd, h);
+}
+
+static BOOL gDITBHookTried = NO;
+static void diArtInstallTBHook(void) {
+    if (gDITBHookTried) return;
+    Class tb = NSClassFromString(@"MRUTransportButton");
+    if (!tb) return;
+    gDITBHookTried = YES;
+    @try {
+        MSHookMessageEx(tb, @selector(setFrame:), (IMP)diTBSetFrame, (IMP *)&gDIOrigTBSetFrame);
+        MSHookMessageEx(tb, @selector(setTransform:), (IMP)diTBSetTransform, (IMP *)&gDIOrigTBSetTransform);
+        MSHookMessageEx(tb, @selector(setHighlighted:), (IMP)diTBSetHighlighted, (IMP *)&gDIOrigTBSetHighlighted);
+        RLog(@"[抖动3] MRUTransportButton 定位钩子已装(只读)");
+    } @catch (__unused NSException *e) {}
+}
+
+static void diArtInstallAVHook(void) {
+    if (gDIArtAVTried) return;
+    Class av = NSClassFromString(@"MRUArtworkView");
+    if (!av) return;
+    gDIArtAVTried = YES;
+    Method m = class_getInstanceMethod(av, @selector(layoutSubviews));
+    IMP before = m ? method_getImplementation(m) : NULL;
+    MSHookMessageEx(av, @selector(layoutSubviews), (IMP)diArtAVLayout, (IMP *)&gDIOrigAVLayout);
+    if (!gDIOrigAVLayout) gDIOrigAVLayout = (void (*)(id, SEL))before;
+    RLog(@"[封面] 已接管 MRUArtworkView layoutSubviews(全部实例/全部尺寸)");
+    diArtInstallTBHook();
+}
+
 static void diArtInstall(void) {
     if (gDIArtHooked) return;
     diArtDisableNPRSpin();   /* 尽早接管播放器内置旋转, 避免第一次播放就已经在转 */
+    diArtInstallAVHook();    /* 3.0.17: 类级接管, 覆盖所有实例/尺寸 */
     Class npv = NSClassFromString(@"MRUNowPlayingView");
     Class ccv = NSClassFromString(@"MRUControlCenterViewController");
     if (!npv || !ccv) {
@@ -16836,6 +17007,7 @@ static void diArtInstallGated(void) {
     if (needModule && !mvc) return;   /* 类还没出来, 第 20 秒诊断会再试 */
     if (needTC && !tcc) return;
     gDIStageHooksDone = YES;
+    diArtInstallAVHook();
     diCrumb([NSString stringWithFormat:@"安装: 高危钩子开始(档位 %d)", gDIStage]);
     diNPInstallMediaObserver();   /* 3.0.14: 换歌通知兜底注册 */
     diNPStartBgTimer();           /* 3.0.15: 换曲轮询(通知不可靠) */
