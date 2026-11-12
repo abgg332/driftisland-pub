@@ -231,7 +231,7 @@ static void diStartWatchdog(void) {
                 if (tk == last) stalled++; else { stalled = 0; last = tk; }
                 if (stalled >= 4 && notes < 12) {   /* 连续 2 秒没心跳 */
                     notes++;
-                    const char *ph = gDIPhase ? gDIPhase : "?";
+                    const volatile char *vp = gDIPhase; const char *ph = vp ? (const char *)vp : "?";
                     diHangNote([NSString stringWithFormat:@"主线程停摆约 %d 秒, 阶段=%s",
                                 stalled / 2, ph]);
                 }
