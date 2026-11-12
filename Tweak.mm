@@ -17711,8 +17711,13 @@ static void diNPRefreshBackgrounds(void) {
 }
 
 /* ---------- 隐藏「未在播放」 ---------- */
+/* 3.0.42: 记录"被我们亲手藏掉的未在播放标签" —— 判断"现在是不是真的没歌"时,
+   这些标签虽然 hidden 了, 仍然算作可见(是我们藏的, 不是系统收起的)。 */
+static NSHashTable *gDIHiddenNPLabels = nil;
+
 static void diNPHideNotPlayingLabels(UIView *root, BOOL hide) {
     if (!root) return;
+    if (!gDIHiddenNPLabels) gDIHiddenNPLabels = [NSHashTable weakObjectsHashTable];
     NSMutableArray *stack = [NSMutableArray arrayWithObject:root];
     int budget = 2500;
     while (stack.count && budget-- > 0) {
@@ -17725,6 +17730,8 @@ static void diNPHideNotPlayingLabels(UIView *root, BOOL hide) {
             if (t.length && ([t containsString:@"未在播放"] || [t containsString:@"Not Playing"]
                              || [t containsString:@"Nothing Playing"])) {
                 if (v.hidden != hide) v.hidden = hide;
+                if (hide) [gDIHiddenNPLabels addObject:v];
+                else [gDIHiddenNPLabels removeObject:v];
             }
         }
         for (UIView *c in v.subviews) {
@@ -17750,21 +17757,105 @@ static void diNPApplyHideForRoot(UIView *root) {
     @try { diNPApplyHideTime(); } @catch (__unused NSException *e) {}
 }
 
-/* ---------- 3.0.41: 隐藏时间(只在没放歌的时候) ----------
+/* ---------- 3.0.41/3.0.42: 隐藏时间(只在没放歌的时候) ----------
    用户要的是: 没播放歌曲时, 把进度条那条横条和左右两个时间一起藏掉。
-   取舍:
-     · 认整块 TimeControls(进度条 + 左右时间标签都在它里面), 不逐个藏 label ——
-       逐个藏会漏字, 还可能把标题区别的文字带下去;
-     · 只改 alpha, 不写 hidden。hidden 会让父级 stack 当场塌陷, 3×2 那一排按钮
-       跟着移位(用户对"按钮乱跳"零容忍); alpha 只影响可见性, 排版一个像素不动;
-     · 系统每次重排都可能把 alpha 拨回去, 所以由 1Hz 的 visibilityTick 复查;
-     · 只还原**我们自己压下去的**那些(弱表记账), 系统自己的 alpha 一概不碰。 */
-static NSMapTable *gDITimeAlpha = nil;   /* 我们压过的 view → 它原来的 alpha(弱键, 视图走了自动清) */
+
+   3.0.42 修两个毛病:
+   ① 播放后仍被判成"未播放", 时间条一直被压成透明, 和系统一拉一扯 → 用户看到"一闪一闪"。
+      根因: 播放时"未在播放"那条 UILabel 还留在视图树里(只是被系统 hidden),
+      旧逻辑只看文字不看可见性, 于是永远判空。现在要求标签真的在窗口里、
+      自身与祖先都没被系统收起(「隐藏未在」被我们亲手藏的那个除外)。
+   ② 呼出控制中心、展开再收起时, 时间条先露一下才被藏掉 → 旧逻辑靠 0.5 秒巡检,
+      第一帧来不及。现在给 MRUNowPlayingTimeControlsView 挂 layoutSubviews:
+      系统每次重排完, 在同一个提交帧里把 alpha 压回去, 肉眼看不到中间态。
+
+   为什么仍然用 alpha 不用 hidden: hidden 会让父级 stack 当场塌陷, 3×2 那排按钮
+   跟着移位(用户对"按钮乱跳"零容忍); alpha 只影响可见性, 排版一个像素不动。 */
+/* 3.0.42: "到底有没有歌" 用 MediaRemote 的 now playing info 判断 ——
+   有 info 且有标题 = 有歌(暂停也算, 暂停时系统仍显示时间和进度);
+   info 为空/没有标题 = 真的没歌, 这才是用户说的"没播放"。
+   1 秒最多问一次, 回调在后台队列, 结果回主线程。符号缺失时退回文案判定。 */
+static BOOL gDIHasNowPlaying = NO;
+static BOOL gDIInfoReady = NO;
+static void diNPQueryNowPlaying(void) {
+    diNPLoadMediaRemote();   /* 幂等: 背景功能关着时也要把符号拉起来 */
+    if (!gMRGetNowPlayingInfo) return;
+    static CFAbsoluteTime last = 0;
+    CFTimeInterval now = CFAbsoluteTimeGetCurrent();
+    if (now - last < 1.0) return;
+    last = now;
+    gMRGetNowPlayingInfo(dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^(CFDictionaryRef info) {
+        BOOL has = NO;
+        @try {
+            if (info) {
+                if (gMRTitleKeyPtr && *gMRTitleKeyPtr) {
+                    id tv = (__bridge id)CFDictionaryGetValue(info, *gMRTitleKeyPtr);
+                    has = ([tv isKindOfClass:NSString.class] && [(NSString *)tv length] > 0);
+                } else {
+                    has = YES;   /* 没有标题键的旧系统: 有 info 就算有歌 */
+                }
+            }
+        } @catch (__unused NSException *e) {}
+        dispatch_async(dispatch_get_main_queue(), ^{
+            gDIHasNowPlaying = has;
+            gDIInfoReady = YES;
+        });
+    });
+}
+
+static BOOL gDITimeShouldHide = NO;          /* 全局: 这一帧所有时间条都该藏 */
+static NSHashTable *gDITimeTouched = nil;    /* 我们压过 alpha 的 view(弱表) */
+static void (*gDITimeOrigLayout)(id, SEL) = NULL;
+
+static void diTimeLayoutHook(id self, SEL cmd) {
+    if (gDITimeOrigLayout) gDITimeOrigLayout(self, cmd);
+    UIView *v = (UIView *)self;
+    if (gDITimeShouldHide) {
+        if (v.alpha != 0.0) v.alpha = 0.0;
+        /* 系统常用 opacity 动画把时间条淡进来; 动画还在的话, 光写 alpha 会被动画盖住,
+           视觉上就是"闪一下才消失"。这里把那条动画也摘掉, 同一帧内直接不见。 */
+        if ([v.layer animationForKey:@"opacity"]) [v.layer removeAnimationForKey:@"opacity"];
+        if (!gDITimeTouched) gDITimeTouched = [NSHashTable weakObjectsHashTable];
+        [gDITimeTouched addObject:v];
+    } else if (gDITimeTouched && [gDITimeTouched containsObject:v]) {
+        v.alpha = 1.0;
+        [gDITimeTouched removeObject:v];
+    }
+}
+
+static void diTimeInstallHook(void) {
+    static BOOL done = NO;
+    if (done) return;
+    Class c = NSClassFromString(@"MRUNowPlayingTimeControlsView");
+    if (!c) return;
+    done = YES;
+    Method m = class_getInstanceMethod(c, @selector(layoutSubviews));
+    IMP before = m ? method_getImplementation(m) : NULL;
+    MSHookMessageEx(c, @selector(layoutSubviews), (IMP)diTimeLayoutHook, (IMP *)&gDITimeOrigLayout);
+    if (!gDITimeOrigLayout) gDITimeOrigLayout = (void (*)(id, SEL))before;
+    RLog(@"[时间] 时间条布局钩子已装 (%@)", gDITimeOrigLayout ? @"OK" : @"失败");
+}
+
+/* 标签现在是不是"真的看得见": 在窗口里, 自身与祖先都没被系统收起。
+   被我们自己 hidden 的那个仍然算数(否则开着「隐藏未在」时, 这里就再也认不出空状态)。 */
+static BOOL diNPViewVisibleTo(UIView *v, UIView *root) {
+    if (!v || !v.window) return NO;
+    BOOL ours = gDIHiddenNPLabels && [gDIHiddenNPLabels containsObject:v];
+    UIView *cur = v;
+    int guard = 0;
+    while (cur && guard++ < 16) {
+        if (cur.alpha < 0.01) return NO;
+        if (cur.hidden && !(cur == v && ours)) return NO;
+        if (cur == root) break;
+        cur = cur.superview;
+    }
+    return YES;
+}
 
 /* 一次遍历同时拿两样东西:
    · 时间控件整块(类名带 TimeControls, 进度条 + 左右时间都在它里面);
-   · 这一屏是否处于「未在播放」空状态 —— 认标题区那条文案(和我们「隐藏未在」用同一套
-     匹配), 不看它是不是被我们 hidden 了(hidden 的视图还在树里)。
+   · 这一屏是否处于「未在播放」空状态 —— 认标题区那条文案(和「隐藏未在」同一套匹配),
+     但必须"看得见"。
    为什么不用 MRMediaRemote 的 isPlaying 判空: 它把"暂停"也算成 false, 而暂停时
    系统仍然显示这首歌的时间和进度, 用户要藏的是"根本没有歌"的那条空横条。 */
 static UIView *diNPFindTimeControls(UIView *root, BOOL *outIdle) {
@@ -17781,7 +17872,9 @@ static UIView *diNPFindTimeControls(UIView *root, BOOL *outIdle) {
             UILabel *lb = (UILabel *)v;
             NSString *t = lb.text.length ? lb.text : lb.attributedText.string;
             if (t.length && ([t containsString:@"未在播放"] || [t containsString:@"Not Playing"]
-                             || [t containsString:@"Nothing Playing"])) idle = YES;
+                             || [t containsString:@"Nothing Playing"])) {
+                if (diNPViewVisibleTo(v, root)) idle = YES;
+            }
         }
         for (UIView *c in v.subviews) [st addObject:c];
     }
@@ -17811,39 +17904,60 @@ static void diNPDumpTimeCandidates(UIView *root) {
          names.count ? [names componentsJoinedByString:@", "] : @"(无)");
 }
 
-static void diNPApplyHideTimeTo(UIView *root, BOOL wantHide) {
-    BOOL idle = NO;
-    UIView *tc = diNPFindTimeControls(root, &idle);
-    if (!tc) { if (wantHide && idle) diNPDumpTimeCandidates(root); return; }
-    BOOL hide = wantHide && idle;
-    if (!gDITimeAlpha) gDITimeAlpha = [NSMapTable weakToStrongObjectsMapTable];
-    if (hide) {
-        if (![gDITimeAlpha objectForKey:tc]) [gDITimeAlpha setObject:@(tc.alpha) forKey:tc];
-        if (tc.alpha != 0.0) {
-            tc.alpha = 0.0;
-            RLog(@"[时间] 未播放 → 隐藏时间条(%@)", NSStringFromClass(tc.class));
-        }
-    } else if ([gDITimeAlpha objectForKey:tc]) {
-        tc.alpha = [[gDITimeAlpha objectForKey:tc] floatValue];
-        [gDITimeAlpha removeObjectForKey:tc];
-        RLog(@"[时间] 恢复时间条(有歌/开关关)");
-    }
-}
-
 static void diNPApplyHideTime(void) {
     static CFAbsoluteTime lastScan = 0;
     CFTimeInterval now = CFAbsoluteTimeGetCurrent();
     if (now - lastScan < 0.4) return;
     lastScan = now;
 
-    if (!gDIHideTime && gDITimeAlpha.count == 0) return;  /* 没事可做 */
+    diTimeInstallHook();
+    diNPQueryNowPlaying();   /* 3.0.42: 用 MediaRemote 判"到底有没有歌" */
+    /* 开关关着、也没有被我们压过的视图 → 本轮没事可做(但复位全局状态, 防止新视图被误压) */
+    if (!gDIHideTime && (!gDITimeTouched || gDITimeTouched.count == 0)) {
+        gDITimeShouldHide = NO;
+        return;
+    }
 
     /* 宿主: 播放器视图 + 模块卡片(去重后逐个找) */
     NSMutableArray<UIView *> *roots = [NSMutableArray array];
     if (gDIBgPlayers) for (UIView *v in gDIBgPlayers.allObjects) [roots addObject:v];
     if (gDIBgHosts) for (UIView *v in gDIBgHosts.allObjects) if (![roots containsObject:v]) [roots addObject:v];
+
+    NSHashTable *tcs = [NSHashTable weakObjectsHashTable];
+    BOOL labelIdle = NO;
     for (UIView *r in roots) {
-        @try { diNPApplyHideTimeTo(r, gDIHideTime); } @catch (__unused NSException *e) {}
+        BOOL idle = NO;
+        UIView *tc = nil;
+        @try { tc = diNPFindTimeControls(r, &idle); } @catch (__unused NSException *e) {}
+        if (idle) labelIdle = YES;
+        if (tc) [tcs addObject:tc];
+    }
+    /* 3.0.42: 以 MediaRemote 为准(有歌=有, 暂停也算有); 还没就绪的前几秒用文案兜底 */
+    BOOL idleAny = gDIInfoReady ? !gDIHasNowPlaying : labelIdle;
+
+    /* 3.0.42: 不再加防抖 —— 用户要的是"播放了立刻显示"。MediaRemote 给的
+       now playing info 在切歌时不会变空(只有真的没有歌才会), 所以直接跟它走。 */
+    BOOL want = gDIHideTime && idleAny;
+
+    if (want != gDITimeShouldHide) {
+        gDITimeShouldHide = want;
+        RLog(@"[时间] %@", want ? @"未播放 → 隐藏时间条"
+                                : @"播放中/开关关 → 恢复时间条");
+    }
+    /* 立刻应用一次(不等下一次系统布局); 系统重排的兜底交给上面的 layout 钩子 */
+    if (!gDITimeTouched) gDITimeTouched = [NSHashTable weakObjectsHashTable];
+    for (UIView *v in tcs.allObjects) {
+        if (gDITimeShouldHide) {
+            if (v.alpha != 0.0) v.alpha = 0.0;
+            [gDITimeTouched addObject:v];
+        } else if ([gDITimeTouched containsObject:v]) {
+            v.alpha = 1.0;
+            [gDITimeTouched removeObject:v];
+        }
+    }
+    if (gDITimeShouldHide && tcs.count == 0 && roots.count > 0) {
+        UIView *r0 = roots.firstObject;
+        diNPDumpTimeCandidates(r0);
     }
 }
 
@@ -17888,6 +18002,9 @@ static void diNPHandleModuleVC(id vc) {
     diNPTickPrefs();
     diNPStartBgTimer();
     diNPHideNotPlayingLabels(card, gDIHideNP);
+    /* 3.0.42: 模块每次排版都顺手把"该不该藏时间条"算一遍 —— 呼出控制中心的第一帧
+       就已经有正确结论, 不用等 0.5 秒的巡检。 */
+    @try { diNPApplyHideTime(); } @catch (__unused NSException *e) {}
 
     if (gDIBgOnCache) {
         /* 3.0.15: 取图交给 1.5 秒轮询 + 通知, 这里只做兜底(没有播放器宿主时才铺容器) */
@@ -18211,6 +18328,8 @@ static void diArtInstallGated(void) {
        一次都没真正拦下过瞬跳(没有一条 [抖动] 拦下...) —— 它没在修问题, 只在跟系统
        布局抢 frame。现在完全不碰传送栏的任何 frame/动画, 由系统自己排。 */
     RLog(@"[抖动] 传送栏 setFrame 接管已停用(3.0.15: 不再改写系统 frame, 档位=%d)", gDIStage);
+    /* 3.0.42: 时间条布局钩子 —— 与模块钩子同一档位安装, 尽早把 alpha 压住 */
+    @try { diTimeInstallHook(); } @catch (__unused NSException *e) {}
     (void)tcc;
 }
 
