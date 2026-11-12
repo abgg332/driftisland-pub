@@ -16280,6 +16280,7 @@ static const void *kDIBgDimKey = &kDIBgDimKey;
 static const void *kDIBgLastKey = &kDIBgLastKey;   /* 3.0.10: 模块 VC 处理节流 */
 static const void *kDIBgRKey    = &kDIBgRKey;      /* 3.0.15: 缓存圆角 */
 static const void *kDIBgSizeKey = &kDIBgSizeKey;   /* 3.0.15: 缓存 host 尺寸 */
+static const void *kDIBgRectKey = &kDIBgRectKey;   /* 3.0.15: 缓存背景矩形 */
 
 static NSHashTable *gDIBgHosts = nil;       /* 模块内容容器(隐藏未在播放用) */
 static NSHashTable *gDIBgPlayers = nil;     /* 3.0.15: 背景宿主 = 播放器视图(各尺寸的可见卡片) */
@@ -16340,13 +16341,11 @@ static void diNPFetchArtwork(void) {
     if (rnow - gDIBgLastReqTS < 0.8) return;   /* 3.0.15: 通知+轮询+布局三路都会来, 合并 */
     gDIBgLastReqTS = rnow;
     diNPLoadMediaRemote();
-    diCrumb(@"取图: MediaRemote 已备, 即将发起请求");
     if (!gMRGetNowPlayingInfo) { diCrumb(@"取图: 符号缺失, 放弃"); return; }
     gMRGetNowPlayingInfo(dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^(CFDictionaryRef info) {
         /* 3.0.10: 回调在后台队列, 整体兜 @try + autoreleasepool —— 这里出任何异常
            都不能带崩 SpringBoard */
         @autoreleasepool { @try {
-            diCrumb(@"取图: 回调已到");
             NSData *data = nil;
             if (info) {
                 CFStringRef key = (gMRArtworkKeyPtr && *gMRArtworkKeyPtr) ? *gMRArtworkKeyPtr : NULL;
@@ -16358,10 +16357,13 @@ static void diNPFetchArtwork(void) {
             UIImage *img = data ? [UIImage imageWithData:data] : nil;
             dispatch_async(dispatch_get_main_queue(), ^{
                 @try {
-                    diCrumb(@"取图: 回到主线程, 准备铺背景");
                     if (!img) {
                         /* 3.0.14: 取不到图(该曲无封面/未播放) → 保留现有背景, 不清空 */
-                        if (!gDIBgImage) diCrumb(@"取图: 无图且当前也没有, 保持隐藏");
+                        static CFTimeInterval lastNone = 0;
+                        if (!gDIBgImage && CFAbsoluteTimeGetCurrent() - lastNone > 30.0) {
+                            lastNone = CFAbsoluteTimeGetCurrent();
+                            RLog(@"[背景] 取不到专辑图(未播放/无封面), 保持当前背景");
+                        }
                         return;
                     }
                     if (data && gDIBgData && [data isEqualToData:gDIBgData]) {
@@ -16370,14 +16372,13 @@ static void diNPFetchArtwork(void) {
                     gDIBgData = data;
                     gDIBgImage = img;
                     diNPRefreshBackgrounds();
-                    diCrumb(@"取图: 铺背景完成");
                     RLog(@"[背景] 专辑图 %@ (数据 %lu 字节)", [NSString stringWithFormat:@"%.0fx%.0f", img.size.width, img.size.height],
                          (unsigned long)data.length);
                 } @catch (NSException *e) { diCrumb([NSString stringWithFormat:@"取图: 主线程异常 %@", e.reason]); }
             });
         } @catch (NSException *e) { diCrumb([NSString stringWithFormat:@"取图: 回调异常 %@", e.reason]); } }
     });
-    diCrumb(@"取图: 请求已发出");
+    /* 3.0.15: 这条路径现在每 1.5 秒跑一次, 不再写足迹文件(每次 4 行会拖慢主线程) */
 }
 
 /* ---------- 背景层(3.0.11 改 CALayer 子层) ----------
@@ -16389,19 +16390,35 @@ static void diNPFetchArtwork(void) {
    播放器视图本身就是当前尺寸下的可见卡片: 3×2 小卡、展开大卡、折叠态, 尺寸一变
    它跟着变, 背景实时跟随, 也就不会再出现"展开显示太长 / 起点偏下 / 直角"这三种错位。
    圆角单独找: 最近的、能包住宿主的祖先圆角, 或宿主内部铺满的材质层圆角, 都没有才估算。 */
-static CGFloat diNPRadiusFor(UIView *host, NSString **outSrc) {
+static void diNPGeometryFor(UIView *host, CGRect *outRect, CGFloat *outR, NSString **outSrc) {
+    CGRect rect = host.bounds;
     CGFloat r = host.layer.cornerRadius;
     NSString *src = (r >= 6.0) ? NSStringFromClass(host.class) : nil;
     CGFloat hostArea = host.bounds.size.width * host.bounds.size.height;
+    /* ① 最近的、把宿主整个包住、而且只比宿主大一点点的祖先 = 卡片本体。
+          用它的矩形+圆角(播放器常有几 pt 内边距, 背景要铺到卡片边才算对)。 */
+    UIView *a = host.superview;
+    for (int i = 0; a && i < 4; i++, a = a.superview) {
+        CGFloat cr = a.layer.cornerRadius;
+        CGSize s = a.bounds.size;
+        CGFloat area = s.width * s.height;
+        if (cr >= 6.0 && hostArea > 1
+            && area >= hostArea * 0.9 && area <= hostArea * 1.45) {
+            rect = [a convertRect:a.bounds toView:host];
+            r = cr;
+            src = NSStringFromClass(a.class);
+            break;
+        }
+    }
+    /* ② 祖先太大(整块 CC 面板) → 只借圆角, 矩形还是用宿主自己的 */
     if (!src) {
-        /* ① 最近的、把宿主整个包住的祖先 —— 卡片圆角通常挂在容器/材质层上 */
-        UIView *a = host.superview;
-        for (int i = 0; a && i < 4; i++, a = a.superview) {
-            CGFloat cr = a.layer.cornerRadius;
-            CGSize s = a.bounds.size;
+        UIView *b = host.superview;
+        for (int i = 0; b && i < 4; i++, b = b.superview) {
+            CGFloat cr = b.layer.cornerRadius;
+            CGSize s = b.bounds.size;
             if (cr >= 6.0 && (hostArea <= 1 || s.width * s.height >= hostArea * 0.9)) {
                 r = cr;
-                src = NSStringFromClass(a.class);
+                src = NSStringFromClass(b.class);
                 break;
             }
         }
@@ -16429,8 +16446,9 @@ static CGFloat diNPRadiusFor(UIView *host, NSString **outSrc) {
         r = MIN(MAX(side * 0.16, 18.0), 40.0);
         src = @"估算";
     }
+    *outRect = rect;
+    *outR = r;
     if (outSrc) *outSrc = src;
-    return r;
 }
 
 static void diNPApplyBackgroundTo(UIView *host, BOOL on) {
@@ -16446,24 +16464,29 @@ static void diNPApplyBackgroundTo(UIView *host, BOOL on) {
         CGRect rect = host.bounds;
         if (rect.size.width < 40 || rect.size.height < 40) return;   /* 占位尺寸不铺 */
 
-        /* 3.0.15: 圆角只在"尺寸变了 / 还没有层"时重算并缓存 —— 每次都走祖先链+子树
-           太贵, 而且会让背景在布局抖动时反复改圆角。 */
+        /* 3.0.15: 几何(矩形+圆角)只在"尺寸变了 / 还没有层"时重算并缓存 —— 尺寸没变时
+           反复量只会让背景跟着布局抖动反复改。 */
         NSValue *sz = objc_getAssociatedObject(host, kDIBgSizeKey);
         CGFloat r = [objc_getAssociatedObject(host, kDIBgRKey) doubleValue];
         BOOL needGeo = (!bg || !sz || !CGSizeEqualToSize(sz.CGSizeValue, rect.size));
         NSString *srcName = nil;
+        NSValue *rv = objc_getAssociatedObject(host, kDIBgRectKey);
+        if (!needGeo && rv) rect = rv.CGRectValue;   /* 尺寸没变就沿用上次量的矩形 */
         if (needGeo) {
-            @try { r = diNPRadiusFor(host, &srcName); }
-            @catch (__unused NSException *e) { r = 22.0; srcName = @"兜底"; }
+            @try { diNPGeometryFor(host, &rect, &r, &srcName); }
+            @catch (__unused NSException *e) { rect = host.bounds; r = 22.0; srcName = @"兜底"; }
             objc_setAssociatedObject(host, kDIBgRKey, @(r), OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-            objc_setAssociatedObject(host, kDIBgSizeKey, [NSValue valueWithCGSize:rect.size],
+            objc_setAssociatedObject(host, kDIBgSizeKey, [NSValue valueWithCGSize:host.bounds.size],
+                                     OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+            objc_setAssociatedObject(host, kDIBgRectKey, [NSValue valueWithCGRect:rect],
                                      OBJC_ASSOCIATION_RETAIN_NONATOMIC);
             static int geoLogs = 0;
             if (geoLogs < 10) {
                 geoLogs++;
-                RLog(@"[背景] 几何: %.0fx%.0f 圆角%.1f (来源 %@, 宿主 %@)",
-                     rect.size.width, rect.size.height, r, srcName ?: @"?",
-                     NSStringFromClass(host.class));
+                RLog(@"[背景] 几何: 宿主 %.0fx%.0f → %.0fx%.0f@(%.0f,%.0f) 圆角%.1f (来源 %@, %@)",
+                     host.bounds.size.width, host.bounds.size.height,
+                     rect.size.width, rect.size.height, rect.origin.x, rect.origin.y,
+                     r, srcName ?: @"?", NSStringFromClass(host.class));
             }
         }
         if (r < 6.0) r = 22.0;
@@ -16558,7 +16581,6 @@ static void diNPHandleModuleVC(id vc) {
     NSString *ident = nil;
     @try { ident = [vc valueForKey:@"moduleIdentifier"]; } @catch (__unused NSException *e) {}
     if (![ident isKindOfClass:NSString.class] || ![ident containsString:@"nowplaying"]) return;
-    diCrumb(@"模块: 命中 nowplaying 容器");
 
     /* 模块内容视图(播放器视图的父级)最底层: 与播放器平级, 又不插进播放器自己的树 ——
        3.0.8 直接把背景插进播放器视图, 它每次 layout 都重排子视图, 整块布局被带崩。 */
@@ -16578,8 +16600,12 @@ static void diNPHandleModuleVC(id vc) {
     /* 3.0.10: 启动早期卡片的占位尺寸(0x0 / 极小)一律不处理, 等真正排出来再说 */
     CGSize cs = card.bounds.size;
     if (cs.width < 40 || cs.height < 40) return;
-    diCrumb([NSString stringWithFormat:@"模块: 卡片 %@ %.0fx%.0f",
-             NSStringFromClass(card.class), cs.width, cs.height]);
+    static int cardLogs = 0;
+    if (cardLogs < 3) {
+        cardLogs++;
+        diCrumb([NSString stringWithFormat:@"模块: 卡片 %@ %.0fx%.0f",
+                 NSStringFromClass(card.class), cs.width, cs.height]);
+    }
 
     if (!gDIBgHosts) gDIBgHosts = [NSHashTable weakObjectsHashTable];
     [gDIBgHosts addObject:card];
