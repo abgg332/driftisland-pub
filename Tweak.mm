@@ -69,7 +69,7 @@ static double expandTextY = DI_EXP_TEXT_BASE_Y;   // 上下偏移(pt, 下为正,
 static double expandTextScale = 100.0; // 文字大小(%, 100=原样)
 /* 2.8.86: 构建戳 —— 之前横幅打的是 SpringBoard 自己的 CFBundleShortVersionString(恒 1.0),
    日志里根本看不出装的是哪一版。所有诊断行都带这个戳, 下轮日志一眼定位。 */
-#define DI_BUILD_VER @"3.0.23"
+#define DI_BUILD_VER @"3.0.24"
 static BOOL gRecordingActive = NO; // 保留: 岛素材总闸条件
 static NSString *diElementId(UIView *host);
 static BOOL diMiniMusicActive(UIView *host); // 2.6.3: 前置(遮罩层使用)
@@ -16104,11 +16104,74 @@ static const CFTimeInterval kDISpinDur = 10.0;
 /* 幂等: 尺寸没变、蒙版还是我们那片、旋转还在 → 一个字都不写。
    3.0.16 及以前每轮布局都重设 mask.frame/path, 3×2 网格里那张图每秒被重建两三次,
    肉眼就是"小专辑头像闪一下"。 */
+/* ===== 3.0.24: 播放器封面铺遮罩素材 =====
+   用户要求: 把「专辑遮罩」选好的素材也用到播放器的旋转专辑图上 —— 内容换成素材图,
+   圆蒙版和旋转沿用现有那套(不引入第二组旋转参数)。开关写在播放器自己的域
+   (ArtworkMaskEnabled); 素材直接用 diExportMaskSoon 导出的 mask.png(选素材后会
+   自动重导, 这里按 mtime+大小指纹感知, 0.5 秒节流)。 */
+static char kDIArtMaskOrigC, kDIArtMaskOrigG, kDIArtMaskApplied;
+static BOOL gDIArtMaskEnabled = NO;      /* 缓存, 由 diNPLoadPrefsSync/diNPTickPrefs 维护 */
+
+static UIImage *diArtMaskAsset(void) {
+    static UIImage *img = nil;
+    static double mtime = -1;
+    static unsigned long long fsize = 0;
+    static CFTimeInterval lastStat = 0;
+    CFTimeInterval now = CFAbsoluteTimeGetCurrent();
+    if (img && now - lastStat < 0.5) return img;
+    lastStat = now;
+    NSString *path = [diMruCacheDir() stringByAppendingPathComponent:@"mask.png"];
+    NSDictionary *att = [[NSFileManager defaultManager] attributesOfItemAtPath:path error:NULL];
+    double m = att ? [[att objectForKey:NSFileModificationDate] timeIntervalSince1970] : 0;
+    unsigned long long sz = att ? [[att objectForKey:NSFileSize] unsignedLongLongValue] : 0;
+    if (img && m == mtime && sz == fsize) return img;
+    mtime = m; fsize = sz;
+    if (m <= 0) return nil;
+    img = [UIImage imageWithContentsOfFile:path];
+    return img;
+}
+/* 把素材铺到封面内容上(幂等: contents 指针一样就一个字不写)。首次铺前记原样。 */
+static void diArtMaskCover(UIView *v, CALayer *layer) {
+    if (!v || !layer) return;
+    UIImage *mk = diArtMaskAsset();
+    if (!mk || !mk.CGImage) {
+        if ([objc_getAssociatedObject(v, &kDIArtMaskApplied) isEqual:@YES]) {
+            id oc = objc_getAssociatedObject(v, &kDIArtMaskOrigC);
+            layer.contents = (oc && oc != [NSNull null]) ? oc : nil;
+            objc_setAssociatedObject(v, &kDIArtMaskApplied, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        }
+        return;
+    }
+    if (![objc_getAssociatedObject(v, &kDIArtMaskApplied) isEqual:@YES]) {
+        objc_setAssociatedObject(v, &kDIArtMaskOrigC, layer.contents ?: [NSNull null],
+                                 OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        objc_setAssociatedObject(v, &kDIArtMaskOrigG, layer.contentsGravity ?: [NSNull null],
+                                 OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        objc_setAssociatedObject(v, &kDIArtMaskApplied, @YES, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    }
+    if (layer.contents != (__bridge id)mk.CGImage) {
+        layer.contents = (__bridge id)mk.CGImage;
+        layer.contentsGravity = kCAGravityResizeAspectFill;
+        layer.contentsScale = 1.0;
+    }
+}
+static void diArtMaskRestore(UIView *v, CALayer *layer) {
+    if (!v || !layer) return;
+    if (![objc_getAssociatedObject(v, &kDIArtMaskApplied) isEqual:@YES]) return;
+    id oc = objc_getAssociatedObject(v, &kDIArtMaskOrigC);
+    id og = objc_getAssociatedObject(v, &kDIArtMaskOrigG);
+    layer.contents = (oc && oc != [NSNull null]) ? oc : nil;
+    layer.contentsGravity = (og && og != [NSNull null]) ? og : kCAGravityResize;
+    objc_setAssociatedObject(v, &kDIArtMaskApplied, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+}
+
 static void diArtDress(UIView *v) {
     if (!v || !v.layer) return;
     CALayer *layer = v.layer;
     CGRect b = v.bounds;
     if (b.size.width < 8 || b.size.height < 8) return;
+    /* 3.0.24: 铺遮罩素材(在所有幂等分支之前 —— contents 的检查很廉价) */
+    if (gDIArtMaskEnabled) diArtMaskCover(v, layer);
     DIArtMaskState *st = objc_getAssociatedObject(v, kDIArtStateKey);
     if (!st) {
         st = [DIArtMaskState new];
@@ -16192,6 +16255,10 @@ static void diArtApply(UIView *v, BOOL on) {
         /* 3.0.15: 删掉"没记录也要把 transform 拍回单位阵" —— 系统给没被我们收集到的
            格子挂的原生旋转就是这么被永久拍停的(用户反馈"旋转有时候会停")。 */
         diArtStripSpin(layer, 0, 5);
+        /* 3.0.24: 旋转/圆蒙版关了, 但「启用遮罩」还开着 → 封面内容保持素材图;
+           遮罩也关了才把原封面还原回去。 */
+        if (gDIArtMaskEnabled) diArtMaskCover(v, layer);
+        else diArtMaskRestore(v, layer);
         return;
     }
     diArtDress(v);
@@ -16932,10 +16999,13 @@ static BOOL diNPPrefFlag(NSString *key, BOOL def) {
 static void diNPLoadPrefsSync(void) {
     BOOL on = diNPPrefFlagRaw(@"MusicArtworkGradientEnabled", YES);
     BOOL hid = diNPPrefFlagRaw(@"HideNotPlaying", NO);
+    BOOL mask = diNPPrefFlagRaw(@"ArtworkMaskEnabled", NO);
     diNPPrefCachePut(@"MusicArtworkGradientEnabled", on);
     diNPPrefCachePut(@"HideNotPlaying", hid);
+    diNPPrefCachePut(@"ArtworkMaskEnabled", mask);
     gDIBgOnCache = on;
     gDIHideNP = hid;
+    gDIArtMaskEnabled = mask;
 }
 static void diNPTickPrefs(void) {
     CFTimeInterval now = CFAbsoluteTimeGetCurrent();
@@ -16949,11 +17019,14 @@ static void diNPTickPrefs(void) {
     dispatch_async(q, ^{
         BOOL on = diNPPrefFlagRaw(@"MusicArtworkGradientEnabled", YES);
         BOOL hid = diNPPrefFlagRaw(@"HideNotPlaying", NO);
+        BOOL mask = diNPPrefFlagRaw(@"ArtworkMaskEnabled", NO);
         diNPPrefCachePut(@"MusicArtworkGradientEnabled", on);
         diNPPrefCachePut(@"HideNotPlaying", hid);
+        diNPPrefCachePut(@"ArtworkMaskEnabled", mask);
         dispatch_async(dispatch_get_main_queue(), ^{
             gDIBgOnCache = on;
             gDIHideNP = hid;
+            gDIArtMaskEnabled = mask;
         });
     });
 }
@@ -17753,6 +17826,7 @@ static void diArtChanged(CFNotificationCenterRef c, void *obs, CFStringRef name,
                 @try {
                     diPhase("prefs");
                     diArtDisableNPRSpin();
+                    @try { diExportMaskSoon(); } @catch (__unused NSException *e) {}  /* 3.0.24: 保证 mask.png 在 */
                     BOOL on = diArtPrefOn();
                     RLog(@"[封面] 开关变化 → %@", on ? @"圆 + 旋转" : @"方形 + 停止");
                     diNPRefreshBackgrounds();

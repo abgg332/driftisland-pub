@@ -5152,8 +5152,7 @@ static void diOpenHomeBarPickWindow(void) {
     PSSpecifier *maskRow = [PSSpecifier preferenceSpecifierNamed:@"遮罩素材"
         target:self set:NULL get:@selector(readAlbumMaskName:) detail:[DIMaskPicker class] cell:PSLinkCell edit:nil];
     [specs addObject:maskRow];
-    /* 2.8.87: 展开定义 —— 按用户要求放在"遮罩素材"下面, 点进去是独立一页 */
-    [specs addObject:[self linkSpec:@"歌词位置" detail:[DIExpandDefinePage class]]];
+    /* 3.0.24: 删掉这里的「歌词位置」入口 —— 附加功能页已有同名独立入口, 重复了 */
     /* 2.8.16: 遮罩尺寸可调 —— 用户反馈"加遮罩后专辑大了一点点, 边上被裁剪" */
     /* 2.8.41: 遮罩大小新刻度 —— 旧设定 115 为基准 100, 范围 50~150 */
     [specs addObject:[self numSlider:@"遮罩大小" key:@"diAlbumMaskScale2" def:100 mn:50 mx:150]];
@@ -5791,7 +5790,7 @@ static void diNPEnsureActivation(void) {
 }
 
 - (PSSpecifier *)npRotateSwitch {
-    PSSpecifier *sp = [PSSpecifier preferenceSpecifierNamed:@"专辑图旋转" target:self
+    PSSpecifier *sp = [PSSpecifier preferenceSpecifierNamed:@"专辑旋转" target:self
         set:@selector(writeRotateEnabled:specifier:) get:@selector(readPreferenceValue:)
         detail:nil cell:PSSwitchCell edit:nil];
     [sp setProperty:@"ArtworkRotationEnabled" forKey:@"key"];
@@ -5810,8 +5809,9 @@ static void diNPEnsureActivation(void) {
 - (NSArray *)buildSpecifiers {
     NSMutableArray *specs = [NSMutableArray array];
 
-    [specs addObject:[self groupSpec:@"播放器入口" footer:nil]];
-    PSSpecifier *sw = [PSSpecifier preferenceSpecifierNamed:@"启用原生播放器" target:self
+    /* 3.0.24: 分组「播放器入口」→「原生播放」, 开关「启用原生播放器」→「启用播放器」 */
+    [specs addObject:[self groupSpec:@"原生播放" footer:nil]];
+    PSSpecifier *sw = [PSSpecifier preferenceSpecifierNamed:@"启用播放器" target:self
         set:@selector(writeNPEnabled:specifier:) get:@selector(readNPEnabled:)
         detail:nil cell:PSSwitchCell edit:nil];
     [specs addObject:sw];
@@ -5837,8 +5837,13 @@ static void diNPEnsureActivation(void) {
     /* 3.1.0: 参考 CCUIPlayer 的 HideNotPlaying —— 打开后隐藏模块里的「未在播放」文字 */
     [specs addObject:[self npSwitch:@"隐藏未在播放" key:@"HideNotPlaying" def:NO]];
     [specs addObject:[self npRotateSwitch]];
-    [specs addObject:[self npSwitch:@"禁止 N95 修改专辑图" key:@"BlockN95Artwork" def:NO]];
-    [specs addObject:[self npSwitch:@"隐藏投送图标" key:@"HideRoutingIcon" def:NO]];
+    /* 3.0.24: 「禁止 N95 修改专辑图」删除(用不上); 「隐藏投送图标」改名「隐藏投送」;
+       下面新增「启用遮罩」+「遮罩素材」 —— 把专辑遮罩的素材铺到播放器的旋转专辑图上,
+       不带旋转那组参数(旋转沿用上面的「专辑旋转」开关)。 */
+    [specs addObject:[self npSwitch:@"隐藏投送" key:@"HideRoutingIcon" def:NO]];
+    [specs addObject:[self npSwitch:@"启用遮罩" key:@"ArtworkMaskEnabled" def:NO]];
+    PSSpecifier *maskLink = [self linkSpec:@"遮罩素材" detail:[DIMaskPicker class]];
+    [specs addObject:maskLink];
 
     /* ---- 原版参数管理 ---- */
     [specs addObject:[self groupSpec:@"原插件参数" footer:nil]];
