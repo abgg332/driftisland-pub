@@ -8,6 +8,8 @@
 #import <objc/message.h>
 #import <dlfcn.h>
 #include <mach-o/dyld.h>
+#include <execinfo.h>
+#include <dlfcn.h>
 #include <string.h>
 #include <notify.h>
 #import <substrate.h>
@@ -16841,7 +16843,7 @@ static BOOL gDIArtAVTried = NO;
 
 static BOOL diArtInControlCenter(UIView *v) {
     /* 按"窗口"判定最干净: 3×2 那套在 SBControlCenterWindow 里; 锁屏/灵动岛是
-       SBLockScreen*/SBAperture 窗口 —— 那些地方的头像有自己的遮罩素材, 绝不能碰。 */
+       SBLockScreen 或 SBAperture 窗口 —— 那些地方的头像有自己的遮罩素材, 绝不能碰。 */
     UIWindow *w = v.window;
     if (w) {
         NSString *wn = NSStringFromClass(w.class);
