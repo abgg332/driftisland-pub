@@ -17206,73 +17206,102 @@ static void diTBNormalizeRow(UIView *tc) {
      |cur−base|>40(换布局了) → 认新基准再推。不会越推越远。 */
 static const void *kDI31ShiftKey = &kDI31ShiftKey;
 @interface DI31ShiftState : NSObject
-@property (nonatomic, assign) CGFloat base;      /* 系统原始中心 x(窗口坐标) */
+@property (nonatomic, assign) CGFloat base;      /* 系统原始中心 x(传送栏坐标系) */
 @property (nonatomic, assign) CGFloat applied;   /* 我们摆好后的中心 x */
+@property (nonatomic, assign) CGFloat rowW;      /* 3.0.35: 记基准时的栏宽, 栏宽真变了才重认 */
 @end
 @implementation DI31ShiftState
 @end
+/* 3.0.35: 只算"真的看得见、真的有宽度"的按钮。
+   原来把 hidden / 0 宽占位也算进来再按 x 排序, 索引会随状态漂移 ——
+   未播放时占位按钮多一颗, 位移落到别的按钮上(用户: "没播放时播放按钮乱跳");
+   播放后内容重建、可见按钮数变少, 位移又落回原位(用户: "两个按钮又变回原位")。 */
+static NSArray<UIView *> *diTBVisibleBtns(UIView *tc) {
+    NSMutableArray<UIView *> *a = [NSMutableArray array];
+    for (UIView *c in tc.subviews) {
+        if (![NSStringFromClass(c.class) containsString:@"TransportButton"]) continue;
+        if (c.hidden || c.alpha < 0.05) continue;
+        if (c.frame.size.width < 10.0 || c.frame.size.height < 10.0) continue;
+        [a addObject:c];
+    }
+    return [a sortedArrayUsingComparator:^NSComparisonResult(UIView *x, UIView *y) {
+        if (x.center.x < y.center.x) return NSOrderedAscending;
+        if (x.center.x > y.center.x) return NSOrderedDescending;
+        return NSOrderedSame;
+    }];
+}
 static void diNP31ShiftButtons(UIView *tc) {
     if (!tc || !tc.window || !enabled) return;
     if (![diNPLayoutKey() isEqualToString:@"3x1"]) return;
-    NSArray<UIView *> *btns = diTBBtns(tc);
+    NSArray<UIView *> *btns = diTBVisibleBtns(tc);
     if (btns.count < 3) {
         static int ls = 0;
         if (ls < 3) {
             ls++;
-            RLog(@"[3x1] 按钮右移跳过: 只找到 %lu 个按钮 (栏 %@ %.0fx%.0f)",
+            RLog(@"[3x1] 按钮右移跳过: 可见按钮只有 %lu 个 (栏 %@ %.0fx%.0f)",
                  (unsigned long)btns.count, NSStringFromClass(tc.class),
                  tc.bounds.size.width, tc.bounds.size.height);
         }
         return;
     }
-    NSArray<UIView *> *sorted = [btns sortedArrayUsingComparator:^NSComparisonResult(UIView *a, UIView *b) {
-        CGFloat ax = a.frame.origin.x, bx = b.frame.origin.x;
-        if (ax < bx) return NSOrderedAscending;
-        if (ax > bx) return NSOrderedDescending;
-        return NSOrderedSame;
-    }];
     const CGFloat kShift = 12.0;   /* 3.0.33: 9 太小, 用户看不出; 12 明显一点 */
+    CGFloat rowW = tc.bounds.size.width;
     int moved = 0; CGFloat lastDx = 0;
-    /* 3.0.35: 只推"中间两颗"(播放/下一首), 不再把第 0 个之后的全推。
-       原写法 i=1..count-1 在 5 按钮栏(随机/上一首/播放/下一首/循环)会把后 4 颗
-       一起推 12pt —— 用户圈的是"播放/下一首", 随机和循环不该跟着动。
-       3 颗时索引 1、2 就是播放/下一首; 5 颗时是 2、3。按钮数量的判定需要真机确认,
-       所以这里按"≥5 就整体后挪一位"处理。 */
-    NSUInteger lo = (sorted.count >= 5) ? 2 : 1;
-    NSUInteger hi = MIN(lo + 2, sorted.count);
-    for (NSUInteger i = lo; i < hi; i++) {
-        UIView *b = sorted[i];
-        if (!b.window || b.hidden || !b.superview || !b.layer) continue;
-        CGRect r = [b convertRect:b.bounds toView:nil];
-        CGFloat cur = CGRectGetMidX(r);
+    /* 3.0.35: 先按"离栏中心最近的那颗 = 播放"定位, 再取它右边第一颗 = 下一首。
+       不能用"中间索引"/"最右两颗": 这一排有两种形态 —— 3 颗(上一首/播放/下一首)和
+       5 颗(随机/上一首/播放/下一首/循环)。按索引推在 5 颗时会把"循环"当成"下一首";
+       按中心定位则两种形态都落在"播放"上, 右边那颗自然就是"下一首"。 */
+    NSUInteger n = btns.count;
+    CGFloat mid = rowW * 0.5;
+    NSUInteger playIdx = 0;
+    CGFloat best = CGFLOAT_MAX;
+    for (NSUInteger i = 0; i < n; i++) {
+        CGRect ri = [btns[i] convertRect:btns[i].bounds toView:tc];
+        CGFloat d = fabs(CGRectGetMidX(ri) - mid);
+        if (d < best) { best = d; playIdx = i; }
+    }
+    NSUInteger targets[2] = { playIdx, playIdx + 1 };
+    for (int t = 0; t < 2; t++) {
+        NSUInteger i = targets[t];
+        if (i >= n) continue;
+        UIView *b = btns[i];
+        if (!b.window || !b.layer) continue;
+        /* 3.0.35: 图层上有动画在跑就先不写。未播放时那颗播放键带"呼吸"式的循环动画,
+           我们每帧写 model layer 的 position, 动画播完就从动画值跳回我们写的值,
+           表现就是用户说的"没播放时播放按钮会乱跳"。等动画结束再摆, 只跳一次。 */
+        if (b.layer.animationKeys.count > 0) continue;
+        /* 3.0.35: 在**传送栏坐标系**里量。窗口坐标会随控制中心滚动/展开整体漂移,
+           以前在那儿判"偏离 >40 就重认基准", 一滚就重认、位移跟着丢; 栏内坐标对
+           滚动免疫, 只有栏自己重新排版(宽度变了)才重认基准。这是"位置又变回去"的主因。 */
+        CGRect rInTc = [b convertRect:b.bounds toView:tc];
+        CGFloat cur = CGRectGetMidX(rInTc);
         DI31ShiftState *st = objc_getAssociatedObject(b, &kDI31ShiftKey);
         if (!st) {
             st = [DI31ShiftState new];
             st.base = cur;
             st.applied = cur;
+            st.rowW = rowW;
             objc_setAssociatedObject(b, &kDI31ShiftKey, st, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
         }
-        /* 3.0.33: 以前第一次只记录基准就 continue, 系统不重排时永远不推(用户:
-           "3×1 的按钮还是原来位置")。现在目标恒为 base+shift, 第一次就生效。 */
-        CGFloat target = st.base + kShift;
-        if (fabs(cur - st.base) > 40.0) {                      /* 换布局: 认新基准 */
+        if (fabs(rowW - st.rowW) > 2.0) {          /* 栏宽度真变了 = 换了一套排版 */
             st.base = cur;
-            target = cur + kShift;
+            st.applied = cur;
+            st.rowW = rowW;
         }
-        if (fabs(cur - target) < 0.4) { st.applied = target; continue; }
-        CGPoint inSp = [b.superview convertPoint:CGPointMake(target, CGRectGetMidY(r)) fromView:nil];
-        CGPoint p = b.layer.position;
-        CGFloat dx = inSp.x - b.center.x;
+        CGFloat target = st.base + kShift;
+        CGFloat dx = target - cur;
         if (fabs(dx) < 0.4) { st.applied = target; continue; }
+        CGPoint p = b.layer.position;
         p.x += dx;
-        b.layer.position = p;                                 /* 只写图层, 不触发重排 */
+        b.layer.position = p;                       /* 只写图层: 不触发 UIKit 再排一次版 */
         st.applied = target;
         moved++; lastDx = dx;
     }
     if (moved > 0) {
         static int logs = 0;
-        if (logs < 6) { logs++; RLog(@"[3x1] 按钮右移 %d 个 dx=%.1f (栏 %.0fx%.0f)",
-                                     moved, lastDx, tc.bounds.size.width, tc.bounds.size.height); }
+        if (logs < 6) { logs++; RLog(@"[3x1] 按钮右移 %d 个 dx=%.1f (栏 %.0fx%.0f, 可见 %lu)",
+                                     moved, lastDx, tc.bounds.size.width, tc.bounds.size.height,
+                                     (unsigned long)n); }
     }
 }
 /* 3.0.35: 从按钮往上找传送栏。原实现直接拿 b.superview 当传送栏, 按钮只要不是
@@ -18074,7 +18103,29 @@ static void diNPHandleModuleVC(id vc) {
         } @catch (__unused NSException *e) {}
     }
     if (!card) card = [(UIViewController *)vc view];
-    if (![card isKindOfClass:UIView.class] || !card.window) return;
+    if (![card isKindOfClass:UIView.class]) return;
+    /* 3.0.35: 3×1 收窄挪到"必须有 window / 尺寸够大"两个检查**之前**。
+       现象(用户): 注销后第一次打开控制中心还是满宽 4×1, 要展开一下才变 3×1。
+       原因就在这两行 return 上: 注销后首开时模块卡片往往还没接进视图树(window=nil)、
+       尺寸还是 0×0, 而这条路径是全场**唯一**靠 moduleIdentifier 精确认出播放器模块的
+       地方 —— 它一 return, 标记就打不上; 后面 setFrame/layout 的所有兜底都要靠标记或
+       四级识别, 而那时容器上没有 identifier、内容也还没加载, 四级全不命中。
+       等用户展开 → 内容重建、window 有了 → 才第一次收窄, 正好就是用户看到的现象。
+       这里既然已经认准是播放器模块, 先把标记打上(宽度为零也不影响), 后面 setFrame
+       钩子从第一帧就能按标记收窄, 用户看不到 4×1 的中间态。 */
+    if ([diNPLayoutKey() isEqualToString:@"3x1"]) {
+        diNP31ApplyModule(card);
+        @try {
+            UIView *vv = [(UIViewController *)vc view];
+            if (vv && vv != card
+                && [NSStringFromClass(vv.class) isEqualToString:@"CCUIContentModuleContainerView"]) {
+                /* 卡片还没进树时, ApplyModule 顺着 superview 找不到外层容器, 这里补上 */
+                diNP31Mark(vv);
+                diNP31FitBox(vv);
+            }
+        } @catch (__unused NSException *e) {}
+    }
+    if (!card.window) return;
     /* 3.0.10: 启动早期卡片的占位尺寸(0x0 / 极小)一律不处理, 等真正排出来再说 */
     CGSize cs = card.bounds.size;
     if (cs.width < 40 || cs.height < 40) return;
@@ -18089,8 +18140,8 @@ static void diNPHandleModuleVC(id vc) {
     [gDIBgHosts addObject:card];
 
     /* 3.0.30: 3×1 —— 这里已经按 moduleIdentifier 认准是播放器模块了, 直接给卡片和
-       外层模块容器打标记并收窄; 其他模块(天气/手电)走不到这儿, 不会被误伤。 */
-    if ([diNPLayoutKey() isEqualToString:@"3x1"]) diNP31ApplyModule(card);
+       外层模块容器打标记并收窄; 其他模块(天气/手电)走不到这儿, 不会被误伤。
+       3.0.35: 调用点上移到 window/尺寸检查之前(见上面的注释), 这里不再重复。 */
 
     diNPTickPrefs();
     diNPStartBgTimer();
@@ -18163,6 +18214,36 @@ static void diNPStartBgTimer(void) {
 static void diNPModuleLayout(id self, SEL cmd) {
     if (gDIOrigModuleLayout) gDIOrigModuleLayout(self, cmd);
     diNPInstall3x1Hook();   /* 3.0.28: 类晚加载时在这里补装(已装则立即返回) */
+    /* 3.0.35 诊断: "3×1 不生效"最常见的两种, 日志里必须能一眼分开 ——
+       ① 域里读到的键根本不是 3x1(被播放器自己改回去/没写进去) ② 读到了但钩子没认到视图。
+       这条只在"判定不是 3x1"时打, 5 秒一次, 不刷屏。 */
+    {
+        static CFTimeInterval lastKeyLog = 0;
+        CFTimeInterval kn = CFAbsoluteTimeGetCurrent();
+        if (kn - lastKeyLog > 5.0) {
+            lastKeyLog = kn;
+            NSString *k = diNPLayoutKey();
+            if (!k.length) {
+                /* 3.0.35: 注入后 1 秒内 diNPLayoutKey 故意返回空(首开保护)。如果模块
+                   恰好在这一秒内布局完, 标记就打不上, 而后面没有任何人再来一次 ——
+                   表现就是"注销后一直 4×1, 直到我去展开一下"。这里补一次延迟重试。 */
+                __weak id wvc = self;
+                dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.2 * NSEC_PER_SEC)),
+                               dispatch_get_main_queue(), ^{
+                    id s2 = wvc;
+                    @try { if (s2) diNPHandleModuleVC(s2); } @catch (__unused NSException *e) {}
+                });
+            }
+            if (![k isEqualToString:@"3x1"]) {
+                id szK = CFBridgingRelease(CFPreferencesCopyAppValue(CFSTR("Size"),
+                                                                     CFSTR("com.local.playerexact")));
+                id vrK = CFBridgingRelease(CFPreferencesCopyAppValue(CFSTR("PlayerGridVariant"),
+                                                                     CFSTR("com.local.playerexact")));
+                RLog(@"[3x1][键] 判定=%@ Size=%@ Variant=%@ 功能档位=%d",
+                     k.length ? k : @"(空)", szK ?: @"(无)", vrK ?: @"(无)", gDIStage);
+            }
+        }
+    }
     /* 3.0.10: 绝不在 viewWillLayoutSubviews 里同步改视图树/发 XPC —— 挪到下一轮
        runloop, 且每个 VC 节流 0.5s。 */
     @try {
