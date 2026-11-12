@@ -5879,6 +5879,9 @@ static void diNPEnsureActivation(void) {
     /* 3.0.41: 播放器遮罩 —— 按用户要求就地展开, 开关 + 素材直接排在这一页, 不再进二级页 */
     [specs addObject:[self switchSpec:@"启用播放器遮罩" key:kDIPlayerMaskOnKey def:@NO]];
     [specs addObject:[self linkSpec:@"遮罩素材" detail:[DIPlayerMaskPicker class]]];
+    /* 3.0.43: 控制中心播放器专辑的律动与粒子(参考 FlexMusic 的观感) */
+    [specs addObject:[self switchSpec:@"专辑律动" key:@"AlbumRhythmOn" def:@YES]];
+    [specs addObject:[self switchSpec:@"粒子效果" key:@"AlbumParticlesOn" def:@YES]];
 
     /* ---- 原版参数管理 ---- */
     [specs addObject:[self groupSpec:@"原插件参数" footer:nil]];

@@ -61,6 +61,11 @@ static NSString *maskAnimFolder;  // 遮罩素材文件夹(帧率素材下的子
    以前两者共用 maskOn/mask.png, 改一个另一个跟着变(用户明确要求分开)。 */
 static BOOL playerMaskOn = NO;
 static NSString *playerMaskAsset;   // 相对 kMaskDir 的文件名
+/* 3.0.43: 控制中心播放器专辑的「律动 + 粒子」(参考 FlexMusic 的观感) */
+static BOOL rhythmOn = YES;          // 专辑随节拍呼吸
+static BOOL rhythmParticlesOn = YES; // 封面外圈粒子
+static int  rhythmParticleCount = 22;
+static double rhythmStrength = 100.0; // 百分比: 律动幅度
 /* ===== 2.8.85: 展开定义 —— 展开岛歌词/歌名的自定义位置与大小 =====
    展开岛(407x202 的 Now Playing)整块由 MediaRemoteUI 远程渲染, SpringBoard 只能看到
    一块门户, 拿不到里面的文字视图。所以参数由 SpringBoard 侧写进 MRU 容器的
@@ -822,6 +827,18 @@ static void refreshPrefs(void) {
             DLog(@"通知文字颜色: 开关=%d 流光=%d 颜色数=%lu 背景过滤=%d 首色=%@",
                  notifyColorOn, notifyFlowOn, (unsigned long)cols.count, notifyBgOff, diHexFromUIColor(cols.firstObject));
         }
+    }
+    /* 3.0.43: 专辑律动 / 粒子 */
+    rhythmOn = pBool(@"AlbumRhythmOn", YES);
+    rhythmParticlesOn = pBool(@"AlbumParticlesOn", YES);
+    rhythmStrength = pDouble(@"AlbumRhythmStrength", 100.0);
+    if (rhythmStrength < 0) rhythmStrength = 0;
+    if (rhythmStrength > 200) rhythmStrength = 200;
+    {
+        int c = (int)pInt(@"AlbumParticleCount", 22);
+        if (c < 6) c = 6;
+        if (c > 60) c = 60;
+        rhythmParticleCount = c;
     }
     hideNoMusic = pBool(@"hideNoMusic", NO); // 无音乐时隐藏小岛视频
     lockWOn = pBool(@"lockWOn", NO);
@@ -12387,6 +12404,7 @@ static void diCCInstallLayoutHook(void) {
 
 
 static void diNPApplyHideTime(void);   /* 3.0.41: 未播放时隐藏进度条与时间(定义在 3.1.0 段) */
+static void diRhythmEnsure(void);      /* 3.0.43: 专辑律动/粒子定时器(定义在文件末尾) */
 
 static void visibilityTick(void) {
     refreshPrefs();
@@ -12407,6 +12425,8 @@ static void visibilityTick(void) {
         }
     }
     if (now - tMR > 1.0) { tMR = now; queryMusicPlaying(); }
+    /* 3.0.43: 律动/粒子的定时器按开关起停(30Hz, 开关关掉就完全停) */
+    @try { diRhythmEnsure(); } @catch (__unused NSException *e) {}
     /* 3.0.41: 隐藏时间 —— 未播放时把进度条与两侧时间压成透明, 播放即还原 */
     {
         static CFAbsoluteTime tHideT;
@@ -17207,6 +17227,10 @@ static void diArtPostFlush(UIView *root) {
         }
     }
     @try { diNPProbeArtwork32(root); } @catch (__unused NSException *e) {}
+    /* 3.0.43: 不管遮罩/旋转开没开, 都把封面记下来 —— 律动/粒子要用它挑目标,
+       否则用户关掉遮罩后律动就失效了。 */
+    if (!gDIArtKnown) gDIArtKnown = [NSHashTable weakObjectsHashTable];
+    for (__strong UIView *a in arts) [gDIArtKnown addObject:a];
     if (on) {
         /* 3.0.17: 累积"见过的封面" —— 3×2 换页/换曲时视图会短暂离开收集结果,
            以前一离开就没人再管它(或下一轮重挂 mask 闪一下)。现在只要见过一次就
@@ -17807,10 +17831,24 @@ static BOOL gDITimeShouldHide = NO;          /* 全局: 这一帧所有时间条
 static NSHashTable *gDITimeTouched = nil;    /* 我们压过 alpha 的 view(弱表) */
 static void (*gDITimeOrigLayout)(id, SEL) = NULL;
 
+/* 3.0.43: 只看折叠态的播放器卡片 —— 展开整块完全不动(用户明确要求)。
+   判据: 顺着父链找到 MRUNowPlayingView, 它的高度 > 250 就是展开那张长卡;
+   不能看到容器多大就完事, 控制中心自己的窗口/模块容器也是几百高, 会误判。 */
+static BOOL diTimeInExpandedModule(UIView *v) {
+    UIView *cur = v;
+    int g = 0;
+    while (cur && g++ < 12) {
+        if ([NSStringFromClass(cur.class) isEqualToString:@"MRUNowPlayingView"])
+            return cur.bounds.size.height > 250;
+        cur = cur.superview;
+    }
+    return NO;
+}
+
 static void diTimeLayoutHook(id self, SEL cmd) {
     if (gDITimeOrigLayout) gDITimeOrigLayout(self, cmd);
     UIView *v = (UIView *)self;
-    if (gDITimeShouldHide) {
+    if (gDITimeShouldHide && !diTimeInExpandedModule(v)) {
         if (v.alpha != 0.0) v.alpha = 0.0;
         /* 系统常用 opacity 动画把时间条淡进来; 动画还在的话, 光写 alpha 会被动画盖住,
            视觉上就是"闪一下才消失"。这里把那条动画也摘掉, 同一帧内直接不见。 */
@@ -17926,11 +17964,13 @@ static void diNPApplyHideTime(void) {
     NSHashTable *tcs = [NSHashTable weakObjectsHashTable];
     BOOL labelIdle = NO;
     for (UIView *r in roots) {
+        /* 3.0.43: 展开态整块不许动 —— 只看折叠态这张卡片 */
+        if (r.bounds.size.height > 250 && r.bounds.size.width > 300) continue;
         BOOL idle = NO;
         UIView *tc = nil;
         @try { tc = diNPFindTimeControls(r, &idle); } @catch (__unused NSException *e) {}
         if (idle) labelIdle = YES;
-        if (tc) [tcs addObject:tc];
+        if (tc && !diTimeInExpandedModule(tc)) [tcs addObject:tc];
     }
     /* 3.0.42: 以 MediaRemote 为准(有歌=有, 暂停也算有); 还没就绪的前几秒用文案兜底 */
     BOOL idleAny = gDIInfoReady ? !gDIHasNowPlaying : labelIdle;
@@ -18559,5 +18599,261 @@ __attribute__((constructor)) static void init(void) {
                 dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)s * NSEC_PER_SEC),
                     dispatch_get_main_queue(), ^{ installKnownHosts(); refreshAll(); diPreloadIslandVideos(); diHookHomeBarGrabberRetry(); });
         });
+    }
+}
+
+/* ================= 3.0.43: 专辑律动 + 粒子 =================
+   参考 FlexMusic 的观感, 在控制中心播放器那颗专辑封面上做两层:
+     · 律动: 封面随节拍轻微缩放(默认 ±5.5%), 拍点上来、拍间回落;
+     · 粒子: 封面外圈一圈细小光点向外飘散, 颜色取自封面主色, 节拍时更密。
+     · 没歌/暂停: 能量衰减到 0, 封面回原尺寸, 粒子自然熄灭。
+
+   放在 SpringBoard 侧(控制中心播放器就在这个进程里), 目标是我们在维护的
+   MRUArtworkView, 不碰 MediaRemoteUI 的远程视图, 也不改任何布局。
+
+   节拍来源: 现阶段是 120BPM 的合成节拍。FlexMusic 那种"真音频能量"是在
+   mediaserverd 里注入一个 AudioUnit 抓 PCM 再走 socket 送出来 —— 需要再注入一个
+   系统音频进程, 一旦出问题就是整机没声音, 先不冒这个险; 等确认观感方向没问题
+   再决定要不要接真数据。 */
+static NSTimer *gDIRhythmTimer = nil;
+static __weak UIView *gDIRhythmTarget = nil;
+static __weak UIView *gDIRhythmHost = nil;
+static CAEmitterLayer *gDIRhythmEmitter = nil;
+static CATransform3D gDIRhythmBase;
+static BOOL gDIRhythmBaseValid = NO;
+static float gDIRhythmEnergy = 0.0f;
+static CFTimeInterval gDIRhythmLast = 0;
+static double gDIRhythmPhase = 0.0;
+static double gDIRhythmClock = 0.0;
+
+static UIImage *diRhythmDotImage(void) {
+    static UIImage *dot = nil;
+    if (dot) return dot;
+    UIGraphicsBeginImageContextWithOptions(CGSizeMake(24, 24), NO, 1.0);
+    CGContextRef ctx = UIGraphicsGetCurrentContext();
+    if (ctx) {
+        CGColorSpaceRef cs = CGColorSpaceCreateDeviceRGB();
+        CGFloat comps[8] = {1, 1, 1, 1, 1, 1, 1, 0};
+        CGFloat locs[2] = {0, 1};
+        CGGradientRef g = CGGradientCreateWithColorComponents(cs, comps, locs, 2);
+        if (g) {
+            CGContextDrawRadialGradient(ctx, g, CGPointMake(12, 12), 0,
+                                        CGPointMake(12, 12), 12, 0);
+            CGGradientRelease(g);
+        }
+        CGColorSpaceRelease(cs);
+    }
+    dot = UIGraphicsGetImageFromCurrentImageContext();
+    UIGraphicsEndImageContext();
+    return dot;
+}
+
+/* 封面主色: 缩到 8×8 取平均, 再往"饱和/亮"方向提一点 —— 直接用原色会偏灰,
+   发光小点看不出来。取不到就退回淡紫。 */
+static UIColor *diRhythmAverageColor(UIView *v) {
+    if (!v) return nil;
+    CGImageRef img = NULL;
+    id c = v.layer.contents;
+    if (c) {
+        CFTypeRef cf = (__bridge CFTypeRef)c;
+        if (CFGetTypeID(cf) == CGImageGetTypeID()) img = (CGImageRef)cf;
+    }
+    if (!img && [v isKindOfClass:UIImageView.class]) img = ((UIImageView *)v).image.CGImage;
+    if (!img) return nil;
+    unsigned char px[8 * 8 * 4] = {0};
+    CGColorSpaceRef cs = CGColorSpaceCreateDeviceRGB();
+    CGContextRef ctx = CGBitmapContextCreate(px, 8, 8, 8, 32, cs,
+        kCGImageAlphaPremultipliedLast | kCGBitmapByteOrder32Big);
+    CGColorSpaceRelease(cs);
+    if (!ctx) return nil;
+    CGContextDrawImage(ctx, CGRectMake(0, 0, 8, 8), img);
+    CGContextRelease(ctx);
+    CGFloat r = 0, g = 0, b = 0;
+    for (int i = 0; i < 64; i++) { r += px[i * 4]; g += px[i * 4 + 1]; b += px[i * 4 + 2]; }
+    r /= 64 * 255.0; g /= 64 * 255.0; b /= 64 * 255.0;
+    CGFloat mx = MAX(r, MAX(g, b));
+    if (mx < 0.02) return nil;
+    r = MIN(1.0, r / mx * 0.55 + r * 0.45);
+    g = MIN(1.0, g / mx * 0.55 + g * 0.45);
+    b = MIN(1.0, b / mx * 0.55 + b * 0.45);
+    return [UIColor colorWithRed:r green:g blue:b alpha:1.0];
+}
+
+/* 只挑一颗: 可见、方形、尺寸像专辑封面的那个(3×2 主封面)。4×2 有 4 颗,
+   全动起来太吵, 取面积最大的那颗。 */
+static UIView *diRhythmPickTarget(void) {
+    UIView *best = nil;
+    CGFloat bestArea = 0;
+    if (!gDIArtKnown) return nil;
+    for (UIView *v in gDIArtKnown.allObjects) {
+        if (!v.window || v.hidden || v.alpha < 0.3) continue;
+        CGSize s = v.bounds.size;
+        if (s.width < 40 || s.width > 220) continue;
+        CGFloat ratio = s.width / MAX(1.0, s.height);
+        if (ratio < 0.8 || ratio > 1.25) continue;
+        CGFloat area = s.width * s.height;
+        if (area > bestArea) { bestArea = area; best = v; }
+    }
+    return best;
+}
+
+/* 粒子挂在"不裁剪"的祖先上, 否则光点出了封面框就被切掉 */
+static UIView *diRhythmHostFor(UIView *t) {
+    UIView *v = t.superview;
+    int g = 0;
+    while (v && g++ < 4) {
+        if (!v.clipsToBounds && !v.layer.masksToBounds) return v;
+        v = v.superview;
+    }
+    return t.superview;
+}
+
+static void diRhythmDetach(void) {
+    if (gDIRhythmEmitter) {
+        [gDIRhythmEmitter removeFromSuperlayer];
+        gDIRhythmEmitter = nil;
+    }
+    gDIRhythmHost = nil;
+}
+
+static void diRhythmAttach(UIView *t) {
+    diRhythmDetach();
+    if (!rhythmParticlesOn || !t) return;
+    UIView *host = diRhythmHostFor(t);
+    if (!host) return;
+    gDIRhythmHost = host;
+    UIColor *tint = diRhythmAverageColor(t)
+        ?: [UIColor colorWithRed:0.72 green:0.70 blue:0.98 alpha:1.0];
+
+    CAEmitterLayer *em = [CAEmitterLayer layer];
+    em.name = @"di.rhythm.emitter";
+    em.frame = host.bounds;
+    em.emitterShape = kCAEmitterLayerCircle;
+    em.emitterMode = kCAEmitterLayerOutline;
+    em.renderMode = kCAEmitterLayerAdditive;
+    CGRect r = [t convertRect:t.bounds toView:host];
+    em.emitterPosition = CGPointMake(CGRectGetMidX(r), CGRectGetMidY(r));
+    em.emitterSize = CGSizeMake(r.size.width * 1.02, r.size.height * 1.02);
+    em.birthRate = 0;   /* 由 tick 按能量抬起来 */
+
+    CAEmitterCell *cell = [CAEmitterCell emitterCell];
+    cell.name = @"di.spark";
+    cell.contents = (__bridge id)diRhythmDotImage().CGImage;
+    cell.birthRate = 1.0;
+    cell.lifetime = 1.1; cell.lifetimeRange = 0.5;
+    cell.velocity = 16; cell.velocityRange = 10;
+    cell.emissionRange = M_PI * 2;
+    cell.scale = 0.34; cell.scaleRange = 0.16; cell.scaleSpeed = -0.26;
+    cell.alphaSpeed = -0.9;
+    cell.color = tint.CGColor;
+    em.emitterCells = @[cell];
+    em.zPosition = 900;
+    [host.layer addSublayer:em];
+    gDIRhythmEmitter = em;
+}
+
+static void diRhythmReset(void) {
+    UIView *t = gDIRhythmTarget;
+    if (t && gDIRhythmBaseValid) {
+        [CATransaction begin];
+        [CATransaction setDisableActions:YES];
+        t.layer.transform = gDIRhythmBase;
+        [CATransaction commit];
+    }
+    gDIRhythmBaseValid = NO;
+    gDIRhythmTarget = nil;
+    gDIRhythmEnergy = 0;
+    diRhythmDetach();
+}
+
+static void diRhythmTick(void) {
+    if (!rhythmOn) { diRhythmReset(); return; }
+
+    UIView *t = gDIRhythmTarget;
+    if (!t || !t.window || t.hidden || t.alpha < 0.1) {
+        UIView *nt = diRhythmPickTarget();
+        if (t && gDIRhythmBaseValid && t.window) {
+            [CATransaction begin];
+            [CATransaction setDisableActions:YES];
+            t.layer.transform = gDIRhythmBase;
+            [CATransaction commit];
+        }
+        gDIRhythmBaseValid = NO;
+        gDIRhythmTarget = nt;
+        t = nt;
+        if (t) {
+            /* 基准 = 当前 transform 去掉缩放分量(防止把上一轮的缩放存成基准, 越缩越小) */
+            CATransform3D cur = t.layer.transform;
+            CGFloat sx = sqrt(cur.m11 * cur.m11 + cur.m12 * cur.m12);
+            if (sx > 0.01 && fabs(sx - 1.0) > 0.001)
+                cur = CATransform3DScale(cur, 1.0 / sx, 1.0 / sx, 1.0);
+            gDIRhythmBase = cur;
+            gDIRhythmBaseValid = YES;
+            diRhythmAttach(t);
+        } else {
+            diRhythmDetach();
+        }
+    }
+    if (!t) { gDIRhythmEnergy = 0; return; }
+
+    BOOL hasSong = gDIInfoReady ? gDIHasNowPlaying : YES;
+    BOOL playing = mrQueryOK ? musicPlaying : AVAudioSession.sharedInstance.isOtherAudioPlaying;
+
+    CFTimeInterval now = CACurrentMediaTime();
+    double dt = (gDIRhythmLast > 0) ? MIN(0.1, now - gDIRhythmLast) : (1.0 / 30.0);
+    gDIRhythmLast = now;
+    gDIRhythmClock += dt;
+
+    double targetE = 0.0;
+    if (hasSong && playing) {
+        gDIRhythmPhase += dt * 120.0 / 60.0;   /* 120BPM */
+        double frac = fmod(gDIRhythmPhase, 1.0);
+        double pulse = exp(-frac * 6.5);        /* 拍点起来、拍间迅速回落 */
+        double breath = 0.5 + 0.5 * sin(gDIRhythmClock * 2.0 * M_PI * 0.23);
+        targetE = 0.28 + 0.46 * pulse + 0.22 * breath;
+    }
+    /* 上拍快、回落慢: 观感像"被拍子顶了一下" */
+    double k = (targetE > gDIRhythmEnergy) ? 18.0 : 6.0;
+    gDIRhythmEnergy += (float)((targetE - gDIRhythmEnergy) * MIN(1.0, dt * k));
+
+    CGFloat amp = 0.055 * (rhythmStrength / 100.0);
+    CGFloat s = 1.0 + (gDIRhythmEnergy - 0.25) * amp;
+    if (s < 0.92) s = 0.92;
+    if (s > 1.15) s = 1.15;
+    if (rhythmOn) {
+        [CATransaction begin];
+        [CATransaction setDisableActions:YES];
+        t.layer.transform = CATransform3DConcat(gDIRhythmBase, CATransform3DMakeScale(s, s, 1));
+        [CATransaction commit];
+    }
+
+    if (!rhythmParticlesOn) {
+        if (gDIRhythmEmitter) diRhythmDetach();
+        return;
+    }
+    if (!gDIRhythmEmitter) { diRhythmAttach(t); return; }   /* 换过宿主/被系统清了 */
+    UIView *host = gDIRhythmHost;
+    if (host) {
+        CGRect r = [t convertRect:t.bounds toView:host];
+        gDIRhythmEmitter.emitterPosition = CGPointMake(CGRectGetMidX(r), CGRectGetMidY(r));
+        gDIRhythmEmitter.emitterSize = CGSizeMake(r.size.width, r.size.height);
+    }
+    gDIRhythmEmitter.birthRate = (gDIRhythmEnergy > 0.05) ? 1.0 : 0.0;
+    for (CAEmitterCell *c in gDIRhythmEmitter.emitterCells)
+        c.birthRate = 1.5 + gDIRhythmEnergy * (rhythmParticleCount * 1.2);
+}
+
+static void diRhythmEnsure(void) {
+    BOOL need = rhythmOn;
+    if (need && !gDIRhythmTimer) {
+        gDIRhythmTimer = [NSTimer scheduledTimerWithTimeInterval:(1.0 / 30.0)
+            repeats:YES block:^(NSTimer *__unused tm) {
+                @try { diRhythmTick(); } @catch (__unused NSException *e) {}
+            }];
+        gDIRhythmTimer.tolerance = 0.004;
+    } else if (!need && gDIRhythmTimer) {
+        [gDIRhythmTimer invalidate];
+        gDIRhythmTimer = nil;
+        diRhythmReset();
     }
 }
