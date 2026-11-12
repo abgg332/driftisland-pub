@@ -16118,7 +16118,7 @@ static NSString *diNPLayoutKey(void) {
     {
         static CFTimeInterval boot = 0;
         if (boot == 0) boot = now;
-        if (now - boot < 3.0) return @"";
+        if (now - boot < 1.0) return @"";
     }
     NSString *cur = nil;
     /* 3.0.30: Size 是用户在设置页直接选的那一档(我们必写), 可信度最高。
@@ -16159,9 +16159,13 @@ static NSString *diNPLayoutKey(void) {
    高度 > 130 的(展开态 300+)直接跳过 —— 展开一个像素都不动。 */
 static char kDI3x1Player;    /* 标记: 这个视图属于播放器模块 */
 static char kDI3x1FullW;     /* 首次见到的满宽, 之后按它算目标, 防越缩越短 */
+static NSHashTable *gDI3x1Views;
 static BOOL diNP31On(void) {
     return [diNPLayoutKey() isEqualToString:@"3x1"];
 }
+/* 3.0.34: "锁死"保险 —— 系统在任何时机把宽度摆回满宽(动画/重建/重排), 200ms 内
+   收回来, 不依赖某个布局回调有没有跑到。只轮询几个已标记的视图, 开销可忽略。 */
+static void diNP31StartWatch(void);
 static void diNP31Mark(UIView *v) {
     if (!v) return;
     objc_setAssociatedObject(v, &kDI3x1Player, @YES, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
@@ -16172,6 +16176,9 @@ static void diNP31Mark(UIView *v) {
     if (w >= 300.0 && (!fw || fw.doubleValue < 300.0)) {
         objc_setAssociatedObject(v, &kDI3x1FullW, @(w), OBJC_ASSOCIATION_RETAIN_NONATOMIC);
     }
+    if (!gDI3x1Views) gDI3x1Views = [NSHashTable weakObjectsHashTable];
+    [gDI3x1Views addObject:v];
+    diNP31StartWatch();
 }
 /* 3×1 的目标宽(满宽 × 0.75 − 4 = 3 格宽); 算不出来返回 0 */
 static CGFloat diNP31TargetW(UIView *box) {
@@ -16197,6 +16204,35 @@ static void diNP31FitBox(UIView *box) {
         RLog(@"[3x1] 模块框 %.0fx%.0f → %.0fx%.0f", f.size.width, f.size.height,
              target, f.size.height);
     }
+}
+static void diNP31StartWatch(void) {
+    static BOOL started = NO;
+    if (started) return;
+    started = YES;
+    dispatch_source_t t = dispatch_source_create(DISPATCH_SOURCE_TYPE_TIMER, 0, 0,
+                                                 dispatch_get_main_queue());
+    if (!t) return;
+    dispatch_source_set_timer(t, dispatch_time(DISPATCH_TIME_NOW, (int64_t)(200 * NSEC_PER_MSEC)),
+                              (uint64_t)(200 * NSEC_PER_MSEC), (uint64_t)(50 * NSEC_PER_MSEC));
+    dispatch_source_set_event_handler(t, ^{
+        @try {
+            if (!gDI3x1Views || !diNP31On()) return;
+            for (UIView *v in gDI3x1Views.allObjects) {
+                if (v.window && !v.hidden) diNP31FitBox(v);
+            }
+        } @catch (__unused NSException *e) {}
+    });
+    dispatch_resume(t);
+}
+static void diNP31ShiftButtons(UIView *tc);   /* 3.0.34: 定义在后面 */
+static UIView *diNP31FindTC(UIView *v, int depth) {
+    if (!v || depth > 5) return nil;
+    if ([NSStringFromClass(v.class) containsString:@"TransportControls"]) return v;
+    for (UIView *c in v.subviews) {
+        UIView *r = diNP31FindTC(c, depth + 1);
+        if (r) return r;
+    }
+    return nil;
 }
 /* 卡片(内容) + 外层模块容器(背景框)一起收 —— 只缩宽, 左边缘不动 */
 static void diNP31ApplyModule(UIView *card) {
@@ -16226,6 +16262,12 @@ static void diNP31ApplyModule(UIView *card) {
     diNP31Mark(card);
     diNP31FitBox(card);
     if (box) { diNP31Mark(box); diNP31FitBox(box); }
+    /* 3.0.34: 3×1 的传送栏不一定走 MRUNowPlayingTransportControlsView 的钩子,
+       这里直接在卡片树里找到它, 主动把"播放/下一首"摆到位。 */
+    if (diNP31On()) {
+        UIView *tc = diNP31FindTC(card, 0);
+        if (tc) diNP31ShiftButtons(tc);
+    }
 }
 
 /* 容器自己的 layoutSubviews: 父级刚把 frame 设成满宽, 这里同一帧内改回来 */
@@ -16235,36 +16277,93 @@ static void (*gDIOrigCMCFrame)(id, SEL, CGRect) = NULL;
 static void (*gDIOrigCardFrame)(id, SEL, CGRect) = NULL;
 
 /* 3.0.33: 容器/卡片自报身份 —— 未播放时播放器 VC 可能还没建, 靠 moduleIdentifier
-   自己认(容器有这个键; 卡片没有就顺着 nextResponder 找控制器)。认出来就打标记,
-   之后 setFrame 阶段直接生效, 不依赖"有没有在放歌"。 */
+   自己认。3.0.34: KVC 在私有类上经常取不到(键名不带下划线就抛异常), 改成直接扫
+   ivar(名字里带 identifier 的 NSString), 再加 context / contentViewController 类名
+   / 子树含 NowPlaying 三层兜底。 */
+static NSString *diNP31ScanIdent(id obj) {
+    if (!obj) return nil;
+    unsigned int n = 0;
+    Ivar *ivars = class_copyIvarList([obj class], &n);
+    NSString *found = nil;
+    for (unsigned i = 0; i < n && ivars; i++) {
+        const char *nm = ivar_getName(ivars[i]);
+        if (!nm) continue;
+        if (!strstr(nm, "dentifier") && !strstr(nm, "Identifier")) continue;
+        const char *ty = ivar_getTypeEncoding(ivars[i]);
+        if (!ty || ty[0] != '@') continue;
+        @try {
+            id val = object_getIvar(obj, ivars[i]);
+            if ([val isKindOfClass:NSString.class] && [(NSString *)val length]) { found = val; break; }
+        } @catch (__unused NSException *e) {}
+    }
+    if (ivars) free(ivars);
+    return found;
+}
+static BOOL diNP31IsNPIdent(NSString *s) {
+    if (![s isKindOfClass:NSString.class] || !s.length) return NO;
+    NSString *l = s.lowercaseString;
+    return [l containsString:@"nowplaying"] || [l containsString:@"now-playing"];
+}
+static BOOL diNP31HasNPChild(UIView *v, int depth, int *budget) {
+    if (!v || depth > 3 || (budget && *budget <= 0)) return NO;
+    for (UIView *c in v.subviews) {
+        if (budget) (*budget)--;
+        NSString *cn = NSStringFromClass(c.class);
+        if ([cn containsString:@"NowPlaying"] || [cn containsString:@"MediaControls"]) return YES;
+        if (diNP31HasNPChild(c, depth + 1, budget)) return YES;
+    }
+    return NO;
+}
 static BOOL diNP31SelfIdentify(UIView *v) {
     if (!v) return NO;
     if (objc_getAssociatedObject(v, &kDI3x1Player)) return YES;
-    NSString *ident = nil;
-    @try { ident = [v valueForKey:@"moduleIdentifier"]; } @catch (__unused NSException *e) {}
-    if (![ident isKindOfClass:NSString.class] || ![ident containsString:@"nowplaying"]) {
+    NSString *ident = diNP31ScanIdent(v);
+    if (!diNP31IsNPIdent(ident)) {
+        @try { id x = [v valueForKey:@"moduleIdentifier"]; if ([x isKindOfClass:NSString.class]) ident = x; }
+        @catch (__unused NSException *e) {}
+    }
+    if (!diNP31IsNPIdent(ident)) {
         @try {
             UIResponder *r = [v nextResponder];
             if ([r isKindOfClass:UIViewController.class]) {
-                id id2 = [r valueForKey:@"moduleIdentifier"];
-                if ([id2 isKindOfClass:NSString.class]) ident = id2;
+                id x = diNP31ScanIdent(r);
+                if (!x) { @try { x = [r valueForKey:@"moduleIdentifier"]; } @catch (__unused NSException *e) {} }
+                if ([x isKindOfClass:NSString.class]) ident = x;
             }
         } @catch (__unused NSException *e) {}
     }
-    if (![ident isKindOfClass:NSString.class] || ![ident containsString:@"nowplaying"]) {
-        /* 容器把标识放在 contentModuleContext 里(iOS 16/17 都是) */
+    if (!diNP31IsNPIdent(ident)) {
+        /* 容器的 context 里带着标识 */
         @try {
             id ctx = nil;
             @try { ctx = [v valueForKey:@"contentModuleContext"]; } @catch (__unused NSException *e) {}
             if (!ctx) { @try { ctx = [v valueForKey:@"_contentModuleContext"]; } @catch (__unused NSException *e) {} }
             if (ctx) {
-                id id3 = [ctx valueForKey:@"moduleIdentifier"];
-                if ([id3 isKindOfClass:NSString.class]) ident = id3;
+                id x = diNP31ScanIdent(ctx);
+                if (!x) { @try { x = [ctx valueForKey:@"moduleIdentifier"]; } @catch (__unused NSException *e) {} }
+                if ([x isKindOfClass:NSString.class]) ident = x;
             }
         } @catch (__unused NSException *e) {}
     }
-    if ([ident isKindOfClass:NSString.class] && [ident containsString:@"nowplaying"]) {
+    if (!diNP31IsNPIdent(ident)) {
+        /* 内容控制器类名 */
+        @try {
+            id vc = nil;
+            @try { vc = [v valueForKey:@"contentViewController"]; } @catch (__unused NSException *e) {}
+            if (!vc) { @try { vc = [v valueForKey:@"_contentViewController"]; } @catch (__unused NSException *e) {} }
+            NSString *cn = vc ? NSStringFromClass([vc class]) : nil;
+            if (cn.length && [cn.lowercaseString containsString:@"nowplaying"]) ident = @"nowplaying";
+        } @catch (__unused NSException *e) {}
+    }
+    if (!diNP31IsNPIdent(ident)) {
+        /* 最后一层: 子树里已经挂着播放器 */
+        int budget = 80;
+        if (diNP31HasNPChild(v, 0, &budget)) ident = @"nowplaying";
+    }
+    if (diNP31IsNPIdent(ident)) {
         diNP31Mark(v);
+        static int logs = 0;
+        if (logs < 4) { logs++; RLog(@"[3x1] 识别: %@ → %@", NSStringFromClass(v.class), ident); }
         return YES;
     }
     return NO;
@@ -16280,9 +16379,15 @@ static CGRect diNP31AdjustRect(UIView *v, CGRect f) {
         if (!diNP31On()) return f;
         if (f.size.height < 20.0 || f.size.height > 130.0) return f;   /* 展开态不碰 */
         if (f.size.width >= 300.0) {                                    /* 满宽 = 基准 */
-            objc_setAssociatedObject(v, &kDI3x1FullW, @(f.size.width),
-                                     OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-            f.size.width = f.size.width * 0.75 - 4.0;
+            /* 3.0.34: 基准只记一次。以前每次都覆盖, 动画中间值 320/340 会被当成
+               "满宽"记下来, 目标宽随之变成 236/251 —— 视觉上就是"闪一下、宽度乱跳"。 */
+            NSNumber *fw = objc_getAssociatedObject(v, &kDI3x1FullW);
+            if (!fw || fw.doubleValue < 300.0) {
+                objc_setAssociatedObject(v, &kDI3x1FullW, @(f.size.width),
+                                         OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+            }
+            CGFloat t = diNP31TargetW(v);
+            if (t > 0) f.size.width = t;
             return f;
         }
         CGFloat t = diNP31TargetW(v);
@@ -16336,6 +16441,7 @@ static void diNP31VCViewLayout(id self, SEL cmd) {
         if (vc.isViewLoaded) diNP31Walk(vc.view, 0);
     } @catch (__unused NSException *e) {}
 }
+static void diTBInstallRowHook(void);   /* 3.0.34: 3×1 也要装(定义在传送栏那一节) */
 static void diNPInstall3x1Hook(void) {
     static BOOL doneVC = NO;
     static BOOL doneBox = NO, doneCard = NO, doneFrame = NO;
@@ -16403,6 +16509,9 @@ static void diNPInstall3x1Hook(void) {
             } @catch (__unused NSException *e) {}
         }
     }
+    /* 3.0.34: 3×1 也要装传送栏/按钮钩子 —— 以前只在 3×2 路径(diTBNormalizeFromRoot)
+       里才装, 所以 3×1 下按钮位移一次都没跑(446 日志一条 [3x1] 按钮都没有)。 */
+    diTBInstallRowHook();
 }
 
 static BOOL diArtNameIsArtwork(NSString *cn) {
