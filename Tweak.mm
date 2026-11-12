@@ -16929,11 +16929,77 @@ static void diTBNormalizeRow(UIView *tc) {
                                      fixed, lastDy, tc.bounds.size.width, tc.bounds.size.height); }
     }
 }
+/* ===== 3.0.31: 3×1 —— 播放/下一首两颗按钮右移一点点 =====
+   用户圈的就是横向展开条右侧那三颗: 上一首(不动) / 播放(右移) / 下一首(右移)。
+   系统每次布局都会把它们摆回原位, 所以按"基准 + 位移"摆:
+     基准 = 系统第一次排出来的中心(窗口坐标), 目标 = 基准 + 9pt;
+     cur≈applied(系统没动) → 不写;  cur≈base(系统摆回原位) → 推回目标;
+     |cur−base|>40(换布局了) → 认新基准再推。不会越推越远。 */
+static const void *kDI31ShiftKey = &kDI31ShiftKey;
+@interface DI31ShiftState : NSObject
+@property (nonatomic, assign) CGFloat base;      /* 系统原始中心 x(窗口坐标) */
+@property (nonatomic, assign) CGFloat applied;   /* 我们摆好后的中心 x */
+@end
+@implementation DI31ShiftState
+@end
+static void diNP31ShiftButtons(UIView *tc) {
+    if (!tc || !tc.window || !enabled) return;
+    if (![diNPLayoutKey() isEqualToString:@"3x1"]) return;
+    NSArray<UIView *> *btns = diTBBtns(tc);
+    if (btns.count < 3) return;
+    NSArray<UIView *> *sorted = [btns sortedArrayUsingComparator:^NSComparisonResult(UIView *a, UIView *b) {
+        CGFloat ax = a.frame.origin.x, bx = b.frame.origin.x;
+        if (ax < bx) return NSOrderedAscending;
+        if (ax > bx) return NSOrderedDescending;
+        return NSOrderedSame;
+    }];
+    const CGFloat kShift = 9.0;
+    int moved = 0; CGFloat lastDx = 0;
+    for (NSUInteger i = 1; i < sorted.count; i++) {   /* 0=上一首, 不动 */
+        UIView *b = sorted[i];
+        if (!b.window || b.hidden || !b.superview || !b.layer) continue;
+        CGRect r = [b convertRect:b.bounds toView:nil];
+        CGFloat cur = CGRectGetMidX(r);
+        DI31ShiftState *st = objc_getAssociatedObject(b, &kDI31ShiftKey);
+        if (!st) {
+            st = [DI31ShiftState new];
+            st.base = cur;
+            st.applied = cur;
+            objc_setAssociatedObject(b, &kDI31ShiftKey, st, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        }
+        CGFloat target;
+        if (fabs(cur - st.applied) < 0.5) continue;           /* 已经是摆好的位置 */
+        if (fabs(cur - st.base) < 1.0) {                      /* 系统摆回原位 */
+            target = st.base + kShift;
+        } else if (fabs(cur - st.base) > 40.0) {              /* 换布局: 认新基准 */
+            st.base = cur;
+            target = cur + kShift;
+        } else {
+            target = st.base + kShift;                        /* 被摆到别处: 仍回目标 */
+        }
+        CGPoint inSp = [b.superview convertPoint:CGPointMake(target, CGRectGetMidY(r)) fromView:nil];
+        CGPoint p = b.layer.position;
+        CGFloat dx = inSp.x - b.center.x;
+        if (fabs(dx) < 0.4) { st.applied = target; continue; }
+        p.x += dx;
+        b.layer.position = p;                                 /* 只写图层, 不触发重排 */
+        st.applied = target;
+        moved++; lastDx = dx;
+    }
+    if (moved > 0) {
+        static int logs = 0;
+        if (logs < 6) { logs++; RLog(@"[3x1] 按钮右移 %d 个 dx=%.1f (栏 %.0fx%.0f)",
+                                     moved, lastDx, tc.bounds.size.width, tc.bounds.size.height); }
+    }
+}
 /* 传送栏自己的 layoutSubviews: 系统排完立刻摆平(同一帧、提交前, 用户看不到中间态) */
 static void (*gDIOrigTCRowLayout)(id, SEL) = NULL;
 static void diTCRowLayout(id self, SEL cmd) {
     if (gDIOrigTCRowLayout) gDIOrigTCRowLayout(self, cmd);
-    @try { diTBNormalizeRow((UIView *)self); } @catch (__unused NSException *e) {}
+    @try {
+        diTBNormalizeRow((UIView *)self);
+        diNP31ShiftButtons((UIView *)self);
+    } @catch (__unused NSException *e) {}
 }
 
 /* ===== 3.0.25: 按钮残留抖动 —— 谁写错就当场纠正谁 =====
