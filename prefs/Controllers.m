@@ -5652,18 +5652,27 @@ static void diNPApplySize(NSString *size) {
     if ([size isEqualToString:@"3x2b"]) {   /* 布局 B: 模块按 4x2 放, 变体交给 PlayerGridVariant */
         moduleSize = @"4x2";
         variant = @"3x2b";
-    } else if ([size isEqualToString:@"3x1"]) {
-        /* 3.0.32: 回退 —— 3.0.31 直接把模块尺寸写成 3x1 想让系统自己排 3 格, 但系统只认
-           2x2/2x3/3x2/4x1/4x2/4x3 这几档, 非法值直接退化成最小格 2×2(用户: "3×1 变成
-           2×2 了")。所以模块尺寸必须写合法值 4x1(高和排版都是 4×1 的), 宽度收窄仍由
-           tweak 侧在布局阶段完成(3.0.32 起在 setFrame 阶段就改, 注销后第一帧即 3 格宽)。 */
-        moduleSize = @"4x1";
-        variant = @"3x1";
     }
     sizes[kNPModuleID] = moduleSize;
     diNPWrite(@"ModuleSizes", sizes, kNPDomain);
     diNPWrite(@"PlayerGridVariant", variant, kNPDomain);
     diNPWrite(@"Size", size, kNPDomain);
+}
+
+/* 3.0.39: 3×1 档位已整体删除(用户: "3×1 暂时删除, 相关的也删除")。
+   域里若还留着它(Size / PlayerGridVariant), 这里一次性改回 4×1 —— 高度和排版本来
+   就是 4×1 的, 只是很宽; 不改的话播放器会拿一个已经不存在的档位去挑布局。
+   只在设置页打开时做, 不碰运行期。 */
+static void diNPMigrateRetiredSizes(void) {
+    static BOOL done = NO;
+    if (done) return;
+    done = YES;
+    id variant = diNPRead(@"PlayerGridVariant", kNPDomain);
+    id sz = diNPRead(@"Size", kNPDomain);
+    BOOL v31 = [variant isKindOfClass:NSString.class] && [variant isEqualToString:@"3x1"];
+    BOOL s31 = [sz isKindOfClass:NSString.class] && [sz isEqualToString:@"3x1"];
+    if (!v31 && !s31) return;
+    diNPApplySize(@"4x1");
 }
 
 /* 3.0.3: 播放器构造器有两道门槛 —— Enabled 必须是 true, 且 ActivationVersion 必须等于 "0.3.1"。
@@ -5688,7 +5697,8 @@ static void diNPEnsureActivation(void) {
 /* 从尺寸页返回后刷新右侧当前值 */
 - (void)viewWillAppear:(BOOL)animated {
     [super viewWillAppear:animated];
-    diNPEnsureActivation();   /* 3.0.3: 进页先补齐激活键, 页面显示状态与实际一致 */
+    diNPEnsureActivation();       /* 3.0.3: 进页先补齐激活键, 页面显示状态与实际一致 */
+    diNPMigrateRetiredSizes();    /* 3.0.39: 已删除的 3×1 档位改回 4×1 */
     [self reloadSpecifiers];
 }
 
@@ -5832,10 +5842,10 @@ static void diNPEnsureActivation(void) {
     [size setProperty:@"Size" forKey:@"key"];
     [size setProperty:kNPDomain forKey:@"defaults"];
     [size setProperty:@"2x2" forKey:@"default"];
-    [size setProperty:@[ @"2x2", @"2x3", @"3x2", @"3x2b", @"3x1", @"4x1", @"4x2", @"4x2b", @"4x3" ]
+    [size setProperty:@[ @"2x2", @"2x3", @"3x2", @"3x2b", @"4x1", @"4x2", @"4x2b", @"4x3" ]
                forKey:@"validValues"];
     [size setProperty:@[ @"2 × 2", @"2 × 3", @"3 × 2", @"3 × 2（布局 B）",
-                         @"3 × 1", @"4 × 1", @"4 × 2", @"4 × 2（布局 B）", @"4 × 3" ]
+                         @"4 × 1", @"4 × 2", @"4 × 2（布局 B）", @"4 × 3" ]
                forKey:@"validTitles"];
     [specs addObject:size];
 
@@ -5875,12 +5885,13 @@ static void diNPEnsureActivation(void) {
 }
 
 - (NSArray *)buildSpecifiers {
+    diNPMigrateRetiredSizes();
     NSMutableArray *specs = [NSMutableArray array];
     [specs addObject:[self groupSpec:@"播放器尺寸" footer:nil]];
 
-    NSArray<NSString *> *vals = @[ @"2x2", @"2x3", @"3x2", @"3x2b", @"3x1", @"4x1", @"4x2", @"4x2b", @"4x3" ];
+    NSArray<NSString *> *vals = @[ @"2x2", @"2x3", @"3x2", @"3x2b", @"4x1", @"4x2", @"4x2b", @"4x3" ];
     NSArray<NSString *> *titles = @[ @"2 × 2", @"2 × 3", @"3 × 2", @"3 × 2（布局 B）",
-                                     @"3 × 1", @"4 × 1", @"4 × 2", @"4 × 2（布局 B）", @"4 × 3" ];
+                                     @"4 × 1", @"4 × 2", @"4 × 2（布局 B）", @"4 × 3" ];
     NSString *cur = diNPCurrentSize();
 
     for (NSUInteger i = 0; i < vals.count && i < titles.count; i++) {

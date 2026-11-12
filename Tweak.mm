@@ -15914,6 +15914,8 @@ static void diNPDumpDomain(void) {
 @property (nonatomic, assign) CGPoint origAnchor;      /* 3.0.19: 原始锚点(不居中会"绕外围转") */
 @property (nonatomic, assign) CGSize lastSize;
 @property (nonatomic, assign) CFTimeInterval spinTS;   /* 3.0.15: 旋转起始时刻, 重挂时按相位续上 */
+@property (nonatomic, assign) BOOL assetOn;                /* 3.0.39: 当前蒙版是"遮罩素材"而不是内切圆 */
+@property (nonatomic, weak) UIImage *assetImg;             /* 3.0.39: 上次贴上去的那张素材(换素材要重贴) */
 @end
 @implementation DIArtMaskState
 @end
@@ -16047,6 +16049,49 @@ static void diArtStripSpin(CALayer *layer, int depth, int maxDepth) {
    系统给"没有被我们收集到的格子"挂的原生旋转一并摘掉 —— 用户看到的小专辑"转着转着
    停住/闪一下"就是这个。旋转现在只由 diArtApply 内部管理, 全树一律不再动。 */
 
+/* ===== 3.0.39: 旋转唯一化 —— 只允许我们那一条 =====
+   两套旋转确实在打架:
+     · 我们: di.art.spin, 360° / 10 秒(36°/s), 相位由 gDISpinEpoch 续上;
+     · 播放器自己(NPROriginal / 原生播放器镜像): 每次 update 都会给封面或它内部的
+       imageView 再挂一条 transform.rotation.z 的无限旋转, 速度是它自己的值。
+   两条同时存在时转速叠加 → "有时转得快"; 我们那条被系统布局摘掉、只剩它那条 →
+   "有时又慢一点"; 它重挂时从 0 开始 → "感觉重置了"。
+   这里在 CALayer addAnimation:forKey: 这一层直接挡: 只在"目标图层的祖先里有我们
+   接管过的封面"时生效, 只挡 z 轴自转, 只放行 di.art.spin —— 4×2 的翻转换图
+   (rotation.y)、呼吸、高亮一概不动。挡掉第一条时打日志, 便于确认确实是两套。
+   不采用"每 0.4 秒全树清一次"的做法: 那会和播放器每帧重挂互相拉扯, 变成新的抖动。 */
+static void (*gDIOrigLayerAddAnim)(id, SEL, CAAnimation *, NSString *) = NULL;
+static int gDISpinBlocked = 0;
+static void diLayerAddAnimHook(id self, SEL cmd, CAAnimation *anim, NSString *key) {
+    @try {
+        if (anim && [anim isKindOfClass:CABasicAnimation.class] && ![key isEqualToString:@"di.art.spin"]) {
+            NSString *kp = ((CABasicAnimation *)anim).keyPath;
+            if ([kp isEqualToString:@"transform.rotation.z"] || [kp isEqualToString:@"transform.rotation"]) {
+                for (CALayer *p = (CALayer *)self; p; p = p.superlayer) {
+                    if (objc_getAssociatedObject((__bridge id)p, kDIArtStateKey)) {
+                        gDISpinBlocked++;
+                        if (gDISpinBlocked <= 8) {
+                            RLog(@"[封面] 挡掉第二条旋转 %@ key=%@ (第 %d 条)", kp, key ?: @"?", gDISpinBlocked);
+                        }
+                        return;
+                    }
+                }
+            }
+        }
+    } @catch (__unused NSException *e) {}
+    if (gDIOrigLayerAddAnim) gDIOrigLayerAddAnim(self, cmd, anim, key);
+}
+static void diArtInstallSpinGuard(void) {
+    static BOOL done = NO;
+    if (done) return;
+    done = YES;
+    @try {
+        MSHookMessageEx([CALayer class], @selector(addAnimation:forKey:),
+                        (IMP)diLayerAddAnimHook, (IMP *)&gDIOrigLayerAddAnim);
+        RLog(@"[封面] 旋转唯一化 %@", gDIOrigLayerAddAnim ? @"已装" : @"失败(退回只清一次)");
+    } @catch (__unused NSException *e) {}
+}
+
 /* 3×2 / 3×2B: 变体键优先(B 档模块尺寸写的是 4x2), 没有变体再看 ModuleSizes */
 static BOOL diArtIs3x2(void) {
     static NSString *cache = nil;
@@ -16068,607 +16113,6 @@ static BOOL diArtIs3x2(void) {
     cache = cur ?: @"";
     ts = now;
     return [cache hasPrefix:@"3x2"];
-}
-
-/* ===== 3.0.29: 3×1 布局 —— 只把网格里这个模块的框收窄 =====
-   3.0.28 是在 MRUNowPlayingView.layoutSubviews 里把内容压到 80%, 可那个视图在
-   **展开态也存在**(356x568), 于是展开也被一起压小 —— 用户: "你把我展开里面都改了,
-   我只需要我画的框那样缩短就行, 其他不要动"。
-   现在:
-     · 只碰"网格态"模块(容器高 20~130pt; 展开态高 300+ 一律跳过);
-     · 目标宽 = 0.75 × 4格宽 − 4pt(格间隙修正)。实测满宽 356 → 263, 正好等于
-       3×2 布局的模块宽(日志里 3 格模块就是 263) —— 即用户说的"取 3×2 的长,
-       4×1 的高";
-     · 改的是模块容器 CCUIContentModuleContainerView(含背景胶囊)的 frame: 左边缘
-       不动(内容整体左移一点点), 高度不动, 内部由播放器按新宽度自己重排;
-     · 网格布局会重设 frame, 所以在容器自己的 layoutSubviews(父级刚设完 frame、
-       同一帧提交前)纠正, 集合控制器布局链尾再兜一次。
-*/
-/* 3.0.32: 3.0.31 曾把模块尺寸直接写成 "3x1", 但系统只认 2x2/2x3/3x2/4x1/4x2/4x3,
-   非法值会被退化成最小的 2×2。这里做一次自愈: 域里若还留着 3x1, 后台(注入 5 秒后,
-   避开首开初始化串)改回 4x1。模块宽度本来就靠下面的收窄钩子控制。 */
-static void diNP31HealModuleSize(void) {
-    static BOOL done = NO;
-    if (done) return;
-    done = YES;
-    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(5 * NSEC_PER_SEC)),
-                   dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
-        CFStringRef dom = CFSTR("com.local.playerexact");
-        id dict = CFBridgingRelease(CFPreferencesCopyAppValue(CFSTR("ModuleSizes"), dom));
-        if (![dict isKindOfClass:NSDictionary.class]) return;
-        id v = dict[@"com.apple.mediaremote.controlcenter.nowplaying"];
-        if (![v isKindOfClass:NSString.class] || ![v isEqualToString:@"3x1"]) return;
-        NSMutableDictionary *m = [dict mutableCopy];
-        m[@"com.apple.mediaremote.controlcenter.nowplaying"] = @"4x1";
-        CFPreferencesSetAppValue(CFSTR("ModuleSizes"), (__bridge CFPropertyListRef)m, dom);
-        CFPreferencesAppSynchronize(dom);
-        dispatch_async(dispatch_get_main_queue(), ^{
-            RLog(@"[3x1] 自愈: ModuleSizes 里遗留的 3x1 已改回 4x1");
-        });
-    });
-}
-static NSString *diNPLayoutKey(void) {
-    static NSString *cache = nil;
-    static CFTimeInterval ts = 0;
-    CFTimeInterval now = CFAbsoluteTimeGetCurrent();
-    if (cache && now - ts < 2.0) return cache;
-    /* 3.0.32: 注入后 3 秒内不读跨进程域 —— 首开那一波 cfprefsd 争用是最有名的卡点
-       (439/441 日志 [卡死] 阶段=prefs), 布局钩子会高频进来。3 秒后正常读(2 秒一次
-       缓存), 既避开初始化尖峰, 又不会让用户注销后打开控制中心时读不到 3×1。 */
-    {
-        static CFTimeInterval boot = 0;
-        if (boot == 0) boot = now;
-        if (now - boot < 1.0) return @"";
-    }
-    NSString *cur = nil;
-    /* 3.0.30: Size 是用户在设置页直接选的那一档(我们必写), 可信度最高。
-       442 日志里 Size=4x1、ModuleSizes=4x1 但没有任何 PlayerGridVariant ——
-       之前只认 Variant/ModuleSizes, 选了 3×1 也可能读不到。现在先看 Size。 */
-    id sz = CFBridgingRelease(CFPreferencesCopyAppValue(CFSTR("Size"),
-                                                       CFSTR("com.local.playerexact")));
-    if ([sz isKindOfClass:NSString.class] && [sz length]) cur = sz;
-    if (!cur.length) {
-        id v = CFBridgingRelease(CFPreferencesCopyAppValue(CFSTR("PlayerGridVariant"),
-                                                          CFSTR("com.local.playerexact")));
-        if ([v isKindOfClass:NSString.class] && [v length]) cur = v;
-    }
-    if (!cur.length) {
-        id dict = CFBridgingRelease(CFPreferencesCopyAppValue(CFSTR("ModuleSizes"),
-                                                             CFSTR("com.local.playerexact")));
-        if ([dict isKindOfClass:NSDictionary.class]) {
-            id s = dict[@"com.apple.mediaremote.controlcenter.nowplaying"];
-            if ([s isKindOfClass:NSString.class]) cur = s;
-        }
-    }
-    cache = cur ?: @"";
-    ts = now;
-    /* 3.0.32: 选了 3×1 → 顺手把域里可能残留的非法 "3x1" 模块尺寸改回 4x1 */
-    if ([cache isEqualToString:@"3x1"]) diNP31HealModuleSize();
-    return cache;
-}
-
-/* 3.0.30: 3×1 收窄改成"先认准播放器模块, 再改它"。
-   442 日志: 模块是 356x77(430 机型), 两个钩子都装上了, 但 [3x1] 一条没打 ——
-   "在容器子树里找 MRUNowPlayingView" 这条路在网格态走不通(播放器视图不在容器
-   子树里, 或者类名不是那个前缀), 所以一个都没收。
-   现在: diNPHandleModuleVC 早就用 moduleIdentifier=nowplaying 精确认出了播放器
-   模块并且拿到了卡片, 那里直接给"卡片 + 外层模块容器"打标记(kDI3x1Player);
-   布局钩子只负责把带标记的视图宽度摆正, 认不出的模块(天气/手电)一个都不碰。
-   目标宽 = 满宽 × 0.75 − 4pt(= 3 格宽; 430 机型实测 356 → 263, 与 3×2 模块同宽);
-   只改宽度: 左边缘不动(内容整体左移一点点), 高度不动(还是 4×1 的高);
-   高度 > 130 的(展开态 300+)直接跳过 —— 展开一个像素都不动。 */
-static char kDI3x1Player;    /* 标记: 这个视图属于播放器模块 */
-static char kDI3x1FullW;     /* 首次见到的满宽, 之后按它算目标, 防越缩越短 */
-static char kDI3x1NegTS;     /* 3.0.35: 上次"识别失败"的时间戳(2 秒 TTL 负缓存) */
-static NSHashTable *gDI3x1Views;
-static BOOL diNP31On(void) {
-    return [diNPLayoutKey() isEqualToString:@"3x1"];
-}
-/* 3.0.34: "锁死"保险 —— 系统在任何时机把宽度摆回满宽(动画/重建/重排), 200ms 内
-   收回来, 不依赖某个布局回调有没有跑到。只轮询几个已标记的视图, 开销可忽略。 */
-static void diNP31StartWatch(void);
-static void diNP31ShiftButtons(UIView *tc);
-/* 3.0.38: 记住"真的被推过"的传送栏。watchdog 靠它补推 —— 之前是顺着
-   gDI3x1Views 的子树去找, 而 3×1 的栏不一定挂在那棵子树里, 找不到就不补,
-   于是暂停时系统一摆回原位就再也没人管。 */
-static NSHashTable *gDI31TCs;
-static UIView *diNP31FindTC(UIView *v, int depth);
-static void diNP31Mark(UIView *v) {
-    if (!v) return;
-    objc_setAssociatedObject(v, &kDI3x1Player, @YES, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-    /* 3.0.32: 基准宽只认"满宽"(4×1 排出来的 356 这类)。以前宽 >200 就记, 若是先看到
-       已经收窄过的 263 会把基准记成 263, 于是 263×0.75−4=193 越缩越短。 */
-    NSNumber *fw = objc_getAssociatedObject(v, &kDI3x1FullW);
-    CGFloat w = v.frame.size.width;
-    /* 3.0.35: "只记一次"改成"单调取最大"。原规则只防住了覆盖, 没防住"第一次就收到
-       动画中间值": 若首次 setFrame: 拿到 320(≥300), 基准就永久锁在 320, 目标宽
-       = 320×0.75−4 = 236, 整个会话都比 3 格窄 27pt。允许"更大才覆盖"既不会越缩越短,
-       又能在随后真正的满宽 356 到来时把基准修正回来。 */
-    if (w >= 300.0 && (!fw || w > fw.doubleValue + 20.0)) {
-        objc_setAssociatedObject(v, &kDI3x1FullW, @(w), OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-    }
-    if (!gDI3x1Views) gDI3x1Views = [NSHashTable weakObjectsHashTable];
-    [gDI3x1Views addObject:v];
-    diNP31StartWatch();
-}
-/* 3×1 的目标宽(满宽 × 0.75 − 4 = 3 格宽); 算不出来返回 0 */
-static CGFloat diNP31TargetW(UIView *box) {
-    NSNumber *fw = objc_getAssociatedObject(box, &kDI3x1FullW);
-    CGFloat full = fw ? fw.doubleValue : 0;
-    if (full < 300.0) return 0;
-    CGFloat target = full * 0.75 - 4.0;
-    return target >= 150.0 ? target : 0;
-}
-static void diNP31FitBox(UIView *box) {
-    if (!box) return;
-    CGRect f = box.frame;
-    if (f.size.width < 200.0) return;                            /* 已经是窄的/占位 */
-    if (f.size.height < 20.0 || f.size.height > 130.0) return;   /* 展开态(300+)不碰 */
-    CGFloat target = diNP31TargetW(box);
-    if (target <= 0) return;
-    if (fabs(f.size.width - target) < 1.0) return;
-    box.frame = CGRectMake(f.origin.x, f.origin.y, target, f.size.height);
-    static CFAbsoluteTime sT = 0;
-    CFAbsoluteTime now = CFAbsoluteTimeGetCurrent();
-    if (now - sT > 3.0) {
-        sT = now;
-        RLog(@"[3x1] 模块框 %.0fx%.0f → %.0fx%.0f", f.size.width, f.size.height,
-             target, f.size.height);
-    }
-}
-/* 3.0.38: 封面探针 —— 只探 3×1 折叠卡片里那颗圆形专辑头像, 锁屏/展开/小岛一概不碰
-   (它们走不到 FitGroup)。目的是把"这个头像的位置由谁决定"打出来:
-   是 frame 直接给的, 还是约束/父容器排的。5 秒一次, 最多 6 条, 不刷屏。 */
-static void diNP31ProbeArtwork(UIView *root) {
-    static CFAbsoluteTime last = 0;
-    static int cnt = 0;
-    CFAbsoluteTime now = CFAbsoluteTimeGetCurrent();
-    if (cnt >= 6 || now - last < 5.0) return;
-    last = now;
-    NSMutableArray<UIView *> *stack = [NSMutableArray arrayWithObject:root];
-    int budget = 240;
-    while (stack.count && budget-- > 0) {
-        UIView *v = stack.lastObject;
-        [stack removeLastObject];
-        NSString *cn = NSStringFromClass(v.class);
-        if ([cn containsString:@"Artwork"]) {
-            cnt++;
-            UIView *sp = v.superview, *gp = sp.superview;
-            RLog(@"[探针][封面] %@ frame=%@ bounds=%@ center=%@ 圆角=%.1f 约束=%lu tf=%.2f/%.2f hidden=%d",
-                 cn, NSStringFromCGRect(v.frame), NSStringFromCGRect(v.bounds),
-                 NSStringFromCGPoint(v.center), v.layer.cornerRadius,
-                 (unsigned long)(v.constraints.count + (sp ? sp.constraints.count : 0)),
-                 v.transform.a, v.transform.tx, (int)v.hidden);
-            RLog(@"[探针][封面] 父=%@ %@ | 祖父=%@ %@",
-                 sp ? NSStringFromClass(sp.class) : @"无",
-                 sp ? NSStringFromCGRect(sp.frame) : @"-",
-                 gp ? NSStringFromClass(gp.class) : @"无",
-                 gp ? NSStringFromCGRect(gp.frame) : @"-");
-            return;                       /* 卡片里只有一颗, 探到就收 */
-        }
-        for (UIView *c in v.subviews) if (stack.count < 300) [stack addObject:c];
-    }
-}
-
-/* 3.0.37: 把播放器卡片里的文字区(header)加宽一点点。
-   基准用"第一次见到的宽度", 之后只按基准 + extra 摆, 不会每次叠加。
-   系统重新排过(宽度跳变 >40)就认新基准。 */
-static const void *kDI31TextBase = &kDI31TextBase;
-static void diNP31WidenHeader(UIView *root, CGFloat extra) {
-    if (!root) return;
-    NSMutableArray<UIView *> *stack = [NSMutableArray arrayWithObject:root];
-    int budget = 120;
-    while (stack.count && budget-- > 0) {
-        UIView *v = stack.lastObject;
-        [stack removeLastObject];
-        NSString *cn = NSStringFromClass(v.class);
-        if ([cn containsString:@"Header"]) {
-            CGFloat cur = v.frame.size.width;
-            if (cur > 40.0) {
-                NSNumber *bw = objc_getAssociatedObject(v, kDI31TextBase);
-                CGFloat base = bw ? bw.doubleValue : cur;
-                if (!bw || fabs(cur - base) > 40.0) {
-                    base = cur;
-                    objc_setAssociatedObject(v, kDI31TextBase, @(base),
-                                             OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-                }
-                CGFloat want = base + extra;
-                if (fabs(cur - want) > 0.5) {
-                    CGRect f = v.frame;
-                    f.size.width = want;
-                    v.frame = f;
-                }
-            }
-            return;                       /* 只处理最外那层 header */
-        }
-        for (UIView *c in v.subviews) {
-            if (stack.count < 200) [stack addObject:c];
-        }
-    }
-}
-
-/* 3.0.36: 以"播放器视图"为锚点收窄 —— 它就是播放器本身, 不需要任何识别,
-   不依赖 moduleIdentifier / KVC / ivar 扫描, 也就不存在"认不出来"这件事。
-   只处理折叠态(宽>=300 且高 50~120); 展开态(430 机型高 568)直接返回,
-   一个像素都不动 —— 用户明确要求"展开的全部不要动"。
-   宽度只改 size.width, x/高度原样: 左边缘不动, 长度变短。 */
-static void diNP31FitGroup(UIView *npv) {
-    @try {
-        if (!npv || !npv.window) return;
-        if (!diNP31On()) return;
-        UIView *box = nil;
-        for (UIView *p = npv.superview; p; p = p.superview) {
-            if ([NSStringFromClass(p.class) isEqualToString:@"CCUIContentModuleContainerView"]) {
-                box = p; break;
-            }
-            if ([p isKindOfClass:UIWindow.class]) break;
-            if (p.bounds.size.width > 500.0) break;                 /* 面板根 */
-        }
-        if (!box) return;                        /* 锁屏/小岛/桌面组件, 不归 3×1 管 */
-        /* 用**容器**尺寸判定, 不用播放器视图自己的宽度: 4×1 时容器是 356 满宽, 而
-           播放器视图可能本来就是 263(内容按 3 格画), 拿它当门槛会永远不触发。 */
-        CGSize bs = box.bounds.size;
-        if (bs.width < 300.0) return;                                /* 容器已经窄了 */
-        if (bs.height < 50.0 || bs.height > 120.0) return;           /* 展开态/占位不碰 */
-        /* 容器(背景框) → 内容容器(卡片) → 播放器视图, 三层一起收, 才不会一半宽一半窄 */
-        diNP31Mark(box);
-        diNP31FitBox(box);
-        for (UIView *c in box.subviews) {
-            if ([NSStringFromClass(c.class) isEqualToString:@"CCUIContentModuleContentContainerView"]) {
-                diNP31Mark(c);
-                diNP31FitBox(c);
-            }
-        }
-        diNP31Mark(npv);
-        diNP31FitBox(npv);
-        /* 3.0.37: 按钮右移之后, 左侧文字(歌名/歌词)右边多出 18pt 的空间, 顺手让文字
-           区也吃满 —— 用户: "歌词显示也应当显示宽一点(因为按钮右移了)"。
-           只动类名带 Header 的那一层, 找不到就什么也不做, 不碰时间/日期这类标签。 */
-        diNP31WidenHeader(box, 18.0);
-        diNP31ProbeArtwork(box);   /* 3.0.38: 探这个封面到底由谁定位 */
-    } @catch (__unused NSException *e) {}
-}
-
-static void diNP31StartWatch(void) {
-    static BOOL started = NO;
-    if (started) return;
-    started = YES;
-    dispatch_source_t t = dispatch_source_create(DISPATCH_SOURCE_TYPE_TIMER, 0, 0,
-                                                 dispatch_get_main_queue());
-    if (!t) return;
-    dispatch_source_set_timer(t, dispatch_time(DISPATCH_TIME_NOW, (int64_t)(200 * NSEC_PER_MSEC)),
-                              (uint64_t)(200 * NSEC_PER_MSEC), (uint64_t)(50 * NSEC_PER_MSEC));
-    dispatch_source_set_event_handler(t, ^{
-        @try {
-            if (!diNP31On()) return;
-            for (UIView *v in gDI3x1Views.allObjects) {
-                if (!v.window || v.hidden) continue;
-                diNP31FitBox(v);
-            }
-            /* 3.0.37/38: 暂停/切歌时系统会把按钮摆回原位, 而那一刻不一定有布局回调。
-               这里直接对"上次推过的栏"补推, 不再依赖从视图树里重新找。 */
-            for (UIView *t in gDI31TCs.allObjects) {
-                if (t.window && !t.hidden) diNP31ShiftButtons(t);
-            }
-        } @catch (__unused NSException *e) {}
-    });
-    dispatch_resume(t);
-}
-static void diNP31ShiftButtons(UIView *tc);   /* 3.0.34: 定义在后面 */
-static UIView *diNP31FindTC(UIView *v, int depth) {
-    if (!v || depth > 7) return nil;   /* 3.0.37: 3×1 的栏在卡片里更深, 5 层找不到 */
-    if ([NSStringFromClass(v.class) containsString:@"TransportControls"]) return v;
-    for (UIView *c in v.subviews) {
-        UIView *r = diNP31FindTC(c, depth + 1);
-        if (r) return r;
-    }
-    return nil;
-}
-/* 卡片(内容) + 外层模块容器(背景框)一起收 —— 只缩宽, 左边缘不动 */
-static void diNP31ApplyModule(UIView *card) {
-    if (!card || !diNP31On()) return;
-    UIView *box = nil;
-    /* 3.0.33: 未播放时卡片是 356x932 的整块占位, 以前遇到高 >200 就 break, 结果
-       "外层=无", 容器永远收不到 → 用户看到"默认还是 4×1"。现在一路往上找, 只在
-       到窗口/面板根时停。 */
-    int guard = 0;
-    for (UIView *p = card.superview; p && guard++ < 12; p = p.superview) {
-        if ([NSStringFromClass(p.class) isEqualToString:@"CCUIContentModuleContainerView"]) {
-            box = p;
-            break;
-        }
-        if ([p isKindOfClass:UIWindow.class]) break;
-        if (p.frame.size.width > 500 && p.frame.size.height > 500) break;   /* 面板根 */
-    }
-    static int sLog = 0;
-    if (sLog < 6) {
-        sLog++;
-        RLog(@"[3x1][诊断] 键=%@ 卡片=%@ %.0fx%.0f 外层=%@",
-             diNPLayoutKey(), NSStringFromClass(card.class),
-             card.frame.size.width, card.frame.size.height,
-             box ? [NSString stringWithFormat:@"%@ %.0fx%.0f", NSStringFromClass(box.class),
-                    box.frame.size.width, box.frame.size.height] : @"无");
-    }
-    diNP31Mark(card);
-    diNP31FitBox(card);
-    if (box) { diNP31Mark(box); diNP31FitBox(box); }
-    /* 3.0.34: 3×1 的传送栏不一定走 MRUNowPlayingTransportControlsView 的钩子,
-       这里直接在卡片树里找到它, 主动把"播放/下一首"摆到位。 */
-    if (diNP31On()) {
-        UIView *tc = diNP31FindTC(card, 0);
-        if (tc) diNP31ShiftButtons(tc);
-    }
-}
-
-/* 容器自己的 layoutSubviews: 父级刚把 frame 设成满宽, 这里同一帧内改回来 */
-static void (*gDIOrigCMCLayout)(id, SEL) = NULL;
-static void (*gDIOrigCardLayout)(id, SEL) = NULL;
-static void (*gDIOrigCMCFrame)(id, SEL, CGRect) = NULL;
-static void (*gDIOrigCardFrame)(id, SEL, CGRect) = NULL;
-
-/* 3.0.33: 容器/卡片自报身份 —— 未播放时播放器 VC 可能还没建, 靠 moduleIdentifier
-   自己认。3.0.34: KVC 在私有类上经常取不到(键名不带下划线就抛异常), 改成直接扫
-   ivar(名字里带 identifier 的 NSString), 再加 context / contentViewController 类名
-   / 子树含 NowPlaying 三层兜底。 */
-static NSString *diNP31ScanIdent(id obj) {
-    if (!obj) return nil;
-    unsigned int n = 0;
-    Ivar *ivars = class_copyIvarList([obj class], &n);
-    NSString *found = nil;
-    for (unsigned i = 0; i < n && ivars; i++) {
-        const char *nm = ivar_getName(ivars[i]);
-        if (!nm) continue;
-        if (!strstr(nm, "dentifier") && !strstr(nm, "Identifier")) continue;
-        const char *ty = ivar_getTypeEncoding(ivars[i]);
-        if (!ty || ty[0] != '@') continue;
-        @try {
-            id val = object_getIvar(obj, ivars[i]);
-            if ([val isKindOfClass:NSString.class] && [(NSString *)val length]) { found = val; break; }
-        } @catch (__unused NSException *e) {}
-    }
-    if (ivars) free(ivars);
-    return found;
-}
-static BOOL diNP31IsNPIdent(NSString *s) {
-    if (![s isKindOfClass:NSString.class] || !s.length) return NO;
-    NSString *l = s.lowercaseString;
-    return [l containsString:@"nowplaying"] || [l containsString:@"now-playing"];
-}
-static BOOL diNP31HasNPChild(UIView *v, int depth, int *budget) {
-    if (!v || depth > 3 || (budget && *budget <= 0)) return NO;
-    for (UIView *c in v.subviews) {
-        if (budget) (*budget)--;
-        NSString *cn = NSStringFromClass(c.class);
-        if ([cn containsString:@"NowPlaying"] || [cn containsString:@"MediaControls"]) return YES;
-        if (diNP31HasNPChild(c, depth + 1, budget)) return YES;
-    }
-    return NO;
-}
-static BOOL diNP31SelfIdentify(UIView *v) {
-    if (!v) return NO;
-    if (objc_getAssociatedObject(v, &kDI3x1Player)) return YES;
-    /* 3.0.35: 负结果做 2 秒 TTL 缓存。以前只缓存"是播放器", 认不出来的视图
-       (手电/天气/计时器容器)每次 setFrame: 都重跑全套四级识别 —— 包括会抛异常的
-       KVC 和最多 80 节点的子树遍历。用 TTL 而不是永久缓存, 是因为第四级
-       (子树里有没有 NowPlaying) 依赖子树此刻的构成, 永久缓存会把"晚一点才挂上
-       播放器"的容器错误地永久排除。 */
-    NSNumber *negTS = objc_getAssociatedObject(v, &kDI3x1NegTS);
-    CFAbsoluteTime nowTS = CFAbsoluteTimeGetCurrent();
-    if (negTS && nowTS - negTS.doubleValue < 2.0) return NO;
-    NSString *ident = diNP31ScanIdent(v);
-    if (!diNP31IsNPIdent(ident)) {
-        @try { id x = [v valueForKey:@"moduleIdentifier"]; if ([x isKindOfClass:NSString.class]) ident = x; }
-        @catch (__unused NSException *e) {}
-    }
-    if (!diNP31IsNPIdent(ident)) {
-        @try {
-            UIResponder *r = [v nextResponder];
-            if ([r isKindOfClass:UIViewController.class]) {
-                id x = diNP31ScanIdent(r);
-                if (!x) { @try { x = [r valueForKey:@"moduleIdentifier"]; } @catch (__unused NSException *e) {} }
-                if ([x isKindOfClass:NSString.class]) ident = x;
-            }
-        } @catch (__unused NSException *e) {}
-    }
-    if (!diNP31IsNPIdent(ident)) {
-        /* 容器的 context 里带着标识 */
-        @try {
-            id ctx = nil;
-            @try { ctx = [v valueForKey:@"contentModuleContext"]; } @catch (__unused NSException *e) {}
-            if (!ctx) { @try { ctx = [v valueForKey:@"_contentModuleContext"]; } @catch (__unused NSException *e) {} }
-            if (ctx) {
-                id x = diNP31ScanIdent(ctx);
-                if (!x) { @try { x = [ctx valueForKey:@"moduleIdentifier"]; } @catch (__unused NSException *e) {} }
-                if ([x isKindOfClass:NSString.class]) ident = x;
-            }
-        } @catch (__unused NSException *e) {}
-    }
-    if (!diNP31IsNPIdent(ident)) {
-        /* 内容控制器类名 */
-        @try {
-            id vc = nil;
-            @try { vc = [v valueForKey:@"contentViewController"]; } @catch (__unused NSException *e) {}
-            if (!vc) { @try { vc = [v valueForKey:@"_contentViewController"]; } @catch (__unused NSException *e) {} }
-            NSString *cn = vc ? NSStringFromClass([vc class]) : nil;
-            if (cn.length && [cn.lowercaseString containsString:@"nowplaying"]) ident = @"nowplaying";
-        } @catch (__unused NSException *e) {}
-    }
-    if (!diNP31IsNPIdent(ident)) {
-        /* 最后一层: 子树里已经挂着播放器 */
-        int budget = 80;
-        if (diNP31HasNPChild(v, 0, &budget)) ident = @"nowplaying";
-    }
-    if (diNP31IsNPIdent(ident)) {
-        diNP31Mark(v);
-        objc_setAssociatedObject(v, &kDI3x1NegTS, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-        static int logs = 0;
-        if (logs < 4) { logs++; RLog(@"[3x1] 识别: %@ → %@", NSStringFromClass(v.class), ident); }
-        return YES;
-    }
-    objc_setAssociatedObject(v, &kDI3x1NegTS, @(nowTS), OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-    return NO;
-}
-/* 3.0.32: 让"注销后第一次打开就是 3 格宽"。
-   改在 setFrame:(网格给容器/卡片正式设 frame 的那一刻)而不是 layoutSubviews 之后:
-   这里改完就在同一调用栈里设置, CA 提交前已经是窄的, 用户看不到 4×1 的中间态;
-   而且系统后续读 frame 做排版时读到的就是窄值, 不会再摆回满宽。
-   只动宽度: 左边缘(x)和高度不变。 */
-static CGRect diNP31AdjustRect(UIView *v, CGRect f) {
-    @try {
-        /* 3.0.35: 顺序倒过来 —— 先判档位(2 秒缓存, 开销约等于一次字符串比较),
-           再做识别。识别里有 class_copyIvarList 分配、多次 KVC(键不存在会抛
-           NSUnknownKeyException, ObjC 异常很贵)、最深 80 节点的子树遍历;
-           而这个函数挂在 CCUIContentModuleContainerView.setFrame: 上, 控制中心
-           打开动画期间每帧几十次、每个模块(手电/天气/计时器)都过一次 ——
-           非 3×1 用户白付这份开销, iOS 17 首开叠加 cfprefsd 争用就会主线程超时。 */
-        if (!diNP31On()) return f;
-        if (!diNP31SelfIdentify(v)) return f;
-        if (f.size.height < 20.0 || f.size.height > 130.0) return f;   /* 展开态不碰 */
-        if (f.size.width >= 300.0) {                                    /* 满宽 = 基准 */
-            /* 3.0.34: 基准只记一次。以前每次都覆盖, 动画中间值 320/340 会被当成
-               "满宽"记下来, 目标宽随之变成 236/251 —— 视觉上就是"闪一下、宽度乱跳"。 */
-            NSNumber *fw = objc_getAssociatedObject(v, &kDI3x1FullW);
-            /* 3.0.35: 同 diNP31Mark —— 允许更大值覆盖, 修"第一次就是动画中间值"锁死基准 */
-            if (!fw || f.size.width > fw.doubleValue + 20.0) {
-                objc_setAssociatedObject(v, &kDI3x1FullW, @(f.size.width),
-                                         OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-            }
-            CGFloat t = diNP31TargetW(v);
-            if (t > 0) f.size.width = t;
-            return f;
-        }
-        CGFloat t = diNP31TargetW(v);
-        if (t > 0 && f.size.width > 200.0 && fabs(f.size.width - t) >= 1.0) f.size.width = t;
-    } @catch (__unused NSException *e) {}
-    return f;
-}
-static void diNP31CMCFrame(id self, SEL cmd, CGRect f) {
-    f = diNP31AdjustRect((UIView *)self, f);
-    if (gDIOrigCMCFrame) gDIOrigCMCFrame(self, cmd, f);
-}
-static void diNP31CardFrame(id self, SEL cmd, CGRect f) {
-    f = diNP31AdjustRect((UIView *)self, f);
-    if (gDIOrigCardFrame) gDIOrigCardFrame(self, cmd, f);
-}
-static void diNP31CMCLayout(id self, SEL cmd) {
-    if (gDIOrigCMCLayout) gDIOrigCMCLayout(self, cmd);
-    @try {
-        UIView *v = (UIView *)self;
-        if (!diNP31On()) return;
-        if (!objc_getAssociatedObject(v, &kDI3x1Player)) {
-            /* 3.0.36: 识别一直没成功过(3.0.35 日志里 [3x1] 识别 一条都没有),
-               所以收窄全靠 moduleIdentifier 那条路径, 首开晚了 6 秒。
-               这里换成一个不可能失败的判据: 正在 layout 的容器里已经挂着播放器
-               子树 = 这就是播放器模块。只在折叠尺寸下认(展开态一律不碰)。 */
-            CGSize sz = v.bounds.size;
-            if (sz.width < 300.0 || sz.height < 40.0 || sz.height > 130.0) return;
-            int budget = 120;
-            if (!diNP31HasNPChild(v, 0, &budget)) return;
-            diNP31Mark(v);
-        }
-        diNP31FitBox(v);
-    } @catch (__unused NSException *e) {}
-}
-/* 集合控制器布局链尾兜底: 覆盖"容器没被重新布局、但父级改了 frame"的情况 */
-static void (*gDIOrigCVCViewLayout)(id, SEL) = NULL;
-static void diNP31Walk(UIView *v, int depth) {
-    if (!v || depth > 12) return;
-    if (objc_getAssociatedObject(v, &kDI3x1Player)) {
-        diNP31FitBox(v);
-    } else if ([NSStringFromClass(v.class) isEqualToString:@"CCUIContentModuleContainerView"]) {
-        /* 3.0.33: 没标记过的容器也认一次(未播放态没有播放器 VC, 只能靠容器自报身份) */
-        if (diNP31SelfIdentify(v)) diNP31FitBox(v);
-    }
-    for (UIView *c in v.subviews) diNP31Walk(c, depth + 1);
-}
-static void diNP31CardLayout(id self, SEL cmd) {
-    if (gDIOrigCardLayout) gDIOrigCardLayout(self, cmd);
-    @try {
-        UIView *v = (UIView *)self;
-        if (!objc_getAssociatedObject(v, &kDI3x1Player)) return;
-        if (!diNP31On()) return;
-        diNP31FitBox(v);
-    } @catch (__unused NSException *e) {}
-}
-static void diNP31VCViewLayout(id self, SEL cmd) {
-    if (gDIOrigCVCViewLayout) gDIOrigCVCViewLayout(self, cmd);
-    @try {
-        if (!diNP31On()) return;
-        UIViewController *vc = (UIViewController *)self;
-        if (vc.isViewLoaded) diNP31Walk(vc.view, 0);
-    } @catch (__unused NSException *e) {}
-}
-static void diTBInstallRowHook(void);   /* 3.0.34: 3×1 也要装(定义在传送栏那一节) */
-static void diNPInstall3x1Hook(void) {
-    static BOOL doneVC = NO;
-    static BOOL doneBox = NO, doneCard = NO, doneFrame = NO;
-    if (doneVC && doneBox && doneCard && doneFrame) return;
-    /* 3.0.32: setFrame: 阶段就摆平(见 diNP31AdjustRect) —— 两个类都挂 */
-    if (!doneFrame) {
-        doneFrame = YES;
-        Class cb = NSClassFromString(@"CCUIContentModuleContainerView");
-        Class cc = NSClassFromString(@"CCUIContentModuleContentContainerView");
-        if (cb) {
-            @try {
-                MSHookMessageEx(cb, @selector(setFrame:), (IMP)diNP31CMCFrame,
-                                (IMP *)&gDIOrigCMCFrame);
-                RLog(@"[3x1] 容器 setFrame 钩子 %@", gDIOrigCMCFrame ? @"已装" : @"失败");
-            } @catch (__unused NSException *e) {}
-        }
-        if (cc) {
-            @try {
-                MSHookMessageEx(cc, @selector(setFrame:), (IMP)diNP31CardFrame,
-                                (IMP *)&gDIOrigCardFrame);
-                RLog(@"[3x1] 卡片 setFrame 钩子 %@", gDIOrigCardFrame ? @"已装" : @"失败");
-            } @catch (__unused NSException *e) {}
-        }
-    }
-    /* 两个类都挂: 不同 iOS 版本里"卡片"和"容器"是哪个类不固定 */
-    if (!doneBox) {
-        Class c = NSClassFromString(@"CCUIContentModuleContainerView");
-        if (c) {
-            doneBox = YES;
-            @try {
-                Method m = class_getInstanceMethod(c, @selector(layoutSubviews));
-                IMP before = m ? method_getImplementation(m) : NULL;
-                MSHookMessageEx(c, @selector(layoutSubviews), (IMP)diNP31CMCLayout,
-                                (IMP *)&gDIOrigCMCLayout);
-                if (!gDIOrigCMCLayout) gDIOrigCMCLayout = (void (*)(id, SEL))before;
-                RLog(@"[3x1] 模块容器布局钩子 %@", gDIOrigCMCLayout ? @"已装" : @"失败");
-            } @catch (__unused NSException *e) {}
-        }
-    }
-    if (!doneCard) {
-        Class c = NSClassFromString(@"CCUIContentModuleContentContainerView");
-        if (c) {
-            doneCard = YES;
-            @try {
-                Method m = class_getInstanceMethod(c, @selector(layoutSubviews));
-                IMP before = m ? method_getImplementation(m) : NULL;
-                MSHookMessageEx(c, @selector(layoutSubviews), (IMP)diNP31CardLayout,
-                                (IMP *)&gDIOrigCardLayout);
-                if (!gDIOrigCardLayout) gDIOrigCardLayout = (void (*)(id, SEL))before;
-                RLog(@"[3x1] 卡片布局钩子 %@", gDIOrigCardLayout ? @"已装" : @"失败");
-            } @catch (__unused NSException *e) {}
-        }
-    }
-    if (!doneVC) {
-        Class c = NSClassFromString(@"CCUIModuleCollectionViewController");
-        if (c) {
-            doneVC = YES;
-            @try {
-                Method m = class_getInstanceMethod(c, @selector(viewDidLayoutSubviews));
-                IMP before = m ? method_getImplementation(m) : NULL;
-                MSHookMessageEx(c, @selector(viewDidLayoutSubviews), (IMP)diNP31VCViewLayout,
-                                (IMP *)&gDIOrigCVCViewLayout);
-                if (!gDIOrigCVCViewLayout) gDIOrigCVCViewLayout = (void (*)(id, SEL))before;
-                RLog(@"[3x1] 集合控制器布局钩子 %@", gDIOrigCVCViewLayout ? @"已装" : @"失败");
-            } @catch (__unused NSException *e) {}
-        }
-    }
-    /* 3.0.34: 3×1 也要装传送栏/按钮钩子 —— 以前只在 3×2 路径(diTBNormalizeFromRoot)
-       里才装, 所以 3×1 下按钮位移一次都没跑(446 日志一条 [3x1] 按钮都没有)。 */
-    diTBInstallRowHook();
 }
 
 static BOOL diArtNameIsArtwork(NSString *cn) {
@@ -16741,6 +16185,43 @@ static NSArray<UIView *> *diArtCollectIn(UIView *root) {
     return out;
 }
 
+/* ===== 3.0.39: 3×2 专辑头像探针 =====
+   目的只有一个: 把"3×2 档位下那颗专辑头像到底是哪个类、挂在哪一层、由谁给尺寸"
+   打进日志, 不用再猜。只探 3×2(用户当前档位), 4 秒一轮、最多 8 轮, 不刷屏。
+   即使 diArtCollectIn 没收到它(太大/太小/名字不带 Artwork), 这里也会单独列出来。 */
+static void diNPProbeArtwork32(UIView *root) {
+    if (!root || !diArtIs3x2()) return;
+    static CFTimeInterval last = 0;
+    static int rounds = 0;
+    CFAbsoluteTime now = CFAbsoluteTimeGetCurrent();
+    if (rounds >= 8 || now - last < 4.0) return;
+    last = now; rounds++;
+    RLog(@"[探针][3x2] 根=%@ %@", NSStringFromClass(root.class), NSStringFromCGRect(root.frame));
+    NSMutableArray<UIView *> *stack = [NSMutableArray arrayWithObject:root];
+    int budget = 300, hit = 0;
+    while (stack.count && budget-- > 0 && hit < 4) {
+        UIView *v = stack.lastObject; [stack removeLastObject];
+        NSString *cn = NSStringFromClass(v.class);
+        BOOL named = [cn containsString:@"Artwork"] || [cn containsString:@"AlbumArt"];
+        if (named && v != root) {
+            UIView *sp = v.superview;
+            UIView *gp = sp ? sp.superview : nil;
+            hit++;
+            RLog(@"[探针][3x2] 封面#%d %@ frame=%@ 圆角=%.1f 约束=%lu 有内容=%d | 父=%@ %@ | 祖父=%@ %@",
+                 hit, cn, NSStringFromCGRect(v.frame), v.layer.cornerRadius,
+                 (unsigned long)(v.constraints.count + (sp ? sp.constraints.count : 0)),
+                 (v.layer.contents != NULL) ? 1 : 0,
+                 sp ? NSStringFromClass(sp.class) : @"无",
+                 sp ? NSStringFromCGRect(sp.frame) : (NSString *)@"-",
+                 gp ? NSStringFromClass(gp.class) : @"无",
+                 gp ? NSStringFromCGRect(gp.frame) : (NSString *)@"-");
+            continue;   /* 命中就不再往里钻(内部 imageView 不是"接口") */
+        }
+        for (UIView *c in v.subviews) if (stack.count < 400) [stack addObject:c];
+    }
+    if (!hit) RLog(@"[探针][3x2] 没找到类名带 Artwork 的视图 —— 封面可能走的别的类");
+}
+
 /* 3.0.16: 图层改成"自带关闭隐式动画"的 actions, 不再用 CATransaction 包住写入 ——
    在 layoutSubviews 里手工 begin/commit 事务会把系统这一帧排好的动画提前提交,
    肉眼就是"整块内容闪一下/抖一下"。per-layer actions 只影响我们自己的层。 */
@@ -16759,6 +16240,39 @@ static void diNoImplicitActions(CALayer *l) {
    天然每帧都在, 所以从不会"转着转着停了"; 这里把同样的覆盖能力做进 dress 里。 */
 static CFTimeInterval gDISpinEpoch = 0;
 static const CFTimeInterval kDISpinDur = 10.0;
+
+/* ===== 3.0.39: 播放器专辑图重新铺「遮罩素材」 =====
+   3.0.24 曾把素材直接铺成封面 contents(把专辑图整个换掉), 3.0.28 删掉了。现在改成
+   **alpha 蒙版**: 素材当 maskView 用, 专辑图从素材的透明区透出来 —— 与灵动岛那颗
+   小头像的观感一致, 也不再把专辑图本身弄丢。
+   素材来源就是设置页「专辑遮罩」选中的那张(经 diExportMaskSoon 导出到缓存目录
+   mask.png); 目录里没有 png 时退回原来的内切圆, 绝不代码兜底画形状。
+   文件按 mtime+大小缓存, 0.5 秒最多 stat 一次。 */
+static UIImage *diArtMaskImage(void) {
+    static UIImage *img = nil;
+    static double mtime = -1;
+    static long long fsize = -1;
+    static CFTimeInterval last = 0;
+    CFAbsoluteTime now = CFAbsoluteTimeGetCurrent();
+    if (now - last < 0.5) return img;
+    last = now;
+    NSString *path = [diMruCacheDir() stringByAppendingPathComponent:@"mask.png"];
+    NSDictionary *at = [[NSFileManager defaultManager] attributesOfItemAtPath:path error:NULL];
+    double m = at ? [at[NSFileModificationDate] timeIntervalSince1970] : 0;
+    long long sz = at ? [at[NSFileSize] longLongValue] : -1;
+    if (m == mtime && sz == fsize) return img;
+    mtime = m; fsize = sz;
+    img = (m > 0) ? [UIImage imageWithContentsOfFile:path] : nil;
+    if (!img) {
+        static int miss = 0;
+        if (miss < 2) { miss++; RLog(@"[封面] 遮罩素材读不到(%@), 保持内切圆", path.lastPathComponent ?: @"mask.png"); }
+    }
+    return img;
+}
+static BOOL diArtMaskWanted(void) {
+    /* 「启用遮罩」= 设置页那个总开关(maskOn); 关掉就退回内切圆 */
+    return maskOn;
+}
 
 /* 幂等: 尺寸没变、蒙版还是我们那片、旋转还在 → 一个字都不写。
    3.0.16 及以前每轮布局都重设 mask.frame/path, 3×2 网格里那张图每秒被重建两三次,
@@ -16797,19 +16311,34 @@ static void diArtDress(UIView *v) {
         st.mask.name = @"di.player.art.circle";
         diNoImplicitActions(st.mask);
     }
-    /* 只有"尺寸真的变了"或"系统把我们那片 mask 换掉了"才重建 —— 其余情况跳过 */
-    if (layer.mask != st.mask || !CGSizeEqualToSize(st.lastSize, b.size)) {
+    /* 3.0.39: 有遮罩素材就贴素材(alpha 蒙版), 没有就退回内切圆 */
+    UIImage *mk = diArtMaskWanted() ? diArtMaskImage() : nil;
+    BOOL wantAsset = (mk.CGImage != NULL);
+    /* 只有"尺寸真的变了" / "系统把我们那片 mask 换掉了" / "素材换了或开关变了"才重建 */
+    if (layer.mask != st.mask || !CGSizeEqualToSize(st.lastSize, b.size)
+        || st.assetOn != wantAsset || (wantAsset && st.assetImg != mk)) {
         st.lastSize = b.size;
-        CGFloat side = MIN(b.size.width, b.size.height);
-        CGRect circle = CGRectMake((b.size.width - side) / 2.0, (b.size.height - side) / 2.0, side, side);
         st.mask.frame = b;
-        st.mask.path = [UIBezierPath bezierPathWithOvalInRect:CGRectInset(circle, 0.5, 0.5)].CGPath;
+        if (wantAsset) {
+            /* CAShapeLayer 同时有 path 和 contents 时 path 优先 —— 必须先清掉 path */
+            st.mask.path = NULL;
+            st.mask.contents = (__bridge id)mk.CGImage;
+            st.mask.contentsGravity = kCAGravityResizeAspect;   /* 保持素材比例, 不拉扁 */
+            st.mask.contentsScale = 1.0;
+        } else {
+            CGFloat side = MIN(b.size.width, b.size.height);
+            CGRect circle = CGRectMake((b.size.width - side) / 2.0, (b.size.height - side) / 2.0, side, side);
+            st.mask.contents = nil;
+            st.mask.path = [UIBezierPath bezierPathWithOvalInRect:CGRectInset(circle, 0.5, 0.5)].CGPath;
+        }
+        st.assetOn = wantAsset;
+        st.assetImg = wantAsset ? mk : nil;
         layer.mask = st.mask;
         NSString *desc = [NSString stringWithFormat:@"%@ %.0fx%.0f", NSStringFromClass(v.class),
                           b.size.width, b.size.height];
         if (![desc isEqualToString:gDIArtLastDesc]) {
             gDIArtLastDesc = desc;
-            RLog(@"[封面] 圆形蒙版已挂 %@", desc);
+            RLog(@"[封面] %@已挂 %@", wantAsset ? @"遮罩素材" : @"圆形蒙版", desc);
         }
     }
     if (![layer animationForKey:@"di.art.spin"]) {
@@ -17333,144 +16862,12 @@ static void diTBNormalizeRow(UIView *tc) {
                                      fixed, lastDy, tc.bounds.size.width, tc.bounds.size.height); }
     }
 }
-/* ===== 3.0.31: 3×1 —— 播放/下一首两颗按钮右移一点点 =====
-   用户圈的就是横向展开条右侧那三颗: 上一首(不动) / 播放(右移) / 下一首(右移)。
-   系统每次布局都会把它们摆回原位, 所以按"基准 + 位移"摆:
-     基准 = 系统第一次排出来的中心(窗口坐标), 目标 = 基准 + 9pt;
-     cur≈applied(系统没动) → 不写;  cur≈base(系统摆回原位) → 推回目标;
-     |cur−base|>40(换布局了) → 认新基准再推。不会越推越远。 */
-static const void *kDI31ShiftKey = &kDI31ShiftKey;
-@interface DI31ShiftState : NSObject
-@property (nonatomic, assign) CGFloat base;      /* 系统原始中心 x(传送栏坐标系) */
-@property (nonatomic, assign) CGFloat applied;   /* 我们摆好后的中心 x */
-@property (nonatomic, assign) CGFloat rowW;      /* 3.0.35: 记基准时的栏宽, 栏宽真变了才重认 */
-@end
-@implementation DI31ShiftState
-@end
-/* 3.0.35: 只算"真的看得见、真的有宽度"的按钮。
-   原来把 hidden / 0 宽占位也算进来再按 x 排序, 索引会随状态漂移 ——
-   未播放时占位按钮多一颗, 位移落到别的按钮上(用户: "没播放时播放按钮乱跳");
-   播放后内容重建、可见按钮数变少, 位移又落回原位(用户: "两个按钮又变回原位")。 */
-static NSArray<UIView *> *diTBVisibleBtns(UIView *tc) {
-    NSMutableArray<UIView *> *a = [NSMutableArray array];
-    for (UIView *c in tc.subviews) {
-        if (![NSStringFromClass(c.class) containsString:@"TransportButton"]) continue;
-        if (c.hidden || c.alpha < 0.05) continue;
-        if (c.frame.size.width < 10.0 || c.frame.size.height < 10.0) continue;
-        [a addObject:c];
-    }
-    return [a sortedArrayUsingComparator:^NSComparisonResult(UIView *x, UIView *y) {
-        if (x.center.x < y.center.x) return NSOrderedAscending;
-        if (x.center.x > y.center.x) return NSOrderedDescending;
-        return NSOrderedSame;
-    }];
-}
-/* 3.0.36: 只认"折叠的 3×1 模块"。祖先模块容器高 77 = 折叠态; 展开态是 568。
-   用户明确要求"展开的全部不要动", 而 3.0.35 只看档位, 展开后那个传送栏也被推了 12pt。 */
-/* 3.0.38: 3.0.36/3.0.37 在这里加了个"必须找到 CCUIContentModuleContainerView 祖先才算
-   折叠"的门槛, 而 3×1 的传送栏并不一定挂在那棵子树里 —— 日志里一条"按钮右移"都没有,
-   就是这个 return 把整段挡掉了。现在:
-     · 找到容器 → 按它的高度判(77=折叠, 568=展开);
-     · 没找到容器 → 只要祖先链上没有"又高又宽"的展开面板, 就按折叠处理(3.0.35 就是这么
-       工作的, 所以它当时能推进去)。 */
-static BOOL diNP31AllowShift(UIView *v) {
-    for (UIView *p = v; p; p = p.superview) {
-        if ([NSStringFromClass(p.class) isEqualToString:@"CCUIContentModuleContainerView"]) {
-            CGFloat h = p.bounds.size.height;
-            if (h > 130.0) {                            /* 展开态: 一颗都不碰 */
-                static int el = 0;
-                if (el < 3) { el++; RLog(@"[3x1] 按钮跳过: 展开态 容器=%.0fx%.0f",
-                                         p.bounds.size.width, h); }
-                return NO;
-            }
-            return YES;
-        }
-        CGSize ps = p.bounds.size;
-        if (ps.height > 130.0 && ps.width > 250.0) return NO;   /* 展开面板 */
-        if ([p isKindOfClass:UIWindow.class]) break;
-    }
-    return YES;
-}
-static void diNP31ShiftButtons(UIView *tc) {
-    if (!tc || !tc.window || !enabled) return;
-    if (!gDI31TCs) gDI31TCs = [NSHashTable weakObjectsHashTable];
-    [gDI31TCs addObject:tc];
-    if (![diNPLayoutKey() isEqualToString:@"3x1"]) return;
-    if (!diNP31AllowShift(tc)) return;          /* 展开态: 一颗都不碰 */
-    NSArray<UIView *> *btns = diTBVisibleBtns(tc);
-    if (btns.count < 3) return;
-    const CGFloat kShift = 20.0;   /* 3.0.38: 在 3.0.36 的 12pt 基础上再右移 8pt */
-    NSUInteger n = btns.count;
-    /* 播放键 = 离栏中心最近的那颗; 它右边第一颗就是"下一首"。
-       3 颗(上一首/播放/下一首)和 5 颗(随机/上一首/播放/下一首/循环)两种形态都对。 */
-    CGFloat mid = tc.bounds.size.width * 0.5;
-    NSUInteger playIdx = 0;
-    CGFloat best = CGFLOAT_MAX;
-    for (NSUInteger i = 0; i < n; i++) {
-        CGRect ri = [btns[i] convertRect:btns[i].bounds toView:tc];
-        CGFloat d = fabs(CGRectGetMidX(ri) - mid);
-        if (d < best) { best = d; playIdx = i; }
-    }
-    NSUInteger targets[2] = { playIdx, playIdx + 1 };
-    int moved = 0; CGFloat lastDx = 0;
-    for (int t = 0; t < 2; t++) {
-        NSUInteger i = targets[t];
-        if (i >= n) continue;
-        UIView *b = btns[i];
-        if (!b.window || !b.layer) continue;
-        /* 3.0.37: 不再因为有动画就跳过。暂停/播放切换时系统会给按钮挂一条 position
-           动画, 以前这时 continue, 结果就是"暂停后按钮停在原位"。现在照写, 并把那条
-           动画撤掉 —— 最终值只由我们决定, 视觉上也没有中间态。 */
-        if ([b.layer animationForKey:@"position"]) {
-            [b.layer removeAnimationForKey:@"position"];
-        }
-        CGRect rInTc = [b convertRect:b.bounds toView:tc];
-        CGFloat cur = CGRectGetMidX(rInTc);
-        DI31ShiftState *st = objc_getAssociatedObject(b, &kDI31ShiftKey);
-        if (!st) {
-            st = [DI31ShiftState new];
-            st.base = cur;
-            st.applied = cur;
-            st.rowW = tc.bounds.size.width;
-            objc_setAssociatedObject(b, &kDI31ShiftKey, st, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-        }
-        /* 只有"整排真的换了布局"(偏差 >60)才重认基准。3.0.35 是按栏宽变化重认,
-           而展开/收起动画里栏宽是连续变的, 每次变都把"已推过的位置"当成新基准再加
-           12pt —— 越推越远, 这就是用户看到的乱跳。 */
-        if (fabs(cur - st.base) > 60.0) { st.base = cur; st.applied = cur; }
-        CGFloat target = st.base + kShift;
-        CGFloat dx = target - cur;
-        if (fabs(dx) < 0.5) continue;
-        CGPoint p = b.layer.position;
-        p.x += dx;                                  /* 只写图层: 不触发 UIKit 再排一次版 */
-        b.layer.position = p;
-        st.applied = target;
-        moved++; lastDx = dx;
-    }
-    if (moved > 0) {
-        static int logs = 0;
-        if (logs < 6) { logs++; RLog(@"[3x1] 按钮右移 %d 个 dx=%.1f (栏 %.0fx%.0f, 可见 %lu)",
-                                     moved, lastDx, tc.bounds.size.width, tc.bounds.size.height,
-                                     (unsigned long)n); }
-    }
-}
-/* 3.0.35: 从按钮往上找传送栏。原实现直接拿 b.superview 当传送栏, 按钮只要不是
-   栏的直接子视图(嵌在 stack/容器里)就会 btns.count<3 直接跳过 —— 日志里表现为
-   "[3x1] 按钮右移跳过: 只找到 N 个按钮", 看起来像"钩子没装", 其实是参数传错了。 */
-static UIView *diNP31TCOf(UIView *b) {
-    for (UIView *p = b.superview; p; p = p.superview) {
-        if ([NSStringFromClass(p.class) containsString:@"TransportControls"]) return p;
-        if ([p isKindOfClass:UIWindow.class]) break;
-    }
-    return nil;
-}
 /* 传送栏自己的 layoutSubviews: 系统排完立刻摆平(同一帧、提交前, 用户看不到中间态) */
 static void (*gDIOrigTCRowLayout)(id, SEL) = NULL;
 static void diTCRowLayout(id self, SEL cmd) {
     if (gDIOrigTCRowLayout) gDIOrigTCRowLayout(self, cmd);
     @try {
         diTBNormalizeRow((UIView *)self);
-        diNP31ShiftButtons((UIView *)self);
     } @catch (__unused NSException *e) {}
 }
 
@@ -17507,16 +16904,14 @@ static void diBtnFrameHook(id self, SEL cmd, CGRect f) {
     gDIOrigBtnFrame(self, cmd, f);
     @try {
         UIView *b = (UIView *)self;
-        if (diArtIs3x2()) diTBfixBtn(b);
-        else { UIView *tc = diNP31TCOf(b); if (tc) diNP31ShiftButtons(tc); }   /* 3.0.35: 从祖先找栏 */
+        diTBfixBtn(b);
     } @catch (__unused NSException *e) {}
 }
 static void diBtnTransformHook(id self, SEL cmd, CGAffineTransform t) {
     gDIOrigBtnTransform(self, cmd, t);
     @try {
         UIView *b = (UIView *)self;
-        if (diArtIs3x2()) diTBfixBtn(b);
-        else { UIView *tc = diNP31TCOf(b); if (tc) diNP31ShiftButtons(tc); }   /* 3.0.35: 从祖先找栏 */
+        diTBfixBtn(b);
     } @catch (__unused NSException *e) {}
 }
 static void (*gDIOrigTBFrame)(id, SEL, CGRect) = NULL;
@@ -17525,14 +16920,12 @@ static void diTBFrameHook(id self, SEL cmd, CGRect f) {
     gDIOrigTBFrame(self, cmd, f);
     @try {
         diTBNormalizeRow((UIView *)self);
-        diNP31ShiftButtons((UIView *)self);
     } @catch (__unused NSException *e) {}
 }
 static void diTBTransformHook(id self, SEL cmd, CGAffineTransform t) {
     gDIOrigTBTransform(self, cmd, t);
     @try {
         diTBNormalizeRow((UIView *)self);
-        diNP31ShiftButtons((UIView *)self);
     } @catch (__unused NSException *e) {}
 }
 static void diTBInstallRowHook(void) {
@@ -17640,7 +17033,7 @@ static void diArtPlayerPost(UIView *root) {
        "开关关了照样转"。旋转统一由 diArtApply 负责。只做一次。 */
     {
         static BOOL nprDone = NO;
-        if (!nprDone) { nprDone = YES; diArtDisableNPRSpin(); }
+        if (!nprDone) { nprDone = YES; diArtDisableNPRSpin(); diArtInstallSpinGuard(); }
     }
     if (!gDIArtPending) gDIArtPending = [NSHashTable weakObjectsHashTable];
     [gDIArtPending addObject:root];
@@ -17695,6 +17088,7 @@ static void diArtPostFlush(UIView *root) {
             });
         }
     }
+    @try { diNPProbeArtwork32(root); } @catch (__unused NSException *e) {}
     if (on) {
         /* 3.0.17: 累积"见过的封面" —— 3×2 换页/换曲时视图会短暂离开收集结果,
            以前一离开就没人再管它(或下一轮重挂 mask 闪一下)。现在只要见过一次就
@@ -17743,9 +17137,6 @@ static void diArtPostFlush(UIView *root) {
 
 static void diArtNPLayout(id self, SEL cmd) {
     if (gDIArtOrigNPViewLayout) gDIArtOrigNPViewLayout(self, cmd);
-    /* 3.0.36: 播放器视图自己排完就检查一次 3×1 收窄 —— 这是最靠前的时机:
-       视图存在 = 模块已建好, 不再依赖"卡片有没有 window / 容器认不认得出"。 */
-    @try { diNP31FitGroup((UIView *)self); } @catch (__unused NSException *e) {}
     @try { diArtPlayerPost((UIView *)self); } @catch (__unused NSException *e) {}
 }
 static void diArtCCLayout(id self, SEL cmd) {
@@ -18257,27 +17648,6 @@ static void diNPHandleModuleVC(id vc) {
     }
     if (!card) card = [(UIViewController *)vc view];
     if (![card isKindOfClass:UIView.class]) return;
-    /* 3.0.35: 3×1 收窄挪到"必须有 window / 尺寸够大"两个检查**之前**。
-       现象(用户): 注销后第一次打开控制中心还是满宽 4×1, 要展开一下才变 3×1。
-       原因就在这两行 return 上: 注销后首开时模块卡片往往还没接进视图树(window=nil)、
-       尺寸还是 0×0, 而这条路径是全场**唯一**靠 moduleIdentifier 精确认出播放器模块的
-       地方 —— 它一 return, 标记就打不上; 后面 setFrame/layout 的所有兜底都要靠标记或
-       四级识别, 而那时容器上没有 identifier、内容也还没加载, 四级全不命中。
-       等用户展开 → 内容重建、window 有了 → 才第一次收窄, 正好就是用户看到的现象。
-       这里既然已经认准是播放器模块, 先把标记打上(宽度为零也不影响), 后面 setFrame
-       钩子从第一帧就能按标记收窄, 用户看不到 4×1 的中间态。 */
-    if ([diNPLayoutKey() isEqualToString:@"3x1"]) {
-        diNP31ApplyModule(card);
-        @try {
-            UIView *vv = [(UIViewController *)vc view];
-            if (vv && vv != card
-                && [NSStringFromClass(vv.class) isEqualToString:@"CCUIContentModuleContainerView"]) {
-                /* 卡片还没进树时, ApplyModule 顺着 superview 找不到外层容器, 这里补上 */
-                diNP31Mark(vv);
-                diNP31FitBox(vv);
-            }
-        } @catch (__unused NSException *e) {}
-    }
     if (!card.window) return;
     /* 3.0.10: 启动早期卡片的占位尺寸(0x0 / 极小)一律不处理, 等真正排出来再说 */
     CGSize cs = card.bounds.size;
@@ -18291,10 +17661,6 @@ static void diNPHandleModuleVC(id vc) {
 
     if (!gDIBgHosts) gDIBgHosts = [NSHashTable weakObjectsHashTable];
     [gDIBgHosts addObject:card];
-
-    /* 3.0.30: 3×1 —— 这里已经按 moduleIdentifier 认准是播放器模块了, 直接给卡片和
-       外层模块容器打标记并收窄; 其他模块(天气/手电)走不到这儿, 不会被误伤。
-       3.0.35: 调用点上移到 window/尺寸检查之前(见上面的注释), 这里不再重复。 */
 
     diNPTickPrefs();
     diNPStartBgTimer();
@@ -18366,37 +17732,6 @@ static void diNPStartBgTimer(void) {
 
 static void diNPModuleLayout(id self, SEL cmd) {
     if (gDIOrigModuleLayout) gDIOrigModuleLayout(self, cmd);
-    diNPInstall3x1Hook();   /* 3.0.28: 类晚加载时在这里补装(已装则立即返回) */
-    /* 3.0.35 诊断: "3×1 不生效"最常见的两种, 日志里必须能一眼分开 ——
-       ① 域里读到的键根本不是 3x1(被播放器自己改回去/没写进去) ② 读到了但钩子没认到视图。
-       这条只在"判定不是 3x1"时打, 5 秒一次, 不刷屏。 */
-    {
-        static CFTimeInterval lastKeyLog = 0;
-        CFTimeInterval kn = CFAbsoluteTimeGetCurrent();
-        if (kn - lastKeyLog > 5.0) {
-            lastKeyLog = kn;
-            NSString *k = diNPLayoutKey();
-            if (!k.length) {
-                /* 3.0.35: 注入后 1 秒内 diNPLayoutKey 故意返回空(首开保护)。如果模块
-                   恰好在这一秒内布局完, 标记就打不上, 而后面没有任何人再来一次 ——
-                   表现就是"注销后一直 4×1, 直到我去展开一下"。这里补一次延迟重试。 */
-                __weak id wvc = self;
-                dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.2 * NSEC_PER_SEC)),
-                               dispatch_get_main_queue(), ^{
-                    id s2 = wvc;
-                    @try { if (s2) diNPHandleModuleVC(s2); } @catch (__unused NSException *e) {}
-                });
-            }
-            if (![k isEqualToString:@"3x1"]) {
-                id szK = CFBridgingRelease(CFPreferencesCopyAppValue(CFSTR("Size"),
-                                                                     CFSTR("com.local.playerexact")));
-                id vrK = CFBridgingRelease(CFPreferencesCopyAppValue(CFSTR("PlayerGridVariant"),
-                                                                     CFSTR("com.local.playerexact")));
-                RLog(@"[3x1][键] 判定=%@ Size=%@ Variant=%@ 功能档位=%d",
-                     k.length ? k : @"(空)", szK ?: @"(无)", vrK ?: @"(无)", gDIStage);
-            }
-        }
-    }
     /* 3.0.10: 绝不在 viewWillLayoutSubviews 里同步改视图树/发 XPC —— 挪到下一轮
        runloop, 且每个 VC 节流 0.5s。 */
     @try {
@@ -18634,7 +17969,6 @@ static void diArtInstallGated(void) {
     gDIStageHooksDone = YES;
     diArtInstallAVHook();
     diCrumb([NSString stringWithFormat:@"安装: 高危钩子开始(档位 %d)", gDIStage]);
-    diNPInstall3x1Hook();   /* 3.0.28: 3×1 布局收紧(类不存在时在模块布局时会再试) */
     diNPInstallMediaObserver();   /* 3.0.14: 换歌通知兜底注册 */
     diNPStartBgTimer();           /* 3.0.15: 换曲轮询(通知不可靠) */
 
