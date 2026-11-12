@@ -67,7 +67,7 @@ static double expandTextY = DI_EXP_TEXT_BASE_Y;   // 上下偏移(pt, 下为正,
 static double expandTextScale = 100.0; // 文字大小(%, 100=原样)
 /* 2.8.86: 构建戳 —— 之前横幅打的是 SpringBoard 自己的 CFBundleShortVersionString(恒 1.0),
    日志里根本看不出装的是哪一版。所有诊断行都带这个戳, 下轮日志一眼定位。 */
-#define DI_BUILD_VER @"3.0.19"
+#define DI_BUILD_VER @"3.0.20"
 static BOOL gRecordingActive = NO; // 保留: 岛素材总闸条件
 static NSString *diElementId(UIView *host);
 static BOOL diMiniMusicActive(UIView *host); // 2.6.3: 前置(遮罩层使用)
@@ -192,18 +192,28 @@ static void RLog(NSString *fmt, ...) {
 }
 #define DI_STEP(fmt, ...) RLog(fmt, ##__VA_ARGS__)
 
-static BOOL pBool(NSString *key, BOOL def) {
+/* 3.0.20: 自己的域同步一次就够了 —— refreshPrefs 一次要读几十个键, 以前每个键都
+   Synchronize 一遍(几十次跨进程往返 + 落盘), iOS17 上叠加 cfprefsd 争用就会把
+   主线程按住。现在 0.2 秒内只同步一次。 */
+static void diPrefSyncOwn(void) {
+    static CFTimeInterval ts = 0;
+    CFTimeInterval now = CFAbsoluteTimeGetCurrent();
+    if (now - ts < 0.2) return;
+    ts = now;
     CFPreferencesAppSynchronize((__bridge CFStringRef)kDomain);
+}
+static BOOL pBool(NSString *key, BOOL def) {
+    diPrefSyncOwn();
     id v = CFBridgingRelease(CFPreferencesCopyAppValue((__bridge CFStringRef)key, (__bridge CFStringRef)kDomain));
     return v ? [v boolValue] : def;
 }
 static NSInteger pInt(NSString *key, NSInteger def) {
-    CFPreferencesAppSynchronize((__bridge CFStringRef)kDomain);
+    diPrefSyncOwn();
     id v = CFBridgingRelease(CFPreferencesCopyAppValue((__bridge CFStringRef)key, (__bridge CFStringRef)kDomain));
     return v ? [v integerValue] : def;
 }
 static NSString *pString(NSString *key) {
-    CFPreferencesAppSynchronize((__bridge CFStringRef)kDomain);
+    diPrefSyncOwn();
     id v = CFBridgingRelease(CFPreferencesCopyAppValue((__bridge CFStringRef)key, (__bridge CFStringRef)kDomain));
     return [v isKindOfClass:NSString.class] ? v : nil;
 }
@@ -223,7 +233,7 @@ static NSArray<NSString *> *materialList(void) {
 }
 
 static double pDouble(NSString *key, double def) {
-    CFPreferencesAppSynchronize((__bridge CFStringRef)kDomain);
+    diPrefSyncOwn();
     id v = CFBridgingRelease(CFPreferencesCopyAppValue((__bridge CFStringRef)key, (__bridge CFStringRef)kDomain));
     return v ? [v doubleValue] : def;
 }
@@ -935,7 +945,7 @@ static void refreshPrefs(void) {
                日志里直接看到黑圈的类名/尺寸, 下一版精准处理。 */
             static CFAbsoluteTime lastScan;
             CFAbsoluteTime now = CFAbsoluteTimeGetCurrent();
-            if (now - lastScan > 10.0) {
+            if (now - lastScan > 15.0) {
                 lastScan = now;
                 dispatch_async(dispatch_get_main_queue(), ^{ diGainScanAperture(); });
             }
@@ -6358,13 +6368,24 @@ static NSArray *diLayers(DIVideoView *a, DIVideoView *b) {
 @implementation DIGainMapState
 @end
 
-static NSMutableArray<DIGainMapState *> *gGainStates(void) {
-    static NSMutableArray *a; static dispatch_once_t once;
-    dispatch_once(&once, ^{ a = [NSMutableArray array]; });
-    return a;
+/* ===== 3.0.20: 隐藏药丸改成"只改渲染状态"(核心修复) =====
+   2.8.x 起一直是 removeFromSuperview 摘除 + 原位插回。3.0.19 的日志(431/432)把
+   代价摆得很清楚:
+     · 每次摘/插都会让父视图重排一次 → 一次还原里 41 次 MRUTransportButton.setFrame,
+       3×2 那条传送栏就"抖一下"(只有这个布局会在同窗里排 5 个按钮 + 标签)。
+     · iOS17 上更狠: 摘掉 → 系统重建 → hook 再摘, 循环往复, 主线程 30~60 秒不返回,
+       watchdog 直接把 SpringBoard 杀掉 = 用户说的"光卡死然后注销"。
+   现在改成只写 hidden(纯渲染属性, 不改视图树、不触发任何重排), 记账用弱引用表,
+   关开关时按原值还原。系统把黑块显示回来时, 下一轮扫描/hook 再写一次 hidden=YES 即可,
+   幂等、零副作用、不可能递归。 */
+static NSMapTable<UIView *, NSNumber *> *gGainHidden(void) {
+    static NSMapTable *t; static dispatch_once_t once;
+    dispatch_once(&once, ^{ t = [NSMapTable weakToStrongObjectsMapTable]; });
+    return t;
 }
 static BOOL gGainBusy = NO;
-static const NSUInteger kGainMax = 64;   /* 2.8.38: 32→64 —— 紧凑态实测一次要摘 39+ 个 platter, 32 会漏 */
+static const NSUInteger kGainMax = 64;
+static int gDIGainHitLogs = 0;    /* 3.0.20: "隐藏了哪些 platter" 只记前 8 条, 免得刷屏 */
 
 static BOOL diGainIsSB(void) {
     return [NSBundle.mainBundle.bundleIdentifier isEqualToString:@"com.apple.springboard"];
@@ -6451,28 +6472,67 @@ static BOOL diInCCModule(UIView *v) {
     }
     return NO;
 }
-/* 清理失效记账: 父视图已释放, 或系统自己把 view 挂回树上 */
-static void diGainPrune(void) {
-    NSMutableArray *a = gGainStates();
-    for (NSInteger i = (NSInteger)a.count - 1; i >= 0; i--) {
-        DIGainMapState *s = a[i];
-        if (!s.parent || s.view.superview) [a removeObjectAtIndex:i];
+/* 隐藏一个层(只写 hidden) —— 幂等: 已经记过账就只确保它还是隐藏的 */
+static void diGainHideOne(UIView *v) {
+    if (!v) return;
+    NSNumber *orig = [gGainHidden() objectForKey:v];
+    if (orig) {
+        if (!v.hidden) v.hidden = YES;      /* 系统又把它显示了 → 再压回去 */
+        return;
     }
+    [gGainHidden() setObject:@(v.hidden) forKey:v];
+    v.hidden = YES;
 }
-static void diGainRestoreState(DIGainMapState *s) {
+static void diGainUnhide(UIView *v) {
+    if (!v) return;
+    NSNumber *orig = [gGainHidden() objectForKey:v];
+    if (!orig) return;
+    v.hidden = orig.boolValue;
+    [gGainHidden() removeObjectForKey:v];
+}
+/* ===== 增益图(_SBGainMapView)是唯一例外: 必须真摘 =====
+   它不是普通视图, 而是被 HDR 增益链路单独采样的图层 —— 只设 hidden 的话系统照样
+   把它算进画面/录屏(2.8.31 实测)。好在它只挂在灵明岛药丸里、是叶子节点, 摘/插不会
+   牵动传送栏/内容卡片, 所以照旧用"记账+摘除"。platter 一律走 hidden 那条路。 */
+static NSMutableArray<DIGainMapState *> *gGainRemoved(void) {
+    static NSMutableArray *a; static dispatch_once_t once;
+    dispatch_once(&once, ^{ a = [NSMutableArray array]; });
+    return a;
+}
+static void diGainRemovedRestore(DIGainMapState *s) {
     UIView *v = s.view, *parent = s.parent;
-    [gGainStates() removeObjectIdenticalTo:s];
+    [gGainRemoved() removeObjectIdenticalTo:s];
     if (!parent || v.superview || parent == v || [parent isDescendantOfView:v]) return;
-    /* 2.8.39: 别插到我们自己的底层素材层(DIVideoView/DIAnimView 等 DI* 层垫在
-       index 0)前面 —— 会把背景视频整个盖住, 用户看到"展开背景黑屏/暂停"(308)。
-       记录的 index 是摘除时的位置, 而底层视频层是后来 insertSubview:0 加的,
-       原样插回 index 0 就会压住它。 */
     NSUInteger idx = MIN(s.index, parent.subviews.count);
     if (idx == 0) {
         UIView *first = parent.subviews.firstObject;
         if (first && first != v && [NSStringFromClass(first.class) hasPrefix:@"DI"]) idx = 1;
     }
     [parent insertSubview:v atIndex:idx];
+}
+/* 清理失效记账: 视图已经不在任何窗口上(系统整块重建了卡片) → 先还原再销账,
+   免得它回到屏上时永远保持隐藏。 */
+static void diGainPrune(void) {
+    NSMutableArray<UIView *> *gone = [NSMutableArray array];
+    for (UIView *k in gGainHidden()) if (!k.window) [gone addObject:k];
+    for (UIView *k in gone) diGainUnhide(k);
+    for (NSInteger i = (NSInteger)gGainRemoved().count - 1; i >= 0; i--) {
+        DIGainMapState *s = gGainRemoved()[(NSUInteger)i];
+        if (!s.parent || s.view.superview) [gGainRemoved() removeObjectAtIndex:(NSUInteger)i];
+    }
+}
+static void diGainUnhideAll(void) {
+    NSMutableArray<UIView *> *keys = [NSMutableArray array];
+    for (UIView *k in gGainHidden()) [keys addObject:k];
+    for (UIView *k in keys) diGainUnhide(k);
+    while (gGainRemoved().count) diGainRemovedRestore(gGainRemoved().lastObject);
+}
+/* 某一窗口内的记账全部还原(展开态用) */
+static void diGainUnhideInWindow(UIWindow *win) {
+    if (!win) return;
+    NSMutableArray<UIView *> *keys = [NSMutableArray array];
+    for (UIView *k in gGainHidden()) if (k.window == win) [keys addObject:k];
+    for (UIView *k in keys) diGainUnhide(k);
 }
 /* 2.8.38: 展开态判定 —— 307 实测: 展开的媒体岛(407x489 门户)和 DriftIsland
    展开页(DIVideoView 411x228)里, 内容衬底被摘就会"一闪一闪甚至整页黑";
@@ -6521,82 +6581,73 @@ static BOOL diWindowExpanded(UIWindow *win) {
     [cache setObject:@(expanded) forKey:win];
     return expanded;
 }
-/* 2.8.38: 展开时把该窗口内已记账的 platter(非增益图)全部原位插回 ——
-   被摘的层不在视图树上, hook 永远访问不到它, 只有这里能救活;
-   不救的话展开页会缺层/黑屏, 直到开关关闭才恢复。 */
+/* 2.8.38: 展开时把该窗口内已记账的 platter 还原 —— 展开页里这些衬底必须可见,
+   否则会缺层/黑屏。3.0.20 起只是把 hidden 还原, 不动视图树。 */
 static void diPlatterRestoreInWindow(UIWindow *win) {
     if (!win || gGainBusy || ![NSThread isMainThread] || !diGainIsSB()) return;
     gGainBusy = YES;
-    @try {
-        diGainPrune();
-        for (NSInteger i = (NSInteger)gGainStates().count - 1; i >= 0; i--) {
-            DIGainMapState *s = gGainStates()[i];
-            if (diIsGainView(s.view)) continue;   /* 增益图保留摘除(rbp 原版目标) */
-            if (!s.parent || s.parent.window != win) continue;
-            diGainRestoreState(s);
-        }
-    } @finally { gGainBusy = NO; }
+    @try { diGainPrune(); diGainUnhideInWindow(win); }
+    @finally { gGainBusy = NO; }
 }
 /* rbp 的 applyToView:enabled —— enabled = hideBlackPillOn(隐藏药丸开关) */
 static void diGainApply(UIView *view) {
     if (![NSThread isMainThread] || gGainBusy || !diGainIsSB()) return;
-    gGainBusy = YES;
-    @try {
-        diGainPrune();
-        if (!diGainIsExact(view)) return;
-        DIGainMapState *owned = nil;
-        for (DIGainMapState *s in gGainStates()) if (s.view == view) { owned = s; break; }
-        if (!(enabled && hideBlackPillOn)) { if (owned) diGainRestoreState(owned); return; }
-        /* 2.8.38: 展开态豁免 —— 307 实测: 展开的媒体岛/DriftIsland 展开页里,
-           内容衬底(MediaControlsBackground 系列/展开页内材质层)一被摘就
-           "一闪一闪甚至整页黑" —— 系统每帧重建, hook 每帧再摘, 打地鼠循环。
-           只有紧凑态(304 验证的黑圈场景)才摘 platter; 展开态一律放过,
-           已记账的立刻原位插回。增益图(rbp 原版目标)任何态都照摘。 */
-        if (!diIsGainView(view)) {
-            UIWindow *w = view.window;
-            if (w && diWindowExpanded(w)) {
-                if (owned) diGainRestoreState(owned);
-                return;
-            }
-        }
-        if (owned || !view.superview
-            || diInCCModule(view)
-            || (!diGainInAperture(view) && !diPlatterNearHost(view))
-            || gGainStates().count >= kGainMax) return;
+    if (!(enabled && hideBlackPillOn)) return;
+    if (!diGainIsExact(view)) return;
+    /* ---- ① 增益图: 照旧"记账 + 摘除"(它是被 HDR 链路单独采样的层, hidden 无效) ---- */
+    if (diIsGainView(view)) {
+        for (DIGainMapState *s in gGainRemoved()) if (s.view == view) return;
         UIView *parent = view.superview;
+        if (!parent || !view.window) return;
+        if (gGainRemoved().count >= 8) return;   /* 药丸上的增益图最多几个, 防跑飞 */
         NSUInteger idx = [parent.subviews indexOfObjectIdenticalTo:view];
         if (idx == NSNotFound) return;
-        DIGainMapState *s = [DIGainMapState new];
-        s.view = view; s.parent = parent; s.index = idx;
-        [gGainStates() addObject:s];
-        [view removeFromSuperview];
-        diGainPrune();
-        if (diIsGainView(view)) {
-            DLog(@"隐藏药丸: 摘除 _SBGainMapView (记账%lu)", (unsigned long)gGainStates().count);
-        } else {
-            /* 2.8.34: platter 命中时把类名和父链一起打出来 —— 黑圈若还有漏网,
-               日志直接说明它挂在谁下面, 不用再猜。 */
+        gGainBusy = YES;
+        @try {
+            DIGainMapState *s = [DIGainMapState new];
+            s.view = view; s.parent = parent; s.index = idx;
+            [gGainRemoved() addObject:s];
+            [view removeFromSuperview];
+            DLog(@"隐藏药丸: 摘除 _SBGainMapView (记账%lu)", (unsigned long)gGainRemoved().count);
+        } @finally { gGainBusy = NO; }
+        return;
+    }
+    /* ---- ② 内容衬底(platter): 只写 hidden, 一根手指都不碰视图树 ----
+       3.0.19 的 now-playing 豁免继续保留: 3×2 / 4×2 卡片里的一切(传送栏、内容衬底、
+       封面底座)一律不碰 —— 那是"按钮抖一下"的另一半来源。 */
+    if (diInNowPlayingUI(view)) return;
+    UIWindow *w = view.window;
+    if (!w) return;
+    if (diWindowExpanded(w)) return;        /* 展开态全部放过 */
+    if (diInCCModule(view)) return;
+    if (!diGainInAperture(view) && !diPlatterNearHost(view)) return;
+    if (![gGainHidden() objectForKey:view] && gGainHidden().count >= kGainMax) return;
+    gGainBusy = YES;
+    @try {
+        BOOL first = ([gGainHidden() objectForKey:view] == nil);
+        diGainHideOne(view);
+        if (first && gDIGainHitLogs < 8) {
+            gDIGainHitLogs++;
             NSMutableString *chain = [NSMutableString string];
-            for (UIView *p = parent; p && chain.length < 200; p = p.superview)
+            for (UIView *p = view.superview; p && chain.length < 160; p = p.superview)
                 [chain appendFormat:@"← %@", NSStringFromClass(p.class)];
-            DLog(@"隐藏药丸: 摘除 platter %@ %.0fx%.0f 父链%@ (记账%lu)",
-                 NSStringFromClass(object_getClass(view)), view.frame.size.width, view.frame.size.height,
-                 chain, (unsigned long)gGainStates().count);
+            DLog(@"隐藏药丸: 隐藏 platter %@ %.0fx%.0f 父链%@ (记账%lu)",
+                 NSStringFromClass(object_getClass(view)), view.bounds.size.width, view.bounds.size.height,
+                 chain, (unsigned long)gGainHidden().count);
         }
     } @finally { gGainBusy = NO; }
 }
 void diGainRestoreAll(void) {
     if (![NSThread isMainThread] || gGainBusy || !diGainIsSB()) return;
     gGainBusy = YES;
-    @try { diGainPrune(); while (gGainStates().count) diGainRestoreState(gGainStates().lastObject); }
+    @try { diGainPrune(); diGainUnhideAll(); }
     @finally { gGainBusy = NO; }
 }
-/* rbp %ctor 同款: 开关打开瞬间让所有窗口重新布局, 触发 hook 摘除在屏黑块 */
+/* 3.0.20: 这里以前是"对所有窗口 layoutIfNeeded" —— 在 iOS17 上会强制整棵控制中心
+   同步重排一次(我们自己还挂在 layoutSubviews 钩子里), 是"拨个开关就卡死几十秒"
+   的直接推手。现在隐藏只改 hidden, 调用方前面的主动扫描已经足够, 不再逼布局。 */
 static void diGainTriggerVisible(void) {
-    if (![NSThread isMainThread] || !(enabled && hideBlackPillOn)) return;
-    for (UIScene *sc in UIApplication.sharedApplication.connectedScenes)
-        if ([sc isKindOfClass:[UIWindowScene class]])
-            for (UIWindow *w in ((UIWindowScene *)sc).windows) [w layoutIfNeeded];
+    /* no-op (保留符号: 上层调用点不动) */
 }
 
 /* 2.8.33: 把灵动岛窗口前 24 个视图 dump 出来(类名+frame+alpha+hidden+背景色),
@@ -6699,7 +6750,10 @@ static void diContMaybeScan(UIView *self) {
     if (win && diWindowExpanded(win)) { diPlatterRestoreInWindow(win); return; }
     static CFAbsoluteTime last;
     CFAbsoluteTime now = CFAbsoluteTimeGetCurrent();
-    if (now - last < 2.0) return;
+    /* 3.0.20: 2s → 4s。扫描本身已经不再动视图树(只是写 hidden), 但 1500 节点的 BFS
+       在 iOS17 的控制中心里也要几毫秒, 少扫一半是纯赚 —— 新建的黑层有 layoutSubviews/
+       didMoveToWindow 两个钩子兜住, 扫描只是补漏。 */
+    if (now - last < 4.0) return;
     last = now;
     diGainScanAperture();
 }
@@ -12334,36 +12388,72 @@ static void lockStateChanged(CFNotificationCenterRef, void *, CFStringRef, const
 }
 
 static BOOL gDIPrefsRefreshPending;
+
+/* ===== 3.0.20: 设置改动后的刷新改成"分步 + 计时" =====
+   429/432 的现场是: iOS17 上随便拨哪个开关都卡死几十秒然后注销, iOS16 没事。
+   整段刷新以前是一个大 @try 块一把梭 —— 哪一步慢/死循环都看不出来, 而且主线程被
+   独占。现在拆成 6 步, 各自占一个 runloop 回合, 每步超过 120ms 就在日志里点名
+   (日志是同步落盘的, 卡在哪一步最后一行的 [偏好] 就是答案)。 */
+static const char *diPrefsStepName(int i) {
+    switch (i) {
+        case 0: return "偏好+壁纸+视频层";
+        case 1: return "重新登记灵动岛宿主";
+        case 2: return "遮罩导出+控制中心钩子";
+        case 3: return "控制中心壁纸重载";
+        case 4: return "锁屏通知宽度重排";
+        case 5: return "锁屏卡片重绘";
+        case 6: return "启动图/深色重刷";
+        default: return "?";
+    }
+}
+static void diPrefsRunStep(int idx);
+static void diPrefsChainStep(int idx) {
+    if (idx > 6) return;
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.012 * NSEC_PER_SEC)),
+                   dispatch_get_main_queue(), ^{ diPrefsRunStep(idx); });
+}
+static void diPrefsRunStep(int idx) {
+    CFAbsoluteTime t0 = CFAbsoluteTimeGetCurrent();
+    @try {
+        switch (idx) {
+            case 0: refreshAll(); break;
+            case 1: installKnownHosts(); break;
+            case 2: diExportMaskSoon();
+                    if (wpOn) diCCInstallOverlayHook();
+                    break;
+            case 3: {
+                /* 2.7.32: 控制中心(循环/模糊/启用/声音)改了 → 立刻生效 */
+                static NSInteger lastBlur = -1; static int lastLoop = -1;
+                if (lastBlur != wpBlur || lastLoop != (int)wpLoopOn) {
+                    if (lastBlur >= 0) gCCPath = nil;   /* 首次启动不强制重建 */
+                    if (lastLoop == 0 && wpLoopOn) gCCLoopIdx = 0;
+                    lastBlur = wpBlur; lastLoop = (int)wpLoopOn;
+                }
+                diCCReloadSurface();
+                break;
+            }
+            case 4:
+                /* 2.2.10: 锁屏通知宽度变更后立即重排 */
+                if (lockWOn) {
+                    for (UIScene *s in UIApplication.sharedApplication.connectedScenes)
+                        if ([s isKindOfClass:[UIWindowScene class]])
+                            for (UIWindow *w in ((UIWindowScene *)s).windows)
+                                for (UIView *v in w.subviews) [v setNeedsLayout];
+                }
+                break;
+            case 5: diRestyleAllLockPlatters(); break;
+            case 6: diGLFReloadAndReapply(); break;
+        }
+    } @catch (NSException *e) {
+        RLog(@"偏好刷新异常(已吞) 步骤%@: %@ — %@", @(diPrefsStepName(idx)), e.name, e.reason);
+    }
+    double ms = (CFAbsoluteTimeGetCurrent() - t0) * 1000.0;
+    if (ms > 120.0) RLog(@"[偏好] 步骤 %@ 耗时 %.0fms (慢)", @(diPrefsStepName(idx)), ms);
+    diPrefsChainStep(idx + 1);
+}
 static void diPrefsRefreshNow(void) {
     gDIPrefsRefreshPending = NO;
-    /* 2.8.93: 整段兜底 —— 以前这里任何一步抛异常都会把 SpringBoard 直接带走(安全模式) */
-    @try {
-        NSInteger oldBlur = wpBlur; BOOL oldLoop = wpLoopOn;
-        refreshAll(); installKnownHosts();
-        diExportMaskSoon();
-        /* 2.8.41: 控制中心恢复 —— 开关打开时补装 overlay hook(dispatch_once 保证幂等) */
-        if (wpOn) diCCInstallOverlayHook();
-        /* 2.7.32: 控制中心开关(循环播放 / 背景模糊 / 启用 / 声音)改了 → 立刻生效。
-           模糊值变了必须强制重建, 否则会走"同路径"廉价出口, 图还是原来那张不糊的。 */
-        if (oldBlur != wpBlur || oldLoop != wpLoopOn) {
-            gCCPath = nil;
-            if (!oldLoop && wpLoopOn) gCCLoopIdx = 0;
-        }
-        diCCReloadSurface();
-        /* 2.2.10: 锁屏通知宽度变更后立即重排(不必等下次通知弹出) */
-        if (lockWOn) {
-            for (UIScene *s in UIApplication.sharedApplication.connectedScenes)
-                if ([s isKindOfClass:[UIWindowScene class]])
-                    for (UIWindow *w in ((UIWindowScene *)s).windows)
-                        for (UIView *v in w.subviews) [v setNeedsLayout];
-        }
-        /* 2.8.8: 发光开关/半径/颜色变更 → 立即重绘所有锁屏卡片 */
-        diRestyleAllLockPlatters();
-        /* 2.9.33: 启动开关 / 强制深色 一改, 已登记对象立刻重刷 */
-        diGLFReloadAndReapply();
-    } @catch (NSException *e) {
-        RLog(@"偏好刷新异常(已吞): %@ — %@", e.name, e.reason);
-    }
+    diPrefsChainStep(0);
 }
 static void prefsChanged(CFNotificationCenterRef, void *, CFStringRef, const void *, CFDictionaryRef) {
     gFramesDirty = YES; // 偏好变更(可能换了素材文件夹): 立即重扫
@@ -15659,25 +15749,50 @@ static NSHashTable *gDIArtRoots = nil;
 static void (*gDIArtOrigNPViewLayout)(id, SEL) = NULL;
 static void (*gDIArtOrigCCVCLayout)(id, SEL) = NULL;
 
+/* ===== 3.0.20(iOS17 卡死主修之二) =====
+   3.0.7 起 diArtPrefOn 每次刷新都在**主线程**上
+       CFPreferencesAppSynchronize(CFSTR("com.local.playerexact"))
+   那是内置播放器(另一个进程)的域。用户在设置里连续拨开关时, 设置进程正在高频写这个
+   域, cfprefsd 一侧就要排它锁 —— SpringBoard 主线程被按住几十秒, watchdog 直接注销。
+   432 日志里两个 33 秒 / 66 秒的大空洞都发生在这条路径上。
+   现在: 主线程只读内存缓存(纳秒级), 真正的 Synchronize 丢到后台串行队列去做, 1.2 秒
+   最多一次; 开关变化本身还有 artwork-changed 通知会立刻触发一次后台刷新, 所以体感
+   还是"一拨就变"。 */
+static dispatch_queue_t diPrefQ(void) {
+    static dispatch_queue_t q; static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        q = dispatch_queue_create("com.abgg332.driftisland.prefread", DISPATCH_QUEUE_SERIAL);
+        dispatch_set_target_queue(q, dispatch_get_global_queue(QOS_CLASS_UTILITY, 0));
+    });
+    return q;
+}
+static void diArtPrefReadNow(void) {
+    @autoreleasepool {
+        @try {
+            CFPreferencesAppSynchronize(CFSTR("com.local.playerexact"));
+            id v = CFBridgingRelease(CFPreferencesCopyAppValue(CFSTR("ArtworkRotationEnabled"),
+                                                              CFSTR("com.local.playerexact")));
+            BOOL on = [v isKindOfClass:NSNumber.class] ? [v boolValue] : NO;
+            if (on != gDIArtOn) {
+                gDIArtOn = on;
+                RLog(@"[封面] 开关 → %d", on);
+            }
+        } @catch (__unused NSException *e) {}
+    }
+}
 static BOOL diArtPrefOn(void) {
+    /* 只在主线程用; 返回缓存值, 顺带把刷新排进后台 */
     CFTimeInterval now = CFAbsoluteTimeGetCurrent();
-    if (now - gDIArtPrefTS > 0.5) {
+    if (now - gDIArtPrefTS > 1.2) {
         gDIArtPrefTS = now;
-        /* 3.0.7: 设置页写的是另一个进程, SpringBoard 这边 CFPreferences 有缓存, 不
-           Synchronize 会一直拿到旧值 —— 这就是"开关明明开了/关了却不生效"的直接原因。 */
-        CFPreferencesAppSynchronize(CFSTR("com.local.playerexact"));
-        id v = CFBridgingRelease(CFPreferencesCopyAppValue(CFSTR("ArtworkRotationEnabled"),
-                                                          CFSTR("com.local.playerexact")));
-        BOOL on = [v isKindOfClass:NSNumber.class] ? [v boolValue] : NO;
-        if (on != gDIArtOn) RLog(@"[封面] 开关 → %d", on);
-        gDIArtOn = on;
+        dispatch_async(diPrefQ(), ^{ diArtPrefReadNow(); });
     }
     return gDIArtOn;
 }
 static void diArtForceRefresh(void) {
-    gDIArtPrefTS = 0;
-    CFPreferencesAppSynchronize(CFSTR("com.local.playerexact"));
-    diArtPrefOn();
+    /* 已经在后台队列上调用(见 diArtChanged); 这里同步读一次, 保证紧接着的判断是新的 */
+    gDIArtPrefTS = CFAbsoluteTimeGetCurrent();
+    diArtPrefReadNow();
 }
 
 /* 内置播放器自己的旋转开关(导出 C++ 符号)。它的 flag 一旦为 1, 每次 update 都会给
@@ -16342,27 +16457,195 @@ static void diDumpExpandedTreeOnce(UIView *root) {
 
 static void diNPBackgroundTick(UIView *root);   /* 3.0.15: 定义在下面的 3.1.0 段 */
 
+/* ===== 3.0.20: 3×2 传送栏"静默回正"(兜底保险) =====
+   3.0.19 为止我们这边所有在布局里写东西的地方都搬出去了, 理论上抖动该没了。但用户
+   反馈这个抖在"原来给的那份播放器"里就存在(只有 3×2, 3×2B 不会), 所以再加一层
+   纯几何兜底 —— 只在**布局之外**、CA 提交之前做, 而且极度保守:
+     · 只认 3×2 档位 + 同一张卡片尺寸没变(变了 = 展开收起/换布局, 立刻重建基准, 不拦);
+     · 只在位移 ≤8pt、边长变化 ≤8pt 时才判为"抖", 立刻按基准摆回去(无动画);
+     · 同一个新值连续 3 次 = 系统真的要这么排 → 认它(不会死锁);
+     · 每 60 秒最多 30 次, 超了停手 —— 判错了也磕不动系统。
+   写回发生在本轮布局之后、CA 提交之前, 跟系统这一帧一起提交, 用户看不到; 也不会像
+   3.0.9 那样在布局里改 frame 引发互相打架/无限注销。 */
+@interface DITBSnapState : NSObject
+@property (nonatomic, copy)   NSString *sig;      /* 稳定基准 */
+@property (nonatomic, copy)   NSString *trySig;   /* 系统正在坚持的新值 */
+@property (nonatomic, assign) CGSize card;
+@property (nonatomic, assign) int rejects;
+@property (nonatomic, assign) int budget;
+@property (nonatomic, assign) CFTimeInterval ts;
+@property (nonatomic, assign) int logs;
+@end
+@implementation DITBSnapState
+@end
+static const void *kDITBSnapKey = &kDITBSnapKey;
+
+static NSArray<UIView *> *diTBBtns(UIView *tc) {
+    NSMutableArray<UIView *> *a = [NSMutableArray array];
+    for (UIView *c in tc.subviews)
+        if ([NSStringFromClass(c.class) containsString:@"TransportButton"]) [a addObject:c];
+    return a;
+}
+/* 签名格式: 每项 "cx,cy,bw,bh,ta,tb,tc,td,tx,ty", 项间用 | 分隔(第一项是容器)。
+   刻意用 center + bounds + transform, 不用 frame —— frame 在 transform 非单位阵时
+   读写语义不一致(UIKit 明确不建议), 回正会算歪。 */
+static NSString *diTBItemSig(UIView *v) {
+    CGAffineTransform t = v.transform;
+    CGPoint c = v.center; CGSize b = v.bounds.size;
+    return [NSString stringWithFormat:@"%.2f,%.2f,%.2f,%.2f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f",
+            c.x, c.y, b.width, b.height, t.a, t.b, t.c, t.d, t.tx, t.ty];
+}
+static NSString *diTBSigOf(UIView *tc, NSArray<UIView *> *btns) {
+    NSMutableString *s = [NSMutableString stringWithString:diTBItemSig(tc)];
+    for (UIView *b in btns) [s appendFormat:@"|%@", diTBItemSig(b)];
+    return s;
+}
+/* 只比 center/bounds(前 4 个数)判"算不算小抖动"; 阈值 8pt */
+static BOOL diTBSigNear(NSString *a, NSString *b) {
+    NSArray<NSString *> *pa = [a componentsSeparatedByString:@"|"];
+    NSArray<NSString *> *pb = [b componentsSeparatedByString:@"|"];
+    if (pa.count != pb.count || pa.count < 3) return NO;
+    for (NSUInteger i = 0; i < pa.count; i++) {
+        NSArray<NSString *> *na = [pa[i] componentsSeparatedByString:@","];
+        NSArray<NSString *> *nb = [pb[i] componentsSeparatedByString:@","];
+        if (na.count < 4 || nb.count < 4) return NO;
+        for (int k = 0; k < 4; k++)
+            if (fabs([na[k] doubleValue] - [nb[k] doubleValue]) > 8.0) return NO;
+    }
+    return YES;
+}
+static void diTBSnapApply(UIView *tc, NSArray<UIView *> *btns, NSString *sig) {
+    NSArray<NSString *> *parts = [sig componentsSeparatedByString:@"|"];
+    if (parts.count != btns.count + 1) return;
+    [CATransaction begin];
+    [CATransaction setDisableActions:YES];
+    NSMutableArray<UIView *> *all = [NSMutableArray arrayWithObject:tc];
+    [all addObjectsFromArray:btns];
+    for (NSUInteger i = 0; i < all.count && i < parts.count; i++) {
+        NSArray<NSString *> *n = [parts[i] componentsSeparatedByString:@","];
+        if (n.count < 10) continue;
+        UIView *v = all[i];
+        v.transform = CGAffineTransformMake([n[4] doubleValue], [n[5] doubleValue],
+                                            [n[6] doubleValue], [n[7] doubleValue],
+                                            [n[8] doubleValue], [n[9] doubleValue]);
+        v.bounds = CGRectMake(0, 0, [n[2] doubleValue], [n[3] doubleValue]);
+        v.center = CGPointMake([n[0] doubleValue], [n[1] doubleValue]);
+    }
+    [CATransaction commit];
+}
+static void diTBSnapCheck(UIView *root) {
+    if (!root || !root.window) return;
+    if (!enabled || !diArtIs3x2()) return;
+    UIView *tc = diArtTransportOf(root);
+    if (!tc || !tc.superview) return;
+    NSArray<UIView *> *btns = diTBBtns(tc);
+    if (btns.count < 3) return;
+    CGSize card = root.bounds.size;
+    if (card.width < 40 || card.height < 40) return;
+    /* 卡片正在做动画(展开/收起) → 这一帧的几何本来就该变, 重建基准 */
+    if (tc.layer.animationKeys.count || root.layer.animationKeys.count) {
+        DITBSnapState *s0 = objc_getAssociatedObject(root, kDITBSnapKey);
+        if (s0) { s0.sig = nil; s0.trySig = nil; s0.rejects = 0; }
+        return;
+    }
+    DITBSnapState *st = objc_getAssociatedObject(root, kDITBSnapKey);
+    if (!st) {
+        st = [DITBSnapState new];
+        objc_setAssociatedObject(root, kDITBSnapKey, st, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    }
+    NSString *now = diTBSigOf(tc, btns);
+    if (!st.sig || !CGSizeEqualToSize(card, st.card)) {
+        st.card = card; st.sig = now; st.trySig = nil; st.rejects = 0;
+        return;
+    }
+    if ([now isEqualToString:st.sig]) { st.trySig = nil; st.rejects = 0; return; }
+    CFTimeInterval t = CFAbsoluteTimeGetCurrent();
+    if (t - st.ts > 60.0) { st.ts = t; st.budget = 0; }
+    if (!diTBSigNear(st.sig, now)) {          /* 大改 = 真的换排布, 认它 */
+        st.sig = now; st.trySig = nil; st.rejects = 0; return;
+    }
+    if (!st.trySig || ![now isEqualToString:st.trySig]) { st.trySig = now; st.rejects = 0; }
+    if (st.rejects >= 3 || st.budget >= 30) {
+        st.sig = now; st.trySig = nil; st.rejects = 0;
+        if (st.logs < 4) { st.logs++; RLog(@"[抖动5] 接受系统新排布(不再回正)"); }
+        return;
+    }
+    st.rejects++; st.budget++;
+    @try { diTBSnapApply(tc, btns, st.sig); } @catch (__unused NSException *e) {}
+    if (st.logs < 4) {
+        st.logs++;
+        RLog(@"[抖动5] 传送栏静默回正 #%d (卡片 %.0fx%.0f)", st.rejects, card.width, card.height);
+    }
+}
+
+/* ===== 3.0.20: 所有"改东西"的动作搬出 layoutSubviews =====
+   431/432 日志把 3×2 抖动的时序摆出来了: 每一次 [抖动3] 的 setFrame/setTransform
+   爆发, 都紧跟在 [封面] 挂蒙版 / 隐藏未在播放 / 铺背景 之后 —— 因为这些都是在我们
+   自己的 layoutSubviews 钩子里同步写的。写图层/写 hidden/挂子层都会让系统在**同一帧
+   内**再排一次版, 那条 5 按钮的传送栏就被排了两遍: 视觉上就是"抖一下"。
+   现在 layoutSubviews 里只做记账 + 投递一次 flush; 真正的写操作全部落到主队列,
+   同一个 runloop 内合并成一次, 而且一定发生在系统这一次布局**之后**、CA 提交**之前**
+   —— 画面效果完全一样, 但绝不会把布局重排插进系统的排版过程里。 */
+static NSHashTable *gDIArtPending = nil;        /* 待处理的播放器根视图 */
+static NSHashTable *gDIArtDressPending = nil;   /* 待挂蒙版的封面 */
+static BOOL gDIArtFlushQueued = NO;
+
+static void diArtPostFlush(UIView *root);
+static BOOL diArtInControlCenter(UIView *v);   /* 定义在后面 */
+static void diArtFlushRun(void) {
+    gDIArtFlushQueued = NO;
+    NSArray<UIView *> *roots = gDIArtPending.allObjects;
+    [gDIArtPending removeAllObjects];
+    NSArray<UIView *> *arts = gDIArtDressPending.allObjects;
+    [gDIArtDressPending removeAllObjects];
+    for (UIView *r in roots) { @try { diArtPostFlush(r); } @catch (__unused NSException *e) {} }
+    for (UIView *a in arts) {
+        @try {
+            if (!a.window || a.hidden || a.alpha < 0.05 || !diArtPrefOn()) continue;
+            if (!diArtInControlCenter(a)) continue;
+            diArtDress(a);
+        } @catch (__unused NSException *e) {}
+    }
+}
+static void diArtFlushQueue(void) {
+    if (gDIArtFlushQueued) return;
+    gDIArtFlushQueued = YES;
+    dispatch_async(dispatch_get_main_queue(), ^{ diArtFlushRun(); });
+}
+static void diArtScheduleDress(UIView *v) {
+    if (!v) return;
+    if (!gDIArtDressPending) gDIArtDressPending = [NSHashTable weakObjectsHashTable];
+    [gDIArtDressPending addObject:v];
+    diArtFlushQueue();
+}
 static void diArtPlayerPost(UIView *root) {
+    /* ---- 轻量部分: 只记账 + 排一次 flush, 不碰任何图层/视图属性 ---- */
     if (![root isKindOfClass:UIView.class]) return;
     /* 灵动岛那套(MRUActivityNowPlayingView)可能继承自 MRUNowPlayingView, 会顺带命中
        这个 hook —— 岛上的头像是用户自己的遮罩素材在管, 这里绝不能碰。 */
     if ([NSStringFromClass(root.class) containsString:@"Activity"]) return;
     if (!gDIArtRoots) gDIArtRoots = [NSHashTable weakObjectsHashTable];
     [gDIArtRoots addObject:root];
+    diArtInstallAVHook();   /* 3.0.17: 类晚出现时在这里补装, 幂等 */
+    /* 无论开还是关, 都把播放器内置旋转关掉: 它不看我们的偏好键, 开着就会
+       "开关关了照样转"。旋转统一由 diArtApply 负责。只做一次。 */
+    {
+        static BOOL nprDone = NO;
+        if (!nprDone) { nprDone = YES; diArtDisableNPRSpin(); }
+    }
+    if (!gDIArtPending) gDIArtPending = [NSHashTable weakObjectsHashTable];
+    [gDIArtPending addObject:root];
+    diArtFlushQueue();
+}
+
+/* ---- 真正的刷新(在主队列、布局之外执行) ---- */
+static void diArtPostFlush(UIView *root) {
+    if (!root || !root.window) return;
     BOOL on = diArtPrefOn();
     /* 3.0.15: 专辑背景跟着"播放器视图"走 —— 播放器视图本身就是各尺寸下的可见卡片
        (3×2 小卡 / 展开卡), 背景铺在它的 bounds 上, 换尺寸自动跟随, 不用再去猜卡片。
        只在图层层面插子层, 不动任何视图/约束。 */
     @try { diNPBackgroundTick(root); } @catch (__unused NSException *e) {}
-    diArtInstallAVHook();   /* 3.0.17: 类晚出现时在这里补装, 幂等 */
-    /* 无论开还是关, 都把播放器内置旋转关掉: 它不看我们的偏好键, 开着就会
-       "开关关了照样转"。旋转统一由 diArtApply 负责。
-       3.0.15: 只在第一次调用(以前每轮布局都调, 那个 setter 在被别的插件接管时
-       会顺手触发它自己的刷新 —— 1Hz 的"抖一下"嫌疑之一)。 */
-    {
-        static BOOL nprDone = NO;
-        if (!nprDone) { nprDone = YES; diArtDisableNPRSpin(); }
-    }
     DIArtRootState *rs = objc_getAssociatedObject(root, kDIArtRootKey);
     if (!rs) {
         rs = [DIArtRootState new];
@@ -16426,6 +16709,9 @@ static void diArtPlayerPost(UIView *root) {
     }
     /* 3.0.12: 展开态自动导出一次完整视图树(只为定位"有些封面没覆盖"), 写盘不刷屏 */
     diDumpExpandedTreeOnce(root);
+    /* 3.0.20: 3×2 传送栏兜底回正 —— 布局已经跑完, 这里改几何不会插进系统的排版过程,
+       写回去的这一下跟本帧一起提交, 用户看不到。 */
+    @try { diTBSnapCheck(root); } @catch (__unused NSException *e) {}
     /* 3.0.17: 删掉"0.1 秒后再补一次(每 0.25s 触发)"。它在布局回调之后再往图层写一遍,
        等于把系统这一帧排好的排版动画打断重来 —— 3×2 那条传送栏的按钮就是这样
        "抖一下"。现在旋转/蒙版全部由 MRUArtworkView 的 layoutSubviews 钩子负责,
@@ -16987,7 +17273,10 @@ static void diArtAVLayout(id self, SEL cmd) {
         UIView *v = (UIView *)self;
         if (!v.window || v.hidden || v.alpha < 0.05) return;
         if (!diArtInControlCenter(v)) return;   /* 锁屏 / 灵动岛不碰 */
-        diArtDress(v);
+        /* 3.0.20: 不在 layoutSubviews 里挂 mask/加动画 —— 那会让系统在**同一帧**里
+           把父视图再排一次(3×2 的传送栏就是这么抖的)。丢到主队列, 同一 runloop
+           内合并执行, 一定在本次布局之后、CA 提交之前 —— 视觉上还是这一帧。 */
+        diArtScheduleDress(v);
     } @catch (__unused NSException *e) {}
 }
 
@@ -17001,25 +17290,31 @@ static void (*gDIOrigTBSetTransform)(id, SEL, CGAffineTransform) = NULL;
 static void (*gDIOrigTBSetHighlighted)(id, SEL, BOOL) = NULL;
 static int gDITBLogs = 0;
 
+/* 3.0.20: 打**整条调用链**(最多 4 帧), 每帧带 "镜像+偏移"。
+   原因: 3.0.19 只打第一帧, 而 dylib 里的 static 函数没有导出符号, dladdr 只能给出
+   "最近的前一个导出符号", 于是所有调用都被记成了 diGainRestoreAll —— 白查两轮。
+   现在偏移量可以拿同一份 dylib 用 nm 反解, 下次日志就能直接点名到具体函数。 */
 static void diTraceCaller(const char *tag) {
-    void *bt[12];
-    int n = backtrace(bt, 12);
-    for (int i = 1; i < n; i++) {
+    void *bt[16];
+    int n = backtrace(bt, 16);
+    NSMutableString *chain = [NSMutableString string];
+    int shown = 0;
+    for (int i = 1; i < n && shown < 4; i++) {
         Dl_info di;
         if (!dladdr(bt[i], &di)) continue;
-        const char *sym = di.dli_sname ? di.dli_sname : "?";
-        if (strstr(sym, "DriftIsland") || strstr(sym, "diTrace")) continue;
         const char *fn = di.dli_fname ? di.dli_fname : "?";
         const char *base = strrchr(fn, '/');
-        /* 注意: RLog 走 NSString 格式化, 不认 %s —— 必须转成对象, 否则把 char* 当
-           id 用会直接崩 SpringBoard。 */
-        NSString *tagS = tag ? [NSString stringWithUTF8String:tag] : @"?";
         NSString *fnS = [NSString stringWithUTF8String:(base ? base + 1 : fn)];
-        NSString *symS = [NSString stringWithUTF8String:sym];
-        RLog(@"[抖动3] %@ ← %@ %@", tagS, fnS ?: @"?", symS ?: @"?");
-        return;
+        NSString *symS = di.dli_sname ? [NSString stringWithUTF8String:di.dli_sname] : nil;
+        if (symS && [symS containsString:@"diTrace"]) continue;
+        uintptr_t off = di.dli_fbase ? ((uintptr_t)bt[i] - (uintptr_t)di.dli_fbase) : 0;
+        if (shown) [chain appendString:@" ← "];
+        [chain appendFormat:@"%@+0x%lx", fnS ?: @"?", (unsigned long)off];
+        if (symS.length) [chain appendFormat:@"(%@)", symS];
+        shown++;
     }
-    RLog(@"[抖动3] %@ ← (无符号)", tag ? [NSString stringWithUTF8String:tag] : @"?");
+    NSString *tagS = tag ? [NSString stringWithUTF8String:tag] : @"?";
+    RLog(@"[抖动3] %@ ← %@", tagS, chain.length ? chain : @"(无)");
 }
 
 /* 3.0.19: 丢掉引导前 10 秒的记录 —— 430 日志里 40 条配额全被引导期的正常布局吃光了,
@@ -17171,24 +17466,44 @@ static void diArtChanged(CFNotificationCenterRef c, void *obs, CFStringRef name,
         CFPreferencesAppSynchronize(CFSTR("com.abgg332.driftisland"));
         RLog(@"[保险] 设置有改动 → 功能档位恢复全开(下次引导生效)");
     }
-    diArtForceRefresh();
-    diArtDisableNPRSpin();
     gDIBgPrefTS = 0;               /* 3.1.0: 背景/隐藏未在播放的开关立刻重读 */
     gDIBgFetchTS = 0;
-    dispatch_async(dispatch_get_main_queue(), ^{
-        @try {
-            BOOL on = diArtPrefOn();
-            RLog(@"[封面] 开关变化 → %@", on ? @"圆 + 旋转" : @"方形 + 停止");
-            diNPRefreshBackgrounds();
-            for (UIView *host in gDIBgHosts.allObjects) {
-                diNPHideNotPlayingLabels(host, diNPPrefFlag(@"HideNotPlaying", NO));
-            }
-            for (UIView *root in gDIArtRoots.allObjects) {
-                DIArtRootState *rs = objc_getAssociatedObject(root, kDIArtRootKey);
-                for (UIView *a in rs.arts) diArtApply(a, on);
-                [root setNeedsLayout];
-            }
-        } @catch (NSException *e) { RLog(@"[封面] 刷新异常: %@", e.reason); }
+    /* 3.0.20(iOS17 卡死的主修): 以前这里在 SpringBoard 主线程直接
+       CFPreferencesAppSynchronize(com.local.playerexact) —— 那是**别的进程**的域,
+       设置页正在高频写它, cfprefsd 一争用就把主线程按住几十秒, watchdog 直接注销
+       (432 日志: 33 秒 / 66 秒两段空洞, 全都紧跟在这条通知之后)。
+       现在: ① 合并抖动(0.35 秒内只认一次); ② 跨进程同步丢到后台串行队列;
+       ③ 回主线程只做"重挂蒙版", 不再对每个根视图 setNeedsLayout(那会逼整张卡重排)。 */
+    static BOOL pending = NO;
+    if (pending) return;
+    pending = YES;
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.35 * NSEC_PER_SEC)),
+                   dispatch_get_main_queue(), ^{
+        pending = NO;
+        static dispatch_queue_t q;
+        static dispatch_once_t once;
+        dispatch_once(&once, ^{
+            q = dispatch_queue_create("com.abgg332.driftisland.npprefs", DISPATCH_QUEUE_SERIAL);
+            dispatch_set_target_queue(q, dispatch_get_global_queue(QOS_CLASS_UTILITY, 0));
+        });
+        dispatch_async(q, ^{
+            @try { diArtForceRefresh(); } @catch (__unused NSException *e) {}
+            dispatch_async(dispatch_get_main_queue(), ^{
+                @try {
+                    diArtDisableNPRSpin();
+                    BOOL on = diArtPrefOn();
+                    RLog(@"[封面] 开关变化 → %@", on ? @"圆 + 旋转" : @"方形 + 停止");
+                    diNPRefreshBackgrounds();
+                    for (UIView *host in gDIBgHosts.allObjects) {
+                        diNPHideNotPlayingLabels(host, diNPPrefFlag(@"HideNotPlaying", NO));
+                    }
+                    for (UIView *root in gDIArtRoots.allObjects) {
+                        DIArtRootState *rs = objc_getAssociatedObject(root, kDIArtRootKey);
+                        for (UIView *a in rs.arts) diArtApply(a, on);
+                    }
+                } @catch (NSException *e) { RLog(@"[封面] 刷新异常: %@", e.reason); }
+            });
+        });
     });
 }
 
