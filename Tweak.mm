@@ -69,7 +69,7 @@ static double expandTextY = DI_EXP_TEXT_BASE_Y;   // 上下偏移(pt, 下为正,
 static double expandTextScale = 100.0; // 文字大小(%, 100=原样)
 /* 2.8.86: 构建戳 —— 之前横幅打的是 SpringBoard 自己的 CFBundleShortVersionString(恒 1.0),
    日志里根本看不出装的是哪一版。所有诊断行都带这个戳, 下轮日志一眼定位。 */
-#define DI_BUILD_VER @"3.0.22"
+#define DI_BUILD_VER @"3.0.23"
 static BOOL gRecordingActive = NO; // 保留: 岛素材总闸条件
 static NSString *diElementId(UIView *host);
 static BOOL diMiniMusicActive(UIView *host); // 2.6.3: 前置(遮罩层使用)
@@ -208,8 +208,16 @@ static volatile const char *gDIPhase = "启动";
 static inline void diPhase(const char *p) { gDIPhase = p; }
 static void diHangNote(NSString *msg) {
     @try {
+        /* 3.0.23: 时间戳统一用本地时区(以前这里用 descriptionWithLocale 打的是 UTC,
+           和前后行差 8 小时, 事后对时间线很容易错位)。 */
+        static NSDateFormatter *df = nil;
+        static dispatch_once_t once;
+        dispatch_once(&once, ^{
+            df = [NSDateFormatter new];
+            df.dateFormat = @"yyyy-MM-dd HH:mm:ss";
+        });
         NSString *line = [NSString stringWithFormat:@"[%@] [卡死] %@\n",
-                          [[NSDate date] descriptionWithLocale:nil], msg];
+                          [df stringFromDate:[NSDate date]], msg];
         NSData *d = [line dataUsingEncoding:NSUTF8StringEncoding];
         int fd = open(diLogPath().fileSystemRepresentation, O_WRONLY | O_APPEND | O_CREAT, 0666);
         if (fd >= 0) { ssize_t _ = write(fd, d.bytes, d.length); (void)_; close(fd); }
@@ -235,9 +243,10 @@ static void diStartWatchdog(void) {
                 if (tk == last) stalled++; else { stalled = 0; last = tk; }
                 if (stalled >= 4 && notes < 12) {   /* 连续 2 秒没心跳 */
                     notes++;
-                    const volatile char *vp = gDIPhase; const char *ph = vp ? (const char *)vp : "?";
-                    diHangNote([NSString stringWithFormat:@"主线程停摆约 %d 秒, 阶段=%s",
-                                stalled / 2, ph]);
+                    const volatile char *vp = gDIPhase;
+                    NSString *ph = vp ? [NSString stringWithUTF8String:(const char *)vp] : @"?";
+                    diHangNote([NSString stringWithFormat:@"主线程停摆约 %d 秒, 阶段=%@",
+                                stalled / 2, ph ?: @"?"]);
                 }
             }
         });
@@ -6738,7 +6747,7 @@ static void diDumpApertureTree(UIView *root) {
    platter 根本不在那 8 个节点里; 原有功能的定位路径(diRestyleWalk)也是
    遍历所有窗口才找到 platter 301x76。 */
 static void diGainScanAperture(void) {
-    diPhase("隐藏药丸扫描");
+    diPhase("scan");
     if (![NSThread isMainThread] || !(enabled && hideBlackPillOn)) return;
     int gTotal = 0, hitG = 0, hitP = 0;
     for (UIScene *s in UIApplication.sharedApplication.connectedScenes) {
@@ -14939,6 +14948,55 @@ static BOOL diRouteNameHit(UIView *v) {
     if (sz.width > 0 && sz.height > 0 && (sz.width > 90 || sz.height > 90)) return NO;
     return YES;
 }
+/* 3.0.23: 那颗投送按钮底下还有一层独立的"圆底"(半透明灰圆, 436 截图里箭头指的
+   就是它)。它跟按钮是兄弟或包一层的轻量容器, 只把按钮 hidden 的话图标没了、圆还在。
+   这里按"同中心 + 同量级"把光环一起带上; 判据很窄(中心差 ≤12pt, 边长 0.5~2.2 倍),
+   整行容器/整卡不会被误伤。 */
+static void diRouteHideHalo(UIView *hit) {
+    if (!hit || !hit.superview) return;
+    CGSize hs = hit.bounds.size;
+    CGFloat side = MAX(hs.width, hs.height);
+    if (side < 8.0) side = 44.0;
+    CGPoint hcW = [hit convertPoint:CGPointMake(CGRectGetMidX(hit.bounds),
+                                               CGRectGetMidY(hit.bounds)) toView:nil];
+    NSMutableArray<UIView *> *extra = [NSMutableArray array];
+    void (^consider)(UIView *, CGFloat) = ^(UIView *v, CGFloat cap) {
+        if (!v || v == hit) return;
+        if (!v.window || v.hidden) return;
+        CGSize s = v.bounds.size;
+        if (s.width < 8.0 || s.height < 8.0) return;
+        CGFloat mx = MAX(s.width, s.height), mn = MIN(s.width, s.height);
+        if (mx > side * cap) return;          /* 太大: 整行 / 整卡容器 */
+        if (mn < side * 0.5) return;          /* 太扁: 分隔线 / 进度条 */
+        CGPoint c = [v convertPoint:CGPointMake(CGRectGetMidX(v.bounds),
+                                                CGRectGetMidY(v.bounds)) toView:nil];
+        if (fabs(c.x - hcW.x) > 12.0 || fabs(c.y - hcW.y) > 12.0) return;
+        if (![extra containsObject:v]) [extra addObject:v];
+    };
+    UIView *p = hit.superview;
+    for (int i = 0; p && i < 3; i++, p = p.superview) {
+        CGFloat cap = (i == 0) ? 2.2 : 1.6;
+        for (UIView *sib in p.subviews) consider(sib, cap);
+        consider(p, cap);
+    }
+    NSMutableString *names = [NSMutableString string];
+    for (UIView *v in extra) {
+        [names appendFormat:@"%@(%.0fx%.0f) ", NSStringFromClass(v.class),
+         v.bounds.size.width, v.bounds.size.height];
+        if ([gDIRouteViews containsObject:v]) { if (!v.hidden) v.hidden = YES; continue; }
+        objc_setAssociatedObject(v, &kDIRouteOrigHidden, @(v.hidden), OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        [gDIRouteViews addObject:v];
+        v.hidden = YES;
+    }
+    if (names.length) {
+        static NSString *lastNames;
+        if (![names isEqualToString:lastNames ?: @""]) {
+            lastNames = [names copy];
+            diMruFileLog([NSString stringWithFormat:@"route 光环一起隐藏: %@", names]);
+        }
+    }
+}
+
 static void diActivityHideRoute(UIView *root) {
     if (!NSThread.isMainThread || !root || !root.window) return;
     DIExpTextParams p; diMruExpandTextParams(&p);
@@ -15004,6 +15062,7 @@ static void diActivityHideRoute(UIView *root) {
         [gDIRouteViews addObject:hit];
     }
     hit.hidden = YES;
+    diRouteHideHalo(hit);
     NSString *sig = [NSString stringWithFormat:@"%p_%@", (__bridge void *)hit, dump];
     if (![sig isEqualToString:lastSig]) {
         lastSig = [sig copy];
@@ -16714,14 +16773,14 @@ static void diArtPlayerPost(UIView *root) {
 /* ---- 真正的刷新(在主队列、布局之外执行) ---- */
 static void diArtPostFlush(UIView *root) {
     if (!root || !root.window) return;
-    diPhase("封面刷新");
+    diPhase("art");
     BOOL on = diArtPrefOn();
     /* 3.0.15: 专辑背景跟着"播放器视图"走 —— 播放器视图本身就是各尺寸下的可见卡片
        (3×2 小卡 / 展开卡), 背景铺在它的 bounds 上, 换尺寸自动跟随, 不用再去猜卡片。
        只在图层层面插子层, 不动任何视图/约束。 */
-    diPhase("铺专辑背景");
+    diPhase("bgput");
     @try { diNPBackgroundTick(root); } @catch (__unused NSException *e) {}
-    diPhase("封面刷新");
+    diPhase("art");
     DIArtRootState *rs = objc_getAssociatedObject(root, kDIArtRootKey);
     if (!rs) {
         rs = [DIArtRootState new];
@@ -16736,7 +16795,7 @@ static void diArtPostFlush(UIView *root) {
        1500 节点的 BFS, 主线程直接被自己占满。现在扫不到也要间隔 0.4 秒。 */
     CFTimeInterval scanGap = (!arts || !arts.count) ? 0.4 : 1.0;
     if (!arts || now - rs.scanTS > scanGap) {
-        diPhase("收集封面");
+        diPhase("collect");
         arts = diArtCollectIn(root);
         /* 3.0.15: 这一轮没收集到的旧封面不再"还原"(diArtApply:NO) —— 3×2 换页/换曲时
            视图会短暂离开收集结果, 一还原一重挂就是"转圈从起点重来 + 闪一下"。 */
@@ -16765,7 +16824,7 @@ static void diArtPostFlush(UIView *root) {
            一直维护, 直到视图真的离开窗口。dress 是幂等的, 尺寸没变什么都不写。 */
         if (!gDIArtKnown) gDIArtKnown = [NSHashTable weakObjectsHashTable];
         for (__strong UIView *a in arts) [gDIArtKnown addObject:a];
-        diPhase("挂圆形蒙版");
+        diPhase("mask");
         for (__strong UIView *a in gDIArtKnown.allObjects) {
             if (!a.window || a.hidden || a.alpha < 0.05) continue;
             @try { diArtDress(a); } @catch (__unused NSException *e) {}
@@ -16784,9 +16843,9 @@ static void diArtPostFlush(UIView *root) {
         if (hn - lastHideTS > 1.0) {
             lastHideTS = hn;
             dispatch_async(dispatch_get_main_queue(), ^{
-                diPhase("隐藏未在播放");
+                diPhase("hidetext");
                 @try { diNPApplyHideForRoot(root); } @catch (__unused NSException *e) {}
-                diPhase("封面刷新");
+                diPhase("art");
             });
         }
     }
@@ -16794,10 +16853,9 @@ static void diArtPostFlush(UIView *root) {
     diDumpExpandedTreeOnce(root);
     /* 3.0.20: 3×2 传送栏兜底回正 —— 布局已经跑完, 这里改几何不会插进系统的排版过程,
        写回去的这一下跟本帧一起提交, 用户看不到。 */
-    diPhase("3×2 传送栏");
-    diPhase("3×2 传送栏");
+    diPhase("tb");
     @try { diTBNormalizeFromRoot(root); } @catch (__unused NSException *e) {}
-    diPhase("空闲");
+    diPhase("idle");
     /* 3.0.17: 删掉"0.1 秒后再补一次(每 0.25s 触发)"。它在布局回调之后再往图层写一遍,
        等于把系统这一帧排好的排版动画打断重来 —— 3×2 那条传送栏的按钮就是这样
        "抖一下"。现在旋转/蒙版全部由 MRUArtworkView 的 layoutSubviews 钩子负责,
@@ -16840,18 +16898,64 @@ static BOOL gDIBgOnCache = YES;
 static BOOL gDIHideNP = NO;
 static dispatch_source_t gDIBgTimer = NULL; /* 3.0.15: 换曲轮询(通知不可靠时的兜底) */
 
-static BOOL diNPPrefFlag(NSString *key, BOOL def) {
+/* 3.0.23(iOS17 卡死的真正大头, 之前一直漏了):
+   com.local.playerexact 是**别的进程**的偏好域, CFPreferences 对它没有进程内缓存,
+   每读一个键就是一次到 cfprefsd 的同步 XPC。而 diNPTickPrefs 在 1Hz 的布局链路上,
+   一次读 2 个键 —— 用户在设置里拨开关时, 设置进程正在高频写这个域, cfprefsd 一被
+   占住, SpringBoard 主线程就跟着停(436 日志: "背景: 创建子层" 之后 61 秒空白然后
+   重启; 崩溃报告里没有我们 = 被 watchdog 杀掉, 不是我们崩)。
+   现在: 主线程只读**内存缓存**, 真正读盘全部在后台串行队列; 只有"用户真的动了开关"
+   那一次(diArtChanged)才同步读一遍, 保证开关立刻生效。 */
+static NSMutableDictionary<NSString *, NSNumber *> *diNPPrefCache(void) {
+    static NSMutableDictionary *d; static dispatch_once_t once;
+    dispatch_once(&once, ^{ d = [NSMutableDictionary dictionary]; });
+    return d;
+}
+static BOOL diNPPrefFlagRaw(NSString *key, BOOL def) {
     id v = CFBridgingRelease(CFPreferencesCopyAppValue((__bridge CFStringRef)key,
                                                       CFSTR("com.local.playerexact")));
     return [v isKindOfClass:NSNumber.class] ? [v boolValue] : def;
 }
-
+static void diNPPrefCachePut(NSString *key, BOOL v) {
+    @synchronized (diNPPrefCache()) { diNPPrefCache()[key] = @(v); }
+}
+static BOOL diNPPrefFlag(NSString *key, BOOL def) {
+    if (![NSThread isMainThread]) return diNPPrefFlagRaw(key, def);
+    @synchronized (diNPPrefCache()) {
+        NSNumber *n = diNPPrefCache()[key];
+        if (n) return n.boolValue;
+    }
+    BOOL v = diNPPrefFlagRaw(key, def);
+    diNPPrefCachePut(key, v);
+    return v;
+}
+static void diNPLoadPrefsSync(void) {
+    BOOL on = diNPPrefFlagRaw(@"MusicArtworkGradientEnabled", YES);
+    BOOL hid = diNPPrefFlagRaw(@"HideNotPlaying", NO);
+    diNPPrefCachePut(@"MusicArtworkGradientEnabled", on);
+    diNPPrefCachePut(@"HideNotPlaying", hid);
+    gDIBgOnCache = on;
+    gDIHideNP = hid;
+}
 static void diNPTickPrefs(void) {
     CFTimeInterval now = CFAbsoluteTimeGetCurrent();
     if (now - gDIBgPrefTS < 1.0) return;
     gDIBgPrefTS = now;
-    gDIBgOnCache = diNPPrefFlag(@"MusicArtworkGradientEnabled", YES);
-    gDIHideNP = diNPPrefFlag(@"HideNotPlaying", NO);
+    static dispatch_queue_t q; static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        q = dispatch_queue_create("com.abgg332.di.npflag", DISPATCH_QUEUE_SERIAL);
+        dispatch_set_target_queue(q, dispatch_get_global_queue(QOS_CLASS_UTILITY, 0));
+    });
+    dispatch_async(q, ^{
+        BOOL on = diNPPrefFlagRaw(@"MusicArtworkGradientEnabled", YES);
+        BOOL hid = diNPPrefFlagRaw(@"HideNotPlaying", NO);
+        diNPPrefCachePut(@"MusicArtworkGradientEnabled", on);
+        diNPPrefCachePut(@"HideNotPlaying", hid);
+        dispatch_async(dispatch_get_main_queue(), ^{
+            gDIBgOnCache = on;
+            gDIHideNP = hid;
+        });
+    });
 }
 
 /* ---------- MediaRemote: 取当前专辑图 ---------- */
@@ -16885,6 +16989,27 @@ static void diNPLoadMediaRemote(void) {
 
 static void diNPRefreshBackgrounds(void);
 static void diNPStartBgTimer(void);   /* 3.0.15: 定义在模块容器钩子之后 */
+
+/* 3.0.23: 在后台把专辑图缩到 640 长边并**强制解码**。
+   600x600 的原图在 3x 屏上被 CA 当成 1800x1800 的纹理, 4×2 一次要铺 4 个宿主 =
+   近百 MB 纹理; iOS17 的 SpringBoard 直接就被 watchdog 带走(436 日志: "背景: 创建
+   子层" 那一行之后 61 秒空白, 然后重启, 崩溃报告里没有我们 = 被系统杀掉, 不是崩)。
+   缩图 + 预解码都放在后台队列, 主线程只剩一次已解码 CGImage 的赋值。 */
+static UIImage *diNPDownscaleImage(UIImage *img, CGFloat maxSide) {
+    if (!img) return nil;
+    CGSize s = img.size;
+    if (s.width < 1 || s.height < 1) return img;
+    CGFloat k = MIN(1.0, maxSide / MAX(s.width, s.height));
+    CGSize t = CGSizeMake(MAX(1.0, round(s.width * k)), MAX(1.0, round(s.height * k)));
+    UIGraphicsBeginImageContextWithOptions(t, YES, 1.0);
+    UIImage *out = nil;
+    @try {
+        [img drawInRect:CGRectMake(0, 0, t.width, t.height)];
+        out = UIGraphicsGetImageFromCurrentImageContext();
+    } @catch (__unused NSException *e) {}
+    UIGraphicsEndImageContext();
+    return out ?: img;
+}
 
 static void diNPFetchArtwork(void) {
     if (gDIStage < 1) return;   /* 档位 0: 不取图 */
@@ -16935,7 +17060,7 @@ static void diNPFetchArtwork(void) {
             /* 3.0.16: 先比数据再解码 —— 轮询变快以后每次都解一张 600x600 太重 */
             NSData *prev = gDIBgData;
             BOOL same = (data && prev && [data isEqualToData:prev]);
-            UIImage *img = (data && !same) ? [UIImage imageWithData:data] : nil;
+            UIImage *img = (data && !same) ? diNPDownscaleImage([UIImage imageWithData:data], 640.0) : nil;
             dispatch_async(dispatch_get_main_queue(), ^{
                 @try {
                     if (!img) {
@@ -17036,7 +17161,7 @@ static int gDIBgSlowCount = 0;
 static BOOL gDIBgStopped = NO;      /* 3.0.21: 本进程内停用专辑背景(连续超时保护) */
 static void diNPApplyBackgroundTo(UIView *host, BOOL on) {
     if (gDIBgStopped && on) return;
-    diPhase("背景层写入");
+    diPhase("bgwrite");
     CFTimeInterval tBG = CFAbsoluteTimeGetCurrent();
     @try {
         if (![host isKindOfClass:UIView.class] || !host.window) return;
@@ -17082,6 +17207,9 @@ static void diNPApplyBackgroundTo(UIView *host, BOOL on) {
                      NSStringFromClass(host.class), rect.size.width, rect.size.height, r]);
             bg = [CALayer layer];
             bg.contentsGravity = kCAGravityResizeAspectFill;
+            /* 3.0.23: 必须 1.0 —— 默认跟着屏幕 3x, 600pt 的图会被撑成 1800x1800 的
+               backing store(iOS17 上这一手直接几十 MB 一次)。 */
+            bg.contentsScale = 1.0;
             bg.masksToBounds = YES;
             diNoImplicitActions(bg);
             [host.layer insertSublayer:bg atIndex:0];
@@ -17109,14 +17237,17 @@ static void diNPApplyBackgroundTo(UIView *host, BOOL on) {
        紧接着 65 秒空白 + watchdog 注销)。现在给它计时: 单次超过 300ms 就记一笔, 连续
        三次直接本进程内停用背景 —— 宁可这次不显示背景, 也不能把 SpringBoard 拖死。 */
     CFTimeInterval used = CFAbsoluteTimeGetCurrent() - tBG;
-    if (used > 0.3 && !gDIBgStopped) {
+    if (used > 0.25 && !gDIBgStopped) {
         gDIBgSlowCount++;
-        RLog(@"[卡死] 铺背景耗时 %.0f ms (第 %d 次, 宿主 %@)", used * 1000.0, gDIBgSlowCount,
-             NSStringFromClass(host.class));
-        if (gDIBgSlowCount >= 3) {
+        RLog(@"[卡死] 铺背景耗时 %.0f ms (第 %d 次, 宿主 %@)",
+             used * 1000.0, gDIBgSlowCount, NSStringFromClass(host.class));
+        /* 3.0.23: 从"连续 3 次"改成"单次就停"。一次 400ms 的主线程卡顿已经足以
+           让用户在控制中心里"顿住", 而连按三次才停意味着用户要先被卡三次。
+           停用只影响本进程, 注销后自动恢复; 下次日志里会有一行"已停用"。 */
+        if (used > 0.4 || gDIBgSlowCount >= 3) {
             gDIBgStopped = YES;
             for (UIView *h in gDIBgPlayers.allObjects) diNPApplyBackgroundTo(h, NO);
-            RLog(@"[卡死] 专辑背景已在本进程内停用(连续超时)");
+            RLog(@"[卡死] 专辑背景已在本进程内停用(单次 %.0f ms)", used * 1000.0);
         }
     }
 }
@@ -17153,8 +17284,23 @@ static void diNPBackgroundTick(UIView *root) {
 
 static void diNPRefreshBackgrounds(void) {
     diNPTickPrefs();
-    for (UIView *host in gDIBgPlayers.allObjects) {
-        diNPApplyBackgroundTo(host, gDIBgOnCache);
+    /* 3.0.23(iOS17 卡死): 以前是一次性把所有宿主铺完。4×2 有 4 个格子 + 展开卡,
+       同一轮 runloop 里连做 5 次"插层 + 设内容", 主线程直接被按住(436 日志里
+       开关拨下去那一秒之后就是 61 秒空白 + 重启)。现在一个一个来, 每次隔 24ms,
+       每个之间还给主线程留机会跑布局 —— 用户最多觉得"背景淡入晚了半拍"。 */
+    NSArray<UIView *> *hosts = gDIBgPlayers.allObjects;
+    NSUInteger idx = 0;
+    for (UIView *host in hosts) {
+        __weak UIView *w = host;
+        NSUInteger k = idx++;
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.024 * k * NSEC_PER_SEC)),
+                       dispatch_get_main_queue(), ^{
+            @try {
+                UIView *h = w;
+                if (!h || !h.window) return;
+                diNPApplyBackgroundTo(h, gDIBgOnCache && gDIBgImage != nil);
+            } @catch (__unused NSException *e) {}
+        });
     }
 }
 
@@ -17576,6 +17722,13 @@ static void diArtChanged(CFNotificationCenterRef c, void *obs, CFStringRef name,
     }
     gDIBgPrefTS = 0;               /* 3.1.0: 背景/隐藏未在播放的开关立刻重读 */
     gDIBgFetchTS = 0;
+    /* 3.0.23: 只有"用户真的动开关"这一次值得同步读(他要立刻看到效果), 其余全走后台缓存。
+       顺便复位背景熔断 —— 用户重新打开开关 = 明确想再试一次。 */
+    {
+        BOOL wasOn = gDIBgOnCache;
+        diNPLoadPrefsSync();
+        if (gDIBgOnCache && !wasOn) { gDIBgStopped = NO; gDIBgSlowCount = 0; }
+    }
     /* 3.0.20(iOS17 卡死的主修): 以前这里在 SpringBoard 主线程直接
        CFPreferencesAppSynchronize(com.local.playerexact) —— 那是**别的进程**的域,
        设置页正在高频写它, cfprefsd 一争用就把主线程按住几十秒, watchdog 直接注销
@@ -17598,7 +17751,7 @@ static void diArtChanged(CFNotificationCenterRef c, void *obs, CFStringRef name,
             @try { diArtForceRefresh(); } @catch (__unused NSException *e) {}
             dispatch_async(dispatch_get_main_queue(), ^{
                 @try {
-                    diPhase("开关变化刷新");
+                    diPhase("prefs");
                     diArtDisableNPRSpin();
                     BOOL on = diArtPrefOn();
                     RLog(@"[封面] 开关变化 → %@", on ? @"圆 + 旋转" : @"方形 + 停止");
