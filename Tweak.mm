@@ -16210,6 +16210,43 @@ static void diNP31FitBox(UIView *box) {
              target, f.size.height);
     }
 }
+/* 3.0.36: 以"播放器视图"为锚点收窄 —— 它就是播放器本身, 不需要任何识别,
+   不依赖 moduleIdentifier / KVC / ivar 扫描, 也就不存在"认不出来"这件事。
+   只处理折叠态(宽>=300 且高 50~120); 展开态(430 机型高 568)直接返回,
+   一个像素都不动 —— 用户明确要求"展开的全部不要动"。
+   宽度只改 size.width, x/高度原样: 左边缘不动, 长度变短。 */
+static void diNP31FitGroup(UIView *npv) {
+    @try {
+        if (!npv || !npv.window) return;
+        if (!diNP31On()) return;
+        UIView *box = nil;
+        for (UIView *p = npv.superview; p; p = p.superview) {
+            if ([NSStringFromClass(p.class) isEqualToString:@"CCUIContentModuleContainerView"]) {
+                box = p; break;
+            }
+            if ([p isKindOfClass:UIWindow.class]) break;
+            if (p.bounds.size.width > 500.0) break;                 /* 面板根 */
+        }
+        if (!box) return;                        /* 锁屏/小岛/桌面组件, 不归 3×1 管 */
+        /* 用**容器**尺寸判定, 不用播放器视图自己的宽度: 4×1 时容器是 356 满宽, 而
+           播放器视图可能本来就是 263(内容按 3 格画), 拿它当门槛会永远不触发。 */
+        CGSize bs = box.bounds.size;
+        if (bs.width < 300.0) return;                                /* 容器已经窄了 */
+        if (bs.height < 50.0 || bs.height > 120.0) return;           /* 展开态/占位不碰 */
+        /* 容器(背景框) → 内容容器(卡片) → 播放器视图, 三层一起收, 才不会一半宽一半窄 */
+        diNP31Mark(box);
+        diNP31FitBox(box);
+        for (UIView *c in box.subviews) {
+            if ([NSStringFromClass(c.class) isEqualToString:@"CCUIContentModuleContentContainerView"]) {
+                diNP31Mark(c);
+                diNP31FitBox(c);
+            }
+        }
+        diNP31Mark(npv);
+        diNP31FitBox(npv);
+    } @catch (__unused NSException *e) {}
+}
+
 static void diNP31StartWatch(void) {
     static BOOL started = NO;
     if (started) return;
@@ -16429,8 +16466,18 @@ static void diNP31CMCLayout(id self, SEL cmd) {
     if (gDIOrigCMCLayout) gDIOrigCMCLayout(self, cmd);
     @try {
         UIView *v = (UIView *)self;
-        if (!objc_getAssociatedObject(v, &kDI3x1Player)) return;
         if (!diNP31On()) return;
+        if (!objc_getAssociatedObject(v, &kDI3x1Player)) {
+            /* 3.0.36: 识别一直没成功过(3.0.35 日志里 [3x1] 识别 一条都没有),
+               所以收窄全靠 moduleIdentifier 那条路径, 首开晚了 6 秒。
+               这里换成一个不可能失败的判据: 正在 layout 的容器里已经挂着播放器
+               子树 = 这就是播放器模块。只在折叠尺寸下认(展开态一律不碰)。 */
+            CGSize sz = v.bounds.size;
+            if (sz.width < 300.0 || sz.height < 40.0 || sz.height > 130.0) return;
+            int budget = 120;
+            if (!diNP31HasNPChild(v, 0, &budget)) return;
+            diNP31Mark(v);
+        }
         diNP31FitBox(v);
     } @catch (__unused NSException *e) {}
 }
@@ -17230,29 +17277,29 @@ static NSArray<UIView *> *diTBVisibleBtns(UIView *tc) {
         return NSOrderedSame;
     }];
 }
+/* 3.0.36: 只认"折叠的 3×1 模块"。祖先模块容器高 77 = 折叠态; 展开态是 568。
+   用户明确要求"展开的全部不要动", 而 3.0.35 只看档位, 展开后那个传送栏也被推了 12pt。 */
+static BOOL diNP31IsFoldedModule(UIView *v) {
+    for (UIView *p = v; p; p = p.superview) {
+        if ([NSStringFromClass(p.class) isEqualToString:@"CCUIContentModuleContainerView"]) {
+            CGFloat h = p.bounds.size.height;
+            return (h > 20.0 && h < 130.0);
+        }
+        if ([p isKindOfClass:UIWindow.class]) break;
+    }
+    return NO;
+}
 static void diNP31ShiftButtons(UIView *tc) {
     if (!tc || !tc.window || !enabled) return;
     if (![diNPLayoutKey() isEqualToString:@"3x1"]) return;
+    if (!diNP31IsFoldedModule(tc)) return;      /* 展开态/锁屏/小岛: 一颗都不碰 */
     NSArray<UIView *> *btns = diTBVisibleBtns(tc);
-    if (btns.count < 3) {
-        static int ls = 0;
-        if (ls < 3) {
-            ls++;
-            RLog(@"[3x1] 按钮右移跳过: 可见按钮只有 %lu 个 (栏 %@ %.0fx%.0f)",
-                 (unsigned long)btns.count, NSStringFromClass(tc.class),
-                 tc.bounds.size.width, tc.bounds.size.height);
-        }
-        return;
-    }
-    const CGFloat kShift = 12.0;   /* 3.0.33: 9 太小, 用户看不出; 12 明显一点 */
-    CGFloat rowW = tc.bounds.size.width;
-    int moved = 0; CGFloat lastDx = 0;
-    /* 3.0.35: 先按"离栏中心最近的那颗 = 播放"定位, 再取它右边第一颗 = 下一首。
-       不能用"中间索引"/"最右两颗": 这一排有两种形态 —— 3 颗(上一首/播放/下一首)和
-       5 颗(随机/上一首/播放/下一首/循环)。按索引推在 5 颗时会把"循环"当成"下一首";
-       按中心定位则两种形态都落在"播放"上, 右边那颗自然就是"下一首"。 */
+    if (btns.count < 3) return;
+    const CGFloat kShift = 12.0;
     NSUInteger n = btns.count;
-    CGFloat mid = rowW * 0.5;
+    /* 播放键 = 离栏中心最近的那颗; 它右边第一颗就是"下一首"。
+       3 颗(上一首/播放/下一首)和 5 颗(随机/上一首/播放/下一首/循环)两种形态都对。 */
+    CGFloat mid = tc.bounds.size.width * 0.5;
     NSUInteger playIdx = 0;
     CGFloat best = CGFLOAT_MAX;
     for (NSUInteger i = 0; i < n; i++) {
@@ -17261,18 +17308,19 @@ static void diNP31ShiftButtons(UIView *tc) {
         if (d < best) { best = d; playIdx = i; }
     }
     NSUInteger targets[2] = { playIdx, playIdx + 1 };
+    int moved = 0; CGFloat lastDx = 0;
     for (int t = 0; t < 2; t++) {
         NSUInteger i = targets[t];
         if (i >= n) continue;
         UIView *b = btns[i];
         if (!b.window || !b.layer) continue;
-        /* 3.0.35: 图层上有动画在跑就先不写。未播放时那颗播放键带"呼吸"式的循环动画,
-           我们每帧写 model layer 的 position, 动画播完就从动画值跳回我们写的值,
-           表现就是用户说的"没播放时播放按钮会乱跳"。等动画结束再摆, 只跳一次。 */
-        if (b.layer.animationKeys.count > 0) continue;
-        /* 3.0.35: 在**传送栏坐标系**里量。窗口坐标会随控制中心滚动/展开整体漂移,
-           以前在那儿判"偏离 >40 就重认基准", 一滚就重认、位移跟着丢; 栏内坐标对
-           滚动免疫, 只有栏自己重新排版(宽度变了)才重认基准。这是"位置又变回去"的主因。 */
+        /* 只避开"position 本身在动画"的时机(按下高亮)。以前是任何动画都跳过,
+           而播放键常驻形变动画, 于是这帧不推、下帧推 —— 一帧原位一帧右移就是"乱跳"。 */
+        BOOL posAnim = NO;
+        for (NSString *k in b.layer.animationKeys) {
+            if ([k isEqualToString:@"position"]) { posAnim = YES; break; }
+        }
+        if (posAnim) continue;
         CGRect rInTc = [b convertRect:b.bounds toView:tc];
         CGFloat cur = CGRectGetMidX(rInTc);
         DI31ShiftState *st = objc_getAssociatedObject(b, &kDI31ShiftKey);
@@ -17280,20 +17328,19 @@ static void diNP31ShiftButtons(UIView *tc) {
             st = [DI31ShiftState new];
             st.base = cur;
             st.applied = cur;
-            st.rowW = rowW;
+            st.rowW = tc.bounds.size.width;
             objc_setAssociatedObject(b, &kDI31ShiftKey, st, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
         }
-        if (fabs(rowW - st.rowW) > 2.0) {          /* 栏宽度真变了 = 换了一套排版 */
-            st.base = cur;
-            st.applied = cur;
-            st.rowW = rowW;
-        }
+        /* 只有"整排真的换了布局"(偏差 >60)才重认基准。3.0.35 是按栏宽变化重认,
+           而展开/收起动画里栏宽是连续变的, 每次变都把"已推过的位置"当成新基准再加
+           12pt —— 越推越远, 这就是用户看到的乱跳。 */
+        if (fabs(cur - st.base) > 60.0) { st.base = cur; st.applied = cur; }
         CGFloat target = st.base + kShift;
         CGFloat dx = target - cur;
-        if (fabs(dx) < 0.4) { st.applied = target; continue; }
+        if (fabs(dx) < 0.5) continue;
         CGPoint p = b.layer.position;
-        p.x += dx;
-        b.layer.position = p;                       /* 只写图层: 不触发 UIKit 再排一次版 */
+        p.x += dx;                                  /* 只写图层: 不触发 UIKit 再排一次版 */
+        b.layer.position = p;
         st.applied = target;
         moved++; lastDx = dx;
     }
@@ -17593,6 +17640,9 @@ static void diArtPostFlush(UIView *root) {
 
 static void diArtNPLayout(id self, SEL cmd) {
     if (gDIArtOrigNPViewLayout) gDIArtOrigNPViewLayout(self, cmd);
+    /* 3.0.36: 播放器视图自己排完就检查一次 3×1 收窄 —— 这是最靠前的时机:
+       视图存在 = 模块已建好, 不再依赖"卡片有没有 window / 容器认不认得出"。 */
+    @try { diNP31FitGroup((UIView *)self); } @catch (__unused NSException *e) {}
     @try { diArtPlayerPost((UIView *)self); } @catch (__unused NSException *e) {}
 }
 static void diArtCCLayout(id self, SEL cmd) {
