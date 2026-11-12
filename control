@@ -5,7 +5,7 @@ Depends: mobilesubstrate, preferenceloader
 Conflicts: com.yechen.bofangqi, com.jaysuen.evocenter, com.local.nativeplayerresize
 Replaces: com.yechen.bofangqi, com.local.nativeplayerresize
 Provides: com.yechen.bofangqi
-Version: 3.0.26
+Version: 3.0.27
 Architecture: iphoneos-arm64
 Description: 在灵动岛内加载视频背景。
 Maintainer: 一条鱼的记忆

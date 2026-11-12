@@ -69,7 +69,7 @@ static double expandTextY = DI_EXP_TEXT_BASE_Y;   // 上下偏移(pt, 下为正,
 static double expandTextScale = 100.0; // 文字大小(%, 100=原样)
 /* 2.8.86: 构建戳 —— 之前横幅打的是 SpringBoard 自己的 CFBundleShortVersionString(恒 1.0),
    日志里根本看不出装的是哪一版。所有诊断行都带这个戳, 下轮日志一眼定位。 */
-#define DI_BUILD_VER @"3.0.26"
+#define DI_BUILD_VER @"3.0.27"
 static BOOL gRecordingActive = NO; // 保留: 岛素材总闸条件
 static NSString *diElementId(UIView *host);
 static BOOL diMiniMusicActive(UIView *host); // 2.6.3: 前置(遮罩层使用)
@@ -258,7 +258,14 @@ static void diStartWatchdog(void) {
    主线程按住。现在 0.2 秒内只同步一次。 */
 static void diPrefSyncOwn(void) {
     static CFTimeInterval ts = 0;
+    static CFAbsoluteTime firstCall = 0;
     CFTimeInterval now = CFAbsoluteTimeGetCurrent();
+    /* 3.0.27(iOS17 首装卡死): 441 实锤第一次装上/首次打开设置那一串
+       [卡死] 阶段=prefs —— 设置进程首开在疯狂写偏好域, cfprefsd 被占住,
+       我们主线程的 Synchronize 全部同步阻塞。注入后 15 秒内不做跨进程同步
+       (走缓存默认值), 错开首开的写风暴; 之后恢复正常节流。 */
+    if (firstCall == 0) firstCall = now;
+    if (now - firstCall < 15.0) return;
     if (now - ts < 0.2) return;
     ts = now;
     CFPreferencesAppSynchronize((__bridge CFStringRef)kDomain);
@@ -3504,10 +3511,6 @@ static BOOL diMaskStatOf(NSString *path, double *outMtime, unsigned long long *o
 @implementation DIMaskView
 
 static NSString *const kDIMaskLayerName = @"DriftIslandAlbumMask";
-/* 3.0.26: 「启用遮罩」的素材覆盖层名(实现在后面, 这里前置声明供玻璃用) */
-#define kDIArtMaskOverlayName @"di.art.mask.overlay"
-static BOOL gDIArtMaskEnabled;
-static UIImage *diArtMaskAsset(void);
 static char kCoverOrigMaskKey;
 /* 2.7.45: 目标层归属谁的探针 —— 防止小岛/展开两个 DIMaskView 互相摘对方的蒙版 */
 static char kMaskOwnerKey;
@@ -4126,38 +4129,6 @@ static BOOL diApplyMaskToCover(UIView *cover, UIImage *shape) {
     if (art && _artView.layer.contents != (__bridge id)art.CGImage) {
         _artView.layer.contents = (__bridge id)art.CGImage;
         _artView.layer.contentsGravity = kCAGravityResizeAspectFill;
-    }
-
-    /* ===== 3.0.26: 「启用遮罩」—— 素材铺在旋转小头像上面 =====
-       播放歌曲时小岛上的小专辑头像就是这块玻璃; 把「专辑遮罩」选好的素材
-       作为覆盖层叠进来, 随 _artView 一起转(不加第二组旋转参数)。
-       开关关/素材没选好 → 覆盖层直接摘掉。 */
-    if (gDIArtMaskEnabled) {
-        UIImage *mk = diArtMaskAsset();
-        CALayer *ov = nil;
-        for (CALayer *sl in _artView.layer.sublayers)
-            if ([sl.name isEqualToString:kDIArtMaskOverlayName]) { ov = sl; break; }
-        if (mk && mk.CGImage) {
-            if (!ov) {
-                ov = [CALayer layer];
-                ov.name = kDIArtMaskOverlayName;
-                ov.zPosition = 10;
-                [_artView.layer addSublayer:ov];
-                RLog(@"[启用遮罩] 素材已叠到旋转小头像上 (%.0fx%.0f)",
-                     mk.size.width, mk.size.height);
-            }
-            if (!CGRectEqualToRect(ov.frame, _artView.bounds)) ov.frame = _artView.bounds;
-            if (ov.contents != (__bridge id)mk.CGImage) {
-                ov.contents = (__bridge id)mk.CGImage;
-                ov.contentsGravity = kCAGravityResizeAspectFill;
-                ov.contentsScale = UIScreen.mainScreen.scale;
-            }
-        } else if (ov) {
-            [ov removeFromSuperlayer];
-        }
-    } else {
-        for (CALayer *sl in _artView.layer.sublayers)
-            if ([sl.name isEqualToString:kDIArtMaskOverlayName]) { [sl removeFromSuperlayer]; break; }
     }
 
     CALayer *ml = _artView.layer.mask;
@@ -5708,9 +5679,18 @@ static void diExportMaskForMRU(void) {
             } else {
                 [fm removeItemAtPath:mine error:NULL];
             }
+            /* 3.0.27: 「启用遮罩」(原生播放页) — MRU 小岛态小头像的独立闸门,
+               旧遮罩总开关关着也能用 */
+            BOOL artmaskOn = NO;
+            {
+                id v = CFBridgingRelease(CFPreferencesCopyAppValue(
+                    CFSTR("ArtworkMaskEnabled"), CFSTR("com.local.playerexact")));
+                artmaskOn = [v respondsToSelector:@selector(boolValue)] ? [v boolValue] : NO;
+            }
             NSDictionary *params = @{@"rot": @(maskRotateOn), @"rev": @(maskRotateReverse),
                                      @"speed": @(maskRotateSpeed), @"active": @(active),
                                      @"mask": path.lastPathComponent ?: @"",
+                                     @"artmask": @(artmaskOn),
                                      /* 2.8.85: 展开定义 —— MRU 内的歌词/歌名位置与大小 */
                                      @"etOn": @(expandTextOn), @"etX": @(expandTextX),
                                      @"etY": @(expandTextY), @"etScale": @(expandTextScale),
@@ -6818,7 +6798,16 @@ static void diGainScanAperture(void) {
        1205~1287 个节点, 而且同一秒里扫了好几遍(hook 装上一次、容器布局节流到了
        但别的路径还会直接调)。BFS 本身不贵, 但 24 个 platter 的 hidden 写回会逼
        控制中心面板重排 —— 首开那一秒所有初始化活都在主线程上排队, 叠加起来就是
-       几秒的停摆。现在全局限频 1.5 秒; 拨开关的调用点置 gDIGainScanForce 立即跑。 */
+       几秒的停摆。现在全局限频 1.5 秒; 拨开关的调用点置 gDIGainScanForce 立即跑。
+       3.0.27: 注入后 10 秒内的非强制扫描直接跳过(441: 首装第一次必卡死注销,
+       后面就正常 —— 首开那一波系统自己的初始化最重, 我们的扫描纯添乱),
+       代价只是首装后头 10 秒黑药丸隐藏晚一点, 肉眼无感。 */
+    {
+        static CFAbsoluteTime firstCall = 0;
+        CFAbsoluteTime now0 = CFAbsoluteTimeGetCurrent();
+        if (firstCall == 0) firstCall = now0;
+        if (!gDIGainScanForce && now0 - firstCall < 10.0) return;
+    }
     {
         static CFAbsoluteTime lastScan = 0;
         CFAbsoluteTime now = CFAbsoluteTimeGetCurrent();
@@ -13858,6 +13847,7 @@ static char kDIActivityMaskState;
 static NSHashTable<UIView *> *gDIActivityArtworks;
 static UIImage *gDIActivityShape;
 static BOOL gDIActivityEnabled;
+static BOOL gDIActivityArtmask;   /* 3.0.27: 「启用遮罩」(ArtworkMaskEnabled, 经 params.plist) */
 static int gDIActivityHit;   /* 2.8.79: 成功接管次数, 0 说明整条链路没走到 */
 static IMP gDIActivityOrigLayout, gDIActivityOrigMove, gDIActivityOrigVisibility, gDIActivityOrigInit;
 
@@ -13900,6 +13890,25 @@ static void diMruRotParams(BOOL *on, BOOL *rev, double *speed) {
         }
     }
     *on = cOn; *rev = cRev; *speed = cSpeed;
+}
+/* 3.0.27: 「启用遮罩」(原生播放页) — 与 rot 同一份 params.plist, 1 秒缓存读 */
+static BOOL diMruArtmaskOn(void) {
+    static BOOL cOn = NO;
+    static CFAbsoluteTime last = 0;
+    static NSString *lastSig;
+    CFAbsoluteTime now = CFAbsoluteTimeGetCurrent();
+    if (last == 0 || now - last > 1.0) {
+        last = now;
+        NSString *p = [diMruSelfDir() stringByAppendingPathComponent:@"params.plist"];
+        NSDictionary *attr = [[NSFileManager defaultManager] attributesOfItemAtPath:p error:NULL];
+        NSString *sig = [NSString stringWithFormat:@"%@_%@", attr[NSFileModificationDate], attr[NSFileSize]];
+        if (![sig isEqual:lastSig]) {
+            lastSig = sig;
+            NSDictionary *d = [NSDictionary dictionaryWithContentsOfFile:p];
+            cOn = ([d isKindOfClass:NSDictionary.class] && [d[@"artmask"] boolValue]);
+        }
+    }
+    return cOn;
 }
 static void diMruFileLog(NSString *line) {
     static dispatch_once_t once;
@@ -14378,6 +14387,18 @@ static CGFloat diActivityHostHeight(UIView *artwork) {
 static void diActivityApply(UIView *artwork) {
     if (!NSThread.isMainThread || ![artwork isKindOfClass:UIView.class]) return;
     DIActivityMaskState *state = objc_getAssociatedObject(artwork, &kDIActivityMaskState);
+    /* 3.0.27: 「启用遮罩」开关跟随(1Hz 缓存读 params.plist, 便宜) —— 拨开关后
+       最多 1 秒生效, 不依赖 reload 通知有没有送到 */
+    {
+        BOOL am = diMruArtmaskOn();
+        if (am != gDIActivityArtmask) {
+            gDIActivityArtmask = am;
+            gDIActivityEnabled = diMruPrefOn() || am;
+            if (am && !gDIActivityShape) gDIActivityShape = diActivityLoadShape();
+            diMruFileLog([NSString stringWithFormat:@"启用遮罩: 开关=%d → 玻璃闸门=%d (旧遮罩=%d)",
+                          (int)am, (int)gDIActivityEnabled, (int)diMruPrefOn()]);
+        }
+    }
     BOOL sized = artwork.bounds.size.width > 20 && artwork.bounds.size.height > 20;
     BOOL ios17 = diIsIOS17Up();
     /* ===== 2.9.48: 17 上小岛态 MRU 一律不参与 —— 用头像自身尺寸做硬判据 =====
@@ -14592,6 +14613,13 @@ static void diActivityApply(UIView *artwork) {
         want = NO;
     }
     if (!want) { diActivityTeardown(artwork, state); return; }
+    /* 3.0.27: 「启用遮罩」单独开(旧遮罩总开关关) —— 只管"没展开时播放歌曲"的那颗
+       旋转小头像: 头像短边 >40pt(= 展开态 66 / 过渡残影)一律让位还原。
+       小岛态 16=23 / 17=23 都 ≤40, 不受影响。 */
+    if (gDIActivityArtmask && !diMruPrefOn() && !compact && artSide > 40.0) {
+        if (state) diActivityTeardown(artwork, state);
+        return;
+    }
 
     /* ===== 2.9.55: 17 收缩态里有两颗头像, 按尺寸分开处理 =====
        387 日志实锤(17, 宿主 189x37):
@@ -15341,7 +15369,8 @@ static void diActivityInstallTextHook(void) {
 }
 
 static void diActivityReload(void) {
-    gDIActivityEnabled = diMruPrefOn();
+    gDIActivityArtmask = diMruArtmaskOn();
+    gDIActivityEnabled = diMruPrefOn() || gDIActivityArtmask;   /* 3.0.27: 「启用遮罩」也能开玻璃 */
     logEnabled = pBool(@"logging", NO);
     gMaskGen++;
     gDIActivityShape = gDIActivityEnabled ? diActivityLoadShape() : nil;
@@ -16181,31 +16210,15 @@ static const CFTimeInterval kDISpinDur = 10.0;
 /* 幂等: 尺寸没变、蒙版还是我们那片、旋转还在 → 一个字都不写。
    3.0.16 及以前每轮布局都重设 mask.frame/path, 3×2 网格里那张图每秒被重建两三次,
    肉眼就是"小专辑头像闪一下"。 */
-/* ===== 3.0.26: 「启用遮罩」改铺到小岛旋转小头像(自绘玻璃) =====
-   3.0.24/3.0.25 把素材铺到控制中心展开态封面上, 用户实测方向错了:
-   "你把遮罩加错了, 你加到展开的头像去了, 我要的是播放歌曲的时候小专辑头像的上面"。
-   现在改为: 素材作为覆盖层叠进自绘玻璃的旋转载体 _artView(见 diPaintGlassAt),
-   跟小头像一起转, 不引入第二组旋转参数。素材仍用 diExportMaskSoon 导出的
-   mask.png(选素材后自动重导, 按 mtime+大小指纹感知, 0.5 秒节流)。 */
-
-static UIImage *diArtMaskAsset(void) {
-    static UIImage *img = nil;
-    static double mtime = -1;
-    static unsigned long long fsize = 0;
-    static CFTimeInterval lastStat = 0;
-    CFTimeInterval now = CFAbsoluteTimeGetCurrent();
-    if (img && now - lastStat < 0.5) return img;
-    lastStat = now;
-    NSString *path = [diMruCacheDir() stringByAppendingPathComponent:@"mask.png"];
-    NSDictionary *att = [[NSFileManager defaultManager] attributesOfItemAtPath:path error:NULL];
-    double m = att ? [[att objectForKey:NSFileModificationDate] timeIntervalSince1970] : 0;
-    unsigned long long sz = att ? [[att objectForKey:NSFileSize] unsignedLongLongValue] : 0;
-    if (img && m == mtime && sz == fsize) return img;
-    mtime = m; fsize = sz;
-    if (m <= 0) return nil;
-    img = [UIImage imageWithContentsOfFile:path];
-    return img;
-}
+/* ===== 3.0.27: 「启用遮罩」(原生播放页, ArtworkMaskEnabled) — 只管小岛未展开时
+   播放歌曲的那颗旋转小专辑头像 =====
+   440 实锤: 小头像由 MediaRemoteUI 进程渲染(MRUActivityArtworkView + MRU 玻璃),
+   SpringBoard 这边铺什么都被跨进程门户盖住 —— 3.0.24/25/26 铺的展开封面、SB 玻璃
+   覆盖层全都不在显示链路上, 用户"还是没加上"。现在的实现: SpringBoard 把开关经
+   params.plist(artmask 键)带给 MRU; MRU 侧玻璃闸门改成 diMruPrefOn() || artmask
+   —— 旧遮罩总开关关着也能用; 且 artmask 单独开时**只在小岛态铺**(展开态一律让位
+   还原), "不要其他地方"。素材沿用 diActivityLoadShape 读的 mask.png(选素材自动
+   重导), 旋转沿用 params.plist 里的 rot 那组, 不引入第二组旋转参数。 */
 
 static void diArtDress(UIView *v) {
     if (!v || !v.layer) return;
@@ -17102,6 +17115,14 @@ static BOOL diNPPrefFlag(NSString *key, BOOL def) {
     return v;
 }
 static void diNPLoadPrefsSync(void) {
+    /* 3.0.27(iOS17 首装卡死): 注入后 15 秒内不同步读跨进程域 —— 设置页首开正在
+       高频写 com.local.playerexact, cfprefsd 被占住时这几条 XPC 就是主线程停摆
+       (441: 阶段=prefs 停摆 4~7 秒)。这 15 秒内走后台 1Hz 缓存的值, 拨开关最多
+       晚 1 秒生效;过了保护期恢复"用户动开关立刻同步读"。 */
+    static CFAbsoluteTime firstCall = 0;
+    CFAbsoluteTime now = CFAbsoluteTimeGetCurrent();
+    if (firstCall == 0) firstCall = now;
+    if (now - firstCall < 15.0) return;
     BOOL on = diNPPrefFlagRaw(@"MusicArtworkGradientEnabled", YES);
     BOOL hid = diNPPrefFlagRaw(@"HideNotPlaying", NO);
     BOOL mask = diNPPrefFlagRaw(@"ArtworkMaskEnabled", NO);
@@ -17110,7 +17131,6 @@ static void diNPLoadPrefsSync(void) {
     diNPPrefCachePut(@"ArtworkMaskEnabled", mask);
     gDIBgOnCache = on;
     gDIHideNP = hid;
-    gDIArtMaskEnabled = mask;
 }
 static void diNPTickPrefs(void) {
     CFTimeInterval now = CFAbsoluteTimeGetCurrent();
@@ -17128,10 +17148,15 @@ static void diNPTickPrefs(void) {
         diNPPrefCachePut(@"MusicArtworkGradientEnabled", on);
         diNPPrefCachePut(@"HideNotPlaying", hid);
         diNPPrefCachePut(@"ArtworkMaskEnabled", mask);
+        /* 3.0.27: 「启用遮罩」变了 → 立刻把开关导给 MRU(params.plist artmask 键),
+           并保证 mask.png 在它的容器里 —— 不依赖旧遮罩那套导出时机。 */
+        static BOOL sLastMask = NO; static BOOL sMaskInit = NO;
+        BOOL changed = !sMaskInit || (mask != sLastMask);
+        sLastMask = mask; sMaskInit = YES;
         dispatch_async(dispatch_get_main_queue(), ^{
             gDIBgOnCache = on;
             gDIHideNP = hid;
-            gDIArtMaskEnabled = mask;
+            if (changed) diExportMaskSoon();
         });
     });
 }

@@ -5838,8 +5838,9 @@ static void diNPEnsureActivation(void) {
     [specs addObject:[self npSwitch:@"隐藏未在" key:@"HideNotPlaying" def:NO]];
     [specs addObject:[self npRotateSwitch]];
     /* 3.0.24: 「禁止 N95 修改专辑图」删除(用不上); 「隐藏投送图标」改名「隐藏投送」;
-       下面新增「启用遮罩」+「遮罩素材」 —— 3.0.26 起素材铺到播放歌曲时小岛上的
-       旋转小专辑头像(自绘玻璃)上面, 不带旋转那组参数(旋转沿用「专辑旋转」开关)。 */
+       下面新增「启用遮罩」+「遮罩素材」 —— 3.0.27 起素材经 params.plist 交给
+       MediaRemoteUI, 只铺在"没展开时播放歌曲"的旋转小专辑头像上(旧遮罩总开关
+       关着也能单独用), 展开态不铺; 不带旋转那组参数(旋转沿用「专辑旋转」)。 */
     [specs addObject:[self npSwitch:@"隐藏投送" key:@"HideRoutingIcon" def:NO]];
     [specs addObject:[self npSwitch:@"启用遮罩" key:@"ArtworkMaskEnabled" def:NO]];
     PSSpecifier *maskLink = [self linkSpec:@"遮罩素材" detail:[DIMaskPicker class]];
