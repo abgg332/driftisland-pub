@@ -69,7 +69,7 @@ static double expandTextY = DI_EXP_TEXT_BASE_Y;   // 上下偏移(pt, 下为正,
 static double expandTextScale = 100.0; // 文字大小(%, 100=原样)
 /* 2.8.86: 构建戳 —— 之前横幅打的是 SpringBoard 自己的 CFBundleShortVersionString(恒 1.0),
    日志里根本看不出装的是哪一版。所有诊断行都带这个戳, 下轮日志一眼定位。 */
-#define DI_BUILD_VER @"3.0.24"
+#define DI_BUILD_VER @"3.0.25"
 static BOOL gRecordingActive = NO; // 保留: 岛素材总闸条件
 static NSString *diElementId(UIView *host);
 static BOOL diMiniMusicActive(UIView *host); // 2.6.3: 前置(遮罩层使用)
@@ -509,6 +509,7 @@ void diGainRestoreAll(void);
 static void diGainInstallHook(void);
 static void diGainTriggerVisible(void);
 static void diGainScanAperture(void);
+static BOOL gDIGainScanForce;   /* 3.0.25: 拨开关的那次扫描强制立即跑(定义在扫描函数前) */
 static CFAbsoluteTime gVolumeUntil; // 2.9.12: 音量变化后 4 秒"我们让位"窗口(见 syncFrameToHost)
 static BOOL gVolHUDActive;            // 2.9.12: 音量 HUD 窗口是否在屏(仅供日志, 不参与任何写入)
 static id gVolumeObserver; // NSNotificationCenter 观察者 token: 必须持有否则观察者被释放收不到通知
@@ -569,7 +570,7 @@ static NSArray<NSString *> *framePathsImpl(NSString *folderSel) {
        stepMini 每帧调 framePathsFor, 两层素材 60fps 就是每秒上万次系统调用,
        放歌卡顿掉帧的头号元凶。现在: 只有 gFramesDirty(换素材/偏好变更)或
        距上次算签名 >1s 才重算; 文件真变了才丢列表缓存。 */
-    if (gFramesDirty || now - [sigTs[ck] doubleValue] > 1.0) {
+    if (gFramesDirty || now - [sigTs[ck] doubleValue] > 2.0) {
         sigTs[ck] = @(now);
         NSString *sig = diDirSignature(dirForSig);
         BOOL changed = ![sigs[ck] isEqualToString:sig];
@@ -996,7 +997,7 @@ static void refreshPrefs(void) {
             RLog(@"隐藏药丸: %@ (总开关=%@)", wantPill ? @"开" : @"关", enabled ? @"开" : @"关");
             dispatch_async(dispatch_get_main_queue(), ^{
                 diGainInstallHook();
-                if (wantPill) { diGainScanAperture(); diGainTriggerVisible(); }
+                if (wantPill) { gDIGainScanForce = YES; diGainScanAperture(); diGainTriggerVisible(); }
                 else diGainRestoreAll();
             });
         } else if (wantPill) {
@@ -2651,6 +2652,7 @@ __attribute__((unused)) static BOOL diMiniMusicActive(UIView *host) {
 /* 2.7.26: 小岛专辑/音频位置帧率素材(2.2.45 stepMini 原版, 2.7.0 误删后补回) */
 - (void)stepMini {
     @try {
+    if (_link.preferredFramesPerSecond > 30) _link.preferredFramesPerSecond = 30;  /* 3.0.25 功耗: 小岛固定 30fps */
     UIView *host = self.superview;
     if (!host || host.window == nil) { self.hidden = YES; if (++_miss > 15) _link.paused = YES; return; }
     syncNativeSpectrum(host);
@@ -2666,8 +2668,28 @@ __attribute__((unused)) static BOOL diMiniMusicActive(UIView *host) {
         mediaActive = diMiniMusicActive(host);
         sMMAHost = host; sMMARes = mediaActive; sMMAT = CFAbsoluteTimeGetCurrent();
     }
-    BOOL musicGate = AVAudioSession.sharedInstance.isOtherAudioPlaying || (diFindAudioLayer(host) != nil);
-    NSArray<NSString *> *frames = framePathsFor((self.side == 1) ? miniAudioFolder : smallAnimFolder);
+    BOOL musicGate;
+    NSArray<NSString *> *frames;
+    /* 3.0.25 功耗: 这两项以前每帧都算 —— AVAudioSession 查询 + 目录签名比对,
+       两层素材 60fps 就是每秒 240 次。现在 0.25s/0.5s 缓存, 开关和换素材本来
+       也允许半秒内生效; 放歌发热的 CPU 大头就在这类"每帧白干"上。 */
+    {
+        static BOOL sGate; static CFAbsoluteTime sGateT;
+        static NSArray<NSString *> *sFrL, *sFrR; static CFAbsoluteTime sFrTL, sFrTR;
+        CFAbsoluteTime nowS = CFAbsoluteTimeGetCurrent();
+        if (nowS - sGateT > 0.25) {
+            sGateT = nowS;
+            sGate = AVAudioSession.sharedInstance.isOtherAudioPlaying || (diFindAudioLayer(host) != nil);
+        }
+        musicGate = sGate;
+        if (self.side == 1) {
+            if (!sFrR || nowS - sFrTR > 0.5) { sFrTR = nowS; sFrR = framePathsFor(miniAudioFolder); }
+            frames = sFrR;
+        } else {
+            if (!sFrL || nowS - sFrTL > 0.5) { sFrTL = nowS; sFrL = framePathsFor(smallAnimFolder); }
+            frames = sFrL;
+        }
+    }
     BOOL sideOn = (self.side == 1) ? miniAudioOn : miniAnimOn;
     if (!mini || !enabled || gLocked || !sideOn || !frames.count || !mediaActive || !musicGate || gRecordingActive) {
         if (!self.hidden) self.hidden = YES;
@@ -2717,6 +2739,9 @@ __attribute__((unused)) static BOOL diMiniMusicActive(UIView *host) {
 }
 
 - (void)step {
+    /* 3.0.25 功耗: 小岛素材链路固定 30fps —— 小岛只有 37pt 高, 序列帧推进靠累加器,
+       视觉速度不变, CPU/功耗直接减半(用户反馈"听歌明显发热"的主力之一)。 */
+    if (self.miniMode) { [self stepMini]; return; }   /* 2.7.26: 小岛左右两层走独立分支 */
     /* 2.8.22 功耗: 动态帧率 —— 宿主几何不动约 1 秒, 链接 60→30fps;
        序列帧推进用累加器(dt×fps), 视觉速度不变; 几何一动立即回 60fps。 */
     if (self.superview) {
@@ -2728,7 +2753,6 @@ __attribute__((unused)) static BOOL diMiniMusicActive(UIView *host) {
             _link.preferredFramesPerSecond = 30;
         }
     }
-    if (self.miniMode) { [self stepMini]; return; }   /* 2.7.26: 小岛左右两层走独立分支 */
     UIView *host = self.superview;
     if (!host || host.window == nil) { self.hidden = YES; if (++_miss > 15) _link.paused = YES; return; }
     syncNativeSpectrum(host); // 无条件每帧同步音频掩码(即使帧率素材关闭/没放歌): 岛重新展开或层重建时波形立即被藏
@@ -2736,7 +2760,11 @@ __attribute__((unused)) static BOOL diMiniMusicActive(UIView *host) {
        锁屏大卡(高700+)/方形提示岛/通话岛/小岛(高36)/视频展开岛(无音频层) 一律不显示 */
     BOOL expand = host.bounds.size.height > 100 && host.bounds.size.height < 300
                && host.bounds.size.width > 250 && host.bounds.size.width < 500;
-    NSArray<NSString *> *frames = framePaths();
+    /* 3.0.25 功耗: 帧列表 0.5s 缓存(以前每帧比对目录签名) */
+    static NSArray<NSString *> *sFrE; static CFAbsoluteTime sFrTE;
+    CFAbsoluteTime nowE = CFAbsoluteTimeGetCurrent();
+    if (!sFrE || nowE - sFrTE > 0.5) { sFrTE = nowE; sFrE = framePaths(); }
+    NSArray<NSString *> *frames = sFrE;
     CALayer *audioL = expand ? diFindAudioLayer(host) : nil; // 原生音频动态层: 在=音乐岛
     CALayer *apl = audioL ? (audioL.presentationLayer ?: audioL) : nil; // 必须真实可见: 隐藏/透明/过小都视为非音乐岛
     BOOL audioVisible = apl && !apl.isHidden && apl.opacity > 0.05 && apl.bounds.size.width > 10 && apl.bounds.size.height > 10;
@@ -5821,7 +5849,7 @@ static void syncNativeSpectrum(UIView *bestRoot) {
         NSInteger cur = (spectrumOn ? 1 : 0) | (enabled ? 2 : 0) | (hideRouteOn ? 4 : 0);
         BOOL sizeJump = (fabs(bs.width - sW) > 8.0 || fabs(bs.height - sH) > 8.0);
         BOOL stateJump = (sSeenState != cur);
-        if (!gSpecForceNext && !sizeJump && !stateJump && CFAbsoluteTimeGetCurrent() - sT < 0.25) return;
+        if (!gSpecForceNext && !sizeJump && !stateJump && CFAbsoluteTimeGetCurrent() - sT < 0.4) return;
         gSpecForceNext = NO;
         sT = CFAbsoluteTimeGetCurrent(); sW = bs.width; sH = bs.height; sSeenState = cur;
     }
@@ -6746,9 +6774,22 @@ static void diDumpApertureTree(UIView *root) {
    303 实测该窗口子树被 _UIPortalView 空子树截断(只扫到 8 个节点),
    platter 根本不在那 8 个节点里; 原有功能的定位路径(diRestyleWalk)也是
    遍历所有窗口才找到 platter 301x76。 */
+/* 3.0.25: 文件级定义(前向声明在文件头) —— 这里不再重复初始化 */
 static void diGainScanAperture(void) {
     diPhase("scan");
     if (![NSThread isMainThread] || !(enabled && hideBlackPillOn)) return;
+    /* 3.0.25(iOS17 首开卡死): 439 日志里首开那一串 [卡死] 阶段=scan, 一次扫描
+       1205~1287 个节点, 而且同一秒里扫了好几遍(hook 装上一次、容器布局节流到了
+       但别的路径还会直接调)。BFS 本身不贵, 但 24 个 platter 的 hidden 写回会逼
+       控制中心面板重排 —— 首开那一秒所有初始化活都在主线程上排队, 叠加起来就是
+       几秒的停摆。现在全局限频 1.5 秒; 拨开关的调用点置 gDIGainScanForce 立即跑。 */
+    {
+        static CFAbsoluteTime lastScan = 0;
+        CFAbsoluteTime now = CFAbsoluteTimeGetCurrent();
+        if (!gDIGainScanForce && now - lastScan < 1.5) return;
+        gDIGainScanForce = NO;
+        lastScan = now;
+    }
     int gTotal = 0, hitG = 0, hitP = 0;
     for (UIScene *s in UIApplication.sharedApplication.connectedScenes) {
         if (![s isKindOfClass:[UIWindowScene class]]) continue;
@@ -16109,8 +16150,9 @@ static const CFTimeInterval kDISpinDur = 10.0;
    圆蒙版和旋转沿用现有那套(不引入第二组旋转参数)。开关写在播放器自己的域
    (ArtworkMaskEnabled); 素材直接用 diExportMaskSoon 导出的 mask.png(选素材后会
    自动重导, 这里按 mtime+大小指纹感知, 0.5 秒节流)。 */
-static char kDIArtMaskOrigC, kDIArtMaskOrigG, kDIArtMaskApplied;
+static char kDIArtMaskOrigC, kDIArtMaskOrigG, kDIArtMaskOrigView, kDIArtMaskApplied;
 static BOOL gDIArtMaskEnabled = NO;      /* 缓存, 由 diNPLoadPrefsSync/diNPTickPrefs 维护 */
+static void diArtMaskRestore(UIView *v, CALayer *layer);   /* 前置: Cover 的无素材分支要调 */
 
 static UIImage *diArtMaskAsset(void) {
     static UIImage *img = nil;
@@ -16131,37 +16173,80 @@ static UIImage *diArtMaskAsset(void) {
     return img;
 }
 /* 把素材铺到封面内容上(幂等: contents 指针一样就一个字不写)。首次铺前记原样。 */
+/* 3.0.25: 找到真正画专辑图的视图。
+   438 证明: 对 MRUArtworkView.layer 写 contents 没有任何效果 —— 专辑图是它内部的
+   子视图画的, 写在父层上的内容永远被子视图盖住("打开遮罩没有套上")。
+   优先级: 自己是 UIImageView 且有图 → 自己; 否则找树里第一个有图的 UIImageView;
+   都没有 → 退回父层 contents(老路径, 至少 3×2 网格里无子视图的格子图仍有效)。 */
+static UIView *diArtMaskTargetView(UIView *v) {
+    if ([v isKindOfClass:UIImageView.class] && ((UIImageView *)v).image) return v;
+    NSMutableArray *q = [NSMutableArray arrayWithObject:v];
+    int guard = 0;
+    while (q.count && guard++ < 60) {
+        UIView *x = q.firstObject; [q removeObjectAtIndex:0];
+        if (x != v && [x isKindOfClass:UIImageView.class] && ((UIImageView *)x).image) return x;
+        for (UIView *c in x.subviews) [q addObject:c];
+    }
+    return v;
+}
 static void diArtMaskCover(UIView *v, CALayer *layer) {
     if (!v || !layer) return;
     UIImage *mk = diArtMaskAsset();
     if (!mk || !mk.CGImage) {
         if ([objc_getAssociatedObject(v, &kDIArtMaskApplied) isEqual:@YES]) {
-            id oc = objc_getAssociatedObject(v, &kDIArtMaskOrigC);
-            layer.contents = (oc && oc != [NSNull null]) ? oc : nil;
-            objc_setAssociatedObject(v, &kDIArtMaskApplied, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+            diArtMaskRestore(v, layer);
         }
         return;
     }
+    UIView *tv = diArtMaskTargetView(v);
+    CALayer *tl = tv.layer;
     if (![objc_getAssociatedObject(v, &kDIArtMaskApplied) isEqual:@YES]) {
-        objc_setAssociatedObject(v, &kDIArtMaskOrigC, layer.contents ?: [NSNull null],
+        objc_setAssociatedObject(v, &kDIArtMaskOrigC, tl.contents ?: [NSNull null],
                                  OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-        objc_setAssociatedObject(v, &kDIArtMaskOrigG, layer.contentsGravity ?: [NSNull null],
+        objc_setAssociatedObject(v, &kDIArtMaskOrigG, tl.contentsGravity ?: [NSNull null],
                                  OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        objc_setAssociatedObject(v, &kDIArtMaskOrigView, tv, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
         objc_setAssociatedObject(v, &kDIArtMaskApplied, @YES, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        static NSMutableSet *loggedOnce;
+        static dispatch_once_t once;
+        dispatch_once(&once, ^{ loggedOnce = [NSMutableSet new]; });
+        NSString *k = NSStringFromClass(tv.class);
+        if (![loggedOnce containsObject:k]) {
+            [loggedOnce addObject:k];
+            RLog(@"[播放器遮罩] 已铺上 → 目标=%@ %.0fx%.0f (宿主 %@)",
+                 k, tv.bounds.size.width, tv.bounds.size.height, NSStringFromClass(v.class));
+        }
     }
-    if (layer.contents != (__bridge id)mk.CGImage) {
-        layer.contents = (__bridge id)mk.CGImage;
-        layer.contentsGravity = kCAGravityResizeAspectFill;
-        layer.contentsScale = 1.0;
+    /* 系统换曲/重建子视图时目标会变: 目标变了就把记录迁过去, 旧目标还原 */
+    if (objc_getAssociatedObject(v, &kDIArtMaskOrigView) != tv) {
+        UIView *old = objc_getAssociatedObject(v, &kDIArtMaskOrigView);
+        if (old && [objc_getAssociatedObject(old, &kDIArtMaskApplied) isEqual:@YES]) {
+            /* 防串: 旧目标自己也被盖过就别乱还 */
+        } else if (old) {
+            id oc = objc_getAssociatedObject(v, &kDIArtMaskOrigC);
+            old.layer.contents = (oc && oc != [NSNull null]) ? oc : nil;
+        }
+        objc_setAssociatedObject(v, &kDIArtMaskOrigC, tl.contents ?: [NSNull null],
+                                 OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        objc_setAssociatedObject(v, &kDIArtMaskOrigG, tl.contentsGravity ?: [NSNull null],
+                                 OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        objc_setAssociatedObject(v, &kDIArtMaskOrigView, tv, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    }
+    if (tl.contents != (__bridge id)mk.CGImage) {
+        tl.contents = (__bridge id)mk.CGImage;
+        tl.contentsGravity = kCAGravityResizeAspectFill;
+        tl.contentsScale = 1.0;
     }
 }
 static void diArtMaskRestore(UIView *v, CALayer *layer) {
     if (!v || !layer) return;
     if (![objc_getAssociatedObject(v, &kDIArtMaskApplied) isEqual:@YES]) return;
+    UIView *tv = objc_getAssociatedObject(v, &kDIArtMaskOrigView) ?: v;
     id oc = objc_getAssociatedObject(v, &kDIArtMaskOrigC);
     id og = objc_getAssociatedObject(v, &kDIArtMaskOrigG);
-    layer.contents = (oc && oc != [NSNull null]) ? oc : nil;
-    layer.contentsGravity = (og && og != [NSNull null]) ? og : kCAGravityResize;
+    tv.layer.contents = (oc && oc != [NSNull null]) ? oc : nil;
+    tv.layer.contentsGravity = (og && og != [NSNull null]) ? og : kCAGravityResize;
+    objc_setAssociatedObject(v, &kDIArtMaskOrigView, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
     objc_setAssociatedObject(v, &kDIArtMaskApplied, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
 }
 
@@ -16626,32 +16711,40 @@ static void diDumpExpandedTreeOnce(UIView *root) {
     if (done || !root) return;
     if (root.bounds.size.width < 200 || root.bounds.size.height < 150) return;
     done = YES;
-    NSMutableString *s = [NSMutableString string];
-    [s appendFormat:@"=== 播放器展开树 %@ %.0fx%.0f 3x2=%d ===\n", NSStringFromClass(root.class),
-        root.bounds.size.width, root.bounds.size.height, diArtIs3x2()];
-    NSMutableArray *stack = [NSMutableArray arrayWithObject:@[root, @0]];
-    int n = 0;
-    while (stack.count && n < 400) {
-        NSArray *pr = stack.lastObject; [stack removeLastObject];
-        UIView *v = pr[0]; int d = [pr[1] intValue];
-        NSString *ind = [@"" stringByPaddingToLength:(NSUInteger)(d * 2) withString:@" " startingAtIndex:0];
-        NSString *extra = @"";
-        if ([v isKindOfClass:UIImageView.class]) {
-            UIImage *im = ((UIImageView *)v).image;
-            extra = im ? [NSString stringWithFormat:@" img=%.0fx%.0f", im.size.width, im.size.height]
-                       : @" img=nil";
-        } else if ([v isKindOfClass:UILabel.class]) {
-            NSString *t = ((UILabel *)v).text;
-            if (t.length) extra = [NSString stringWithFormat:@" text=%@", t];
+    /* 3.0.25(iOS17 首开): 400 节点类名+frame 拼字符串再落盘, 是首开那一秒的
+       "主线程连续活"之一。往后放 3 秒, 完全错开初始化串; 只为定位问题, 晚没影响。 */
+    __weak UIView *weakRoot = root;
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(3.0 * NSEC_PER_SEC)),
+                   dispatch_get_main_queue(), ^{
+        UIView *r = weakRoot;
+        if (!r || !r.window) return;
+        NSMutableString *s = [NSMutableString string];
+        [s appendFormat:@"=== 播放器展开树 %@ %.0fx%.0f 3x2=%d ===\n", NSStringFromClass(r.class),
+            r.bounds.size.width, r.bounds.size.height, diArtIs3x2()];
+        NSMutableArray *stack = [NSMutableArray arrayWithObject:@[r, @0]];
+        int n = 0;
+        while (stack.count && n < 400) {
+            NSArray *pr = stack.lastObject; [stack removeLastObject];
+            UIView *v = pr[0]; int d = [pr[1] intValue];
+            NSString *ind = [@"" stringByPaddingToLength:(NSUInteger)(d * 2) withString:@" " startingAtIndex:0];
+            NSString *extra = @"";
+            if ([v isKindOfClass:UIImageView.class]) {
+                UIImage *im = ((UIImageView *)v).image;
+                extra = im ? [NSString stringWithFormat:@" img=%.0fx%.0f", im.size.width, im.size.height]
+                           : @" img=nil";
+            } else if ([v isKindOfClass:UILabel.class]) {
+                NSString *t = ((UILabel *)v).text;
+                if (t.length) extra = [NSString stringWithFormat:@" text=%@", t];
+            }
+            [s appendFormat:@"%@%@ %@ h=%d a=%.2f cr=%.1f%@\n", ind, NSStringFromClass(v.class),
+                NSStringFromCGRect(v.frame), v.hidden, v.alpha, v.layer.cornerRadius, extra];
+            n++;
+            if (d < 7) for (UIView *c in v.subviews) [stack addObject:@[c, @(d + 1)]];
         }
-        [s appendFormat:@"%@%@ %@ h=%d a=%.2f cr=%.1f%@\n", ind, NSStringFromClass(v.class),
-            NSStringFromCGRect(v.frame), v.hidden, v.alpha, v.layer.cornerRadius, extra];
-        n++;
-        if (d < 7) for (UIView *c in v.subviews) [stack addObject:@[c, @(d + 1)]];
-    }
-    NSString *path = @"/var/mobile/Library/Logs/driftisland-tree.log";
-    [s writeToFile:path atomically:YES encoding:NSUTF8StringEncoding error:NULL];
-    RLog(@"[树] 已导出展开态视图树 %d 节点 → %@", n, path);
+        NSString *path = @"/var/mobile/Library/Logs/driftisland-tree.log";
+        [s writeToFile:path atomically:YES encoding:NSUTF8StringEncoding error:NULL];
+        RLog(@"[树] 已导出展开态视图树 %d 节点 → %@", n, path);
+    });
 }
 
 static void diNPBackgroundTick(UIView *root);   /* 3.0.15: 定义在下面的 3.1.0 段 */
@@ -16738,19 +16831,80 @@ static void diTCRowLayout(id self, SEL cmd) {
     if (gDIOrigTCRowLayout) gDIOrigTCRowLayout(self, cmd);
     @try { diTBNormalizeRow((UIView *)self); } @catch (__unused NSException *e) {}
 }
+
+/* ===== 3.0.25: 按钮残留抖动 —— 谁写错就当场纠正谁 =====
+   438 日志: 行对齐只在 layoutSubviews 里跑已经不够了。[抖动3] 证明系统(以及
+   NPROriginalRuntime/MediaControls)在 layoutSubviews **之外**还会对传送栏和按钮
+   直接 setFrame/setTransform(按下按钮的 highlighted 动画就是一条典型路径) ——
+   错的 frame 在两次布局之间要显示一两帧, 我们下一轮布局才纠正, 用户看到的就是
+   "按下按钮抖一下, 比以前轻了但还是抖"。
+   现在: 直接 hook 按钮(MRUTransportButton)和传送栏的 setFrame/setTransform,
+   错的那一笔写完立刻在同一事务里摆平 —— 永远在 CA 提交之前, 中间态一帧都不会有。
+   仍然是"只写 layer.position": 不触发 UIKit 重排, 也不会和系统抢 frame。
+   基准(DITBRowState)只在行对齐跑过之后才有, 没基准 = 不归我们管, 零开销秒退。 */
+static CGFloat diTBfixBtn(UIView *b) {
+    if (!b || !b.window || b.hidden || !b.superview) return 0;
+    if (!enabled || !diArtIs3x2()) return 0;
+    DITBRowState *st = objc_getAssociatedObject(b, kDITBRowKey);
+    if (!st) return 0;
+    CGRect r = [b convertRect:b.bounds toView:nil];
+    CGFloat cur = CGRectGetMidY(r);
+    CGFloat dy = cur - st.stable;
+    if (fabs(dy) > 6.0) { st.stable = cur; return 0; }   /* 真变化: 认它 */
+    if (fabs(dy) < 0.6) return 0;
+    CGPoint mid = CGPointMake(CGRectGetMidX(r), st.stable);
+    CGPoint tInSp = [b.window convertPoint:mid toView:b.superview];
+    CGPoint p = b.layer.position;
+    p.y += (tInSp.y - b.center.y);
+    b.layer.position = p;
+    return dy;
+}
+static void (*gDIOrigBtnFrame)(id, SEL, CGRect) = NULL;
+static void (*gDIOrigBtnTransform)(id, SEL, CGAffineTransform) = NULL;
+static void diBtnFrameHook(id self, SEL cmd, CGRect f) {
+    gDIOrigBtnFrame(self, cmd, f);
+    @try { diTBfixBtn((UIView *)self); } @catch (__unused NSException *e) {}
+}
+static void diBtnTransformHook(id self, SEL cmd, CGAffineTransform t) {
+    gDIOrigBtnTransform(self, cmd, t);
+    @try { diTBfixBtn((UIView *)self); } @catch (__unused NSException *e) {}
+}
+static void (*gDIOrigTBFrame)(id, SEL, CGRect) = NULL;
+static void (*gDIOrigTBTransform)(id, SEL, CGAffineTransform) = NULL;
+static void diTBFrameHook(id self, SEL cmd, CGRect f) {
+    gDIOrigTBFrame(self, cmd, f);
+    @try { diTBNormalizeRow((UIView *)self); } @catch (__unused NSException *e) {}
+}
+static void diTBTransformHook(id self, SEL cmd, CGAffineTransform t) {
+    gDIOrigTBTransform(self, cmd, t);
+    @try { diTBNormalizeRow((UIView *)self); } @catch (__unused NSException *e) {}
+}
 static void diTBInstallRowHook(void) {
-    static BOOL done = NO;
-    if (done) return;
+    static BOOL doneTC = NO, doneBtn = NO;
+    if (doneTC && doneBtn) return;
     Class c = NSClassFromString(@"MRUNowPlayingTransportControlsView");
-    if (!c) return;
-    done = YES;
-    @try {
-        Method m = class_getInstanceMethod(c, @selector(layoutSubviews));
-        IMP before = m ? method_getImplementation(m) : NULL;
-        MSHookMessageEx(c, @selector(layoutSubviews), (IMP)diTCRowLayout, (IMP *)&gDIOrigTCRowLayout);
-        if (!gDIOrigTCRowLayout) gDIOrigTCRowLayout = (void (*)(id, SEL))before;
-        RLog(@"[抖动7] 传送栏行对齐钩子 %@", gDIOrigTCRowLayout ? @"已装" : @"失败");
-    } @catch (__unused NSException *e) {}
+    if (c && !doneTC) {
+        doneTC = YES;
+        @try {
+            Method m = class_getInstanceMethod(c, @selector(layoutSubviews));
+            IMP before = m ? method_getImplementation(m) : NULL;
+            MSHookMessageEx(c, @selector(layoutSubviews), (IMP)diTCRowLayout, (IMP *)&gDIOrigTCRowLayout);
+            if (!gDIOrigTCRowLayout) gDIOrigTCRowLayout = (void (*)(id, SEL))before;
+            /* 3.0.25: setFrame/setTransform 是 layoutSubviews 之外的第二个写入口 */
+            MSHookMessageEx(c, @selector(setFrame:), (IMP)diTBFrameHook, (IMP *)&gDIOrigTBFrame);
+            MSHookMessageEx(c, @selector(setTransform:), (IMP)diTBTransformHook, (IMP *)&gDIOrigTBTransform);
+            RLog(@"[抖动7] 传送栏行对齐钩子已装(+setFrame/setTransform)");
+        } @catch (__unused NSException *e) {}
+    }
+    Class bc = NSClassFromString(@"MRUTransportButton");
+    if (bc && !doneBtn) {
+        doneBtn = YES;
+        @try {
+            MSHookMessageEx(bc, @selector(setFrame:), (IMP)diBtnFrameHook, (IMP *)&gDIOrigBtnFrame);
+            MSHookMessageEx(bc, @selector(setTransform:), (IMP)diBtnTransformHook, (IMP *)&gDIOrigBtnTransform);
+            RLog(@"[抖动7] 按钮 setFrame/setTransform 纠正钩子已装");
+        } @catch (__unused NSException *e) {}
+    }
 }
 /* 播放器根视图这一侧再补一次(有些布局路径不走传送栏自己的 layoutSubviews) */
 static void diTBNormalizeFromRoot(UIView *root) {
@@ -16785,9 +16939,12 @@ static void diArtFlushRun(void) {
     for (UIView *r in roots) { @try { diArtPostFlush(r); } @catch (__unused NSException *e) {} }
     for (UIView *a in arts) {
         @try {
-            if (!a.window || a.hidden || a.alpha < 0.05 || !diArtPrefOn()) continue;
+            if (!a.window || a.hidden || a.alpha < 0.05) continue;
             if (!diArtInControlCenter(a)) continue;
-            diArtDress(a);
+            /* 3.0.25: 「启用遮罩」不再被「专辑旋转」挡住 —— 只开遮罩时走 mask-only:
+               只换内容, 不挂圆蒙版不转。 */
+            if (diArtPrefOn()) diArtDress(a);
+            else if (gDIArtMaskEnabled) diArtMaskCover(a, a.layer);
         } @catch (__unused NSException *e) {}
     }
 }
@@ -17596,7 +17753,8 @@ static void diArtAVLayout(id self, SEL cmd) {
         /* 3.0.19: 去掉 diArtIs3x2() 限制 —— 3×2 只是"要不要动传送栏"的判据, 与封面
            无关。用户实测 3×2 展开已经正常, 但 4×2 / 其他尺寸的展开不转, 就是因为
            这里把非 3×2 全挡掉了。 */
-        if (!diArtPrefOn()) return;
+        /* 3.0.25: 只开「启用遮罩」不开「专辑旋转」时也要进来(mask-only)。 */
+        if (!diArtPrefOn() && !gDIArtMaskEnabled) return;
         UIView *v = (UIView *)self;
         if (!v.window || v.hidden || v.alpha < 0.05) return;
         if (!diArtInControlCenter(v)) return;   /* 锁屏 / 灵动岛不碰 */

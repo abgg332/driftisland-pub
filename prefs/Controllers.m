@@ -1463,7 +1463,7 @@ static void diWriteColors(NSArray<NSString *> *colors) {
         /* 2.9.19: 组件隐藏 —— 按用户要求在「控制中心」下面新增入口 */
         DI_ADD([self linkSpec:@"组件隐藏" detail:[DIWidgetHidePage class]]);
         /* 2.9.75: 播放器入口 —— 组件隐藏下面同级(不在里面); 内置原生播放器(控制中心播放器增强) */
-        DI_ADD([self linkSpec:@"播放器入口" detail:[DIPlayerEntryPage class]]);
+        DI_ADD([self linkSpec:@"原生播放" detail:[DIPlayerEntryPage class]]);
 
         _smallRow = _expandRow = -1;
         {
@@ -5835,7 +5835,7 @@ static void diNPEnsureActivation(void) {
     [specs addObject:[self groupSpec:@"功能" footer:nil]];
     [specs addObject:[self npSwitch:@"封面背景" key:@"MusicArtworkGradientEnabled" def:YES]];
     /* 3.1.0: 参考 CCUIPlayer 的 HideNotPlaying —— 打开后隐藏模块里的「未在播放」文字 */
-    [specs addObject:[self npSwitch:@"隐藏未在播放" key:@"HideNotPlaying" def:NO]];
+    [specs addObject:[self npSwitch:@"隐藏未在" key:@"HideNotPlaying" def:NO]];
     [specs addObject:[self npRotateSwitch]];
     /* 3.0.24: 「禁止 N95 修改专辑图」删除(用不上); 「隐藏投送图标」改名「隐藏投送」;
        下面新增「启用遮罩」+「遮罩素材」 —— 把专辑遮罩的素材铺到播放器的旋转专辑图上,
