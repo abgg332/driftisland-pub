@@ -16202,12 +16202,17 @@ static void diNP31FitBox(UIView *box) {
 static void diNP31ApplyModule(UIView *card) {
     if (!card || !diNP31On()) return;
     UIView *box = nil;
-    for (UIView *p = card.superview; p; p = p.superview) {
+    /* 3.0.33: 未播放时卡片是 356x932 的整块占位, 以前遇到高 >200 就 break, 结果
+       "外层=无", 容器永远收不到 → 用户看到"默认还是 4×1"。现在一路往上找, 只在
+       到窗口/面板根时停。 */
+    int guard = 0;
+    for (UIView *p = card.superview; p && guard++ < 12; p = p.superview) {
         if ([NSStringFromClass(p.class) isEqualToString:@"CCUIContentModuleContainerView"]) {
             box = p;
             break;
         }
-        if (p.frame.size.height > 200) break;   /* 到面板级了, 说明没有外层容器 */
+        if ([p isKindOfClass:UIWindow.class]) break;
+        if (p.frame.size.width > 500 && p.frame.size.height > 500) break;   /* 面板根 */
     }
     static int sLog = 0;
     if (sLog < 6) {
@@ -16215,7 +16220,8 @@ static void diNP31ApplyModule(UIView *card) {
         RLog(@"[3x1][诊断] 键=%@ 卡片=%@ %.0fx%.0f 外层=%@",
              diNPLayoutKey(), NSStringFromClass(card.class),
              card.frame.size.width, card.frame.size.height,
-             box ? NSStringFromClass(box.class) : @"无");
+             box ? [NSString stringWithFormat:@"%@ %.0fx%.0f", NSStringFromClass(box.class),
+                    box.frame.size.width, box.frame.size.height] : @"无");
     }
     diNP31Mark(card);
     diNP31FitBox(card);
@@ -16228,6 +16234,41 @@ static void (*gDIOrigCardLayout)(id, SEL) = NULL;
 static void (*gDIOrigCMCFrame)(id, SEL, CGRect) = NULL;
 static void (*gDIOrigCardFrame)(id, SEL, CGRect) = NULL;
 
+/* 3.0.33: 容器/卡片自报身份 —— 未播放时播放器 VC 可能还没建, 靠 moduleIdentifier
+   自己认(容器有这个键; 卡片没有就顺着 nextResponder 找控制器)。认出来就打标记,
+   之后 setFrame 阶段直接生效, 不依赖"有没有在放歌"。 */
+static BOOL diNP31SelfIdentify(UIView *v) {
+    if (!v) return NO;
+    if (objc_getAssociatedObject(v, &kDI3x1Player)) return YES;
+    NSString *ident = nil;
+    @try { ident = [v valueForKey:@"moduleIdentifier"]; } @catch (__unused NSException *e) {}
+    if (![ident isKindOfClass:NSString.class] || ![ident containsString:@"nowplaying"]) {
+        @try {
+            UIResponder *r = [v nextResponder];
+            if ([r isKindOfClass:UIViewController.class]) {
+                id id2 = [r valueForKey:@"moduleIdentifier"];
+                if ([id2 isKindOfClass:NSString.class]) ident = id2;
+            }
+        } @catch (__unused NSException *e) {}
+    }
+    if (![ident isKindOfClass:NSString.class] || ![ident containsString:@"nowplaying"]) {
+        /* 容器把标识放在 contentModuleContext 里(iOS 16/17 都是) */
+        @try {
+            id ctx = nil;
+            @try { ctx = [v valueForKey:@"contentModuleContext"]; } @catch (__unused NSException *e) {}
+            if (!ctx) { @try { ctx = [v valueForKey:@"_contentModuleContext"]; } @catch (__unused NSException *e) {} }
+            if (ctx) {
+                id id3 = [ctx valueForKey:@"moduleIdentifier"];
+                if ([id3 isKindOfClass:NSString.class]) ident = id3;
+            }
+        } @catch (__unused NSException *e) {}
+    }
+    if ([ident isKindOfClass:NSString.class] && [ident containsString:@"nowplaying"]) {
+        diNP31Mark(v);
+        return YES;
+    }
+    return NO;
+}
 /* 3.0.32: 让"注销后第一次打开就是 3 格宽"。
    改在 setFrame:(网格给容器/卡片正式设 frame 的那一刻)而不是 layoutSubviews 之后:
    这里改完就在同一调用栈里设置, CA 提交前已经是窄的, 用户看不到 4×1 的中间态;
@@ -16235,7 +16276,7 @@ static void (*gDIOrigCardFrame)(id, SEL, CGRect) = NULL;
    只动宽度: 左边缘(x)和高度不变。 */
 static CGRect diNP31AdjustRect(UIView *v, CGRect f) {
     @try {
-        if (!objc_getAssociatedObject(v, &kDI3x1Player)) return f;
+        if (!diNP31SelfIdentify(v)) return f;
         if (!diNP31On()) return f;
         if (f.size.height < 20.0 || f.size.height > 130.0) return f;   /* 展开态不碰 */
         if (f.size.width >= 300.0) {                                    /* 满宽 = 基准 */
@@ -16269,8 +16310,13 @@ static void diNP31CMCLayout(id self, SEL cmd) {
 /* 集合控制器布局链尾兜底: 覆盖"容器没被重新布局、但父级改了 frame"的情况 */
 static void (*gDIOrigCVCViewLayout)(id, SEL) = NULL;
 static void diNP31Walk(UIView *v, int depth) {
-    if (!v || depth > 10) return;
-    if (objc_getAssociatedObject(v, &kDI3x1Player)) diNP31FitBox(v);
+    if (!v || depth > 12) return;
+    if (objc_getAssociatedObject(v, &kDI3x1Player)) {
+        diNP31FitBox(v);
+    } else if ([NSStringFromClass(v.class) isEqualToString:@"CCUIContentModuleContainerView"]) {
+        /* 3.0.33: 没标记过的容器也认一次(未播放态没有播放器 VC, 只能靠容器自报身份) */
+        if (diNP31SelfIdentify(v)) diNP31FitBox(v);
+    }
     for (UIView *c in v.subviews) diNP31Walk(c, depth + 1);
 }
 static void diNP31CardLayout(id self, SEL cmd) {
@@ -17038,14 +17084,23 @@ static void diNP31ShiftButtons(UIView *tc) {
     if (!tc || !tc.window || !enabled) return;
     if (![diNPLayoutKey() isEqualToString:@"3x1"]) return;
     NSArray<UIView *> *btns = diTBBtns(tc);
-    if (btns.count < 3) return;
+    if (btns.count < 3) {
+        static int ls = 0;
+        if (ls < 3) {
+            ls++;
+            RLog(@"[3x1] 按钮右移跳过: 只找到 %lu 个按钮 (栏 %@ %.0fx%.0f)",
+                 (unsigned long)btns.count, NSStringFromClass(tc.class),
+                 tc.bounds.size.width, tc.bounds.size.height);
+        }
+        return;
+    }
     NSArray<UIView *> *sorted = [btns sortedArrayUsingComparator:^NSComparisonResult(UIView *a, UIView *b) {
         CGFloat ax = a.frame.origin.x, bx = b.frame.origin.x;
         if (ax < bx) return NSOrderedAscending;
         if (ax > bx) return NSOrderedDescending;
         return NSOrderedSame;
     }];
-    const CGFloat kShift = 9.0;
+    const CGFloat kShift = 12.0;   /* 3.0.33: 9 太小, 用户看不出; 12 明显一点 */
     int moved = 0; CGFloat lastDx = 0;
     for (NSUInteger i = 1; i < sorted.count; i++) {   /* 0=上一首, 不动 */
         UIView *b = sorted[i];
@@ -17059,16 +17114,14 @@ static void diNP31ShiftButtons(UIView *tc) {
             st.applied = cur;
             objc_setAssociatedObject(b, &kDI31ShiftKey, st, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
         }
-        CGFloat target;
-        if (fabs(cur - st.applied) < 0.5) continue;           /* 已经是摆好的位置 */
-        if (fabs(cur - st.base) < 1.0) {                      /* 系统摆回原位 */
-            target = st.base + kShift;
-        } else if (fabs(cur - st.base) > 40.0) {              /* 换布局: 认新基准 */
+        /* 3.0.33: 以前第一次只记录基准就 continue, 系统不重排时永远不推(用户:
+           "3×1 的按钮还是原来位置")。现在目标恒为 base+shift, 第一次就生效。 */
+        CGFloat target = st.base + kShift;
+        if (fabs(cur - st.base) > 40.0) {                      /* 换布局: 认新基准 */
             st.base = cur;
             target = cur + kShift;
-        } else {
-            target = st.base + kShift;                        /* 被摆到别处: 仍回目标 */
         }
+        if (fabs(cur - target) < 0.4) { st.applied = target; continue; }
         CGPoint inSp = [b.superview convertPoint:CGPointMake(target, CGRectGetMidY(r)) fromView:nil];
         CGPoint p = b.layer.position;
         CGFloat dx = inSp.x - b.center.x;
@@ -17125,21 +17178,35 @@ static void (*gDIOrigBtnFrame)(id, SEL, CGRect) = NULL;
 static void (*gDIOrigBtnTransform)(id, SEL, CGAffineTransform) = NULL;
 static void diBtnFrameHook(id self, SEL cmd, CGRect f) {
     gDIOrigBtnFrame(self, cmd, f);
-    @try { diTBfixBtn((UIView *)self); } @catch (__unused NSException *e) {}
+    @try {
+        UIView *b = (UIView *)self;
+        if (diArtIs3x2()) diTBfixBtn(b);
+        else if (b.superview) diNP31ShiftButtons(b.superview);   /* 3.0.33: 3×1 位移别被覆盖 */
+    } @catch (__unused NSException *e) {}
 }
 static void diBtnTransformHook(id self, SEL cmd, CGAffineTransform t) {
     gDIOrigBtnTransform(self, cmd, t);
-    @try { diTBfixBtn((UIView *)self); } @catch (__unused NSException *e) {}
+    @try {
+        UIView *b = (UIView *)self;
+        if (diArtIs3x2()) diTBfixBtn(b);
+        else if (b.superview) diNP31ShiftButtons(b.superview);
+    } @catch (__unused NSException *e) {}
 }
 static void (*gDIOrigTBFrame)(id, SEL, CGRect) = NULL;
 static void (*gDIOrigTBTransform)(id, SEL, CGAffineTransform) = NULL;
 static void diTBFrameHook(id self, SEL cmd, CGRect f) {
     gDIOrigTBFrame(self, cmd, f);
-    @try { diTBNormalizeRow((UIView *)self); } @catch (__unused NSException *e) {}
+    @try {
+        diTBNormalizeRow((UIView *)self);
+        diNP31ShiftButtons((UIView *)self);
+    } @catch (__unused NSException *e) {}
 }
 static void diTBTransformHook(id self, SEL cmd, CGAffineTransform t) {
     gDIOrigTBTransform(self, cmd, t);
-    @try { diTBNormalizeRow((UIView *)self); } @catch (__unused NSException *e) {}
+    @try {
+        diTBNormalizeRow((UIView *)self);
+        diNP31ShiftButtons((UIView *)self);
+    } @catch (__unused NSException *e) {}
 }
 static void diTBInstallRowHook(void) {
     static BOOL doneTC = NO, doneBtn = NO;
