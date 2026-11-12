@@ -790,7 +790,6 @@ static Class diStepSliderClass(void) {
 /* 3.0.40: 播放器遮罩 —— 只作用于控制中心播放器里的专辑头像, 与「附加功能 → 专辑遮罩」
    (岛上那颗) 是两套独立的键和素材, 改一处不会影响另一处。 */
 @interface DIPlayerMaskPage : DIMiniBaseController @end
-@interface DIPlayerMaskPicker : DIMaskPicker @end
 @interface DIFrameFoldersMask : DIFrameFolders @end /* 2.6.3: 遮罩素材选择(键 maskAnimFolder) */
 @interface DIFrameFoldersMini : DIFrameFolders @end  /* 左侧(mini)帧率素材选择(键 smallAnimFolder) */
 @interface DIFrameFoldersAudio : DIFrameFolders @end /* 右侧音频素材(键 miniAudioFolder) */
@@ -4944,6 +4943,7 @@ static void diOpenHomeBarPickWindow(void) {
 
 /* 3.0.40: 播放器遮罩的素材选择页 —— 与岛上那个完全同构, 只是写不同的键
    (PlayerMaskAsset), 所以两处各选各的, 互不覆盖。 */
+@interface DIPlayerMaskPicker : DIMaskPicker @end
 @implementation DIPlayerMaskPicker
 - (NSString *)maskKey { return kDIPlayerMaskKey; }
 - (NSString *)pickerTitle { return @"播放器遮罩素材"; }
