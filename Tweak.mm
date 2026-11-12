@@ -16090,9 +16090,17 @@ static NSString *diNPLayoutKey(void) {
     CFTimeInterval now = CFAbsoluteTimeGetCurrent();
     if (cache && now - ts < 2.0) return cache;
     NSString *cur = nil;
-    id v = CFBridgingRelease(CFPreferencesCopyAppValue(CFSTR("PlayerGridVariant"),
-                                                      CFSTR("com.local.playerexact")));
-    if ([v isKindOfClass:NSString.class] && [v length]) cur = v;
+    /* 3.0.30: Size 是用户在设置页直接选的那一档(我们必写), 可信度最高。
+       442 日志里 Size=4x1、ModuleSizes=4x1 但没有任何 PlayerGridVariant ——
+       之前只认 Variant/ModuleSizes, 选了 3×1 也可能读不到。现在先看 Size。 */
+    id sz = CFBridgingRelease(CFPreferencesCopyAppValue(CFSTR("Size"),
+                                                       CFSTR("com.local.playerexact")));
+    if ([sz isKindOfClass:NSString.class] && [sz length]) cur = sz;
+    if (!cur.length) {
+        id v = CFBridgingRelease(CFPreferencesCopyAppValue(CFSTR("PlayerGridVariant"),
+                                                          CFSTR("com.local.playerexact")));
+        if ([v isKindOfClass:NSString.class] && [v length]) cur = v;
+    }
     if (!cur.length) {
         id dict = CFBridgingRelease(CFPreferencesCopyAppValue(CFSTR("ModuleSizes"),
                                                              CFSTR("com.local.playerexact")));
@@ -16106,20 +16114,39 @@ static NSString *diNPLayoutKey(void) {
     return cache;
 }
 
-/* 这个容器里(或子树里)有没有播放器 —— 只处理播放器模块, 天气/其他模块一概不碰 */
-static BOOL diNP31HasNowPlaying(UIView *v, int depth) {
-    if (!v || depth > 7) return NO;
-    if ([NSStringFromClass(v.class) hasPrefix:@"MRUNowPlayingView"]) return YES;
-    for (UIView *c in v.subviews) if (diNP31HasNowPlaying(c, depth + 1)) return YES;
-    return NO;
+/* 3.0.30: 3×1 收窄改成"先认准播放器模块, 再改它"。
+   442 日志: 模块是 356x77(430 机型), 两个钩子都装上了, 但 [3x1] 一条没打 ——
+   "在容器子树里找 MRUNowPlayingView" 这条路在网格态走不通(播放器视图不在容器
+   子树里, 或者类名不是那个前缀), 所以一个都没收。
+   现在: diNPHandleModuleVC 早就用 moduleIdentifier=nowplaying 精确认出了播放器
+   模块并且拿到了卡片, 那里直接给"卡片 + 外层模块容器"打标记(kDI3x1Player);
+   布局钩子只负责把带标记的视图宽度摆正, 认不出的模块(天气/手电)一个都不碰。
+   目标宽 = 满宽 × 0.75 − 4pt(= 3 格宽; 430 机型实测 356 → 263, 与 3×2 模块同宽);
+   只改宽度: 左边缘不动(内容整体左移一点点), 高度不动(还是 4×1 的高);
+   高度 > 130 的(展开态 300+)直接跳过 —— 展开一个像素都不动。 */
+static char kDI3x1Player;    /* 标记: 这个视图属于播放器模块 */
+static char kDI3x1FullW;     /* 首次见到的满宽, 之后按它算目标, 防越缩越短 */
+static BOOL diNP31On(void) {
+    return [diNPLayoutKey() isEqualToString:@"3x1"];
 }
-/* 只收网格态(高 20~130); 展开态(300+) 直接返回, 一个像素都不动 */
+static void diNP31Mark(UIView *v) {
+    if (!v) return;
+    objc_setAssociatedObject(v, &kDI3x1Player, @YES, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    if (!objc_getAssociatedObject(v, &kDI3x1FullW)) {
+        CGFloat w = v.frame.size.width;
+        if (w > 200) {
+            objc_setAssociatedObject(v, &kDI3x1FullW, @(w), OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        }
+    }
+}
 static void diNP31FitBox(UIView *box) {
     if (!box) return;
     CGRect f = box.frame;
-    if (f.size.width < 200.0) return;
-    if (f.size.height < 20.0 || f.size.height > 130.0) return;
-    CGFloat target = f.size.width * 0.75 - 4.0;
+    if (f.size.width < 200.0) return;                            /* 已经是窄的/占位 */
+    if (f.size.height < 20.0 || f.size.height > 130.0) return;   /* 展开态(300+)不碰 */
+    NSNumber *fw = objc_getAssociatedObject(box, &kDI3x1FullW);
+    CGFloat full = fw ? fw.doubleValue : f.size.width;
+    CGFloat target = full * 0.75 - 4.0;
     if (target < 150.0) return;
     if (fabs(f.size.width - target) < 1.0) return;
     box.frame = CGRectMake(f.origin.x, f.origin.y, target, f.size.height);
@@ -16131,62 +16158,112 @@ static void diNP31FitBox(UIView *box) {
              target, f.size.height);
     }
 }
-static void diNP31Walk(UIView *v, int depth) {
-    if (!v || depth > 8) return;
-    if ([NSStringFromClass(v.class) isEqualToString:@"CCUIContentModuleContainerView"]
-        && diNP31HasNowPlaying(v, 0)) {
-        diNP31FitBox(v);
+/* 卡片(内容) + 外层模块容器(背景框)一起收 —— 只缩宽, 左边缘不动 */
+static void diNP31ApplyModule(UIView *card) {
+    if (!card || !diNP31On()) return;
+    UIView *box = nil;
+    for (UIView *p = card.superview; p; p = p.superview) {
+        if ([NSStringFromClass(p.class) isEqualToString:@"CCUIContentModuleContainerView"]) {
+            box = p;
+            break;
+        }
+        if (p.frame.size.height > 200) break;   /* 到面板级了, 说明没有外层容器 */
     }
-    for (UIView *c in v.subviews) diNP31Walk(c, depth + 1);
+    static int sLog = 0;
+    if (sLog < 6) {
+        sLog++;
+        RLog(@"[3x1][诊断] 键=%@ 卡片=%@ %.0fx%.0f 外层=%@",
+             diNPLayoutKey(), NSStringFromClass(card.class),
+             card.frame.size.width, card.frame.size.height,
+             box ? NSStringFromClass(box.class) : @"无");
+    }
+    diNP31Mark(card);
+    diNP31FitBox(card);
+    if (box) { diNP31Mark(box); diNP31FitBox(box); }
 }
 
 /* 容器自己的 layoutSubviews: 父级刚把 frame 设成满宽, 这里同一帧内改回来 */
 static void (*gDIOrigCMCLayout)(id, SEL) = NULL;
+static void (*gDIOrigCardLayout)(id, SEL) = NULL;
 static void diNP31CMCLayout(id self, SEL cmd) {
     if (gDIOrigCMCLayout) gDIOrigCMCLayout(self, cmd);
     @try {
-        if (![diNPLayoutKey() isEqualToString:@"3x1"]) return;
         UIView *v = (UIView *)self;
-        if (!diNP31HasNowPlaying(v, 0)) return;
+        if (!objc_getAssociatedObject(v, &kDI3x1Player)) return;
+        if (!diNP31On()) return;
         diNP31FitBox(v);
     } @catch (__unused NSException *e) {}
 }
 /* 集合控制器布局链尾兜底: 覆盖"容器没被重新布局、但父级改了 frame"的情况 */
 static void (*gDIOrigCVCViewLayout)(id, SEL) = NULL;
+static void diNP31Walk(UIView *v, int depth) {
+    if (!v || depth > 10) return;
+    if (objc_getAssociatedObject(v, &kDI3x1Player)) diNP31FitBox(v);
+    for (UIView *c in v.subviews) diNP31Walk(c, depth + 1);
+}
+static void diNP31CardLayout(id self, SEL cmd) {
+    if (gDIOrigCardLayout) gDIOrigCardLayout(self, cmd);
+    @try {
+        UIView *v = (UIView *)self;
+        if (!objc_getAssociatedObject(v, &kDI3x1Player)) return;
+        if (!diNP31On()) return;
+        diNP31FitBox(v);
+    } @catch (__unused NSException *e) {}
+}
 static void diNP31VCViewLayout(id self, SEL cmd) {
     if (gDIOrigCVCViewLayout) gDIOrigCVCViewLayout(self, cmd);
     @try {
-        if (![diNPLayoutKey() isEqualToString:@"3x1"]) return;
+        if (!diNP31On()) return;
         UIViewController *vc = (UIViewController *)self;
         if (vc.isViewLoaded) diNP31Walk(vc.view, 0);
     } @catch (__unused NSException *e) {}
 }
 static void diNPInstall3x1Hook(void) {
-    static BOOL doneBox = NO, doneVC = NO;
-    if (doneBox && doneVC) return;
-    Class box = NSClassFromString(@"CCUIContentModuleContainerView");
-    if (box && !doneBox) {
-        doneBox = YES;
-        @try {
-            Method m = class_getInstanceMethod(box, @selector(layoutSubviews));
-            IMP before = m ? method_getImplementation(m) : NULL;
-            MSHookMessageEx(box, @selector(layoutSubviews), (IMP)diNP31CMCLayout,
-                            (IMP *)&gDIOrigCMCLayout);
-            if (!gDIOrigCMCLayout) gDIOrigCMCLayout = (void (*)(id, SEL))before;
-            RLog(@"[3x1] 模块容器布局钩子 %@", gDIOrigCMCLayout ? @"已装" : @"失败");
-        } @catch (__unused NSException *e) {}
+    static BOOL doneVC = NO;
+    static BOOL doneBox = NO, doneCard = NO;
+    if (doneVC && doneBox && doneCard) return;
+    /* 两个类都挂: 不同 iOS 版本里"卡片"和"容器"是哪个类不固定 */
+    if (!doneBox) {
+        Class c = NSClassFromString(@"CCUIContentModuleContainerView");
+        if (c) {
+            doneBox = YES;
+            @try {
+                Method m = class_getInstanceMethod(c, @selector(layoutSubviews));
+                IMP before = m ? method_getImplementation(m) : NULL;
+                MSHookMessageEx(c, @selector(layoutSubviews), (IMP)diNP31CMCLayout,
+                                (IMP *)&gDIOrigCMCLayout);
+                if (!gDIOrigCMCLayout) gDIOrigCMCLayout = (void (*)(id, SEL))before;
+                RLog(@"[3x1] 模块容器布局钩子 %@", gDIOrigCMCLayout ? @"已装" : @"失败");
+            } @catch (__unused NSException *e) {}
+        }
     }
-    Class vcc = NSClassFromString(@"CCUIModuleCollectionViewController");
-    if (vcc && !doneVC) {
-        doneVC = YES;
-        @try {
-            Method m = class_getInstanceMethod(vcc, @selector(viewDidLayoutSubviews));
-            IMP before = m ? method_getImplementation(m) : NULL;
-            MSHookMessageEx(vcc, @selector(viewDidLayoutSubviews), (IMP)diNP31VCViewLayout,
-                            (IMP *)&gDIOrigCVCViewLayout);
-            if (!gDIOrigCVCViewLayout) gDIOrigCVCViewLayout = (void (*)(id, SEL))before;
-            RLog(@"[3x1] 集合控制器布局钩子 %@", gDIOrigCVCViewLayout ? @"已装" : @"失败");
-        } @catch (__unused NSException *e) {}
+    if (!doneCard) {
+        Class c = NSClassFromString(@"CCUIContentModuleContentContainerView");
+        if (c) {
+            doneCard = YES;
+            @try {
+                Method m = class_getInstanceMethod(c, @selector(layoutSubviews));
+                IMP before = m ? method_getImplementation(m) : NULL;
+                MSHookMessageEx(c, @selector(layoutSubviews), (IMP)diNP31CardLayout,
+                                (IMP *)&gDIOrigCardLayout);
+                if (!gDIOrigCardLayout) gDIOrigCardLayout = (void (*)(id, SEL))before;
+                RLog(@"[3x1] 卡片布局钩子 %@", gDIOrigCardLayout ? @"已装" : @"失败");
+            } @catch (__unused NSException *e) {}
+        }
+    }
+    if (!doneVC) {
+        Class c = NSClassFromString(@"CCUIModuleCollectionViewController");
+        if (c) {
+            doneVC = YES;
+            @try {
+                Method m = class_getInstanceMethod(c, @selector(viewDidLayoutSubviews));
+                IMP before = m ? method_getImplementation(m) : NULL;
+                MSHookMessageEx(c, @selector(viewDidLayoutSubviews), (IMP)diNP31VCViewLayout,
+                                (IMP *)&gDIOrigCVCViewLayout);
+                if (!gDIOrigCVCViewLayout) gDIOrigCVCViewLayout = (void (*)(id, SEL))before;
+                RLog(@"[3x1] 集合控制器布局钩子 %@", gDIOrigCVCViewLayout ? @"已装" : @"失败");
+            } @catch (__unused NSException *e) {}
+        }
     }
 }
 
@@ -17635,6 +17712,10 @@ static void diNPHandleModuleVC(id vc) {
 
     if (!gDIBgHosts) gDIBgHosts = [NSHashTable weakObjectsHashTable];
     [gDIBgHosts addObject:card];
+
+    /* 3.0.30: 3×1 —— 这里已经按 moduleIdentifier 认准是播放器模块了, 直接给卡片和
+       外层模块容器打标记并收窄; 其他模块(天气/手电)走不到这儿, 不会被误伤。 */
+    if ([diNPLayoutKey() isEqualToString:@"3x1"]) diNP31ApplyModule(card);
 
     diNPTickPrefs();
     diNPStartBgTimer();
