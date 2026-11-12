@@ -16611,6 +16611,8 @@ static void diNPHandleModuleVC(id vc) {
 
 /* 3.0.14: 播放信息变化通知 —— 之前只在构造器里注册且被保险门控, 一旦那次没注册上
    (或档位为 0), 之后切歌就永远不刷新。改成幂等函数, 构造器和延迟安装各调一次。 */
+static void diNPMediaChanged(CFNotificationCenterRef c, void *obs, CFStringRef name,
+                             const void *obj, CFDictionaryRef info);   /* 定义在后面 */
 static BOOL gDIMediaObserved = NO;
 static void diNPInstallMediaObserver(void) {
     if (gDIMediaObserved) return;
