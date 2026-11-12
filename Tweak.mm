@@ -16159,6 +16159,7 @@ static NSString *diNPLayoutKey(void) {
    高度 > 130 的(展开态 300+)直接跳过 —— 展开一个像素都不动。 */
 static char kDI3x1Player;    /* 标记: 这个视图属于播放器模块 */
 static char kDI3x1FullW;     /* 首次见到的满宽, 之后按它算目标, 防越缩越短 */
+static char kDI3x1NegTS;     /* 3.0.35: 上次"识别失败"的时间戳(2 秒 TTL 负缓存) */
 static NSHashTable *gDI3x1Views;
 static BOOL diNP31On(void) {
     return [diNPLayoutKey() isEqualToString:@"3x1"];
@@ -16173,7 +16174,11 @@ static void diNP31Mark(UIView *v) {
        已经收窄过的 263 会把基准记成 263, 于是 263×0.75−4=193 越缩越短。 */
     NSNumber *fw = objc_getAssociatedObject(v, &kDI3x1FullW);
     CGFloat w = v.frame.size.width;
-    if (w >= 300.0 && (!fw || fw.doubleValue < 300.0)) {
+    /* 3.0.35: "只记一次"改成"单调取最大"。原规则只防住了覆盖, 没防住"第一次就收到
+       动画中间值": 若首次 setFrame: 拿到 320(≥300), 基准就永久锁在 320, 目标宽
+       = 320×0.75−4 = 236, 整个会话都比 3 格窄 27pt。允许"更大才覆盖"既不会越缩越短,
+       又能在随后真正的满宽 356 到来时把基准修正回来。 */
+    if (w >= 300.0 && (!fw || w > fw.doubleValue + 20.0)) {
         objc_setAssociatedObject(v, &kDI3x1FullW, @(w), OBJC_ASSOCIATION_RETAIN_NONATOMIC);
     }
     if (!gDI3x1Views) gDI3x1Views = [NSHashTable weakObjectsHashTable];
@@ -16317,6 +16322,14 @@ static BOOL diNP31HasNPChild(UIView *v, int depth, int *budget) {
 static BOOL diNP31SelfIdentify(UIView *v) {
     if (!v) return NO;
     if (objc_getAssociatedObject(v, &kDI3x1Player)) return YES;
+    /* 3.0.35: 负结果做 2 秒 TTL 缓存。以前只缓存"是播放器", 认不出来的视图
+       (手电/天气/计时器容器)每次 setFrame: 都重跑全套四级识别 —— 包括会抛异常的
+       KVC 和最多 80 节点的子树遍历。用 TTL 而不是永久缓存, 是因为第四级
+       (子树里有没有 NowPlaying) 依赖子树此刻的构成, 永久缓存会把"晚一点才挂上
+       播放器"的容器错误地永久排除。 */
+    NSNumber *negTS = objc_getAssociatedObject(v, &kDI3x1NegTS);
+    CFAbsoluteTime nowTS = CFAbsoluteTimeGetCurrent();
+    if (negTS && nowTS - negTS.doubleValue < 2.0) return NO;
     NSString *ident = diNP31ScanIdent(v);
     if (!diNP31IsNPIdent(ident)) {
         @try { id x = [v valueForKey:@"moduleIdentifier"]; if ([x isKindOfClass:NSString.class]) ident = x; }
@@ -16362,10 +16375,12 @@ static BOOL diNP31SelfIdentify(UIView *v) {
     }
     if (diNP31IsNPIdent(ident)) {
         diNP31Mark(v);
+        objc_setAssociatedObject(v, &kDI3x1NegTS, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
         static int logs = 0;
         if (logs < 4) { logs++; RLog(@"[3x1] 识别: %@ → %@", NSStringFromClass(v.class), ident); }
         return YES;
     }
+    objc_setAssociatedObject(v, &kDI3x1NegTS, @(nowTS), OBJC_ASSOCIATION_RETAIN_NONATOMIC);
     return NO;
 }
 /* 3.0.32: 让"注销后第一次打开就是 3 格宽"。
@@ -16375,14 +16390,21 @@ static BOOL diNP31SelfIdentify(UIView *v) {
    只动宽度: 左边缘(x)和高度不变。 */
 static CGRect diNP31AdjustRect(UIView *v, CGRect f) {
     @try {
-        if (!diNP31SelfIdentify(v)) return f;
+        /* 3.0.35: 顺序倒过来 —— 先判档位(2 秒缓存, 开销约等于一次字符串比较),
+           再做识别。识别里有 class_copyIvarList 分配、多次 KVC(键不存在会抛
+           NSUnknownKeyException, ObjC 异常很贵)、最深 80 节点的子树遍历;
+           而这个函数挂在 CCUIContentModuleContainerView.setFrame: 上, 控制中心
+           打开动画期间每帧几十次、每个模块(手电/天气/计时器)都过一次 ——
+           非 3×1 用户白付这份开销, iOS 17 首开叠加 cfprefsd 争用就会主线程超时。 */
         if (!diNP31On()) return f;
+        if (!diNP31SelfIdentify(v)) return f;
         if (f.size.height < 20.0 || f.size.height > 130.0) return f;   /* 展开态不碰 */
         if (f.size.width >= 300.0) {                                    /* 满宽 = 基准 */
             /* 3.0.34: 基准只记一次。以前每次都覆盖, 动画中间值 320/340 会被当成
                "满宽"记下来, 目标宽随之变成 236/251 —— 视觉上就是"闪一下、宽度乱跳"。 */
             NSNumber *fw = objc_getAssociatedObject(v, &kDI3x1FullW);
-            if (!fw || fw.doubleValue < 300.0) {
+            /* 3.0.35: 同 diNP31Mark —— 允许更大值覆盖, 修"第一次就是动画中间值"锁死基准 */
+            if (!fw || f.size.width > fw.doubleValue + 20.0) {
                 objc_setAssociatedObject(v, &kDI3x1FullW, @(f.size.width),
                                          OBJC_ASSOCIATION_RETAIN_NONATOMIC);
             }
@@ -17211,7 +17233,14 @@ static void diNP31ShiftButtons(UIView *tc) {
     }];
     const CGFloat kShift = 12.0;   /* 3.0.33: 9 太小, 用户看不出; 12 明显一点 */
     int moved = 0; CGFloat lastDx = 0;
-    for (NSUInteger i = 1; i < sorted.count; i++) {   /* 0=上一首, 不动 */
+    /* 3.0.35: 只推"中间两颗"(播放/下一首), 不再把第 0 个之后的全推。
+       原写法 i=1..count-1 在 5 按钮栏(随机/上一首/播放/下一首/循环)会把后 4 颗
+       一起推 12pt —— 用户圈的是"播放/下一首", 随机和循环不该跟着动。
+       3 颗时索引 1、2 就是播放/下一首; 5 颗时是 2、3。按钮数量的判定需要真机确认,
+       所以这里按"≥5 就整体后挪一位"处理。 */
+    NSUInteger lo = (sorted.count >= 5) ? 2 : 1;
+    NSUInteger hi = MIN(lo + 2, sorted.count);
+    for (NSUInteger i = lo; i < hi; i++) {
         UIView *b = sorted[i];
         if (!b.window || b.hidden || !b.superview || !b.layer) continue;
         CGRect r = [b convertRect:b.bounds toView:nil];
@@ -17245,6 +17274,16 @@ static void diNP31ShiftButtons(UIView *tc) {
         if (logs < 6) { logs++; RLog(@"[3x1] 按钮右移 %d 个 dx=%.1f (栏 %.0fx%.0f)",
                                      moved, lastDx, tc.bounds.size.width, tc.bounds.size.height); }
     }
+}
+/* 3.0.35: 从按钮往上找传送栏。原实现直接拿 b.superview 当传送栏, 按钮只要不是
+   栏的直接子视图(嵌在 stack/容器里)就会 btns.count<3 直接跳过 —— 日志里表现为
+   "[3x1] 按钮右移跳过: 只找到 N 个按钮", 看起来像"钩子没装", 其实是参数传错了。 */
+static UIView *diNP31TCOf(UIView *b) {
+    for (UIView *p = b.superview; p; p = p.superview) {
+        if ([NSStringFromClass(p.class) containsString:@"TransportControls"]) return p;
+        if ([p isKindOfClass:UIWindow.class]) break;
+    }
+    return nil;
 }
 /* 传送栏自己的 layoutSubviews: 系统排完立刻摆平(同一帧、提交前, 用户看不到中间态) */
 static void (*gDIOrigTCRowLayout)(id, SEL) = NULL;
@@ -17290,7 +17329,7 @@ static void diBtnFrameHook(id self, SEL cmd, CGRect f) {
     @try {
         UIView *b = (UIView *)self;
         if (diArtIs3x2()) diTBfixBtn(b);
-        else if (b.superview) diNP31ShiftButtons(b.superview);   /* 3.0.33: 3×1 位移别被覆盖 */
+        else { UIView *tc = diNP31TCOf(b); if (tc) diNP31ShiftButtons(tc); }   /* 3.0.35: 从祖先找栏 */
     } @catch (__unused NSException *e) {}
 }
 static void diBtnTransformHook(id self, SEL cmd, CGAffineTransform t) {
@@ -17298,7 +17337,7 @@ static void diBtnTransformHook(id self, SEL cmd, CGAffineTransform t) {
     @try {
         UIView *b = (UIView *)self;
         if (diArtIs3x2()) diTBfixBtn(b);
-        else if (b.superview) diNP31ShiftButtons(b.superview);
+        else { UIView *tc = diNP31TCOf(b); if (tc) diNP31ShiftButtons(tc); }   /* 3.0.35: 从祖先找栏 */
     } @catch (__unused NSException *e) {}
 }
 static void (*gDIOrigTBFrame)(id, SEL, CGRect) = NULL;
@@ -17509,7 +17548,9 @@ static void diArtPostFlush(UIView *root) {
         }
     }
     /* 3.0.12: 展开态自动导出一次完整视图树(只为定位"有些封面没覆盖"), 写盘不刷屏 */
-    diDumpExpandedTreeOnce(root);
+    /* 3.0.35: 只在开了日志时导出 —— 400 节点拼字符串 + 落盘是首开那一秒的"主线程
+       连续活"之一, 交付版本不该无条件跑(交接文档 P1 也要求"交付前关掉")。 */
+    if (logEnabled) diDumpExpandedTreeOnce(root);
     /* 3.0.20: 3×2 传送栏兜底回正 —— 布局已经跑完, 这里改几何不会插进系统的排版过程,
        写回去的这一下跟本帧一起提交, 用户看不到。 */
     diPhase("tb");
