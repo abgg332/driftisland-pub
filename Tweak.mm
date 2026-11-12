@@ -69,7 +69,7 @@ static double expandTextY = DI_EXP_TEXT_BASE_Y;   // 上下偏移(pt, 下为正,
 static double expandTextScale = 100.0; // 文字大小(%, 100=原样)
 /* 2.8.86: 构建戳 —— 之前横幅打的是 SpringBoard 自己的 CFBundleShortVersionString(恒 1.0),
    日志里根本看不出装的是哪一版。所有诊断行都带这个戳, 下轮日志一眼定位。 */
-#define DI_BUILD_VER @"3.0.21"
+#define DI_BUILD_VER @"3.0.22"
 static BOOL gRecordingActive = NO; // 保留: 岛素材总闸条件
 static NSString *diElementId(UIView *host);
 static BOOL diMiniMusicActive(UIView *host); // 2.6.3: 前置(遮罩层使用)
@@ -116,18 +116,26 @@ static NSFileHandle *diLogHandle(void) {
     if (!gDILogHandle) gDILogHandle = [NSFileHandle fileHandleForWritingAtPath:diLogPath()];   /* 文件被删后重开 */
     return gDILogHandle;
 }
-/* 限流: 每秒 25 行; 溢出计数, 秒切换时补一条汇总 */
-static BOOL diLogThrottle(NSString **dropNote) {
+/* 限流: 每秒 25 行; 溢出计数, 秒切换时补一条汇总.
+   3.0.22: 改成"先数数再格式化" —— 以前是先把整行拼出来再判断, 一旦某处在布局里刷屏
+   (435 日志出现过一秒 30213 次), 光是拼字符串就能把主线程按死。 */
+static void diLogWrite(NSString *out);   /* 下面定义 */
+static BOOL diLogGate(void) {
     static int n = 0; static int dropped = 0;
     static CFAbsoluteTime sec = 0;
     CFAbsoluteTime now = CFAbsoluteTimeGetCurrent();
     if (now - sec >= 1.0) {
-        if (dropped > 0 && dropNote) {
-            *dropNote = [NSString stringWithFormat:@"(上一秒省略 %d 行重复日志)", dropped];
-        }
+        int d = dropped;
         dropped = 0;
         sec = now;
         n = 0;
+        if (d > 0) {
+            @try {
+                NSString *line = [NSString stringWithFormat:@"[%@] [现场] (上一秒省略 %d 行重复日志)\n",
+                                  [diLogDF() stringFromDate:[NSDate date]], d];
+                diLogWrite(line);
+            } @catch (__unused NSException *e) {}
+        }
     }
     if (n >= 25) { dropped++; return NO; }
     n++;
@@ -169,13 +177,11 @@ static void diLogWrite(NSString *out) {
 static void DLog(NSString *fmt, ...) NS_FORMAT_FUNCTION(1,2);
 static void DLog(NSString *fmt, ...) {
     if (!logEnabled) return; // 日志开关关闭时不生成
+    if (!diLogGate()) return;
     va_list args; va_start(args, fmt);
     NSString *line = [[NSString alloc] initWithFormat:fmt arguments:args];
     va_end(args);
-    NSString *dropNote = nil;
-    if (!diLogThrottle(&dropNote)) return;
-    NSString *out = [NSString stringWithFormat:@"[%@] %@%@\n", [diLogDF() stringFromDate:[NSDate date]], line,
-                     dropNote ?: @""];
+    NSString *out = [NSString stringWithFormat:@"[%@] %@\n", [diLogDF() stringFromDate:[NSDate date]], line];
     diLogWrite(out);
 }
 
@@ -183,13 +189,11 @@ static void DLog(NSString *fmt, ...) {
    固定写同一文件, 顶部标记 [现场], 排查时 grep "现场" 即可。 */
 static void RLog(NSString *fmt, ...) NS_FORMAT_FUNCTION(1,2);
 static void RLog(NSString *fmt, ...) {
+    if (!diLogGate()) return;
     va_list args; va_start(args, fmt);
     NSString *line = [[NSString alloc] initWithFormat:fmt arguments:args];
     va_end(args);
-    NSString *dropNote = nil;
-    if (!diLogThrottle(&dropNote)) return;
-    NSString *out = [NSString stringWithFormat:@"[%@] [现场] %@%@\n", [diLogDF() stringFromDate:[NSDate date]], line,
-                     dropNote ?: @""];
+    NSString *out = [NSString stringWithFormat:@"[%@] [现场] %@\n", [diLogDF() stringFromDate:[NSDate date]], line];
     diLogWrite(out);
 }
 #define DI_STEP(fmt, ...) RLog(fmt, ##__VA_ARGS__)
@@ -11769,12 +11773,32 @@ static void diCCAttachTo(id vc, UIView *background) {
     }
     UIView *parent = background.superview;
     if (!parent) { DLog(@"[控制中心] 背景视图没有父级, 无法挂载"); return; }
+    /* 3.0.22(iOS17 卡死): 这个函数是从布局钩子里调的, 而 removeFromSuperview +
+       insertSubview 本身就会**再触发一次布局** —— 系统如果每次布局都把背景视图
+       重建/换父级, 这里就成了"插入→布局→再插入"的死循环。435 日志里出现过
+       "上一秒省略 30213 行重复日志", 就是它: 一秒三万次, 主线程被自己的日志和
+       插视图占满, watchdog 直接注销。现在同一父级只挂一次, 0.5 秒内最多重挂一次。 */
+    static CFAbsoluteTime lastAttach = 0;
+    static __weak UIView *lastParent;
     if (gCCSurface.superview != parent) {
-        [gCCSurface removeFromSuperview];
-        [parent insertSubview:gCCSurface aboveSubview:background];
-        DLog(@"[控制中心] 壁纸层已挂到 %@ 之上(兄弟层, 系统清理不到)", NSStringFromClass(background.class));
+        CFAbsoluteTime now = CFAbsoluteTimeGetCurrent();
+        if (lastParent == parent && now - lastAttach < 0.5) {
+            /* 刚挂过又不在树上了 = 系统正在重建, 这一轮不跟它抢 */
+        } else {
+            lastParent = parent;
+            lastAttach = now;
+            [gCCSurface removeFromSuperview];
+            [parent insertSubview:gCCSurface aboveSubview:background];
+            if (now - lastAttach > 0) {
+                static CFAbsoluteTime lastLog = 0;
+                if (now - lastLog > 5.0) {
+                    lastLog = now;
+                    DLog(@"[控制中心] 壁纸层已挂到 %@ 之上(兄弟层, 系统清理不到)", NSStringFromClass(background.class));
+                }
+            }
+        }
     }
-    gCCSurface.frame = background.frame;
+    if (!CGRectEqualToRect(gCCSurface.frame, background.frame)) gCCSurface.frame = background.frame;
     diCCReloadSurface();
     if (ccLongPressOn) diCCInstallPressGesture(vc, background);
 }
@@ -16506,93 +16530,108 @@ static void diDumpExpandedTreeOnce(UIView *root) {
 
 static void diNPBackgroundTick(UIView *root);   /* 3.0.15: 定义在下面的 3.1.0 段 */
 
-/* ===== 3.0.21: 3×2 传送栏"按 3×2B 的方式排" =====
-   3.0.20 加的"静默回正"是错的方向: 它在布局之后又把 buttons 的 center/bounds/transform
-   写回去, 而写的位置是我们自己算的基准 —— 系统真的想挪一点点, 我们就跟它抢, 一抢就是
-   肉眼那一下"抖"。3.0.21 直接删掉, 一个几何都不写。
+/* ===== 3.0.22: 3×2 传送栏"行对齐"(找到真凶了) =====
+   435 日志把五个按钮的坐标原样打了出来, 一共有两组状态在来回切:
 
-   换成用户提的思路(照着 3×2B 的表现改): 3×2B 那套布局按钮的位移是**即时生效**的, 没有
-   隐式动画, 所以就算系统同一帧排两遍也看不出来。我们就在**紧凑 3×2 且几何稳定**的时候,
-   把这几个按钮层的隐式动画关掉(position/bounds/transform/opacity/contents) —— 不写任何
-   数值, 只是让系统的写入"落笔即定"。展开/收起动画期间(root 尺寸在变)立刻恢复原样,
-   所以展开动画一点不受影响; 卡片稳定超过 0.35 秒才关, 展开结束时也不会截断动画。 */
-@interface DITBQuietState : NSObject
-@property (nonatomic, assign) CGSize card;
-@property (nonatomic, assign) CFTimeInterval changedTS;
-@property (nonatomic, assign) BOOL quiet;
-@end
-@implementation DITBQuietState
-@end
-static const void *kDITBQuietKey = &kDITBQuietKey;
-static const void *kDITBActKey = &kDITBActKey;
+     tc={{24, 87.333}, {215, 44}}  按钮 y = 26.9007 / 30.1347
+     tc={{24, 71},     {215, 44}}  按钮 y = 43.234  / 46.468
 
+   关键: 26.9007 与 30.1347 相差 **3.234pt**, 而 3.234 = (44 − 44×0.853)/2 ——
+   正是"按钮带着 0.853 缩放(37.532/44)时又被写了一次 frame"产生的偏移。
+   也就是说: 系统对这条 5 按钮传送栏的布局每跑一次, 就有一次机会把三个中间按钮
+   (上一首/播放/下一首)**整体上抬 3.234pt**, 下一次又落回 —— 半秒到一秒一次,
+   跟用户从 3.0.9 就在说的"整条上跳几 pt、停一两帧又落回"完全一致。
+   容器自己在 87.333 / 71 之间来回是带补偿的(绝对位置不变), 所以看不见; 看得见的
+   只有这 3.234。
+
+   前面的做法(关隐式动画、事后回正)都不对: 关动画只让跳变更生硬, 事后回正发生在
+   CA 提交之后, 那一帧错的已经显示出来了。真正该做的是**在布局里、提交之前**把这行
+   摆平, 而且只写图层(CALayer.position) —— 层属性不会触发 UIKit 再排一次版, 也就
+   不会把上一帧的错位带到下一帧。
+
+   做法: 每个按钮记一个"稳定中心"(窗口坐标)。窗口坐标下容器那 16.33pt 的来回会互相
+   抵消, 只剩真正跳的 3.234pt; 偏离 0.75~6pt 就按稳定值写回(只写 layer.position),
+   偏得多说明是展开/收起这类真变化, 认它并重建基准。系统排对了就一个数都不写。 */
 static NSArray<UIView *> *diTBBtns(UIView *tc) {
     NSMutableArray<UIView *> *a = [NSMutableArray array];
     for (UIView *c in tc.subviews)
         if ([NSStringFromClass(c.class) containsString:@"TransportButton"]) [a addObject:c];
     return a;
 }
-/* 关掉一个层上的隐式动画, 并记住原样(可能本来就是 nil) */
-static void diTBActionsOff(UIView *v) {
-    if (!v || !v.layer) return;
-    if (objc_getAssociatedObject(v, kDITBActKey)) return;
-    NSDictionary *orig = v.layer.actions;
-    objc_setAssociatedObject(v, kDITBActKey, orig ?: [NSNull null], OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-    NSMutableDictionary *d = orig ? [orig mutableCopy] : [NSMutableDictionary dictionary];
-    for (NSString *k in @[@"position", @"bounds", @"bounds.size", @"bounds.origin",
-                          @"transform", @"opacity", @"hidden", @"contents", @"cornerRadius"])
-        d[k] = NSNull.null;
-    v.layer.actions = d;
-}
-static void diTBActionsOn(UIView *v) {
-    if (!v) return;
-    id orig = objc_getAssociatedObject(v, kDITBActKey);
-    if (!orig) return;
-    if (v.layer) v.layer.actions = (orig == [NSNull null]) ? nil : (NSDictionary *)orig;
-    objc_setAssociatedObject(v, kDITBActKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-}
-static void diTBQuietSet(UIView *root, UIView *tc, BOOL on) {
-    if (on) diTBActionsOff(tc); else diTBActionsOn(tc);
-    for (UIView *b in diTBBtns(tc)) {
-        if (on) diTBActionsOff(b); else diTBActionsOn(b);
-    }
-    (void)root;
-}
-static void diTBQuietCheck(UIView *root) {
-    if (!root || !root.window || !enabled || !diArtIs3x2()) return;
-    UIView *tc = diArtTransportOf(root);
-    if (!tc || !tc.superview) return;
+@interface DITBRowState : NSObject
+@property (nonatomic, assign) CGFloat stable;   /* 稳定中心(传送栏坐标系) */
+@end
+@implementation DITBRowState
+@end
+static const void *kDITBRowKey = &kDITBRowKey;
+
+static void diTBNormalizeRow(UIView *tc) {
+    if (!tc || !tc.window) return;
+    if (!enabled || !diArtIs3x2()) return;
     NSArray<UIView *> *btns = diTBBtns(tc);
     if (btns.count < 3) return;
-    DITBQuietState *st = objc_getAssociatedObject(root, kDITBQuietKey);
-    if (!st) {
-        st = [DITBQuietState new];
-        st.changedTS = CFAbsoluteTimeGetCurrent();
-        st.card = root.bounds.size;
-        objc_setAssociatedObject(root, kDITBQuietKey, st, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    if (tc.bounds.size.height < 8) return;
+    int fixed = 0; CGFloat lastDy = 0;
+    for (UIView *b in btns) {
+        if (!b.window || b.hidden || !b.layer || !b.superview || b == tc) continue;
+        /* 3.0.22: 必须在**窗口坐标**里量。容器自己会在 87.333 / 71 之间来回 16.33pt,
+           而按钮在容器内的偏移正好反向补偿 —— 在容器坐标里看是"整体移动 16pt",
+           在窗口坐标里才看得出真正跳的那 3.234pt。 */
+        CGRect r = [b convertRect:b.bounds toView:nil];
+        CGFloat cur = CGRectGetMidY(r);
+        DITBRowState *st = objc_getAssociatedObject(b, kDITBRowKey);
+        if (!st) {
+            st = [DITBRowState new];
+            st.stable = cur;
+            objc_setAssociatedObject(b, kDITBRowKey, st, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+            continue;
+        }
+        /* 差得更多 = 展开/收起/换排布这类真变化, 认它并重建基准 */
+        if (fabs(cur - st.stable) > 6.0) { st.stable = cur; continue; }
+        /* 那个 3.234 = (44 − 44×0.853)/2 的"多算一次居中"只会让按钮往上跑;
+           所以看到更低(更对齐)的一版就记下来当基准, 然后永远对着基准摆平。 */
+        if (cur > st.stable + 0.4) st.stable = cur;
+        CGFloat dy = cur - st.stable;
+        if (fabs(dy) < 0.6) continue;
+        CGPoint mid = CGPointMake(CGRectGetMidX(r), st.stable);
+        CGPoint tInSp = [[b window] convertPoint:mid toView:b.superview];
+        CGPoint p = b.layer.position;
+        p.y += (tInSp.y - b.center.y);
+        b.layer.position = p;      /* 只写图层: 不触发 UIKit 再排一次版 */
+        fixed++; lastDy = dy;
     }
-    CGSize card = root.bounds.size;
-    CFTimeInterval now = CFAbsoluteTimeGetCurrent();
-    if (!CGSizeEqualToSize(card, st.card)) {
-        st.card = card;
-        st.changedTS = now;
-        if (st.quiet) { st.quiet = NO; diTBQuietSet(root, tc, NO); }
-        return;
+    if (fixed > 0) {
+        static int logs = 0;
+        if (logs < 6) { logs++; RLog(@"[抖动7] 3×2 行对齐: 修正 %d 个按钮 dy=%.2f (容器 %.0fx%.0f)",
+                                     fixed, lastDy, tc.bounds.size.width, tc.bounds.size.height); }
     }
-    /* 展开/收起在路上: 层上还有动画, 或者卡片已经不是紧凑尺寸 → 放开动画 */
-    BOOL compact = (card.height <= 200.0 && card.width <= 340.0);
-    BOOL animating = (root.layer.animationKeys.count > 0 || tc.layer.animationKeys.count > 0);
-    if (!compact || animating) {
-        if (st.quiet) { st.quiet = NO; diTBQuietSet(root, tc, NO); }
-        st.changedTS = now;
-        return;
-    }
-    if (!st.quiet && now - st.changedTS > 0.35) {
-        st.quiet = YES;
-        diTBQuietSet(root, tc, YES);
-        static int qLogs = 0;
-        if (qLogs < 3) { qLogs++; RLog(@"[抖动6] 3×2 按钮改即时排布(照 3×2B), 卡片 %.0fx%.0f", card.width, card.height); }
-    }
+}
+/* 传送栏自己的 layoutSubviews: 系统排完立刻摆平(同一帧、提交前, 用户看不到中间态) */
+static void (*gDIOrigTCRowLayout)(id, SEL) = NULL;
+static void diTCRowLayout(id self, SEL cmd) {
+    if (gDIOrigTCRowLayout) gDIOrigTCRowLayout(self, cmd);
+    @try { diTBNormalizeRow((UIView *)self); } @catch (__unused NSException *e) {}
+}
+static void diTBInstallRowHook(void) {
+    static BOOL done = NO;
+    if (done) return;
+    Class c = NSClassFromString(@"MRUNowPlayingTransportControlsView");
+    if (!c) return;
+    done = YES;
+    @try {
+        Method m = class_getInstanceMethod(c, @selector(layoutSubviews));
+        IMP before = m ? method_getImplementation(m) : NULL;
+        MSHookMessageEx(c, @selector(layoutSubviews), (IMP)diTCRowLayout, (IMP *)&gDIOrigTCRowLayout);
+        if (!gDIOrigTCRowLayout) gDIOrigTCRowLayout = (void (*)(id, SEL))before;
+        RLog(@"[抖动7] 传送栏行对齐钩子 %@", gDIOrigTCRowLayout ? @"已装" : @"失败");
+    } @catch (__unused NSException *e) {}
+}
+/* 播放器根视图这一侧再补一次(有些布局路径不走传送栏自己的 layoutSubviews) */
+static void diTBNormalizeFromRoot(UIView *root) {
+    if (!root || !root.window || !enabled || !diArtIs3x2()) return;
+    diTBInstallRowHook();
+    UIView *tc = diArtTransportOf(root);
+    if (tc) diTBNormalizeRow(tc);
 }
 
 /* ===== 3.0.20: 所有"改东西"的动作搬出 layoutSubviews =====
@@ -16756,7 +16795,8 @@ static void diArtPostFlush(UIView *root) {
     /* 3.0.20: 3×2 传送栏兜底回正 —— 布局已经跑完, 这里改几何不会插进系统的排版过程,
        写回去的这一下跟本帧一起提交, 用户看不到。 */
     diPhase("3×2 传送栏");
-    @try { diTBQuietCheck(root); } @catch (__unused NSException *e) {}
+    diPhase("3×2 传送栏");
+    @try { diTBNormalizeFromRoot(root); } @catch (__unused NSException *e) {}
     diPhase("空闲");
     /* 3.0.17: 删掉"0.1 秒后再补一次(每 0.25s 触发)"。它在布局回调之后再往图层写一遍,
        等于把系统这一帧排好的排版动画打断重来 —— 3×2 那条传送栏的按钮就是这样
