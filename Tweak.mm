@@ -16187,7 +16187,6 @@ static const CFTimeInterval kDISpinDur = 10.0;
    现在改为: 素材作为覆盖层叠进自绘玻璃的旋转载体 _artView(见 diPaintGlassAt),
    跟小头像一起转, 不引入第二组旋转参数。素材仍用 diExportMaskSoon 导出的
    mask.png(选素材后自动重导, 按 mtime+大小指纹感知, 0.5 秒节流)。 */
-static BOOL gDIArtMaskEnabled;           /* 定义在前面 3508 行(前向声明处), prefs 缓存 */
 
 static UIImage *diArtMaskAsset(void) {
     static UIImage *img = nil;
