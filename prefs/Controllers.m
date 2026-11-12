@@ -5653,11 +5653,11 @@ static void diNPApplySize(NSString *size) {
         moduleSize = @"4x2";
         variant = @"3x2b";
     } else if ([size isEqualToString:@"3x1"]) {
-        /* 3.0.31: 直接把模块尺寸写成 3x1 —— 之前写 4x1 靠 tweak 事后收窄, 系统每次
-           重新布局都把框摆回 356, 注销后第一帧一定是 4×1(用户: "注销后显示的是4×1")。
-           原生播放器按 WxH 通用解析(4x1/4x3/2x3 都是它自己算的), 3x1 同样成立;
-           tweak 侧收窄保留作兜底(宽度已经对了就一个字不写)。 */
-        moduleSize = @"3x1";
+        /* 3.0.32: 回退 —— 3.0.31 直接把模块尺寸写成 3x1 想让系统自己排 3 格, 但系统只认
+           2x2/2x3/3x2/4x1/4x2/4x3 这几档, 非法值直接退化成最小格 2×2(用户: "3×1 变成
+           2×2 了")。所以模块尺寸必须写合法值 4x1(高和排版都是 4×1 的), 宽度收窄仍由
+           tweak 侧在布局阶段完成(3.0.32 起在 setFrame 阶段就改, 注销后第一帧即 3 格宽)。 */
+        moduleSize = @"4x1";
         variant = @"3x1";
     }
     sizes[kNPModuleID] = moduleSize;

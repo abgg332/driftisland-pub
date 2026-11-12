@@ -16084,11 +16084,42 @@ static BOOL diArtIs3x2(void) {
      · 网格布局会重设 frame, 所以在容器自己的 layoutSubviews(父级刚设完 frame、
        同一帧提交前)纠正, 集合控制器布局链尾再兜一次。
 */
+/* 3.0.32: 3.0.31 曾把模块尺寸直接写成 "3x1", 但系统只认 2x2/2x3/3x2/4x1/4x2/4x3,
+   非法值会被退化成最小的 2×2。这里做一次自愈: 域里若还留着 3x1, 后台(注入 5 秒后,
+   避开首开初始化串)改回 4x1。模块宽度本来就靠下面的收窄钩子控制。 */
+static void diNP31HealModuleSize(void) {
+    static BOOL done = NO;
+    if (done) return;
+    done = YES;
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(5 * NSEC_PER_SEC)),
+                   dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
+        CFStringRef dom = CFSTR("com.local.playerexact");
+        id dict = CFBridgingRelease(CFPreferencesCopyAppValue(CFSTR("ModuleSizes"), dom));
+        if (![dict isKindOfClass:NSDictionary.class]) return;
+        id v = dict[@"com.apple.mediaremote.controlcenter.nowplaying"];
+        if (![v isKindOfClass:NSString.class] || ![v isEqualToString:@"3x1"]) return;
+        NSMutableDictionary *m = [dict mutableCopy];
+        m[@"com.apple.mediaremote.controlcenter.nowplaying"] = @"4x1";
+        CFPreferencesSetAppValue(CFSTR("ModuleSizes"), (__bridge CFPropertyListRef)m, dom);
+        CFPreferencesAppSynchronize(dom);
+        dispatch_async(dispatch_get_main_queue(), ^{
+            RLog(@"[3x1] 自愈: ModuleSizes 里遗留的 3x1 已改回 4x1");
+        });
+    });
+}
 static NSString *diNPLayoutKey(void) {
     static NSString *cache = nil;
     static CFTimeInterval ts = 0;
     CFTimeInterval now = CFAbsoluteTimeGetCurrent();
     if (cache && now - ts < 2.0) return cache;
+    /* 3.0.32: 注入后 3 秒内不读跨进程域 —— 首开那一波 cfprefsd 争用是最有名的卡点
+       (439/441 日志 [卡死] 阶段=prefs), 布局钩子会高频进来。3 秒后正常读(2 秒一次
+       缓存), 既避开初始化尖峰, 又不会让用户注销后打开控制中心时读不到 3×1。 */
+    {
+        static CFTimeInterval boot = 0;
+        if (boot == 0) boot = now;
+        if (now - boot < 3.0) return @"";
+    }
     NSString *cur = nil;
     /* 3.0.30: Size 是用户在设置页直接选的那一档(我们必写), 可信度最高。
        442 日志里 Size=4x1、ModuleSizes=4x1 但没有任何 PlayerGridVariant ——
@@ -16111,6 +16142,8 @@ static NSString *diNPLayoutKey(void) {
     }
     cache = cur ?: @"";
     ts = now;
+    /* 3.0.32: 选了 3×1 → 顺手把域里可能残留的非法 "3x1" 模块尺寸改回 4x1 */
+    if ([cache isEqualToString:@"3x1"]) diNP31HealModuleSize();
     return cache;
 }
 
@@ -16132,22 +16165,29 @@ static BOOL diNP31On(void) {
 static void diNP31Mark(UIView *v) {
     if (!v) return;
     objc_setAssociatedObject(v, &kDI3x1Player, @YES, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-    if (!objc_getAssociatedObject(v, &kDI3x1FullW)) {
-        CGFloat w = v.frame.size.width;
-        if (w > 200) {
-            objc_setAssociatedObject(v, &kDI3x1FullW, @(w), OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-        }
+    /* 3.0.32: 基准宽只认"满宽"(4×1 排出来的 356 这类)。以前宽 >200 就记, 若是先看到
+       已经收窄过的 263 会把基准记成 263, 于是 263×0.75−4=193 越缩越短。 */
+    NSNumber *fw = objc_getAssociatedObject(v, &kDI3x1FullW);
+    CGFloat w = v.frame.size.width;
+    if (w >= 300.0 && (!fw || fw.doubleValue < 300.0)) {
+        objc_setAssociatedObject(v, &kDI3x1FullW, @(w), OBJC_ASSOCIATION_RETAIN_NONATOMIC);
     }
+}
+/* 3×1 的目标宽(满宽 × 0.75 − 4 = 3 格宽); 算不出来返回 0 */
+static CGFloat diNP31TargetW(UIView *box) {
+    NSNumber *fw = objc_getAssociatedObject(box, &kDI3x1FullW);
+    CGFloat full = fw ? fw.doubleValue : 0;
+    if (full < 300.0) return 0;
+    CGFloat target = full * 0.75 - 4.0;
+    return target >= 150.0 ? target : 0;
 }
 static void diNP31FitBox(UIView *box) {
     if (!box) return;
     CGRect f = box.frame;
     if (f.size.width < 200.0) return;                            /* 已经是窄的/占位 */
     if (f.size.height < 20.0 || f.size.height > 130.0) return;   /* 展开态(300+)不碰 */
-    NSNumber *fw = objc_getAssociatedObject(box, &kDI3x1FullW);
-    CGFloat full = fw ? fw.doubleValue : f.size.width;
-    CGFloat target = full * 0.75 - 4.0;
-    if (target < 150.0) return;
+    CGFloat target = diNP31TargetW(box);
+    if (target <= 0) return;
     if (fabs(f.size.width - target) < 1.0) return;
     box.frame = CGRectMake(f.origin.x, f.origin.y, target, f.size.height);
     static CFAbsoluteTime sT = 0;
@@ -16185,6 +16225,38 @@ static void diNP31ApplyModule(UIView *card) {
 /* 容器自己的 layoutSubviews: 父级刚把 frame 设成满宽, 这里同一帧内改回来 */
 static void (*gDIOrigCMCLayout)(id, SEL) = NULL;
 static void (*gDIOrigCardLayout)(id, SEL) = NULL;
+static void (*gDIOrigCMCFrame)(id, SEL, CGRect) = NULL;
+static void (*gDIOrigCardFrame)(id, SEL, CGRect) = NULL;
+
+/* 3.0.32: 让"注销后第一次打开就是 3 格宽"。
+   改在 setFrame:(网格给容器/卡片正式设 frame 的那一刻)而不是 layoutSubviews 之后:
+   这里改完就在同一调用栈里设置, CA 提交前已经是窄的, 用户看不到 4×1 的中间态;
+   而且系统后续读 frame 做排版时读到的就是窄值, 不会再摆回满宽。
+   只动宽度: 左边缘(x)和高度不变。 */
+static CGRect diNP31AdjustRect(UIView *v, CGRect f) {
+    @try {
+        if (!objc_getAssociatedObject(v, &kDI3x1Player)) return f;
+        if (!diNP31On()) return f;
+        if (f.size.height < 20.0 || f.size.height > 130.0) return f;   /* 展开态不碰 */
+        if (f.size.width >= 300.0) {                                    /* 满宽 = 基准 */
+            objc_setAssociatedObject(v, &kDI3x1FullW, @(f.size.width),
+                                     OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+            f.size.width = f.size.width * 0.75 - 4.0;
+            return f;
+        }
+        CGFloat t = diNP31TargetW(v);
+        if (t > 0 && f.size.width > 200.0 && fabs(f.size.width - t) >= 1.0) f.size.width = t;
+    } @catch (__unused NSException *e) {}
+    return f;
+}
+static void diNP31CMCFrame(id self, SEL cmd, CGRect f) {
+    f = diNP31AdjustRect((UIView *)self, f);
+    if (gDIOrigCMCFrame) gDIOrigCMCFrame(self, cmd, f);
+}
+static void diNP31CardFrame(id self, SEL cmd, CGRect f) {
+    f = diNP31AdjustRect((UIView *)self, f);
+    if (gDIOrigCardFrame) gDIOrigCardFrame(self, cmd, f);
+}
 static void diNP31CMCLayout(id self, SEL cmd) {
     if (gDIOrigCMCLayout) gDIOrigCMCLayout(self, cmd);
     @try {
@@ -16220,8 +16292,28 @@ static void diNP31VCViewLayout(id self, SEL cmd) {
 }
 static void diNPInstall3x1Hook(void) {
     static BOOL doneVC = NO;
-    static BOOL doneBox = NO, doneCard = NO;
-    if (doneVC && doneBox && doneCard) return;
+    static BOOL doneBox = NO, doneCard = NO, doneFrame = NO;
+    if (doneVC && doneBox && doneCard && doneFrame) return;
+    /* 3.0.32: setFrame: 阶段就摆平(见 diNP31AdjustRect) —— 两个类都挂 */
+    if (!doneFrame) {
+        doneFrame = YES;
+        Class cb = NSClassFromString(@"CCUIContentModuleContainerView");
+        Class cc = NSClassFromString(@"CCUIContentModuleContentContainerView");
+        if (cb) {
+            @try {
+                MSHookMessageEx(cb, @selector(setFrame:), (IMP)diNP31CMCFrame,
+                                (IMP *)&gDIOrigCMCFrame);
+                RLog(@"[3x1] 容器 setFrame 钩子 %@", gDIOrigCMCFrame ? @"已装" : @"失败");
+            } @catch (__unused NSException *e) {}
+        }
+        if (cc) {
+            @try {
+                MSHookMessageEx(cc, @selector(setFrame:), (IMP)diNP31CardFrame,
+                                (IMP *)&gDIOrigCardFrame);
+                RLog(@"[3x1] 卡片 setFrame 钩子 %@", gDIOrigCardFrame ? @"已装" : @"失败");
+            } @catch (__unused NSException *e) {}
+        }
+    }
     /* 两个类都挂: 不同 iOS 版本里"卡片"和"容器"是哪个类不固定 */
     if (!doneBox) {
         Class c = NSClassFromString(@"CCUIContentModuleContainerView");
