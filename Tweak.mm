@@ -16167,6 +16167,8 @@ static BOOL diNP31On(void) {
 /* 3.0.34: "锁死"保险 —— 系统在任何时机把宽度摆回满宽(动画/重建/重排), 200ms 内
    收回来, 不依赖某个布局回调有没有跑到。只轮询几个已标记的视图, 开销可忽略。 */
 static void diNP31StartWatch(void);
+static void diNP31ShiftButtons(UIView *tc);
+static UIView *diNP31FindTC(UIView *v, int depth);
 static void diNP31Mark(UIView *v) {
     if (!v) return;
     objc_setAssociatedObject(v, &kDI3x1Player, @YES, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
@@ -16210,6 +16212,43 @@ static void diNP31FitBox(UIView *box) {
              target, f.size.height);
     }
 }
+/* 3.0.37: 把播放器卡片里的文字区(header)加宽一点点。
+   基准用"第一次见到的宽度", 之后只按基准 + extra 摆, 不会每次叠加。
+   系统重新排过(宽度跳变 >40)就认新基准。 */
+static const void *kDI31TextBase = &kDI31TextBase;
+static void diNP31WidenHeader(UIView *root, CGFloat extra) {
+    if (!root) return;
+    NSMutableArray<UIView *> *stack = [NSMutableArray arrayWithObject:root];
+    int budget = 120;
+    while (stack.count && budget-- > 0) {
+        UIView *v = stack.lastObject;
+        [stack removeLastObject];
+        NSString *cn = NSStringFromClass(v.class);
+        if ([cn containsString:@"Header"]) {
+            CGFloat cur = v.frame.size.width;
+            if (cur > 40.0) {
+                NSNumber *bw = objc_getAssociatedObject(v, kDI31TextBase);
+                CGFloat base = bw ? bw.doubleValue : cur;
+                if (!bw || fabs(cur - base) > 40.0) {
+                    base = cur;
+                    objc_setAssociatedObject(v, kDI31TextBase, @(base),
+                                             OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+                }
+                CGFloat want = base + extra;
+                if (fabs(cur - want) > 0.5) {
+                    CGRect f = v.frame;
+                    f.size.width = want;
+                    v.frame = f;
+                }
+            }
+            return;                       /* 只处理最外那层 header */
+        }
+        for (UIView *c in v.subviews) {
+            if (stack.count < 200) [stack addObject:c];
+        }
+    }
+}
+
 /* 3.0.36: 以"播放器视图"为锚点收窄 —— 它就是播放器本身, 不需要任何识别,
    不依赖 moduleIdentifier / KVC / ivar 扫描, 也就不存在"认不出来"这件事。
    只处理折叠态(宽>=300 且高 50~120); 展开态(430 机型高 568)直接返回,
@@ -16244,6 +16283,10 @@ static void diNP31FitGroup(UIView *npv) {
         }
         diNP31Mark(npv);
         diNP31FitBox(npv);
+        /* 3.0.37: 按钮右移之后, 左侧文字(歌名/歌词)右边多出 18pt 的空间, 顺手让文字
+           区也吃满 —— 用户: "歌词显示也应当显示宽一点(因为按钮右移了)"。
+           只动类名带 Header 的那一层, 找不到就什么也不做, 不碰时间/日期这类标签。 */
+        diNP31WidenHeader(box, 18.0);
     } @catch (__unused NSException *e) {}
 }
 
@@ -16260,7 +16303,12 @@ static void diNP31StartWatch(void) {
         @try {
             if (!gDI3x1Views || !diNP31On()) return;
             for (UIView *v in gDI3x1Views.allObjects) {
-                if (v.window && !v.hidden) diNP31FitBox(v);
+                if (!v.window || v.hidden) continue;
+                diNP31FitBox(v);
+                /* 3.0.37: 暂停/切歌时系统会把按钮摆回原位, 而那一刻不一定有布局回调,
+                   所以靠这个 200ms 心跳把位移补回去 —— 这是"暂停就归位"的根治办法。 */
+                UIView *tc = diNP31FindTC(v, 0);
+                if (tc) diNP31ShiftButtons(tc);
             }
         } @catch (__unused NSException *e) {}
     });
@@ -16268,7 +16316,7 @@ static void diNP31StartWatch(void) {
 }
 static void diNP31ShiftButtons(UIView *tc);   /* 3.0.34: 定义在后面 */
 static UIView *diNP31FindTC(UIView *v, int depth) {
-    if (!v || depth > 5) return nil;
+    if (!v || depth > 7) return nil;   /* 3.0.37: 3×1 的栏在卡片里更深, 5 层找不到 */
     if ([NSStringFromClass(v.class) containsString:@"TransportControls"]) return v;
     for (UIView *c in v.subviews) {
         UIView *r = diNP31FindTC(c, depth + 1);
@@ -17295,7 +17343,7 @@ static void diNP31ShiftButtons(UIView *tc) {
     if (!diNP31IsFoldedModule(tc)) return;      /* 展开态/锁屏/小岛: 一颗都不碰 */
     NSArray<UIView *> *btns = diTBVisibleBtns(tc);
     if (btns.count < 3) return;
-    const CGFloat kShift = 12.0;
+    const CGFloat kShift = 18.0;   /* 3.0.37: 用户要求"在当前播放位置再右移一点点" */
     NSUInteger n = btns.count;
     /* 播放键 = 离栏中心最近的那颗; 它右边第一颗就是"下一首"。
        3 颗(上一首/播放/下一首)和 5 颗(随机/上一首/播放/下一首/循环)两种形态都对。 */
@@ -17314,13 +17362,12 @@ static void diNP31ShiftButtons(UIView *tc) {
         if (i >= n) continue;
         UIView *b = btns[i];
         if (!b.window || !b.layer) continue;
-        /* 只避开"position 本身在动画"的时机(按下高亮)。以前是任何动画都跳过,
-           而播放键常驻形变动画, 于是这帧不推、下帧推 —— 一帧原位一帧右移就是"乱跳"。 */
-        BOOL posAnim = NO;
-        for (NSString *k in b.layer.animationKeys) {
-            if ([k isEqualToString:@"position"]) { posAnim = YES; break; }
+        /* 3.0.37: 不再因为有动画就跳过。暂停/播放切换时系统会给按钮挂一条 position
+           动画, 以前这时 continue, 结果就是"暂停后按钮停在原位"。现在照写, 并把那条
+           动画撤掉 —— 最终值只由我们决定, 视觉上也没有中间态。 */
+        if ([b.layer animationForKey:@"position"]) {
+            [b.layer removeAnimationForKey:@"position"];
         }
-        if (posAnim) continue;
         CGRect rInTc = [b convertRect:b.bounds toView:tc];
         CGFloat cur = CGRectGetMidX(rInTc);
         DI31ShiftState *st = objc_getAssociatedObject(b, &kDI31ShiftKey);
