@@ -16120,6 +16120,7 @@ static void diNPDumpCrashEvidence(void) {
 static void diNPApplyHideForRoot(UIView *root);
 /* 3.0.13: 高危钩子(模块背景/隐藏 + 传送栏 setFrame)延迟安装, 定义在后面 */
 static void diArtInstallGated(void);
+static void diArtInstallAVHook(void);   /* 3.0.17: 类级接管(定义在后) */
 
 static void diArtKillJitter(UIView *root) {
     if (!diArtIs3x2()) return;
