@@ -65,7 +65,7 @@ static double expandTextY = DI_EXP_TEXT_BASE_Y;   // 上下偏移(pt, 下为正,
 static double expandTextScale = 100.0; // 文字大小(%, 100=原样)
 /* 2.8.86: 构建戳 —— 之前横幅打的是 SpringBoard 自己的 CFBundleShortVersionString(恒 1.0),
    日志里根本看不出装的是哪一版。所有诊断行都带这个戳, 下轮日志一眼定位。 */
-#define DI_BUILD_VER @"3.0.15"
+#define DI_BUILD_VER @"3.0.16"
 static BOOL gRecordingActive = NO; // 保留: 岛素材总闸条件
 static NSString *diElementId(UIView *host);
 static BOOL diMiniMusicActive(UIView *host); // 2.6.3: 前置(遮罩层使用)
@@ -14884,8 +14884,18 @@ static void diActivityTextApply(UIView *root) {
         CGPoint c0 = [sv convertPoint:v.center toView:root];
         CGPoint nRoot = CGPointMake(target.x + (c0.x - sysCenter.x) * s,
                                     target.y + (c0.y - sysCenter.y) * s);
-        v.transform = CGAffineTransformMakeScale(s, s);
-        v.center = [root convertPoint:nRoot toView:sv];
+        CGAffineTransform want = CGAffineTransformMakeScale(s, s);
+        CGPoint wantC = [root convertPoint:nRoot toView:sv];
+        /* 3.0.16: 只在"真的要变"时才写 —— 以前每次布局都写一遍 transform+center,
+           而这两个属性一改就会把父视图标脏、触发它再排一次版(3×2 里就是整条按钮跟着
+           抖一下)。值已经对上就一个字都不写。 */
+        if (CGAffineTransformEqualToTransform(v.transform, want)
+            && fabs(v.center.x - wantC.x) < 0.5 && fabs(v.center.y - wantC.y) < 0.5) {
+            [gDIActivityTexts addObject:v];
+            continue;
+        }
+        v.transform = want;
+        v.center = wantC;
         [gDIActivityTexts addObject:v];
     }
     /* 2.8.88: 只摆位置/大小, 颜色一律保持系统原样 */
@@ -15722,6 +15732,18 @@ static NSArray<UIView *> *diArtCollectIn(UIView *root) {
     return out;
 }
 
+/* 3.0.16: 图层改成"自带关闭隐式动画"的 actions, 不再用 CATransaction 包住写入 ——
+   在 layoutSubviews 里手工 begin/commit 事务会把系统这一帧排好的动画提前提交,
+   肉眼就是"整块内容闪一下/抖一下"。per-layer actions 只影响我们自己的层。 */
+static void diNoImplicitActions(CALayer *l) {
+    if (!l) return;
+    l.actions = @{ @"contents": [NSNull null], @"frame": [NSNull null],
+                   @"position": [NSNull null], @"bounds": [NSNull null],
+                   @"cornerRadius": [NSNull null], @"hidden": [NSNull null],
+                   @"opacity": [NSNull null], @"path": [NSNull null],
+                   @"transform": [NSNull null], @"backgroundColor": [NSNull null] };
+}
+
 static void diArtApply(UIView *v, BOOL on) {
     if (!v || !v.layer) return;
     CALayer *layer = v.layer;
@@ -15755,6 +15777,7 @@ static void diArtApply(UIView *v, BOOL on) {
     if (!st.mask) {
         st.mask = [CAShapeLayer layer];
         st.mask.name = @"di.player.art.circle";
+        diNoImplicitActions(st.mask);
     }
     if (!CGSizeEqualToSize(st.lastSize, b.size) || layer.mask != st.mask) {
         /* 先把 frame 定死再给 path —— CALayer 设 frame 会连带改 position/bounds/transform,
@@ -15762,14 +15785,10 @@ static void diArtApply(UIView *v, BOOL on) {
         st.lastSize = b.size;
         CGFloat side = MIN(b.size.width, b.size.height);
         CGRect circle = CGRectMake((b.size.width - side) / 2.0, (b.size.height - side) / 2.0, side, side);
-        /* 3.0.15: 尺寸/蒙版一律在"无隐式动画"的事务里写。之前每次 layout 改蒙版都带着
-           系统动画, 肉眼就是"专辑闪一下、尺寸抖一下"。 */
-        [CATransaction begin];
-        [CATransaction setDisableActions:YES];
+        /* 3.0.16: 蒙版 frame/path 在自带 actions=null 的层上写, 不再开事务。 */
         st.mask.frame = b;
         st.mask.path = [UIBezierPath bezierPathWithOvalInRect:CGRectInset(circle, 0.5, 0.5)].CGPath;
         layer.mask = st.mask;
-        [CATransaction commit];
         NSString *desc = [NSString stringWithFormat:@"%@ %.0fx%.0f", NSStringFromClass(v.class),
                           b.size.width, b.size.height];
         if (![desc isEqualToString:gDIArtLastDesc]) {
@@ -16107,6 +16126,26 @@ static void diArtKillJitter(UIView *root) {
              key, [tc.layer.animationKeys componentsJoinedByString:@","] ?: @"(无)",
              NSStringFromCGRect(tc.frame), NSStringFromClass(tc.superview.class));
     }
+    /* 3.0.16: 被动记录(只读不改) —— 3×2 里传送栏和每个按钮的 frame 一变就记一行,
+       最多 60 行。下次日志里如果出现 A→B→A 的来回, 就是系统自己在抖; 一直不动,
+       说明看到的"抖"不是 frame 变化, 而是图层/动画层面的重绘。 */
+    {
+        static int flowLogs = 0;
+        static NSString *lastSig = nil;
+        if (flowLogs < 60) {
+            NSMutableString *sig = [NSMutableString stringWithFormat:@"root=%@ tc=%@",
+                NSStringFromCGRect(tc.superview ? tc.superview.bounds : CGRectZero),
+                NSStringFromCGRect(tc.frame)];
+            for (UIView *c in tc.subviews) {
+                [sig appendFormat:@" | %@ %@", NSStringFromClass(c.class), NSStringFromCGRect(c.frame)];
+            }
+            if (!lastSig || ![lastSig isEqualToString:sig]) {
+                lastSig = [sig copy];
+                flowLogs++;
+                RLog(@"[抖动2] %@", sig);
+            }
+        }
+    }
 }
 
 /* 开关打开却一个封面候选都没找到时, 把播放器视图树记一次 —— 下一版按这个类名改 */
@@ -16354,7 +16393,10 @@ static void diNPFetchArtwork(void) {
                     if ([v isKindOfClass:NSData.class] && [((NSData *)v) length] > 64) data = v;
                 }
             }
-            UIImage *img = data ? [UIImage imageWithData:data] : nil;
+            /* 3.0.16: 先比数据再解码 —— 轮询变快以后每次都解一张 600x600 太重 */
+            NSData *prev = gDIBgData;
+            BOOL same = (data && prev && [data isEqualToData:prev]);
+            UIImage *img = (data && !same) ? [UIImage imageWithData:data] : nil;
             dispatch_async(dispatch_get_main_queue(), ^{
                 @try {
                     if (!img) {
@@ -16491,22 +16533,20 @@ static void diNPApplyBackgroundTo(UIView *host, BOOL on) {
         }
         if (r < 6.0) r = 22.0;
 
-        /* 3.0.15: 所有图层写入都关掉隐式动画 —— 之前 frame 变化会跟着外面的 UIView
-           动画块一起"滑"过去, 就是用户看到的"切歌/展开时背景拖着闪"。 */
-        [CATransaction begin];
-        [CATransaction setDisableActions:YES];
         if (!bg) {
             diCrumb([NSString stringWithFormat:@"背景: 创建子层 %@ %.0fx%.0f 圆角%.1f",
                      NSStringFromClass(host.class), rect.size.width, rect.size.height, r]);
             bg = [CALayer layer];
             bg.contentsGravity = kCAGravityResizeAspectFill;
             bg.masksToBounds = YES;
+            diNoImplicitActions(bg);
             [host.layer insertSublayer:bg atIndex:0];
             objc_setAssociatedObject(host, kDIBgIVKey, bg, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
 
             dim = [CALayer layer];
             dim.backgroundColor = [UIColor colorWithWhite:0 alpha:0.22].CGColor;
             dim.masksToBounds = YES;
+            diNoImplicitActions(dim);
             [host.layer insertSublayer:dim above:bg];
             objc_setAssociatedObject(host, kDIBgDimKey, dim, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
         }
@@ -16520,7 +16560,6 @@ static void diNPApplyBackgroundTo(UIView *host, BOOL on) {
         }
         if (bg.contents != (__bridge id)gDIBgImage.CGImage)
             bg.contents = (__bridge id)gDIBgImage.CGImage;
-        [CATransaction commit];
     } @catch (NSException *e) { diCrumb([NSString stringWithFormat:@"背景: 异常 %@", e.reason]); }
 }
 
@@ -16530,10 +16569,24 @@ static void diNPBackgroundTick(UIView *root) {
     diNPTickPrefs();
     if (!gDIBgPlayers) gDIBgPlayers = [NSHashTable weakObjectsHashTable];
     [gDIBgPlayers addObject:root];
-    if (!gDIBgOnCache) { diNPApplyBackgroundTo(root, NO); return; }
-    diNPApplyBackgroundTo(root, gDIBgImage != nil);
-    /* 图还没拿到时也别每帧都发 XPC */
+    /* 3.0.16: 不在 layoutSubviews 里直接动图层 —— 丢到下一轮 runloop, 16ms 合并一次。
+       3×2 那套布局在系统排版里还要再算一遍, 我们插进去改图层会让它这一帧多排一次,
+       表现就是"整条按钮抖一下"。 */
     CFTimeInterval now = CFAbsoluteTimeGetCurrent();
+    static CFTimeInterval lastReq = 0;
+    if (now - lastReq > 0.016) {
+        lastReq = now;
+        __weak UIView *w = root;
+        dispatch_async(dispatch_get_main_queue(), ^{
+            @try {
+                UIView *h = w;
+                if (!h || !h.window) return;
+                if (!gDIBgOnCache) { diNPApplyBackgroundTo(h, NO); return; }
+                diNPApplyBackgroundTo(h, gDIBgImage != nil);
+            } @catch (__unused NSException *e) {}
+        });
+    }
+    /* 图还没拿到时也别每帧都发 XPC */
     if (now - gDIBgFetchTS > 2.0) {
         gDIBgFetchTS = now;
         diNPFetchArtwork();
@@ -16661,9 +16714,9 @@ static void diNPStartBgTimer(void) {
                                                 dispatch_get_main_queue());
     if (!t) return;
     dispatch_source_set_timer(t,
-                              dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.5 * NSEC_PER_SEC)),
-                              (uint64_t)(1.5 * NSEC_PER_SEC),
-                              (uint64_t)(0.3 * NSEC_PER_SEC));
+                              dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.8 * NSEC_PER_SEC)),
+                              (uint64_t)(0.8 * NSEC_PER_SEC),
+                              (uint64_t)(0.2 * NSEC_PER_SEC));
     dispatch_source_set_event_handler(t, ^{
         @try {
             if (gDIStage < 1) return;
@@ -16675,7 +16728,7 @@ static void diNPStartBgTimer(void) {
     });
     gDIBgTimer = t;
     dispatch_resume(t);
-    RLog(@"[背景] 换曲轮询已启动(1.5s)");
+    RLog(@"[背景] 换曲轮询已启动(0.8s)");
 }
 
 static void diNPModuleLayout(id self, SEL cmd) {
@@ -16704,6 +16757,18 @@ static void diNPMediaChanged(CFNotificationCenterRef c, void *obs, CFStringRef n
     last = now;
     gDIBgFetchTS = 0;   /* 3.0.14: 通知来了就别等 2 秒节流 */
     @try { diNPFetchArtwork(); } @catch (__unused NSException *e) {}
+    /* 3.0.16: 通知到的时候 artworkData 常常还没写好(还拿得到上一首的图), 补两次 */
+    for (int i = 0; i < 2; i++) {
+        CFTimeInterval d = (i == 0) ? 0.25 : 0.7;
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(d * NSEC_PER_SEC)),
+                       dispatch_get_main_queue(), ^{
+            @try {
+                gDIBgFetchTS = 0;
+                gDIBgLastReqTS = 0;
+                diNPFetchArtwork();
+            } @catch (__unused NSException *e) {}
+        });
+    }
 }
 
 static void diArtInstall(void) {
