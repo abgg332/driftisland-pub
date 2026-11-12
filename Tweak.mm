@@ -14821,8 +14821,17 @@ static void diActivityApply(UIView *artwork) {
         a.fromValue = @(rev ? 6.283185307179586 : 0.0);
         a.toValue   = @(rev ? 0.0 : 6.283185307179586);
         a.duration = 360.0 / MAX(fabs(speed), 1.0);
+        /* 3.0.39: 相位续上 —— 以前每次重挂(玻璃重建 / 拨开关 / 速度重读)都从 0° 开始,
+           画面就是"转到一半突然跳回 12 点"。现在按全局时钟取起始相位。 */
+        {
+            static CFTimeInterval epoch = 0;
+            CFTimeInterval tn = CACurrentMediaTime();
+            if (epoch <= 0) epoch = tn;
+            a.beginTime = tn - fmod(tn - epoch, a.duration);
+        }
         a.repeatCount = HUGE_VALF;
         a.removedOnCompletion = NO;
+        a.fillMode = kCAFillModeBoth;
         a.timingFunction = [CAMediaTimingFunction functionWithName:kCAMediaTimingFunctionLinear];
         [state.glass.layer addAnimation:a forKey:@"di.spin"];
         state.spinSpeed = speed; state.spinRev = rev;
@@ -16068,7 +16077,7 @@ static void diLayerAddAnimHook(id self, SEL cmd, CAAnimation *anim, NSString *ke
             NSString *kp = ((CABasicAnimation *)anim).keyPath;
             if ([kp isEqualToString:@"transform.rotation.z"] || [kp isEqualToString:@"transform.rotation"]) {
                 for (CALayer *p = (CALayer *)self; p; p = p.superlayer) {
-                    if (objc_getAssociatedObject((__bridge id)p, kDIArtStateKey)) {
+                    if (objc_getAssociatedObject(p, kDIArtStateKey)) {
                         gDISpinBlocked++;
                         if (gDISpinBlocked <= 8) {
                             RLog(@"[封面] 挡掉第二条旋转 %@ key=%@ (第 %d 条)", kp, key ?: @"?", gDISpinBlocked);
