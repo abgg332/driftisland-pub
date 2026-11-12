@@ -67,7 +67,7 @@ static double expandTextY = DI_EXP_TEXT_BASE_Y;   // 上下偏移(pt, 下为正,
 static double expandTextScale = 100.0; // 文字大小(%, 100=原样)
 /* 2.8.86: 构建戳 —— 之前横幅打的是 SpringBoard 自己的 CFBundleShortVersionString(恒 1.0),
    日志里根本看不出装的是哪一版。所有诊断行都带这个戳, 下轮日志一眼定位。 */
-#define DI_BUILD_VER @"3.0.18"
+#define DI_BUILD_VER @"3.0.19"
 static BOOL gRecordingActive = NO; // 保留: 岛素材总闸条件
 static NSString *diElementId(UIView *host);
 static BOOL diMiniMusicActive(UIView *host); // 2.6.3: 前置(遮罩层使用)
@@ -6383,8 +6383,21 @@ static BOOL diGainIsSB(void) {
 static BOOL diIsGainView(UIView *v) {
     return v && [NSStringFromClass(object_getClass(v)) isEqualToString:@"_SBGainMapView"];
 }
+/* 3.0.19: 3×2 的"内容衬底"和传送栏/封面在同一棵子树里。把它当黑底板摘掉再插回,
+   会让整条传送栏重排一次(430 日志实锤: 一次还原里 40 次 MRUTransportButton.setFrame)
+   —— 这就是"按一下按钮就抖一下 / 展开返回也抖一下"。凡在 now-playing 模块里的层,
+   隐藏药丸一律不摘: 黑底由 _SBGainMapView 那条路照旧处理, 不影响效果。 */
+static BOOL diInNowPlayingUI(UIView *v) {
+    for (UIView *p = v; p; p = p.superview) {
+        NSString *cn = NSStringFromClass(object_getClass(p));
+        if ([cn containsString:@"MRU"] || [cn containsString:@"NowPlaying"]
+            || [cn containsString:@"MediaControls"] || [cn containsString:@"Transport"]) return YES;
+    }
+    return NO;
+}
 static BOOL diIsPlatter(UIView *v) {
     if (!v) return NO;
+    if (diInNowPlayingUI(v)) return NO;
     NSString *cn = NSStringFromClass(object_getClass(v));
     BOOL nameHit = [cn containsString:@"PlatterView"]
                 || [cn isEqualToString:@"PLPlatterView"]
@@ -15618,6 +15631,7 @@ static void diNPDumpDomain(void) {
 @property (nonatomic, assign) CGFloat origRadius;
 @property (nonatomic, assign) BOOL origClip;
 @property (nonatomic, assign) CATransform3D origTransform;
+@property (nonatomic, assign) CGPoint origAnchor;      /* 3.0.19: 原始锚点(不居中会"绕外围转") */
 @property (nonatomic, assign) CGSize lastSize;
 @property (nonatomic, assign) CFTimeInterval spinTS;   /* 3.0.15: 旋转起始时刻, 重挂时按相位续上 */
 @end
@@ -15710,9 +15724,13 @@ static void diArtStripSpin(CALayer *layer, int depth, int maxDepth) {
         if ([k isEqualToString:@"di.art.spin"]) continue;   /* 3.0.14: 自己的旋转不清 */
         CAAnimation *a = [layer animationForKey:k];
         if (!a) continue;
-        BOOL spin = [a isKindOfClass:CABasicAnimation.class]
-                 && [((CABasicAnimation *)a).keyPath containsString:@"rotation"];
-        if (spin || a.repeatCount > 1000.0f || a.repeatCount == HUGE_VALF || a.autoreverses) {
+        /* 3.0.19: 旧实现顺带把 repeatCount/autoreverses 的动画也清了 —— 4×2 展开格子的
+           "翻转换图"(MRUFlippingArtworkView 的 rotation.y + autoreverses)就是被它拦腰
+           掐断的: 掐断后图层停在半翻姿态, 用户看到的是"头像外围歪着转/显示不对"。
+           现在只认"绕 z 轴的自转", 其它动画(翻转/呼吸/高亮)一个都不碰。 */
+        if (![a isKindOfClass:CABasicAnimation.class]) continue;
+        NSString *kp = ((CABasicAnimation *)a).keyPath;
+        if ([kp isEqualToString:@"transform.rotation.z"] || [kp isEqualToString:@"transform.rotation"]) {
             [layer removeAnimationForKey:k];
         }
     }
@@ -15851,7 +15869,17 @@ static void diArtDress(UIView *v) {
         st.origRadius = layer.cornerRadius;
         st.origClip = layer.masksToBounds;
         st.origTransform = layer.transform;
+        st.origAnchor = layer.anchorPoint;
         objc_setAssociatedObject(v, kDIArtStateKey, st, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        /* 3.0.19: 锚点不在正中时, 绕 z 轴旋转会让整块头像"绕着外围某点转"(用户 4×2
+           反馈的"外围旋转")。这里把锚点归中, 同时把 position 补偿回去, 保证这一帧
+           视觉位置一动不动; 关掉时再还原。 */
+        if (fabs(layer.anchorPoint.x - 0.5) > 0.001 || fabs(layer.anchorPoint.y - 0.5) > 0.001) {
+            CGRect f = layer.frame;
+            layer.anchorPoint = CGPointMake(0.5, 0.5);
+            layer.position = CGPointMake(f.origin.x + f.size.width / 2.0,
+                                         f.origin.y + f.size.height / 2.0);
+        }
         /* 第一次接管这张封面时, 把播放器自己挂的旋转(常在内部 imageView 那层)清掉 ——
            不清就是"我们的 10 秒一圈 + 它的若干秒一圈"叠在一起, 转速翻倍还会卡顿。
            只清这一棵树(封面内部), 与传送栏/按钮无关。 */
@@ -15906,6 +15934,12 @@ static void diArtApply(UIView *v, BOOL on) {
             layer.masksToBounds = st.origClip;
             if (!CATransform3DIsIdentity(st.origTransform)) layer.transform = st.origTransform;
             else if (!CATransform3DIsIdentity(layer.transform)) layer.transform = CATransform3DIdentity;
+            if (fabs(st.origAnchor.x - 0.5) > 0.001 || fabs(st.origAnchor.y - 0.5) > 0.001) {
+                CGRect f = layer.frame;
+                layer.anchorPoint = st.origAnchor;
+                layer.position = CGPointMake(f.origin.x + f.size.width * st.origAnchor.x,
+                                             f.origin.y + f.size.height * st.origAnchor.y);
+            }
             objc_setAssociatedObject(v, kDIArtStateKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
         }
         /* 3.0.15: 删掉"没记录也要把 transform 拍回单位阵" —— 系统给没被我们收集到的
@@ -16946,7 +16980,9 @@ static void diArtAVLayout(id self, SEL cmd) {
     if (gDIOrigAVLayout) gDIOrigAVLayout(self, cmd);
     @try {
         if (gDIStage < 1) return;
-        if (!diArtIs3x2()) return;
+        /* 3.0.19: 去掉 diArtIs3x2() 限制 —— 3×2 只是"要不要动传送栏"的判据, 与封面
+           无关。用户实测 3×2 展开已经正常, 但 4×2 / 其他尺寸的展开不转, 就是因为
+           这里把非 3×2 全挡掉了。 */
         if (!diArtPrefOn()) return;
         UIView *v = (UIView *)self;
         if (!v.window || v.hidden || v.alpha < 0.05) return;
@@ -16986,16 +17022,24 @@ static void diTraceCaller(const char *tag) {
     RLog(@"[抖动3] %@ ← (无符号)", tag ? [NSString stringWithUTF8String:tag] : @"?");
 }
 
+/* 3.0.19: 丢掉引导前 10 秒的记录 —— 430 日志里 40 条配额全被引导期的正常布局吃光了,
+   真正抖动时反而一条都没有。现在只在"系统已经稳定"之后才开始记。 */
+static BOOL diTBShouldLog(void) {
+    if (gDITBLogs >= 40) return NO;
+    if (gDILoadTS <= 0) return NO;
+    if (CFAbsoluteTimeGetCurrent() - gDILoadTS < 10.0) return NO;
+    return diArtIs3x2();
+}
 static void diTBSetFrame(id self, SEL cmd, CGRect f) {
-    if (gDITBLogs < 40 && diArtIs3x2()) { gDITBLogs++; diTraceCaller("TB.setFrame"); }
+    if (diTBShouldLog()) { gDITBLogs++; diTraceCaller("TB.setFrame"); }
     if (gDIOrigTBSetFrame) gDIOrigTBSetFrame(self, cmd, f);
 }
 static void diTBSetTransform(id self, SEL cmd, CGAffineTransform t) {
-    if (gDITBLogs < 40 && diArtIs3x2()) { gDITBLogs++; diTraceCaller("TB.setTransform"); }
+    if (diTBShouldLog()) { gDITBLogs++; diTraceCaller("TB.setTransform"); }
     if (gDIOrigTBSetTransform) gDIOrigTBSetTransform(self, cmd, t);
 }
 static void diTBSetHighlighted(id self, SEL cmd, BOOL h) {
-    if (gDITBLogs < 40 && diArtIs3x2()) { gDITBLogs++; diTraceCaller("TB.setHighlighted"); }
+    if (diTBShouldLog()) { gDITBLogs++; diTraceCaller("TB.setHighlighted"); }
     if (gDIOrigTBSetHighlighted) gDIOrigTBSetHighlighted(self, cmd, h);
 }
 
