@@ -26,6 +26,10 @@ static NSString *const kDomain = @"com.abgg332.driftisland";
 static NSString *const DI_VERSION_STR = DI_VERSION;
 /* 2.6.10: 专辑光晕遮罩 —— 与 Tweak 侧 DIAlbumMask.h 保持一致 */
 static NSString *const kDIAlbumMaskKey = @"diAlbumMaskAsset";
+/* 3.0.40: 控制中心播放器的遮罩 —— 与岛上那颗**分开的两套键**, 互不影响。
+   PlayerMaskOn/PlayerMaskAsset 与 maskOn/diAlbumMaskAsset 是独立的两组。 */
+static NSString *const kDIPlayerMaskKey = @"PlayerMaskAsset";
+static NSString *const kDIPlayerMaskOnKey = @"PlayerMaskOn";
 static NSString *const kDIMaskRoot = @"/var/mobile/灵动岛/遮罩素材";
 /* 2.7.0: 壁纸素材目录 —— png/jpg/mp4, 浅色深色各选一个 */
 static NSString *const kDIWallpaperRoot = @"/var/mobile/灵动岛/壁纸素材";
@@ -783,6 +787,10 @@ static Class diStepSliderClass(void) {
 @interface DIPlayerEntryPage : DIMiniBaseController @end
 /* 3.0.1: 尺寸选择页自建 —— 不再走系统的 PSListItemsController(点进去闪退) */
 @interface DIPlayerSizePage : DIMiniBaseController @end
+/* 3.0.40: 播放器遮罩 —— 只作用于控制中心播放器里的专辑头像, 与「附加功能 → 专辑遮罩」
+   (岛上那颗) 是两套独立的键和素材, 改一处不会影响另一处。 */
+@interface DIPlayerMaskPage : DIMiniBaseController @end
+@interface DIPlayerMaskPicker : DIMaskPicker @end
 @interface DIFrameFoldersMask : DIFrameFolders @end /* 2.6.3: 遮罩素材选择(键 maskAnimFolder) */
 @interface DIFrameFoldersMini : DIFrameFolders @end  /* 左侧(mini)帧率素材选择(键 smallAnimFolder) */
 @interface DIFrameFoldersAudio : DIFrameFolders @end /* 右侧音频素材(键 miniAudioFolder) */
@@ -4836,6 +4844,8 @@ static void diOpenHomeBarPickWindow(void) {
 /* 2.6.10: 专辑遮罩素材选择页 —— 独立 PSListController, 不继承主控制器。
  */
 @interface DIMaskPicker : PSListController
+- (NSString *)maskKey;       /* 读写的偏好键 */
+- (NSString *)pickerTitle;   /* 页面标题 */
 @end
 
 /* 2.7.0: 壁纸素材选择页 —— 与遮罩页同构, 只是扫描目录和写入的键不同 */
@@ -4852,9 +4862,11 @@ static void diOpenHomeBarPickWindow(void) {
 @interface DIWallpaperPickerDark : DIWallpaperPicker @end
 
 @implementation DIMaskPicker
+- (NSString *)maskKey { return kDIAlbumMaskKey; }
+- (NSString *)pickerTitle { return @"专辑遮罩素材"; }
 - (void)viewDidLoad {
     [super viewDidLoad];
-    self.title = @"专辑遮罩素材";
+    self.title = [self pickerTitle];
     /* 进页就保证目录存在, 方便用户直接往里面丢 png(不用先手动建目录) */
     NSFileManager *fm = [NSFileManager defaultManager];
     BOOL d = NO;
@@ -4868,7 +4880,7 @@ static void diOpenHomeBarPickWindow(void) {
     if (!_specifiers) {
         NSMutableArray *specs = [NSMutableArray array];
         NSArray<NSString *> *list = DIMaskListAssets();
-        NSString *cur = readPrefString(kDIAlbumMaskKey);
+        NSString *cur = readPrefString([self maskKey]);
 
         PSSpecifier *none = [PSSpecifier preferenceSpecifierNamed:@"不遮罩（关闭遮罩）"
                                                            target:self set:nil get:@selector(currentValueForSpecifier:)
@@ -4907,7 +4919,7 @@ static void diOpenHomeBarPickWindow(void) {
     PSSpecifier *sp = [self specifierAtIndexPath:ip];
     NSString *key = [sp propertyForKey:@"diKey"];
     if (key) {
-        writePrefString(key, kDIAlbumMaskKey);
+        writePrefString(key, [self maskKey]);
         /* 让悬浮岛立刻刷新 */
         CFNotificationCenterPostNotification(CFNotificationCenterGetDarwinNotifyCenter(),
                                              CFSTR("com.abgg332.driftisland/prefsChanged"), NULL, NULL, YES);
@@ -4928,6 +4940,13 @@ static void diOpenHomeBarPickWindow(void) {
 - (NSString *)tableView:(UITableView *)tv titleForHeaderInSection:(NSInteger)section {
     return @"点选即生效（无需重启）";
 }
+@end
+
+/* 3.0.40: 播放器遮罩的素材选择页 —— 与岛上那个完全同构, 只是写不同的键
+   (PlayerMaskAsset), 所以两处各选各的, 互不覆盖。 */
+@implementation DIPlayerMaskPicker
+- (NSString *)maskKey { return kDIPlayerMaskKey; }
+- (NSString *)pickerTitle { return @"播放器遮罩素材"; }
 @end
 
 /* 2.7.0: 壁纸素材选择页 —— 与遮罩页同构, 只是扫描目录和写入的键不同 */
@@ -5857,6 +5876,8 @@ static void diNPEnsureActivation(void) {
     [specs addObject:[self npRotateSwitch]];
     /* 3.0.24: 「禁止 N95 修改专辑图」删除(用不上); 「隐藏投送图标」改名「隐藏投送」。 */
     [specs addObject:[self npSwitch:@"隐藏投送" key:@"HideRoutingIcon" def:NO]];
+    /* 3.0.40: 播放器遮罩 —— 按用户要求放在「隐藏投送」下面, 单独控制播放器那颗专辑头像 */
+    [specs addObject:[self linkSpec:@"播放器遮罩" detail:[DIPlayerMaskPage class]]];
 
     /* ---- 原版参数管理 ---- */
     [specs addObject:[self groupSpec:@"原插件参数" footer:nil]];
@@ -5865,6 +5886,34 @@ static void diNPEnsureActivation(void) {
 
     [specs addObject:[self groupSpec:nil footer:nil]];
     [specs addObject:[self buttonSpec:@"注销生效" action:@selector(doRespring:)]];
+    return specs;
+}
+@end
+
+/* ================= 3.0.40: 播放器遮罩设置页 =================
+   与「附加功能 → 专辑遮罩」并列的另一套设置:
+     · 开关 PlayerMaskOn      (岛上那份是 maskOn)
+     · 素材 PlayerMaskAsset   (岛上那份是 diAlbumMaskAsset)
+   导出时分别落到 player_mask.png / mask.png, 播放器只读自己那份。 */
+@implementation DIPlayerMaskPage
+
+- (id)readPlayerMaskName:(PSSpecifier *)sp {
+    NSString *cur = readPrefString(kDIPlayerMaskKey);
+    if ([cur isEqualToString:@"__none__"]) return @"不遮罩";
+    if (!cur.length) return @"未选择";
+    return [cur.lastPathComponent.stringByDeletingPathExtension copy];
+}
+
+- (NSArray *)buildSpecifiers {
+    NSMutableArray *specs = [NSMutableArray array];
+    [specs addObject:[self groupSpec:@"播放器遮罩"
+        footer:@"只作用于控制中心播放器里的专辑头像。「附加功能 → 专辑遮罩」管的是岛上那颗, 两边素材与开关各自独立, 互不影响。"]];
+    [specs addObject:[self switchSpec:@"启用播放器遮罩" key:kDIPlayerMaskOnKey def:@NO]];
+    PSSpecifier *row = [PSSpecifier preferenceSpecifierNamed:@"遮罩素材"
+        target:self set:NULL get:@selector(readPlayerMaskName:)
+        detail:[DIPlayerMaskPicker class] cell:PSLinkCell edit:nil];
+    [specs addObject:row];
+    [specs addObject:[self groupSpec:nil footer:@"选完 1 秒内生效, 不用注销。素材目录与「专辑遮罩」共用 /var/mobile/灵动岛/遮罩素材。"]];
     return specs;
 }
 @end

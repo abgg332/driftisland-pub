@@ -55,6 +55,12 @@ static double maskRotateSpeed = 45.0; // 旋转角速度 °/秒
    岛显示不了那么大"。玻璃边长 = 能放下的最大边长 × 这个比例, 设置页可调 50~115。 */
 static double maskScale = 88.0;
 static NSString *maskAnimFolder;  // 遮罩素材文件夹(帧率素材下的子目录)
+/* 3.0.40: 控制中心播放器专用遮罩 —— 与岛上那颗**完全分开**的两套键。
+   岛: maskOn + diAlbumMaskAsset + mask.png
+   播放器: PlayerMaskOn + PlayerMaskAsset + player_mask.png
+   以前两者共用 maskOn/mask.png, 改一个另一个跟着变(用户明确要求分开)。 */
+static BOOL playerMaskOn = NO;
+static NSString *playerMaskAsset;   // 相对 kMaskDir 的文件名
 /* ===== 2.8.85: 展开定义 —— 展开岛歌词/歌名的自定义位置与大小 =====
    展开岛(407x202 的 Now Playing)整块由 MediaRemoteUI 远程渲染, SpringBoard 只能看到
    一块门户, 拿不到里面的文字视图。所以参数由 SpringBoard 侧写进 MRU 容器的
@@ -937,6 +943,33 @@ static void refreshPrefs(void) {
     if (wpBlur < 0) wpBlur = 0; if (wpBlur > 100) wpBlur = 100;
     /* 2.6.3: 遮罩(贴合左侧专辑) */
     maskOn = pBool(@"maskOn", NO);
+    /* 3.0.40: 播放器遮罩 —— 独立键。首次升级时这两个键还不存在, 就继承一次岛上的设置,
+       保证升级那一刻画面不变; 之后各改各的, 互不影响(只要键存在就不再继承)。 */
+    {
+        CFStringRef dom = (__bridge CFStringRef)kDomain;
+        CFPreferencesAppSynchronize(dom);
+        Boolean hasOn = false, hasAsset = false;
+        CFPreferencesGetAppBooleanValue(CFSTR("PlayerMaskOn"), dom, &hasOn);
+        id av = CFBridgingRelease(CFPreferencesCopyAppValue(CFSTR("PlayerMaskAsset"), dom));
+        hasAsset = (av != nil);
+        if (!hasOn) {
+            playerMaskOn = maskOn;
+            CFPreferencesSetAppValue(CFSTR("PlayerMaskOn"),
+                                     playerMaskOn ? kCFBooleanTrue : kCFBooleanFalse, dom);
+        } else {
+            playerMaskOn = pBool(@"PlayerMaskOn", NO);
+        }
+        if (!hasAsset) {
+            playerMaskAsset = pString(@"diAlbumMaskAsset");
+            if (playerMaskAsset.length) {
+                CFPreferencesSetAppValue(CFSTR("PlayerMaskAsset"),
+                                         (__bridge CFStringRef)playerMaskAsset, dom);
+            }
+        } else {
+            playerMaskAsset = pString(@"PlayerMaskAsset");
+        }
+        CFPreferencesAppSynchronize(dom);
+    }
     maskRotateOn = pBool(@"maskRotateOn", NO);
     maskRotateReverse = pBool(@"maskRotateReverse", NO);
     maskRotateSpeed = pDouble(@"maskRotateSpeed", 45.0);
@@ -5594,6 +5627,22 @@ static NSString *diMaskCurrentPathV2(void) {
     return [kMaskDir stringByAppendingPathComponent:list.firstObject];
 }
 
+/* 3.0.40: 播放器遮罩素材路径 —— 独立键 PlayerMaskAsset(相对 kMaskDir)。
+   没选过就当没素材(播放器保持内切圆), 不偷偷回退到岛上的那张 ——
+   否则"两处分开设置"就形同虚设。 */
+static NSString *diPlayerMaskCurrentPath(void) {
+    NSArray<NSString *> *list = diMaskListAssets();
+    if (!list.count) return nil;
+    CFPreferencesAppSynchronize((__bridge CFStringRef)kDomain);
+    id v = CFBridgingRelease(CFPreferencesCopyAppValue(CFSTR("PlayerMaskAsset"),
+                                                       (__bridge CFStringRef)kDomain));
+    NSString *sel = [v isKindOfClass:NSString.class] ? v : nil;
+    if ([sel isEqualToString:@"__none__"]) return nil;
+    if (!sel.length) return nil;
+    if (![list containsObject:sel]) return nil;
+    return [kMaskDir stringByAppendingPathComponent:sel];
+}
+
 /* ===== 2.8.78: 给 MediaRemoteUI 进程的素材通道 =====
    MediaRemoteUI 是独立沙盒进程, 直接读 /var/mobile/灵动岛 很可能被沙盒拒绝
    (325 日志: 该进程 0 条记录 + 展开态遮罩从不生效, 两个症状同时指向跨进程不可达)。
@@ -5643,23 +5692,35 @@ static NSString *diMruSharedDir(void) {
     NSString *c = diMruOwnContainer();
     return c.length ? [c stringByAppendingPathComponent:@"Library/Caches/com.abgg332.driftisland"] : nil;
 }
+/* 3.0.40: 把一份素材字节写进两个通道(公共 Caches + MRU 自己的容器)。
+   岛用 mask.png, 播放器用 player_mask.png —— 同目录不同名, 互不覆盖。 */
+static BOOL diWriteMaskBytes(NSData *raw, NSString *dir, NSString *name) {
+    if (!dir.length || !name.length) return NO;
+    NSFileManager *fm = [NSFileManager defaultManager];
+    [fm createDirectoryAtPath:dir withIntermediateDirectories:YES
+                    attributes:@{NSFilePosixPermissions: @0777} error:NULL];
+    NSString *out = [dir stringByAppendingPathComponent:name];
+    if (!raw) { [fm removeItemAtPath:out error:NULL]; return NO; }
+    BOOL ok = [raw writeToFile:out atomically:YES];
+    if (ok) [fm setAttributes:@{NSFilePosixPermissions: @0644} ofItemAtPath:out error:NULL];
+    return ok;
+}
 static void diExportMaskForMRU(void) {
     @autoreleasepool {
         NSString *path = diMaskCurrentPathV2();
         NSData *raw = path ? [NSData dataWithContentsOfFile:path] : nil;
         if (raw.length > 512 * 1024) raw = nil;   /* 太大的不塞偏好, 只走文件通道 */
+        /* 3.0.40: 播放器遮罩 —— 自己的素材、自己的文件、自己的开关 */
+        NSString *pmPath = diPlayerMaskCurrentPath();
+        NSData *pmRaw = pmPath ? [NSData dataWithContentsOfFile:pmPath] : nil;
+        if (pmRaw.length > 512 * 1024) pmRaw = nil;
         NSFileManager *fm = [NSFileManager defaultManager];
         NSError *err = nil;
         [fm createDirectoryAtPath:diMruCacheDir() withIntermediateDirectories:YES
                         attributes:@{NSFilePosixPermissions: @0777} error:&err];
         NSString *out = [diMruCacheDir() stringByAppendingPathComponent:@"mask.png"];
-        BOOL fileOK = NO;
-        if (raw) {
-            fileOK = [raw writeToFile:out atomically:YES];
-            if (fileOK) [fm setAttributes:@{NSFilePosixPermissions: @0644} ofItemAtPath:out error:NULL];
-        } else {
-            [fm removeItemAtPath:out error:NULL];
-        }
+        BOOL fileOK = diWriteMaskBytes(raw, diMruCacheDir(), @"mask.png");
+        BOOL pmFileOK = diWriteMaskBytes(pmRaw, diMruCacheDir(), @"player_mask.png");
         CFStringRef dom = CFSTR("com.abgg332.driftisland.mrumask");
         CFPreferencesAppSynchronize(dom);
         NSString *b64 = raw ? [raw base64EncodedStringWithOptions:0] : nil;
@@ -5669,20 +5730,18 @@ static void diExportMaskForMRU(void) {
         CFPreferencesAppSynchronize(dom);
         /* 2.8.82: 真正能被 MRU 读到的那一份 —— 它自己的容器 */
         NSString *own = diMruSharedDir();
-        BOOL ownOK = NO;
+        BOOL ownOK = NO, pmOwnOK = NO;
         if (own.length) {
             [fm createDirectoryAtPath:own withIntermediateDirectories:YES
                             attributes:@{NSFilePosixPermissions: @0777} error:NULL];
-            NSString *mine = [own stringByAppendingPathComponent:@"mask.png"];
-            if (raw) {
-                ownOK = [raw writeToFile:mine atomically:YES];
-                if (ownOK) [fm setAttributes:@{NSFilePosixPermissions: @0644} ofItemAtPath:mine error:NULL];
-            } else {
-                [fm removeItemAtPath:mine error:NULL];
-            }
+            ownOK = diWriteMaskBytes(raw, own, @"mask.png");
+            pmOwnOK = diWriteMaskBytes(pmRaw, own, @"player_mask.png");
             NSDictionary *params = @{@"rot": @(maskRotateOn), @"rev": @(maskRotateReverse),
                                      @"speed": @(maskRotateSpeed), @"active": @(active),
                                      @"mask": path.lastPathComponent ?: @"",
+                                     /* 3.0.40: 播放器遮罩 —— 开关与素材名都独立一份 */
+                                     @"pmOn": @(playerMaskOn),
+                                     @"pmMask": pmPath.lastPathComponent ?: @"",
                                      /* 2.8.85: 展开定义 —— MRU 内的歌词/歌名位置与大小 */
                                      @"etOn": @(expandTextOn), @"etX": @(expandTextX),
                                      @"etY": @(expandTextY), @"etScale": @(expandTextScale),
@@ -5694,6 +5753,9 @@ static void diExportMaskForMRU(void) {
              path.lastPathComponent ?: @"(无)", fileOK ? @"OK" : @"FAIL",
              (unsigned long)b64.length, active, own.length ? own : @"(找不到MRU容器)",
              ownOK ? @"OK" : @"FAIL", err.localizedDescription ?: @"无");
+        RLog(@"[遮罩导出] 播放器遮罩: 素材=%@ 文件=%@ 容器写入=%@ 开关=%d",
+             pmPath.lastPathComponent ?: @"(无)", pmFileOK ? @"OK" : @"FAIL",
+             pmOwnOK ? @"OK" : @"FAIL", playerMaskOn);
     }
 }
 
@@ -16254,9 +16316,24 @@ static const CFTimeInterval kDISpinDur = 10.0;
    3.0.24 曾把素材直接铺成封面 contents(把专辑图整个换掉), 3.0.28 删掉了。现在改成
    **alpha 蒙版**: 素材当 maskView 用, 专辑图从素材的透明区透出来 —— 与灵动岛那颗
    小头像的观感一致, 也不再把专辑图本身弄丢。
-   素材来源就是设置页「专辑遮罩」选中的那张(经 diExportMaskSoon 导出到缓存目录
-   mask.png); 目录里没有 png 时退回原来的内切圆, 绝不代码兜底画形状。
+   3.0.40 起素材来自**播放器专属**的「原生播放 → 播放器遮罩」(PlayerMaskAsset),
+   由 SpringBoard 导出成 player_mask.png; 与岛上那份 mask.png 互不干扰。
+   没有素材时退回原来的内切圆, 绝不代码兜底画形状。
    文件按 mtime+大小缓存, 0.5 秒最多 stat 一次。 */
+/* 3.0.40: 播放器遮罩的图与岛上的完全分开 —— 文件名 player_mask.png。
+   路径优先级和岛那份一致(自己容器 → 公共 Caches → /var/jb 镜像),
+   这样"给播放器换一张、岛上不动"才真的成立。 */
+static NSString *diArtPlayerMaskPath(void) {
+    NSMutableArray<NSString *> *cands = [NSMutableArray array];
+    if (diMruSelfDir().length) [cands addObject:[diMruSelfDir() stringByAppendingPathComponent:@"player_mask.png"]];
+    [cands addObject:[diMruCacheDir() stringByAppendingPathComponent:@"player_mask.png"]];
+    [cands addObject:@"/var/jb/var/mobile/Library/Caches/com.abgg332.driftisland/player_mask.png"];
+    NSFileManager *fm = [NSFileManager defaultManager];
+    for (NSString *p in cands) {
+        if ([fm fileExistsAtPath:p]) return p;
+    }
+    return cands.firstObject;
+}
 static UIImage *diArtMaskImage(void) {
     static UIImage *img = nil;
     static double mtime = -1;
@@ -16265,8 +16342,8 @@ static UIImage *diArtMaskImage(void) {
     CFAbsoluteTime now = CFAbsoluteTimeGetCurrent();
     if (now - last < 0.5) return img;
     last = now;
-    NSString *path = [diMruCacheDir() stringByAppendingPathComponent:@"mask.png"];
-    NSDictionary *at = [[NSFileManager defaultManager] attributesOfItemAtPath:path error:NULL];
+    NSString *path = diArtPlayerMaskPath();
+    NSDictionary *at = path ? [[NSFileManager defaultManager] attributesOfItemAtPath:path error:NULL] : nil;
     double m = at ? [at[NSFileModificationDate] timeIntervalSince1970] : 0;
     long long sz = at ? [at[NSFileSize] longLongValue] : -1;
     if (m == mtime && sz == fsize) return img;
@@ -16274,13 +16351,36 @@ static UIImage *diArtMaskImage(void) {
     img = (m > 0) ? [UIImage imageWithContentsOfFile:path] : nil;
     if (!img) {
         static int miss = 0;
-        if (miss < 2) { miss++; RLog(@"[封面] 遮罩素材读不到(%@), 保持内切圆", path.lastPathComponent ?: @"mask.png"); }
+        if (miss < 2) { miss++; RLog(@"[封面] 播放器遮罩素材读不到(%@), 保持内切圆", path.lastPathComponent ?: @"player_mask.png"); }
     }
     return img;
 }
+/* 3.0.40: 播放器遮罩开关 —— 优先读 SpringBoard 导出的 params.plist(pmOn),
+   读不到再退回主偏好域的文件通道。**不再看 maskOn**(那是岛上的开关)。
+   1 秒最多读一次, 文件没变不重解析; 设置页改完 1 秒内生效, 不用注销。 */
 static BOOL diArtMaskWanted(void) {
-    /* 「启用遮罩」= 设置页那个总开关(maskOn); 关掉就退回内切圆 */
-    return maskOn;
+    static BOOL cached = NO;
+    static CFAbsoluteTime last = 0;
+    static NSString *lastSig;
+    CFAbsoluteTime now = CFAbsoluteTimeGetCurrent();
+    if (last == 0 || now - last > 1.0) {
+        last = now;
+        NSString *d = diMruSelfDir();
+        NSString *path = d.length ? [d stringByAppendingPathComponent:@"params.plist"] : nil;
+        NSDictionary *attr = path ? [[NSFileManager defaultManager] attributesOfItemAtPath:path error:NULL] : nil;
+        NSString *sig = [NSString stringWithFormat:@"%@_%@", attr[NSFileModificationDate], attr[NSFileSize]];
+        if (![sig isEqual:lastSig]) {
+            lastSig = [sig copy];
+            NSDictionary *pd = path ? [NSDictionary dictionaryWithContentsOfFile:path] : nil;
+            if ([pd isKindOfClass:NSDictionary.class] && pd[@"pmOn"] != nil) {
+                cached = [pd[@"pmOn"] boolValue];
+            } else {
+                BOOL f = NO;
+                cached = diMruReadFilePref(@"PlayerMaskOn", &f) ? f : playerMaskOn;
+            }
+        }
+    }
+    return cached;
 }
 
 /* 幂等: 尺寸没变、蒙版还是我们那片、旋转还在 → 一个字都不写。
@@ -16347,7 +16447,7 @@ static void diArtDress(UIView *v) {
                           b.size.width, b.size.height];
         if (![desc isEqualToString:gDIArtLastDesc]) {
             gDIArtLastDesc = desc;
-            RLog(@"[封面] %@已挂 %@", wantAsset ? @"遮罩素材" : @"圆形蒙版", desc);
+            RLog(@"[封面] %@已挂 %@", wantAsset ? @"播放器遮罩" : @"圆形蒙版", desc);
         }
     }
     if (![layer animationForKey:@"di.art.spin"]) {
