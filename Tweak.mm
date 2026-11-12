@@ -16240,8 +16240,10 @@ static void diNP31ProbeArtwork(UIView *root) {
                  (unsigned long)(v.constraints.count + (sp ? sp.constraints.count : 0)),
                  v.transform.a, v.transform.tx, (int)v.hidden);
             RLog(@"[探针][封面] 父=%@ %@ | 祖父=%@ %@",
-                 sp ? NSStringFromClass(sp.class) : @"无", sp ? NSStringFromCGRect(sp.frame) : CGRectZero,
-                 gp ? NSStringFromClass(gp.class) : @"无", gp ? NSStringFromCGRect(gp.frame) : CGRectZero);
+                 sp ? NSStringFromClass(sp.class) : @"无",
+                 sp ? NSStringFromCGRect(sp.frame) : @"-",
+                 gp ? NSStringFromClass(gp.class) : @"无",
+                 gp ? NSStringFromCGRect(gp.frame) : @"-");
             return;                       /* 卡片里只有一颗, 探到就收 */
         }
         for (UIView *c in v.subviews) if (stack.count < 300) [stack addObject:c];
