@@ -5718,7 +5718,6 @@ static void diExportMaskForMRU(void) {
         NSError *err = nil;
         [fm createDirectoryAtPath:diMruCacheDir() withIntermediateDirectories:YES
                         attributes:@{NSFilePosixPermissions: @0777} error:&err];
-        NSString *out = [diMruCacheDir() stringByAppendingPathComponent:@"mask.png"];
         BOOL fileOK = diWriteMaskBytes(raw, diMruCacheDir(), @"mask.png");
         BOOL pmFileOK = diWriteMaskBytes(pmRaw, diMruCacheDir(), @"player_mask.png");
         CFStringRef dom = CFSTR("com.abgg332.driftisland.mrumask");
