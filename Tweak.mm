@@ -16168,6 +16168,10 @@ static BOOL diNP31On(void) {
    收回来, 不依赖某个布局回调有没有跑到。只轮询几个已标记的视图, 开销可忽略。 */
 static void diNP31StartWatch(void);
 static void diNP31ShiftButtons(UIView *tc);
+/* 3.0.38: 记住"真的被推过"的传送栏。watchdog 靠它补推 —— 之前是顺着
+   gDI3x1Views 的子树去找, 而 3×1 的栏不一定挂在那棵子树里, 找不到就不补,
+   于是暂停时系统一摆回原位就再也没人管。 */
+static NSHashTable *gDI31TCs;
 static UIView *diNP31FindTC(UIView *v, int depth);
 static void diNP31Mark(UIView *v) {
     if (!v) return;
@@ -16212,6 +16216,38 @@ static void diNP31FitBox(UIView *box) {
              target, f.size.height);
     }
 }
+/* 3.0.38: 封面探针 —— 只探 3×1 折叠卡片里那颗圆形专辑头像, 锁屏/展开/小岛一概不碰
+   (它们走不到 FitGroup)。目的是把"这个头像的位置由谁决定"打出来:
+   是 frame 直接给的, 还是约束/父容器排的。5 秒一次, 最多 6 条, 不刷屏。 */
+static void diNP31ProbeArtwork(UIView *root) {
+    static CFAbsoluteTime last = 0;
+    static int cnt = 0;
+    CFAbsoluteTime now = CFAbsoluteTimeGetCurrent();
+    if (cnt >= 6 || now - last < 5.0) return;
+    last = now;
+    NSMutableArray<UIView *> *stack = [NSMutableArray arrayWithObject:root];
+    int budget = 240;
+    while (stack.count && budget-- > 0) {
+        UIView *v = stack.lastObject;
+        [stack removeLastObject];
+        NSString *cn = NSStringFromClass(v.class);
+        if ([cn containsString:@"Artwork"]) {
+            cnt++;
+            UIView *sp = v.superview, *gp = sp.superview;
+            RLog(@"[探针][封面] %@ frame=%@ bounds=%@ center=%@ 圆角=%.1f 约束=%lu tf=%.2f/%.2f hidden=%d",
+                 cn, NSStringFromCGRect(v.frame), NSStringFromCGRect(v.bounds),
+                 NSStringFromCGPoint(v.center), v.layer.cornerRadius,
+                 (unsigned long)(v.constraints.count + (sp ? sp.constraints.count : 0)),
+                 v.transform.a, v.transform.tx, (int)v.hidden);
+            RLog(@"[探针][封面] 父=%@ %@ | 祖父=%@ %@",
+                 sp ? NSStringFromClass(sp.class) : @"无", sp ? NSStringFromCGRect(sp.frame) : CGRectZero,
+                 gp ? NSStringFromClass(gp.class) : @"无", gp ? NSStringFromCGRect(gp.frame) : CGRectZero);
+            return;                       /* 卡片里只有一颗, 探到就收 */
+        }
+        for (UIView *c in v.subviews) if (stack.count < 300) [stack addObject:c];
+    }
+}
+
 /* 3.0.37: 把播放器卡片里的文字区(header)加宽一点点。
    基准用"第一次见到的宽度", 之后只按基准 + extra 摆, 不会每次叠加。
    系统重新排过(宽度跳变 >40)就认新基准。 */
@@ -16287,6 +16323,7 @@ static void diNP31FitGroup(UIView *npv) {
            区也吃满 —— 用户: "歌词显示也应当显示宽一点(因为按钮右移了)"。
            只动类名带 Header 的那一层, 找不到就什么也不做, 不碰时间/日期这类标签。 */
         diNP31WidenHeader(box, 18.0);
+        diNP31ProbeArtwork(box);   /* 3.0.38: 探这个封面到底由谁定位 */
     } @catch (__unused NSException *e) {}
 }
 
@@ -16301,14 +16338,15 @@ static void diNP31StartWatch(void) {
                               (uint64_t)(200 * NSEC_PER_MSEC), (uint64_t)(50 * NSEC_PER_MSEC));
     dispatch_source_set_event_handler(t, ^{
         @try {
-            if (!gDI3x1Views || !diNP31On()) return;
+            if (!diNP31On()) return;
             for (UIView *v in gDI3x1Views.allObjects) {
                 if (!v.window || v.hidden) continue;
                 diNP31FitBox(v);
-                /* 3.0.37: 暂停/切歌时系统会把按钮摆回原位, 而那一刻不一定有布局回调,
-                   所以靠这个 200ms 心跳把位移补回去 —— 这是"暂停就归位"的根治办法。 */
-                UIView *tc = diNP31FindTC(v, 0);
-                if (tc) diNP31ShiftButtons(tc);
+            }
+            /* 3.0.37/38: 暂停/切歌时系统会把按钮摆回原位, 而那一刻不一定有布局回调。
+               这里直接对"上次推过的栏"补推, 不再依赖从视图树里重新找。 */
+            for (UIView *t in gDI31TCs.allObjects) {
+                if (t.window && !t.hidden) diNP31ShiftButtons(t);
             }
         } @catch (__unused NSException *e) {}
     });
@@ -17327,23 +17365,39 @@ static NSArray<UIView *> *diTBVisibleBtns(UIView *tc) {
 }
 /* 3.0.36: 只认"折叠的 3×1 模块"。祖先模块容器高 77 = 折叠态; 展开态是 568。
    用户明确要求"展开的全部不要动", 而 3.0.35 只看档位, 展开后那个传送栏也被推了 12pt。 */
-static BOOL diNP31IsFoldedModule(UIView *v) {
+/* 3.0.38: 3.0.36/3.0.37 在这里加了个"必须找到 CCUIContentModuleContainerView 祖先才算
+   折叠"的门槛, 而 3×1 的传送栏并不一定挂在那棵子树里 —— 日志里一条"按钮右移"都没有,
+   就是这个 return 把整段挡掉了。现在:
+     · 找到容器 → 按它的高度判(77=折叠, 568=展开);
+     · 没找到容器 → 只要祖先链上没有"又高又宽"的展开面板, 就按折叠处理(3.0.35 就是这么
+       工作的, 所以它当时能推进去)。 */
+static BOOL diNP31AllowShift(UIView *v) {
     for (UIView *p = v; p; p = p.superview) {
         if ([NSStringFromClass(p.class) isEqualToString:@"CCUIContentModuleContainerView"]) {
             CGFloat h = p.bounds.size.height;
-            return (h > 20.0 && h < 130.0);
+            if (h > 130.0) {                            /* 展开态: 一颗都不碰 */
+                static int el = 0;
+                if (el < 3) { el++; RLog(@"[3x1] 按钮跳过: 展开态 容器=%.0fx%.0f",
+                                         p.bounds.size.width, h); }
+                return NO;
+            }
+            return YES;
         }
+        CGSize ps = p.bounds.size;
+        if (ps.height > 130.0 && ps.width > 250.0) return NO;   /* 展开面板 */
         if ([p isKindOfClass:UIWindow.class]) break;
     }
-    return NO;
+    return YES;
 }
 static void diNP31ShiftButtons(UIView *tc) {
     if (!tc || !tc.window || !enabled) return;
+    if (!gDI31TCs) gDI31TCs = [NSHashTable weakObjectsHashTable];
+    [gDI31TCs addObject:tc];
     if (![diNPLayoutKey() isEqualToString:@"3x1"]) return;
-    if (!diNP31IsFoldedModule(tc)) return;      /* 展开态/锁屏/小岛: 一颗都不碰 */
+    if (!diNP31AllowShift(tc)) return;          /* 展开态: 一颗都不碰 */
     NSArray<UIView *> *btns = diTBVisibleBtns(tc);
     if (btns.count < 3) return;
-    const CGFloat kShift = 18.0;   /* 3.0.37: 用户要求"在当前播放位置再右移一点点" */
+    const CGFloat kShift = 20.0;   /* 3.0.38: 在 3.0.36 的 12pt 基础上再右移 8pt */
     NSUInteger n = btns.count;
     /* 播放键 = 离栏中心最近的那颗; 它右边第一颗就是"下一首"。
        3 颗(上一首/播放/下一首)和 5 颗(随机/上一首/播放/下一首/循环)两种形态都对。 */
