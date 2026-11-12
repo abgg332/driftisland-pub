@@ -12386,6 +12386,8 @@ static void diCCInstallLayoutHook(void) {
 }
 
 
+static void diNPApplyHideTime(void);   /* 3.0.41: 未播放时隐藏进度条与时间(定义在 3.1.0 段) */
+
 static void visibilityTick(void) {
     refreshPrefs();
     static CFAbsoluteTime tMR; // CPU 优化: MediaRemote 查询 1秒一次(检测音乐停止够快)
@@ -12405,6 +12407,14 @@ static void visibilityTick(void) {
         }
     }
     if (now - tMR > 1.0) { tMR = now; queryMusicPlaying(); }
+    /* 3.0.41: 隐藏时间 —— 未播放时把进度条与两侧时间压成透明, 播放即还原 */
+    {
+        static CFAbsoluteTime tHideT;
+        if (now - tHideT > 0.5) {
+            tHideT = now;
+            @try { diNPApplyHideTime(); } @catch (__unused NSException *e) {}
+        }
+    }
     /* 音量轮询(2.2.5): 这台 16.2 上 AVSystemController 通知收不到(2.2.3/2.2.4 两次验证), 改为直接读系统音量。
        每 0.5s tick 读一次 outputVolume(纯属性读取, 不激活音频会话), 数值变化 = 按了音量键 → 开 6 秒拦截窗口 */
     /* 2.3.1 功耗: 音量轮询从 0.5s 放宽到 1s(与 MediaRemote 查询同步节拍);
@@ -17277,6 +17287,7 @@ static CFTimeInterval gDIBgLastReqTS = 0;   /* 3.0.15: 取图请求节流 */
 static CFTimeInterval gDIBgPrefTS = 0;
 static BOOL gDIBgOnCache = YES;
 static BOOL gDIHideNP = NO;
+static BOOL gDIHideTime = NO;   /* 3.0.41: 未播放时隐藏进度条与两侧时间 */
 static dispatch_source_t gDIBgTimer = NULL; /* 3.0.15: 换曲轮询(通知不可靠时的兜底) */
 
 /* 3.0.23(iOS17 卡死的真正大头, 之前一直漏了):
@@ -17321,10 +17332,13 @@ static void diNPLoadPrefsSync(void) {
     if (now - firstCall < 15.0) return;
     BOOL on = diNPPrefFlagRaw(@"MusicArtworkGradientEnabled", YES);
     BOOL hid = diNPPrefFlagRaw(@"HideNotPlaying", NO);
+    BOOL hidT = diNPPrefFlagRaw(@"HideTimeWhenIdle", NO);
     diNPPrefCachePut(@"MusicArtworkGradientEnabled", on);
     diNPPrefCachePut(@"HideNotPlaying", hid);
+    diNPPrefCachePut(@"HideTimeWhenIdle", hidT);
     gDIBgOnCache = on;
     gDIHideNP = hid;
+    gDIHideTime = hidT;
 }
 static void diNPTickPrefs(void) {
     CFTimeInterval now = CFAbsoluteTimeGetCurrent();
@@ -17338,11 +17352,14 @@ static void diNPTickPrefs(void) {
     dispatch_async(q, ^{
         BOOL on = diNPPrefFlagRaw(@"MusicArtworkGradientEnabled", YES);
         BOOL hid = diNPPrefFlagRaw(@"HideNotPlaying", NO);
+        BOOL hidT = diNPPrefFlagRaw(@"HideTimeWhenIdle", NO);
         diNPPrefCachePut(@"MusicArtworkGradientEnabled", on);
         diNPPrefCachePut(@"HideNotPlaying", hid);
+        diNPPrefCachePut(@"HideTimeWhenIdle", hidT);
         dispatch_async(dispatch_get_main_queue(), ^{
             gDIBgOnCache = on;
             gDIHideNP = hid;
+            gDIHideTime = hidT;
         });
     });
 }
@@ -17730,6 +17747,104 @@ static void diNPHideNotPlayingLabels(UIView *root, BOOL hide) {
 static void diNPApplyHideForRoot(UIView *root) {
     diNPTickPrefs();
     diNPHideNotPlayingLabels(root, gDIHideNP);
+    @try { diNPApplyHideTime(); } @catch (__unused NSException *e) {}
+}
+
+/* ---------- 3.0.41: 隐藏时间(只在没放歌的时候) ----------
+   用户要的是: 没播放歌曲时, 把进度条那条横条和左右两个时间一起藏掉。
+   取舍:
+     · 认整块 TimeControls(进度条 + 左右时间标签都在它里面), 不逐个藏 label ——
+       逐个藏会漏字, 还可能把标题区别的文字带下去;
+     · 只改 alpha, 不写 hidden。hidden 会让父级 stack 当场塌陷, 3×2 那一排按钮
+       跟着移位(用户对"按钮乱跳"零容忍); alpha 只影响可见性, 排版一个像素不动;
+     · 系统每次重排都可能把 alpha 拨回去, 所以由 1Hz 的 visibilityTick 复查;
+     · 只还原**我们自己压下去的**那些(弱表记账), 系统自己的 alpha 一概不碰。 */
+static NSMapTable *gDITimeAlpha = nil;   /* 我们压过的 view → 它原来的 alpha(弱键, 视图走了自动清) */
+
+/* 一次遍历同时拿两样东西:
+   · 时间控件整块(类名带 TimeControls, 进度条 + 左右时间都在它里面);
+   · 这一屏是否处于「未在播放」空状态 —— 认标题区那条文案(和我们「隐藏未在」用同一套
+     匹配), 不看它是不是被我们 hidden 了(hidden 的视图还在树里)。
+   为什么不用 MRMediaRemote 的 isPlaying 判空: 它把"暂停"也算成 false, 而暂停时
+   系统仍然显示这首歌的时间和进度, 用户要藏的是"根本没有歌"的那条空横条。 */
+static UIView *diNPFindTimeControls(UIView *root, BOOL *outIdle) {
+    if (outIdle) *outIdle = NO;
+    if (!root) return nil;
+    UIView *tc = nil;
+    BOOL idle = NO;
+    NSMutableArray *st = [NSMutableArray arrayWithObject:root];
+    int budget = 1500;
+    while (st.count && budget-- > 0) {
+        UIView *v = st.lastObject; [st removeLastObject];
+        if (!tc && [NSStringFromClass(v.class) containsString:@"TimeControls"]) tc = v;
+        if (!idle && [v isKindOfClass:UILabel.class]) {
+            UILabel *lb = (UILabel *)v;
+            NSString *t = lb.text.length ? lb.text : lb.attributedText.string;
+            if (t.length && ([t containsString:@"未在播放"] || [t containsString:@"Not Playing"]
+                             || [t containsString:@"Nothing Playing"])) idle = YES;
+        }
+        for (UIView *c in v.subviews) [st addObject:c];
+    }
+    if (outIdle) *outIdle = idle;
+    return tc;
+}
+
+/* 找不到时打一次候选类名, 方便下一版精确命中(不刷屏, 全生命周期最多 3 次) */
+static void diNPDumpTimeCandidates(UIView *root) {
+    static int dumped = 0;
+    if (dumped >= 3) return;
+    dumped++;
+    NSMutableArray *names = [NSMutableArray array];
+    NSMutableArray *st = [NSMutableArray arrayWithObject:root];
+    int budget = 800;
+    while (st.count && budget-- > 0) {
+        UIView *v = st.lastObject; [st removeLastObject];
+        NSString *cn = NSStringFromClass(v.class);
+        if ([cn containsString:@"Time"] || [cn containsString:@"Progress"]
+            || [cn containsString:@"Slider"] || [cn containsString:@"Duration"]) {
+            [names addObject:[NSString stringWithFormat:@"%@(%.0fx%.0f)",
+                              cn, v.bounds.size.width, v.bounds.size.height]];
+        }
+        for (UIView *c in v.subviews) [st addObject:c];
+    }
+    RLog(@"[时间] 没找到 TimeControls(根=%@); 候选: %@", NSStringFromClass(root.class),
+         names.count ? [names componentsJoinedByString:@", "] : @"(无)");
+}
+
+static void diNPApplyHideTimeTo(UIView *root, BOOL wantHide) {
+    BOOL idle = NO;
+    UIView *tc = diNPFindTimeControls(root, &idle);
+    if (!tc) { if (wantHide && idle) diNPDumpTimeCandidates(root); return; }
+    BOOL hide = wantHide && idle;
+    if (!gDITimeAlpha) gDITimeAlpha = [NSMapTable weakToStrongObjectsMapTable];
+    if (hide) {
+        if (![gDITimeAlpha objectForKey:tc]) [gDITimeAlpha setObject:@(tc.alpha) forKey:tc];
+        if (tc.alpha != 0.0) {
+            tc.alpha = 0.0;
+            RLog(@"[时间] 未播放 → 隐藏时间条(%@)", NSStringFromClass(tc.class));
+        }
+    } else if ([gDITimeAlpha objectForKey:tc]) {
+        tc.alpha = [[gDITimeAlpha objectForKey:tc] floatValue];
+        [gDITimeAlpha removeObjectForKey:tc];
+        RLog(@"[时间] 恢复时间条(有歌/开关关)");
+    }
+}
+
+static void diNPApplyHideTime(void) {
+    static CFAbsoluteTime lastScan = 0;
+    CFTimeInterval now = CFAbsoluteTimeGetCurrent();
+    if (now - lastScan < 0.4) return;
+    lastScan = now;
+
+    if (!gDIHideTime && gDITimeAlpha.count == 0) return;  /* 没事可做 */
+
+    /* 宿主: 播放器视图 + 模块卡片(去重后逐个找) */
+    NSMutableArray<UIView *> *roots = [NSMutableArray array];
+    if (gDIBgPlayers) for (UIView *v in gDIBgPlayers.allObjects) [roots addObject:v];
+    if (gDIBgHosts) for (UIView *v in gDIBgHosts.allObjects) if (![roots containsObject:v]) [roots addObject:v];
+    for (UIView *r in roots) {
+        @try { diNPApplyHideTimeTo(r, gDIHideTime); } @catch (__unused NSException *e) {}
+    }
 }
 
 /* ---------- 模块容器钩子 ---------- */

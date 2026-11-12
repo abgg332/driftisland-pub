@@ -787,9 +787,6 @@ static Class diStepSliderClass(void) {
 @interface DIPlayerEntryPage : DIMiniBaseController @end
 /* 3.0.1: 尺寸选择页自建 —— 不再走系统的 PSListItemsController(点进去闪退) */
 @interface DIPlayerSizePage : DIMiniBaseController @end
-/* 3.0.40: 播放器遮罩 —— 只作用于控制中心播放器里的专辑头像, 与「附加功能 → 专辑遮罩」
-   (岛上那颗) 是两套独立的键和素材, 改一处不会影响另一处。 */
-@interface DIPlayerMaskPage : DIMiniBaseController @end
 @interface DIFrameFoldersMask : DIFrameFolders @end /* 2.6.3: 遮罩素材选择(键 maskAnimFolder) */
 @interface DIFrameFoldersMini : DIFrameFolders @end  /* 左侧(mini)帧率素材选择(键 smallAnimFolder) */
 @interface DIFrameFoldersAudio : DIFrameFolders @end /* 右侧音频素材(键 miniAudioFolder) */
@@ -5632,7 +5629,8 @@ static NSArray<NSString *> *diNPKeys(void) {
     return @[ @"Size", @"ModuleSizes", @"PlayerGridVariant",
               @"MusicArtworkBackgroundMode", @"MusicArtworkBlurRadius",
               @"MusicArtworkGradientEnabled", @"ArtworkRotationEnabled",
-              @"BlockN95Artwork", @"HideRoutingIcon", @"HideNotPlaying" ];
+              @"BlockN95Artwork", @"HideRoutingIcon", @"HideNotPlaying",
+              @"HideTimeWhenIdle" ];
 }
 
 static BOOL diNPReadEnabled(void) {
@@ -5873,11 +5871,14 @@ static void diNPEnsureActivation(void) {
     [specs addObject:[self npSwitch:@"封面背景" key:@"MusicArtworkGradientEnabled" def:YES]];
     /* 3.1.0: 参考 CCUIPlayer 的 HideNotPlaying —— 打开后隐藏模块里的「未在播放」文字 */
     [specs addObject:[self npSwitch:@"隐藏未在" key:@"HideNotPlaying" def:NO]];
+    /* 3.0.41: 隐藏时间 —— 没在放歌时把进度条横条与两侧时间一起藏掉 */
+    [specs addObject:[self npSwitch:@"隐藏时间" key:@"HideTimeWhenIdle" def:NO]];
     [specs addObject:[self npRotateSwitch]];
     /* 3.0.24: 「禁止 N95 修改专辑图」删除(用不上); 「隐藏投送图标」改名「隐藏投送」。 */
     [specs addObject:[self npSwitch:@"隐藏投送" key:@"HideRoutingIcon" def:NO]];
-    /* 3.0.40: 播放器遮罩 —— 按用户要求放在「隐藏投送」下面, 单独控制播放器那颗专辑头像 */
-    [specs addObject:[self linkSpec:@"播放器遮罩" detail:[DIPlayerMaskPage class]]];
+    /* 3.0.41: 播放器遮罩 —— 按用户要求就地展开, 开关 + 素材直接排在这一页, 不再进二级页 */
+    [specs addObject:[self switchSpec:@"启用播放器遮罩" key:kDIPlayerMaskOnKey def:@NO]];
+    [specs addObject:[self linkSpec:@"遮罩素材" detail:[DIPlayerMaskPicker class]]];
 
     /* ---- 原版参数管理 ---- */
     [specs addObject:[self groupSpec:@"原插件参数" footer:nil]];
@@ -5886,34 +5887,6 @@ static void diNPEnsureActivation(void) {
 
     [specs addObject:[self groupSpec:nil footer:nil]];
     [specs addObject:[self buttonSpec:@"注销生效" action:@selector(doRespring:)]];
-    return specs;
-}
-@end
-
-/* ================= 3.0.40: 播放器遮罩设置页 =================
-   与「附加功能 → 专辑遮罩」并列的另一套设置:
-     · 开关 PlayerMaskOn      (岛上那份是 maskOn)
-     · 素材 PlayerMaskAsset   (岛上那份是 diAlbumMaskAsset)
-   导出时分别落到 player_mask.png / mask.png, 播放器只读自己那份。 */
-@implementation DIPlayerMaskPage
-
-- (id)readPlayerMaskName:(PSSpecifier *)sp {
-    NSString *cur = readPrefString(kDIPlayerMaskKey);
-    if ([cur isEqualToString:@"__none__"]) return @"不遮罩";
-    if (!cur.length) return @"未选择";
-    return [cur.lastPathComponent.stringByDeletingPathExtension copy];
-}
-
-- (NSArray *)buildSpecifiers {
-    NSMutableArray *specs = [NSMutableArray array];
-    [specs addObject:[self groupSpec:@"播放器遮罩"
-        footer:@"只作用于控制中心播放器里的专辑头像。「附加功能 → 专辑遮罩」管的是岛上那颗, 两边素材与开关各自独立, 互不影响。"]];
-    [specs addObject:[self switchSpec:@"启用播放器遮罩" key:kDIPlayerMaskOnKey def:@NO]];
-    PSSpecifier *row = [PSSpecifier preferenceSpecifierNamed:@"遮罩素材"
-        target:self set:NULL get:@selector(readPlayerMaskName:)
-        detail:[DIPlayerMaskPicker class] cell:PSLinkCell edit:nil];
-    [specs addObject:row];
-    [specs addObject:[self groupSpec:nil footer:@"选完 1 秒内生效, 不用注销。素材目录与「专辑遮罩」共用 /var/mobile/灵动岛/遮罩素材。"]];
     return specs;
 }
 @end
