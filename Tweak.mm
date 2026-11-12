@@ -67,41 +67,114 @@ static double expandTextY = DI_EXP_TEXT_BASE_Y;   // 上下偏移(pt, 下为正,
 static double expandTextScale = 100.0; // 文字大小(%, 100=原样)
 /* 2.8.86: 构建戳 —— 之前横幅打的是 SpringBoard 自己的 CFBundleShortVersionString(恒 1.0),
    日志里根本看不出装的是哪一版。所有诊断行都带这个戳, 下轮日志一眼定位。 */
-#define DI_BUILD_VER @"3.0.17"
+#define DI_BUILD_VER @"3.0.18"
 static BOOL gRecordingActive = NO; // 保留: 岛素材总闸条件
 static NSString *diElementId(UIView *host);
 static BOOL diMiniMusicActive(UIView *host); // 2.6.3: 前置(遮罩层使用)
 static os_log_t logHandle;
 
-// 运行日志: 写入 /var/mobile/Library/Logs/DriftIsland/driftisland.log (供"导出日志报告"抓取)
-static void DLog(NSString *fmt, ...) NS_FORMAT_FUNCTION(1,2);
-static void DLog(NSString *fmt, ...) {
-    va_list args; va_start(args, fmt);
-    NSString *line = [[NSString alloc] initWithFormat:fmt arguments:args];
-    va_end(args);
+/* ===== 3.0.18: 日志核心重写 —— iOS 17 卡死的根因 =====
+   旧实现每写一行日志都:
+     ① 新建一个 NSDateFormatter(创建一次要毫秒级, 是 Foundation 里最贵的对象之一);
+     ② fileHandleForWritingAtPath → seek → write → close(每行一次同步磁盘 I/O);
+     ③ DLog 还要 stat 一次文件大小。
+   在洪峰秒(iOS 17 上灵动岛相关路径一秒 60~190 行)里, 主线程全耗在日志 I/O 上,
+   表现就是"卡死很久 → 看门狗杀掉 → 注销"。现在:
+     · formatter 全局只建一个;
+     · 文件句柄常驻(不再每行开/关), 写失败才重开;
+     · 每秒最多落 25 行, 超出的只计数, 下一秒补一条"省略 N 行";
+     · 大小上限只每 10 秒检查一次, 超限时保留末尾 200KB(旧实现会用单行覆盖整个文件,
+       把引导判定等历史全冲掉 —— 之前几轮"日志被截断"的怪象就是它)。 */
+static NSDateFormatter *diLogDF(void) {
+    static NSDateFormatter *df = nil;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        df = [NSDateFormatter new];
+        df.dateFormat = @"yyyy-MM-dd HH:mm:ss";
+        df.locale = [[NSLocale alloc] initWithLocaleIdentifier:@"en_US_POSIX"];
+        df.timeZone = [NSTimeZone localTimeZone];
+    });
+    return df;
+}
+static NSString *diLogPath(void) {
     static NSString *path = nil;
     static dispatch_once_t once;
     dispatch_once(&once, ^{
         NSFileManager *fm = [NSFileManager defaultManager];
         [fm createDirectoryAtPath:kMaterialDir withIntermediateDirectories:YES attributes:@{NSFilePosixPermissions: @0777} error:NULL];
         path = [kMaterialDir stringByAppendingPathComponent:@"driftisland.log"];
-        [fm setAttributes:@{NSFilePosixPermissions: @0666} ofItemAtPath:path error:NULL]; // 跨进程守护进程也能写
+        [fm setAttributes:@{NSFilePosixPermissions: @0666} ofItemAtPath:path error:NULL];
     });
-    if (!path) return;
-    if (!logEnabled) return; // 日志开关关闭时不生成
-    NSDateFormatter *df = [NSDateFormatter new];
-    df.dateFormat = @"yyyy-MM-dd HH:mm:ss";
-    NSString *out = [NSString stringWithFormat:@"[%@] %@\n", [df stringFromDate:[NSDate date]], line];
-    NSFileHandle *h = [NSFileHandle fileHandleForWritingAtPath:path];
-    if (!h) { [out writeToFile:path atomically:YES encoding:NSUTF8StringEncoding error:NULL]; return; }
-    [h seekToEndOfFile];
-    [h writeData:[out dataUsingEncoding:NSUTF8StringEncoding]];
-    [h closeFile];
-    // 单文件限 512KB, 防止无限增长
-    NSDictionary *attr = [[NSFileManager defaultManager] attributesOfItemAtPath:path error:NULL];
-    if (attr && [attr[NSFileSize] unsignedLongLongValue] > 512 * 1024) {
-        [out writeToFile:path atomically:YES encoding:NSUTF8StringEncoding error:NULL];
+    return path;
+}
+static NSFileHandle *gDILogHandle = nil;   /* 3.0.18: 常驻句柄(截断后置 nil 重开) */
+static NSFileHandle *diLogHandle(void) {
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{ gDILogHandle = [NSFileHandle fileHandleForWritingAtPath:diLogPath()]; });
+    if (!gDILogHandle) gDILogHandle = [NSFileHandle fileHandleForWritingAtPath:diLogPath()];   /* 文件被删后重开 */
+    return gDILogHandle;
+}
+/* 限流: 每秒 25 行; 溢出计数, 秒切换时补一条汇总 */
+static BOOL diLogThrottle(NSString **dropNote) {
+    static int n = 0; static int dropped = 0;
+    static CFAbsoluteTime sec = 0;
+    CFAbsoluteTime now = CFAbsoluteTimeGetCurrent();
+    if (now - sec >= 1.0) {
+        if (dropped > 0 && dropNote) {
+            *dropNote = [NSString stringWithFormat:@"(上一秒省略 %d 行重复日志)", dropped];
+        }
+        dropped = 0;
+        sec = now;
+        n = 0;
     }
+    if (n >= 25) { dropped++; return NO; }
+    n++;
+    return YES;
+}
+static void diLogWrite(NSString *out) {
+    NSFileHandle *h = diLogHandle();
+    NSData *d = [out dataUsingEncoding:NSUTF8StringEncoding];
+    if (!h) { [out writeToFile:diLogPath() atomically:YES encoding:NSUTF8StringEncoding error:NULL]; return; }
+    @try { [h seekToEndOfFile]; [h writeData:d]; } @catch (__unused NSException *e) { gDILogHandle = nil; }
+    /* 大小上限: 每 10 秒查一次; 超限保留末尾 200KB(不再用单行覆盖整个文件) */
+    static CFAbsoluteTime tCap = 0;
+    CFAbsoluteTime now = CFAbsoluteTimeGetCurrent();
+    if (now - tCap > 10.0) {
+        tCap = now;
+        NSDictionary *attr = [[NSFileManager defaultManager] attributesOfItemAtPath:diLogPath() error:NULL];
+        unsigned long long sz = attr ? [attr[NSFileSize] unsignedLongLongValue] : 0;
+        if (sz > 512 * 1024) {
+            unsigned long long keep = 200 * 1024;
+            NSFileHandle *rh = [NSFileHandle fileHandleForReadingAtPath:diLogPath()];
+            if (rh) {
+                @try {
+                    [rh seekToFileOffset:sz - keep];
+                    NSData *tail = [rh readDataToEndOfFile];
+                    [rh closeFile];
+                    NSString *mark = @"[日志] 超过 512KB, 已截断保留末尾 200KB\n";
+                    NSMutableData *nd = [NSMutableData data];
+                    [nd appendData:[mark dataUsingEncoding:NSUTF8StringEncoding]];
+                    if (tail) [nd appendData:tail];
+                    [nd writeToFile:diLogPath() atomically:YES];
+                    gDILogHandle = nil;   /* 旧句柄指向被替换的文件, 置空让下次重开 */
+                } @catch (__unused NSException *e) {}
+            }
+        }
+    }
+}
+
+// 运行日志: 写入 /var/mobile/Library/Logs/DriftIsland/driftisland.log (供"导出日志报告"抓取)
+static void DLog(NSString *fmt, ...) NS_FORMAT_FUNCTION(1,2);
+static void DLog(NSString *fmt, ...) {
+    if (!logEnabled) return; // 日志开关关闭时不生成
+    va_list args; va_start(args, fmt);
+    NSString *line = [[NSString alloc] initWithFormat:fmt arguments:args];
+    va_end(args);
+    NSString *dropNote = nil;
+    if (!diLogThrottle(&dropNote)) return;
+    NSString *out = [NSString stringWithFormat:@"[%@] %@%@\n", [diLogDF() stringFromDate:[NSDate date]], line,
+                     dropNote ?: @""];
+    diLogWrite(out);
 }
 
 /* 现场日志: 不受 logEnabled 开关控制, 崩溃/进安全模式时也要留痕。
@@ -111,21 +184,11 @@ static void RLog(NSString *fmt, ...) {
     va_list args; va_start(args, fmt);
     NSString *line = [[NSString alloc] initWithFormat:fmt arguments:args];
     va_end(args);
-    static NSString *path = nil;
-    static dispatch_once_t once;
-    dispatch_once(&once, ^{
-        NSFileManager *fm = [NSFileManager defaultManager];
-        [fm createDirectoryAtPath:kMaterialDir withIntermediateDirectories:YES attributes:@{NSFilePosixPermissions: @0777} error:NULL];
-        path = [kMaterialDir stringByAppendingPathComponent:@"driftisland.log"];
-        [fm setAttributes:@{NSFilePosixPermissions: @0666} ofItemAtPath:path error:NULL];
-    });
-    if (!path) return;
-    NSDateFormatter *df = [NSDateFormatter new];
-    df.dateFormat = @"yyyy-MM-dd HH:mm:ss";
-    NSString *out = [NSString stringWithFormat:@"[%@] [现场] %@\n", [df stringFromDate:[NSDate date]], line];
-    NSFileHandle *h = [NSFileHandle fileHandleForWritingAtPath:path];
-    if (!h) [out writeToFile:path atomically:YES encoding:NSUTF8StringEncoding error:NULL];
-    else { [h seekToEndOfFile]; [h writeData:[out dataUsingEncoding:NSUTF8StringEncoding]]; [h closeFile]; }
+    NSString *dropNote = nil;
+    if (!diLogThrottle(&dropNote)) return;
+    NSString *out = [NSString stringWithFormat:@"[%@] [现场] %@%@\n", [diLogDF() stringFromDate:[NSDate date]], line,
+                     dropNote ?: @""];
+    diLogWrite(out);
 }
 #define DI_STEP(fmt, ...) RLog(fmt, ##__VA_ARGS__)
 
@@ -13594,12 +13657,31 @@ static void diMruFileLog(NSString *line) {
         }
     });
     if (!gDiMruLogPath) return;
-    NSDateFormatter *df = [NSDateFormatter new];
-    df.dateFormat = @"yyyy-MM-dd HH:mm:ss";
-    NSString *out = [NSString stringWithFormat:@"[%@] [MRU] %@\n", [df stringFromDate:[NSDate date]], line];
-    NSFileHandle *h = [NSFileHandle fileHandleForWritingAtPath:gDiMruLogPath];
+    /* 3.0.18: 与主日志同一套修复 —— 缓存 formatter + 常驻句柄 + 每秒 25 行限流。
+       这个进程(MediaRemoteUI)也在主线程写日志, 洪峰一样会把它拖死。 */
+    static NSDateFormatter *df = nil;
+    static dispatch_once_t fonce;
+    dispatch_once(&fonce, ^{
+        df = [NSDateFormatter new];
+        df.dateFormat = @"yyyy-MM-dd HH:mm:ss";
+        df.locale = [[NSLocale alloc] initWithLocaleIdentifier:@"en_US_POSIX"];
+    });
+    static int n = 0; static int dropped = 0; static CFAbsoluteTime sec = 0;
+    CFAbsoluteTime now = CFAbsoluteTimeGetCurrent();
+    NSString *dropNote = nil;
+    if (now - sec >= 1.0) {
+        if (dropped > 0) dropNote = [NSString stringWithFormat:@"(上一秒省略 %d 行)", dropped];
+        dropped = 0; sec = now; n = 0;
+    }
+    if (n >= 25) { dropped++; return; }
+    n++;
+    NSString *out = [NSString stringWithFormat:@"[%@] [MRU] %@%@\n", [df stringFromDate:[NSDate date]], line,
+                     dropNote ?: @""];
+    static NSFileHandle *h = nil;
+    h = [NSFileHandle fileHandleForWritingAtPath:gDiMruLogPath];   /* 该进程日志路径可能切换, 每次取 */
     if (!h) { [out writeToFile:gDiMruLogPath atomically:YES encoding:NSUTF8StringEncoding error:NULL]; return; }
-    [h seekToEndOfFile]; [h writeData:[out dataUsingEncoding:NSUTF8StringEncoding]]; [h closeFile];
+    @try { [h seekToEndOfFile]; [h writeData:[out dataUsingEncoding:NSUTF8StringEncoding]]; } @catch (__unused NSException *e) {}
+    [h closeFile];
 }
 static void diMruReport(NSString *tag, NSString *detail) {
     /* 同 tag 3 秒内只报一次 —— 这些函数在每帧布局里被调用, 不能刷屏 */

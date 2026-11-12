@@ -67,23 +67,40 @@ static NSString *const kMaterialDir = @"/var/mobile/灵动岛";
 static NSString *const kFrameDir = @"/var/mobile/灵动岛/帧率素材";
 static NSString *const kMaskDir = @"/var/mobile/灵动岛/遮罩素材"; // 2.6.4: 遮罩素材(图片)
 
-/* 现场日志: 不受日志开关控制, 设置页崩溃时也要留痕(与 Tweak.mm 的 DI_STEP 同一格式) */
+/* 现场日志: 不受日志开关控制, 设置页崩溃时也要留痕(与 Tweak.mm 的 DI_STEP 同一格式)
+   3.0.18: 与主 tweak 同一套性能修复 —— 旧实现每行新建 NSDateFormatter(毫秒级开销)
+   + 每行开/关一次文件句柄。设置页一次构建要写 30+ 行, 快速操作时每秒上千行,
+   同步落盘直接把设置页和整个系统日志文件写路径拖死。现在:
+   formatter 全局一个、句柄常驻、每秒限 25 行(溢出补一条汇总)。 */
 static void diStep(NSString *fmt, ...) NS_FORMAT_FUNCTION(1,2);
 static void diStep(NSString *fmt, ...) {
     va_list args; va_start(args, fmt);
     NSString *line = [[NSString alloc] initWithFormat:fmt arguments:args];
     va_end(args);
-    NSFileManager *fm = [NSFileManager defaultManager];
-    [fm createDirectoryAtPath:kMaterialDir withIntermediateDirectories:YES attributes:@{NSFilePosixPermissions: @0777} error:NULL];
+    static NSDateFormatter *df = nil;
+    static dispatch_once_t fonce;
+    dispatch_once(&fonce, ^{
+        NSFileManager *fm = [NSFileManager defaultManager];
+        [fm createDirectoryAtPath:kMaterialDir withIntermediateDirectories:YES attributes:@{NSFilePosixPermissions: @0777} error:NULL];
+        df = [NSDateFormatter new];
+        df.dateFormat = @"yyyy-MM-dd HH:mm:ss";
+        df.locale = [[NSLocale alloc] initWithLocaleIdentifier:@"en_US_POSIX"];
+    });
+    static int n = 0; static int dropped = 0; static CFAbsoluteTime sec = 0;
+    CFAbsoluteTime now = CFAbsoluteTimeGetCurrent();
+    NSString *dropNote = nil;
+    if (now - sec >= 1.0) {
+        if (dropped > 0) dropNote = [NSString stringWithFormat:@"(上一秒省略 %d 行)", dropped];
+        dropped = 0; sec = now; n = 0;
+    }
+    if (n >= 25) { dropped++; return; }
+    n++;
     NSString *path = [kMaterialDir stringByAppendingPathComponent:@"driftisland.log"];
-    [fm setAttributes:@{NSFilePosixPermissions: @0666} ofItemAtPath:path error:NULL];
-    NSDateFormatter *df = [NSDateFormatter new];
-    df.dateFormat = @"yyyy-MM-dd HH:mm:ss";
-    NSString *out = [NSString stringWithFormat:@"[%@] [现场] %@\n", [df stringFromDate:[NSDate date]], line];
+    NSString *out = [NSString stringWithFormat:@"[%@] [现场] %@%@\n", [df stringFromDate:[NSDate date]], line,
+                     dropNote ?: @""];
     NSFileHandle *h = [NSFileHandle fileHandleForWritingAtPath:path];
     if (!h) { [out writeToFile:path atomically:YES encoding:NSUTF8StringEncoding error:NULL]; return; }
-    [h seekToEndOfFile];
-    [h writeData:[out dataUsingEncoding:NSUTF8StringEncoding]];
+    @try { [h seekToEndOfFile]; [h writeData:[out dataUsingEncoding:NSUTF8StringEncoding]]; } @catch (__unused NSException *e) {}
     [h closeFile];
 }
 
