@@ -19431,7 +19431,9 @@ static void diRhythmUpdateBars(UIView *host, BOOL active) {
             float v = active ? (gDIBandSmooth[b0] * (1.0f - bf) + gDIBandSmooth[b1] * bf) : 0.0f;
             CGFloat h = 1.5 + (height - 1.5) * pow(v, 0.85);
             CGRect r = CGRectMake(x0 + i * (bw + gap), bottom - h, bw, h);
-            CGFloat rr = MIN(bw, h) * 0.5;
+            /* 3.0.53: 圆角上限压到 1.6pt —— 之前取 MIN(bw,h)*0.5, 矮条(高<宽)
+               直接变成圆点, 整排看着是一串珠子。视频里是圆头竖条。 */
+            CGFloat rr = MIN(bw * 0.5f, MIN(h * 0.45f, 1.6f));
             CGPathAddRoundedRect(p, NULL, r, rr, rr);
         }
         [CATransaction begin];
