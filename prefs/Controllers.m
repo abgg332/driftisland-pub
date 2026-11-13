@@ -363,9 +363,23 @@ static double diStepReadValue(UITableViewCell *cell) {
     return def ? [def doubleValue] : 0;
 }
 
+/* 3.0.57: 按 key 兜底的步进。
+   用户反馈"粒子大小 1 之后按一下就变 1.5" —— 说明那一行拿到的步进是 0.5(不是 0.1),
+   不管 specifier 上的 diStep 有没有正确落到 cell 上, 这几个键一律强制按小数走。 */
+static double diStepForKeyOverride(NSString *key) {
+    if (![key isKindOfClass:NSString.class] || !key.length) return 0.0;
+    if ([key isEqualToString:@"AlbumParticleSize"]) return 0.1;
+    if ([key isEqualToString:@"AlbumBeatScale"]) return 0.05;
+    if ([key isEqualToString:@"RhythmParticleAlpha"]) return 0.05;
+    return 0.0;
+}
+
 /* 3.0.56: 步进值(0.1 这类)。以前这里硬编码 round(v) —— 小数全被抹成整数,
    所以"粒子大小"怎么调都是 0.5 一档。现在按 specifier 的 diStep 走。 */
 static double diStepOf(UITableViewCell *cell) {
+    NSString *k = objc_getAssociatedObject(cell, "di_k_key");
+    double ov = diStepForKeyOverride(k);
+    if (ov > 0.0) return ov;
     id st = objc_getAssociatedObject(cell, "di_k_step");
     if ([st isKindOfClass:NSNumber.class]) {
         double d = [st doubleValue];
@@ -831,7 +845,11 @@ static Class diStepSliderClass(void) {
 /* 3.0: 播放器入口 —— 组件隐藏下面同级, 开关写 com.local.playerexact(内置原生播放器域) */
 @interface DIPlayerEntryPage : DIMiniBaseController @end
 /* 3.0.45: 律动特效页 —— 总开关/封面律动/环/粒子/参数/渐变色全在这一页 */
-@interface DIFxPage : DIMiniBaseController @end
+@interface DIFxPage : DIMiniBaseController
+/* 3.0.57: 颜色行用系统取色盘; 这几个方法在 @implementation 内部前后互相调用, 先声明一遍 */
+- (void)diPickFxColor:(PSSpecifier *)sp;
+- (void)diOpenFxPickerKeyA:(NSString *)a keyB:(NSString *)b title:(NSString *)t;
+@end
 /* 3.0.1: 尺寸选择页自建 —— 不再走系统的 PSListItemsController(点进去闪退) */
 @interface DIPlayerSizePage : DIMiniBaseController @end
 @interface DIFrameFoldersMask : DIFrameFolders @end /* 2.6.3: 遮罩素材选择(键 maskAnimFolder) */
@@ -6087,20 +6105,81 @@ static NSArray<NSString *> *diFxColorNames(void) {
 }
 
 
+/* 3.0.57: 系统取色盘的 delegate 桥。面板关掉前必须强引用住, 否则回调丢。 */
+static id gDIFxColorBridge = nil;
+
+@interface DIFxColorBridge : NSObject <UIColorPickerViewControllerDelegate>
+@property (nonatomic, copy) NSString *key;
+@property (nonatomic, copy) NSString *modeKey;
+@property (nonatomic, weak) PSListController *page;
+@end
+
+@implementation DIFxColorBridge {
+    NSString *_lastHex;
+    CFTimeInterval _lastAt;
+}
+
+- (void)writeColor:(UIColor *)c {
+    if (!self.key.length || !c) return;
+    CGFloat r = 0, g = 0, b = 0, a = 0;
+    if (![c getRed:&r green:&g blue:&b alpha:&a]) {
+        if (![c getWhite:&r alpha:&a]) return;
+        g = b = r;
+    }
+    NSString *hex = [NSString stringWithFormat:@"#%02X%02X%02X",
+                     (unsigned)lround(r * 255.0), (unsigned)lround(g * 255.0), (unsigned)lround(b * 255.0)];
+    if ([hex isEqualToString:_lastHex]) return;
+    CFTimeInterval now = CFAbsoluteTimeGetCurrent();
+    if (now - _lastAt < 0.05) return;      /* 连续取色时最多 20 次/秒, 别把设置页拖卡 */
+    _lastAt = now; _lastHex = hex;
+    CFPreferencesSetAppValue((__bridge CFStringRef)self.key,
+                             (__bridge CFPropertyListRef)hex,
+                             (__bridge CFStringRef)kDomain);
+    /* 选完色还用"跟随封面"就等于白选 —— 自动切到自定义 */
+    if (self.modeKey.length) {
+        id mv = (__bridge_transfer id)CFPreferencesCopyAppValue(
+            (__bridge CFStringRef)self.modeKey, (__bridge CFStringRef)kDomain);
+        if (!mv || [mv intValue] == 0) {
+            CFPreferencesSetAppValue((__bridge CFStringRef)self.modeKey,
+                                     (__bridge CFPropertyListRef)@1,
+                                     (__bridge CFStringRef)kDomain);
+        }
+    }
+    CFPreferencesAppSynchronize((__bridge CFStringRef)kDomain);
+    diPostFxTune();
+    diStep(@"配色 %@ = %@", self.key, hex);
+}
+
+- (void)colorPickerViewControllerDidSelectColor:(UIColorPickerViewController *)vc {
+    [self writeColor:vc.selectedColor];
+}
+- (void)colorPickerViewController:(UIColorPickerViewController *)vc
+                   didSelectColor:(UIColor *)color
+                     continuously:(BOOL)continuously {
+    [self writeColor:color];
+}
+- (void)colorPickerViewControllerDidFinish:(UIColorPickerViewController *)vc {
+    gDIFxColorBridge = nil;
+    @try { [self.page reloadSpecifiers]; } @catch (__unused NSException *e) {}
+}
+@end
+
 @implementation DIFxPage
 
-/* 3.0.54: 颜色模式行 —— 点一下切下一个模式(跟随专辑 → 固定颜色 → 流光颜色)。
-   不用 PSListItemsController: 这个环境里它必闪退(踩过两次)。 */
+/* 3.0.57: 颜色不再"三态循环锁死"。
+   只有两个来源: 跟随封面 / 自定义颜色; 「流光」是独立开关。
+   自定义色用系统取色盘(iOS 14+ 的 UIColorPickerViewController): 色谱、色卡、吸管、
+   十六进制全都有, 你想选什么就是什么 —— 不再受八个预设色限制。 */
 static NSString *diModeName(int m) {
-    return m == 0 ? @"跟随专辑" : (m == 1 ? @"固定颜色" : @"流光颜色");
+    return m == 0 ? @"跟随封面" : @"自定义";
 }
 - (int)diModeValue:(NSString *)key {
     CFPreferencesAppSynchronize((__bridge CFStringRef)kDomain);
     id v = (__bridge_transfer id)CFPreferencesCopyAppValue((__bridge CFStringRef)key,
                                                            (__bridge CFStringRef)kDomain);
     int m = v ? [v intValue] : 0;
-    if (m < 0 || m > 2) m = 0;
-    return m;
+    if (m < 0) m = 0;
+    return m == 0 ? 0 : 1;      /* 旧值 2(流光) 归到"自定义", 流光改由开关控制 */
 }
 - (PSSpecifier *)modeSpec:(NSString *)title key:(NSString *)key {
     int m = [self diModeValue:key];
@@ -6113,12 +6192,63 @@ static NSString *diModeName(int m) {
 }
 - (void)diCycleMode:(PSSpecifier *)sp {
     NSString *key = [sp propertyForKey:@"diModeKey"];
-    int m = ([self diModeValue:key] + 1) % 3;
+    int m = ([self diModeValue:key] + 1) % 2;      /* 3.0.57: 两态循环 */
     CFPreferencesSetAppValue((__bridge CFStringRef)key,
                              (__bridge CFPropertyListRef)@(m),
                              (__bridge CFStringRef)kDomain);
     if (diIsFxKey(key)) diPostFxTune(); else postReload();
     [self reloadSpecifiers];
+    diStep(@"颜色来源: %@", diModeName(m));
+}
+
+/* 3.0.57: 当前色值(供行标题显示) */
+- (NSString *)fxHexForKey:(NSString *)key def:(NSString *)def {
+    if (!key.length) return def;
+    CFPreferencesAppSynchronize((__bridge CFStringRef)kDomain);
+    id v = (__bridge_transfer id)CFPreferencesCopyAppValue((__bridge CFStringRef)key,
+                                                           (__bridge CFStringRef)kDomain);
+    if ([v isKindOfClass:NSString.class] && [(NSString *)v length]) return v;
+    return def;
+}
+
+/* 一行 = 一个颜色槽, 点开系统取色盘, 选完立刻生效 */
+- (PSSpecifier *)fxColorSpec:(NSString *)title key:(NSString *)key def:(NSString *)def modeKey:(NSString *)mk {
+    NSString *hex = [self fxHexForKey:key def:def];
+    NSString *upper = [hex uppercaseString];
+    if (![upper hasPrefix:@"#"]) upper = [@"#" stringByAppendingString:upper];
+    PSSpecifier *sp = [PSSpecifier preferenceSpecifierNamed:[NSString stringWithFormat:@"%@   %@", title, upper]
+                                                     target:self set:NULL get:NULL detail:nil cell:PSButtonCell edit:nil];
+    [sp setProperty:key forKey:@"diColorKey"];
+    [sp setProperty:mk forKey:@"diColorModeKey"];
+    sp.buttonAction = @selector(diPickFxColor:);
+    return sp;
+}
+
+- (void)diPickFxColor:(PSSpecifier *)sp {
+    NSString *key = [sp propertyForKey:@"diColorKey"];
+    NSString *mk = [sp propertyForKey:@"diColorModeKey"];
+    if (!key.length) return;
+    if (@available(iOS 14.0, *)) {
+        UIColorPickerViewController *p = [[UIColorPickerViewController alloc] init];
+        p.selectedColor = diColorFromHexStr([self fxHexForKey:key def:@"#FFFFFF"], UIColor.whiteColor);
+        p.supportsAlpha = NO;
+        p.title = key;
+        /* delegate 必须强持有到面板关掉为止, 否则回调直接丢 */
+        DIFxColorBridge *b = [DIFxColorBridge new];
+        b.key = key;
+        b.modeKey = mk;
+        b.page = self;
+        gDIFxColorBridge = b;
+        p.delegate = b;
+        [self presentViewController:p animated:YES completion:nil];
+    } else {
+        [self diOpenFxPickerKeyA:key keyB:nil title:@"颜色"];
+    }
+}
+
+/* 3.0.57: 流光开关 —— 在"自定义颜色"基础上缓慢转色相。 */
+- (PSSpecifier *)fxFlowSpec:(NSString *)title key:(NSString *)key {
+    return [self switchSpec:title key:key def:@NO];
 }
 
 /* 3.0.45: 播放器域滑杆(与 DIPlayerEntryPage 同一套, 保留两位小数) */
@@ -6249,35 +6379,39 @@ static NSString *diModeName(int m) {
 - (NSArray *)buildSpecifiers {
     NSMutableArray *specs = [NSMutableArray array];
     [specs addObject:[self groupSpec:@"专辑律动"
-        footer:@"封面裁成正圆, 并跟随中音鼓点缩放(0.1 幅度可调)。频谱来自 mediaserverd 的 AudioUnitRender(1024 点 FFT, 60Hz), 暂停/停止时全部归零。特效只在未展开的播放卡上显示。「律动专辑环」已下线。"]];
+        footer:@"封面裁成正圆, 并跟随音乐拍点缩放(幅度可调)。拍点用全谱通量判定(底鼓/军鼓/拍手/人声起音都会触发), 频谱来自 mediaserverd 的 AudioUnitRender(1024 点 FFT), 暂停时全部归零。特效只在未展开的播放卡上显示。"]];
     [specs addObject:[self switchSpec:@"启用律动特效" key:@"AlbumEffectsOn" def:@YES]];
     [specs addObject:[self switchSpec:@"圆形封面" key:@"AlbumRoundCover" def:@YES]];
     [specs addObject:[self switchSpec:@"专辑跟随律动" key:@"AlbumRhythmOn" def:@YES]];
     [specs addObject:[self npSlider:@"专辑律动幅度" key:@"AlbumBeatScale" def:0.70 mn:0.00 mx:2.00]];
 
     [specs addObject:[self groupSpec:@"律动粒子"
-        footer:@"粒子从专辑背后随机位置冒出, 自然向外飘散, 不受鼓点影响。颜色: 「跟随专辑」取封面颜色;「固定颜色」和「流光颜色」都用你自定义的色值(流光 = 在你选的颜色基础上缓慢变色), 应用自定义色时会自动切到固定颜色。大小 0.1 一档。"]];
+        footer:@"粒子从专辑背后随机位置冒出, 跟着拍点向外轻轻一撑再收回, 平时自然飘散。颜色来源: 「跟随封面」取封面颜色;「自定义」用你选的两个色(渐变) —— 选色即生效, 不限颜色数量/色相。流光 = 在你选的颜色上缓慢转色相。粒子大小 1.0 为基准, 每按一次 + 是 0.1。"]];
     [specs addObject:[self switchSpec:@"启用律动粒子" key:@"AlbumParticlesOn" def:@YES]];
     [specs addObject:[self npSlider:@"粒子数量" key:@"AlbumParticleCount2" def:25 mn:0 mx:40]];
-    [specs addObject:[self modeSpec:@"粒子颜色" key:@"ParticleColorMode"]];
     [specs addObject:[self npSlider:@"粒子透明" key:@"RhythmParticleAlpha" def:0.74 mn:0.10 mx:1.50]];
     {
         PSSpecifier *psz = [self npSlider:@"粒子大小" key:@"AlbumParticleSize" def:1.0 mn:0.2 mx:2.0];
         [psz setProperty:@(0.1) forKey:@"diStep"];
         [specs addObject:psz];
     }
-    [specs addObject:[self buttonSpec:@"自定义粒子颜色(渐变)" action:@selector(diPickParticleColors:)]];
+    [specs addObject:[self modeSpec:@"颜色来源" key:@"ParticleColorMode"]];
+    [specs addObject:[self fxColorSpec:@"起始颜色" key:@"ParticleColorA" def:@"#FFFFBC" modeKey:@"ParticleColorMode"]];
+    [specs addObject:[self fxColorSpec:@"结束颜色" key:@"ParticleColorB" def:@"#BFCDF8" modeKey:@"ParticleColorMode"]];
+    [specs addObject:[self fxFlowSpec:@"流光(颜色缓慢流动)" key:@"ParticleFlowOn"]];
 
     [specs addObject:[self groupSpec:@"频谱条"
-        footer:@"进度条上方那一排小竖条, 中间高向两侧递减。「跟随专辑」取封面颜色;「固定颜色」「流光颜色」用你自定义的色值。上下位移 -150~150。"]];
+        footer:@"进度条上方那一排小竖条, 中间高向两侧递减。颜色来源同上: 「跟随封面」或「自定义」(两个色做渐变, 选色即生效), 流光在自定义色上缓慢转色相。上下位移 -150~150。"]];
     [specs addObject:[self switchSpec:@"启用频谱条" key:@"AlbumBarsOn" def:@YES]];
-    [specs addObject:[self modeSpec:@"频谱条颜色" key:@"SpectrumColorMode"]];
-    [specs addObject:[self buttonSpec:@"自定义频谱条颜色(渐变)" action:@selector(diPickSpectrumColors:)]];
     [specs addObject:[self npSlider:@"根数" key:@"AlbumBarsCount" def:40 mn:8 mx:64]];
     [specs addObject:[self npSlider:@"长度" key:@"AlbumBarsHeight" def:13.0 mn:4.0 mx:40.0]];
     [specs addObject:[self npSlider:@"宽度" key:@"AlbumBarsWidth" def:3.0 mn:1.0 mx:8.0]];
     [specs addObject:[self npSlider:@"左右位移" key:@"AlbumBarsOffset" def:0.0 mn:-120.0 mx:120.0]];
     [specs addObject:[self npSlider:@"上下位移" key:@"AlbumBarsOffsetY" def:0.0 mn:-150.0 mx:150.0]];
+    [specs addObject:[self modeSpec:@"颜色来源" key:@"SpectrumColorMode"]];
+    [specs addObject:[self fxColorSpec:@"起始颜色" key:@"SpectrumColorA" def:@"#9A8AFF" modeKey:@"SpectrumColorMode"]];
+    [specs addObject:[self fxColorSpec:@"结束颜色" key:@"SpectrumColorB" def:@"#6BB8FF" modeKey:@"SpectrumColorMode"]];
+    [specs addObject:[self fxFlowSpec:@"流光(颜色缓慢流动)" key:@"SpectrumFlowOn"]];
     return specs;
 }
 @end

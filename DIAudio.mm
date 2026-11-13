@@ -144,16 +144,14 @@ static BOOL diComputeBands(void) {
         float v = (db + 62.0f) / 54.0f;               /* -62dB → 0, -8dB → 1 */
         if (v < 0) v = 0;
         if (v > 1) v = 1;
-        /* 慢衰减 AGC: 小音量也看得出起伏, 又不会随风乱跳 */
-        if (v > gDIBandPeak[b]) gDIBandPeak[b] = v;
-        else gDIBandPeak[b] = MAX(0.25f, gDIBandPeak[b] * 0.994f);
-        float agcv = v / gDIBandPeak[b];
-        if (agcv > 1) agcv = 1;
-        float out = 0.45f * v + 0.55f * agcv;
-        /* 快起慢落 */
-        if (out > gDIBandF[b]) gDIBandF[b] = gDIBandF[b] * 0.35f + out * 0.65f;
-        else gDIBandF[b] = gDIBandF[b] * 0.80f + out * 0.20f;
-        gDIBandByte[b] = (uint8_t)(gDIBandF[b] * 255.0f);
+        /* 3.0.57: 不再做"归一到自身峰值"的 AGC。
+           旧版 out = 0.45v + 0.55(v/peak): 音乐一起来 peak 立刻贴到 1, 于是 v/peak 恒等于 1,
+           out 就被钉在 0.55 + 0.45v ≈ 0.85 —— 客户端探针日志里"中音"60 行全在 0.84~0.90,
+           一帧之内的上冲(谱通量)几乎为 0, 所以鼓点检测一直是 0.00, 封面/粒子都不动。
+           现在直接送 dB 归一后的绝对值 v; 包络、平滑、AGC 全部交给客户端(那边按 dt 做,
+           120Hz 下才顺), 这样"这一包比上一包突然高了"才是真实的。 */
+        gDIBandF[b] = v;
+        gDIBandByte[b] = (uint8_t)(v * 255.0f);
     }
     return YES;
 }
