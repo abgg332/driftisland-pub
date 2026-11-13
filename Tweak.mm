@@ -18683,7 +18683,7 @@ static float gDIRhythmEnergy = 0.0f;
 static CFTimeInterval gDIRhythmLast = 0;
 static double gDIRhythmPhase = 0.0;
 static double gDIRhythmClock = 0.0;
-static CGRect gDIRhythmRingFrame = {0, 0, 0, 0};
+static CGRect gDIRhythmRingFrame = {{0, 0}, {0, 0}};
 static NSString *gDIRhythmUsedA = nil;   /* 已生效的颜色, 变了就重建环/粒子 */
 static NSString *gDIRhythmUsedB = nil;
 
@@ -18782,7 +18782,7 @@ static CGRect diRhythmCoverRect(UIView *t, UIView *host) {
     CGSize s = t.bounds.size;
     CGPoint c = t.center;
     if (t.superview && host) c = [t.superview convertPoint:t.center toView:host];
-    return CGRectMake(c.x - s.size.width / 2, c.y - s.size.height / 2, s.size.width, s.size.height);
+    return CGRectMake(c.x - s.width / 2, c.y - s.height / 2, s.width, s.height);
 }
 
 static void diRhythmDetach(void) {
