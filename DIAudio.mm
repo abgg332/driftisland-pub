@@ -6,7 +6,7 @@
 
      1. MSHookFunction 包一层 AudioUnitRender, 把系统最终混音的样本混成
         单声道推进环形缓冲(只读, 一个字节都不改);
-     2. 独立线程每 33ms 取最近 1024 点做 Hann 加窗 FFT(自写 radix-2,
+     2. 独立线程每 16ms 取最近 1024 点做 Hann 加窗 FFT(自写 radix-2,
         不引 Accelerate, 避免 mediaserverd 里额外依赖), 归成 24 段对数频带
         (60Hz~14kHz), 每段做慢衰减 AGC + 快起慢落包络, 输出 0~255;
      3. 127.0.0.1:41235 推 36 字节定长包:
@@ -252,7 +252,9 @@ static void *diAudioServerThread(void *arg) {
         int nb = fcntl(c, F_GETFL, 0);
         if (nb >= 0) fcntl(c, F_SETFL, nb | O_NONBLOCK);
         for (;;) {
-            usleep(33000);
+            /* 3.0.55: 33ms → 16ms。30Hz 的数据在 120Hz 屏上就是"每四帧才变一次",
+               刻度和粒子再怎么平滑也是顿的。60Hz 发包, 32 字节/包, 开销可以忽略。 */
+            usleep(16000);
             BOOL live = (CFAbsoluteTimeGetCurrent() - gDIStamp < 0.5);
             float fast = 0.0f, slow = 0.0f;
             uint8_t bands[DI_BANDS];

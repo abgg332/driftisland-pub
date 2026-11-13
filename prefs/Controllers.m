@@ -237,6 +237,23 @@ static void diPostReloadRaw(void) {
     CFNotificationCenterPostNotification(CFNotificationCenterGetDarwinNotifyCenter(),
         (__bridge CFStringRef)kNotifyStr, NULL, NULL, YES);
 }
+/* 3.0.55: 特效类键(律动/粒子/频谱条/时间条位移) —— 这些键只影响灵动岛里的
+   实时绘制, 不需要重排壁纸/视频/锁屏卡片。给它们一条独立的轻量通知,
+   避免拖滑杆时每次都触发 SpringBoard 的全量刷新(那样会直接卡死)。 */
+static BOOL diIsFxKey(NSString *key) {
+    if (![key isKindOfClass:NSString.class] || !key.length) return NO;
+    static NSArray<NSString *> *pfx;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        pfx = @[@"Album", @"Rhythm", @"Particle", @"Spectrum", @"Ring", @"TimeYOffset"];
+    });
+    for (NSString *p in pfx) if ([key hasPrefix:p]) return YES;
+    return NO;
+}
+static void diPostFxTune(void) {
+    notify_post("com.abgg332.driftisland.fxtune");
+}
+
 static void postReload(void) {
     static CFAbsoluteTime last; static BOOL queued;
     if (!NSThread.isMainThread) { diPostReloadRaw(); return; }
@@ -3884,6 +3901,8 @@ static NSArray *diHomeBarPresets(void) {
    prefKey 决定写哪个键: lkGlowHex / lkFrameHex。 */
 @interface DIColorPick : UIViewController
 @property (nonatomic, copy) NSString *prefKey;
+/* 3.0.55: 渐变色的第二个键(起始/结束)。填了就按"两色"处理, 只填一个色时两键同色。 */
+@property (nonatomic, copy) NSString *prefKeyB;
 @end
 @implementation DIColorPick {
     UIScrollView *_scroll;
@@ -3975,9 +3994,13 @@ static NSArray *diHomeBarPresets(void) {
     [_hexField addTarget:self action:@selector(diRefreshPreview) forControlEvents:UIControlEventEditingChanged];
     [_scroll addSubview:_hexField];
 
-    /* 预填当前色值 */
+    /* 预填当前色值(渐变键: 起始色,结束色) */
     CFPreferencesAppSynchronize((__bridge CFStringRef)kDomain);
     NSString *cur = CFBridgingRelease(CFPreferencesCopyAppValue((__bridge CFStringRef)self.prefKey, (__bridge CFStringRef)kDomain)) ?: @"";
+    if (self.prefKeyB.length) {
+        NSString *b = CFBridgingRelease(CFPreferencesCopyAppValue((__bridge CFStringRef)self.prefKeyB, (__bridge CFStringRef)kDomain)) ?: @"";
+        if (b.length) cur = [NSString stringWithFormat:@"%@,%@", cur, b];
+    }
     _hexField.text = cur;
 
     UIButton *apply = [UIButton buttonWithType:UIButtonTypeSystem];
@@ -4061,10 +4084,21 @@ static NSArray *diHomeBarPresets(void) {
 /* 写键 + 发 reload 通知(SpringBoard 侧下个 tick 重读生效) */
 - (void)diApplyColors:(NSArray *)cols {
     NSString *joined = [cols componentsJoinedByString:@","];
-    CFPreferencesSetAppValue((__bridge CFStringRef)self.prefKey, (__bridge CFPropertyListRef)joined, (__bridge CFStringRef)kDomain);
+    BOOL fx = diIsFxKey(self.prefKey) || diIsFxKey(self.prefKeyB);
+    if (self.prefKeyB.length) {
+        /* 渐变: 第一个色 → 起始键, 第二个色 → 结束键(只有一个色时两键相同) */
+        NSString *a = cols.firstObject ?: @"";
+        NSString *b = cols.count > 1 ? cols[1] : a;
+        CFPreferencesSetAppValue((__bridge CFStringRef)self.prefKey, (__bridge CFPropertyListRef)a, (__bridge CFStringRef)kDomain);
+        CFPreferencesSetAppValue((__bridge CFStringRef)self.prefKeyB, (__bridge CFPropertyListRef)b, (__bridge CFStringRef)kDomain);
+        diStep(@"配色(%@/%@): %@ → %@", self.prefKey, self.prefKeyB, a, b);
+    } else {
+        CFPreferencesSetAppValue((__bridge CFStringRef)self.prefKey, (__bridge CFPropertyListRef)joined, (__bridge CFStringRef)kDomain);
+        diStep(@"配色(%@): 已应用 %lu 个色值 %@", self.prefKey, (unsigned long)cols.count, joined);
+    }
     CFPreferencesAppSynchronize((__bridge CFStringRef)kDomain);
-    postReload();
-    diStep(@"配色(%@): 已应用 %lu 个色值 %@", self.prefKey, (unsigned long)cols.count, joined);
+    if (fx) diPostFxTune();     /* 特效色: 只让 SpringBoard 重读特效参数 */
+    else postReload();
 }
 
 - (void)diClose {
@@ -5864,10 +5898,17 @@ static void diNPEnsureActivation(void) {
         if (v < mn) v = mn;
         if (v > mx) v = mx;
     }
-    v = round(v * 100.0) / 100.0;
+    /* 3.0.55: 支持 0.1 这类步进(粒子大小); 没设步进就保持两位小数 */
+    double step = 0.01;
+    NSNumber *st = [sp propertyForKey:@"diStep"];
+    if ([st isKindOfClass:NSNumber.class] && st.doubleValue > 0.0) step = st.doubleValue;
+    v = round(v / step) * step;
+    v = round(v * 1000.0) / 1000.0;
     CFPreferencesSetAppValue((__bridge CFStringRef)key, (__bridge CFPropertyListRef)@(v),
                              (__bridge CFStringRef)kDomain);
-    notify_post("com.local.playerexact/artwork-changed");
+    /* 特效键不落盘同步(拖动时每秒几十次 fsync 会卡设置页), 由 cfprefsd 异步落盘 */
+    if (diIsFxKey(key)) diPostFxTune();               /* 轻量: 只重读特效参数 */
+    else notify_post("com.local.playerexact/artwork-changed");
 }
 
 - (PSSpecifier *)npRotateSwitch {
@@ -6032,8 +6073,7 @@ static NSString *diModeName(int m) {
     CFPreferencesSetAppValue((__bridge CFStringRef)key,
                              (__bridge CFPropertyListRef)@(m),
                              (__bridge CFStringRef)kDomain);
-    CFPreferencesAppSynchronize((__bridge CFStringRef)kDomain);
-    postReload();
+    if (diIsFxKey(key)) diPostFxTune(); else postReload();
     [self reloadSpecifiers];
 }
 
@@ -6074,10 +6114,17 @@ static NSString *diModeName(int m) {
         if (v < mn) v = mn;
         if (v > mx) v = mx;
     }
-    v = round(v * 100.0) / 100.0;
+    /* 3.0.55: 支持 0.1 这类步进(粒子大小); 没设步进就保持两位小数 */
+    double step = 0.01;
+    NSNumber *st = [sp propertyForKey:@"diStep"];
+    if ([st isKindOfClass:NSNumber.class] && st.doubleValue > 0.0) step = st.doubleValue;
+    v = round(v / step) * step;
+    v = round(v * 1000.0) / 1000.0;
     CFPreferencesSetAppValue((__bridge CFStringRef)key, (__bridge CFPropertyListRef)@(v),
                              (__bridge CFStringRef)kDomain);
-    notify_post("com.local.playerexact/artwork-changed");
+    /* 特效键不落盘同步(拖动时每秒几十次 fsync 会卡设置页), 由 cfprefsd 异步落盘 */
+    if (diIsFxKey(key)) diPostFxTune();               /* 轻量: 只重读特效参数 */
+    else notify_post("com.local.playerexact/artwork-changed");
 }
 
 
@@ -6125,10 +6172,35 @@ static NSString *diModeName(int m) {
     [self reloadSpecifiers];
 }
 
+/* 3.0.55: 环 / 粒子 / 频谱条的颜色都走"真正的取色面板"(预设色卡 + 渐变预览 +
+   自定义色值), 与"文字颜色"同一个 DIColorPick, 不再是八个写死的色点。
+   一个面板选两个色 = 渐变起始/结束; 只填一个色 = 纯色。 */
+- (void)diOpenFxPickerKeyA:(NSString *)a keyB:(NSString *)b title:(NSString *)t {
+    @try {
+        Class cls = NSClassFromString(@"DIColorPick");
+        if (!cls) { diStep(@"配色: 类缺失"); return; }
+        UIViewController *vc = [[cls alloc] initWithNibName:nil bundle:nil];
+        [vc setValue:a forKey:@"prefKey"];
+        [vc setValue:b forKey:@"prefKeyB"];
+        diPushPanel(vc, t, nil);
+    } @catch (NSException *e) {
+        diStep(@"配色: 打开失败 %@", e.reason ?: @"(未知)");
+    }
+}
+- (void)diPickRingColors:(PSSpecifier *)sp {
+    [self diOpenFxPickerKeyA:@"AlbumColorA" keyB:@"AlbumColorB" title:@"环颜色"];
+}
+- (void)diPickParticleColors:(PSSpecifier *)sp {
+    [self diOpenFxPickerKeyA:@"ParticleColorA" keyB:@"ParticleColorB" title:@"粒子颜色"];
+}
+- (void)diPickSpectrumColors:(PSSpecifier *)sp {
+    [self diOpenFxPickerKeyA:@"SpectrumColorA" keyB:@"SpectrumColorB" title:@"频谱条颜色"];
+}
+
 - (NSArray *)buildSpecifiers {
     NSMutableArray *specs = [NSMutableArray array];
     [specs addObject:[self groupSpec:@"专辑律动"
-        footer:@"封面正圆 + 外圈 80 根实心刻度(长短由 24 段真实频谱驱动, 珊瑚橙→紫罗兰) + 封面随低音鼓点缩放。频谱来自 mediaserverd 的 AudioUnitRender(1024 点 FFT), 暂停/停止时全部归零。特效只在未展开的播放卡上显示。"]];
+        footer:@"封面正圆 + 外圈 80 根实心刻度(长短由 24 段真实频谱驱动, 颜色可选跟随专辑/固定/流光) + 封面随低音鼓点缩放。频谱来自 mediaserverd 的 AudioUnitRender(1024 点 FFT, 60Hz), 暂停/停止时全部归零。特效只在未展开的播放卡上显示。"]];
     [specs addObject:[self switchSpec:@"启用律动特效" key:@"AlbumEffectsOn" def:@YES]];
     [specs addObject:[self switchSpec:@"启用律动专辑环" key:@"AlbumRingOn" def:@YES]];
     [specs addObject:[self switchSpec:@"圆形封面" key:@"AlbumRoundCover" def:@YES]];
@@ -6137,26 +6209,27 @@ static NSString *diModeName(int m) {
     [specs addObject:[self npSlider:@"律动强度" key:@"AlbumRhythmStrength" def:0.90 mn:0.10 mx:2.00]];
     [specs addObject:[self npSlider:@"专辑律动幅度" key:@"AlbumBeatScale" def:0.70 mn:0.00 mx:2.00]];
     [specs addObject:[self npSlider:@"刻度粗细" key:@"AlbumRingWidth2" def:2.20 mn:0.80 mx:8.00]];
-    [specs addObject:[self groupSpec:@"环渐变 · 起始色" footer:@"点选即生效并返回。"]];
-    [specs addObjectsFromArray:[self colorRows:@"AlbumColorA"]];
-    [specs addObject:[self groupSpec:@"环渐变 · 结束色" footer:nil]];
-    [specs addObjectsFromArray:[self colorRows:@"AlbumColorB"]];
+    [specs addObject:[self buttonSpec:@"自定义环颜色(渐变)" action:@selector(diPickRingColors:)]];
 
     [specs addObject:[self groupSpec:@"律动粒子"
-        footer:@"粒子从专辑边缘向外散开, 每一记低音鼓点会同时放大、外弹并提亮。颜色在下面的起止色之间渐变。"]];
+        footer:@"粒子从专辑边缘向外散开, 每一下底鼓会给它们一记向外的推力(不是瞬移), 同时轻微放大提亮。大小 0.1 一档。"]];
     [specs addObject:[self switchSpec:@"启用律动粒子" key:@"AlbumParticlesOn" def:@YES]];
     [specs addObject:[self npSlider:@"粒子数量" key:@"AlbumParticleCount2" def:25 mn:0 mx:40]];
     [specs addObject:[self modeSpec:@"粒子颜色" key:@"ParticleColorMode"]];
     [specs addObject:[self npSlider:@"粒子透明" key:@"RhythmParticleAlpha" def:0.74 mn:0.10 mx:1.50]];
-    [specs addObject:[self npSlider:@"粒子大小" key:@"AlbumParticleSize" def:1.0 mn:0.5 mx:3.0]];
-    [specs addObject:[self groupSpec:@"粒子渐变 · 起始色" footer:nil]];
-    [specs addObjectsFromArray:[self colorRows:@"ParticleColorA"]];
-    [specs addObject:[self groupSpec:@"粒子渐变 · 结束色" footer:nil]];
-    [specs addObjectsFromArray:[self colorRows:@"ParticleColorB"]];
+    {
+        /* 3.0.55: 用户要 0.1 一档 —— 1.0 偏小 / 1.5 偏大, 中间能细调 */
+        PSSpecifier *psz = [self npSlider:@"粒子大小" key:@"AlbumParticleSize" def:1.0 mn:0.2 mx:2.0];
+        [psz setProperty:@(0.1) forKey:@"diStep"];
+        [specs addObject:psz];
+    }
+    [specs addObject:[self buttonSpec:@"自定义粒子颜色(渐变)" action:@selector(diPickParticleColors:)]];
 
     [specs addObject:[self groupSpec:@"频谱条"
-        footer:@"进度条上方那一排小竖条, 中间高向两侧递减。"]];
+        footer:@"进度条上方那一排小竖条, 中间高向两侧递减; 颜色可跟随专辑/固定/流光, 也可以自定义渐变色。"]];
     [specs addObject:[self switchSpec:@"启用频谱条" key:@"AlbumBarsOn" def:@YES]];
+    [specs addObject:[self modeSpec:@"频谱条颜色" key:@"SpectrumColorMode"]];
+    [specs addObject:[self buttonSpec:@"自定义频谱条颜色(渐变)" action:@selector(diPickSpectrumColors:)]];
     [specs addObject:[self npSlider:@"根数" key:@"AlbumBarsCount" def:40 mn:8 mx:64]];
     [specs addObject:[self npSlider:@"长度" key:@"AlbumBarsHeight" def:13.0 mn:4.0 mx:40.0]];
     [specs addObject:[self npSlider:@"宽度" key:@"AlbumBarsWidth" def:3.0 mn:1.0 mx:8.0]];

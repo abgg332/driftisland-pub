@@ -77,6 +77,9 @@ static double rhythmBarsOffsetY = 0.0;         // 3.0.54: 频谱条垂直位移(
 static double timeYOffset = 0.0;               // 3.0.54: 时间条垂直位移(取代"隐藏时间")
 static int    ringColorMode = 0;               // 3.0.54: 0=跟随专辑 1=固定色 2=流光
 static int    particleColorMode = 0;           // 3.0.54: 同上
+static int    spectrumColorMode = 0;           // 3.0.55: 频谱条颜色, 同上三态
+static NSString *spectrumColorA = nil;         // 3.0.55: 频谱条固定色(起始)
+static NSString *spectrumColorB = nil;         // 3.0.55: 频谱条固定色(结束)
 static double rhythmParticleAlpha = 1.0;       // 3.0.48: 粒子透明度
 static double rhythmRingFollowAlpha = 1.0;     // 3.0.48: 环跟随透明度
 static int  rhythmParticleCount = 12;          // 3.0.47: 参考视频里只有十几颗
@@ -834,41 +837,12 @@ static NSString *materialPathFor(BOOL expanded) {
     return [kMaterialDir stringByAppendingPathComponent:list[idx]];
 }
 
-static void refreshPrefs(void) {
-    /* 2.6.3: 每次重载都清空音乐岛学习结果, 由下一次在播音乐时重新确认, 避免沿用旧的错误 id */
-    gMusicIslandId = nil; gMusicIslandCls = nil;
-    enabled = pBool(@"enabled", NO);
-    notifyColorOn = pBool(@"notifyColorOn", NO);
-    notifyBgOff = pBool(@"notifyBgOff", NO);
-    notifyFlowOn = pBool(@"notifyFlowOn", NO);
-    /* 2.9.28: 模拟系统外观 —— 开=深色, 关=浅色; 总开关关=跟随系统 */
-    gThemeOn = pBool(@"themeMasterOn", NO);
-    gThemeDark = pBool(@"themeForceDark", NO);
-    {
-        /* 2.2.8: 多色数组(diNotifColors, 逗号分隔 HEX)。
-           流光关 = 取第1个颜色单色固定; 流光开 = 沿文字从左到右循环流动。 */
-        NSString *raw = pString(@"diNotifColors");
-        NSMutableArray<UIColor *> *cols = [NSMutableArray array];
-        if (raw.length) {
-            for (NSString *h in [raw componentsSeparatedByString:@","]) {
-                UIColor *c = diColorFromHex(h);
-                if (c) [cols addObject:c];
-            }
-        }
-        if (!cols.count) {
-            /* 旧版兼容: notifyColorHex / 默认柔白 */
-            UIColor *legacy = diColorFromHex(pString(@"notifyColorHex"));
-            [cols addObject:legacy ?: [UIColor colorWithRed:1.0 green:0.937 blue:0.918 alpha:1.0]];
-        }
-        gNotifyColors = cols;
-        gNotifyColor = cols.firstObject; // 单色模式/兜底色
-        static BOOL lastOn = -1, lastFlow = -1; static NSUInteger lastCnt = 999; static BOOL lastBg = -1;
-        if (lastOn != notifyColorOn || lastFlow != notifyFlowOn || lastCnt != cols.count || lastBg != notifyBgOff) {
-            lastOn = notifyColorOn; lastFlow = notifyFlowOn; lastCnt = cols.count; lastBg = notifyBgOff;
-            DLog(@"通知文字颜色: 开关=%d 流光=%d 颜色数=%lu 背景过滤=%d 首色=%@",
-                 notifyColorOn, notifyFlowOn, (unsigned long)cols.count, notifyBgOff, diHexFromUIColor(cols.firstObject));
-        }
-    }
+/* 3.0.55: 特效参数单独读取。
+   以前这些键混在 refreshPrefs() 里 —— 那是"全量偏好重读"(上百次跨进程读),
+   设置页拖一下滑杆就发一次刷新通知, 一次拖动几十条 → SpringBoard 主线程被按住
+   → 用户看到的就是"一设置就卡死"。现在特效参数只读这 20 来个键,
+   由 com.abgg332.driftisland.fxtune 这条轻量通知驱动。 */
+static void diFxLoadPrefs(void) {
     /* 3.0.46: 一次性迁移 —— 3.0.43/44 的三个子开关可能被关过, 而 3.0.45 的
        总开关默认值是"有", 结果三个子开关全 NO → 引擎根本不启动(用户实测
        日志里 0 条 [律动], 看起来"完全没效果")。只在 AlbumEffectsOn 从未写过
@@ -976,6 +950,53 @@ static void refreshPrefs(void) {
         gDIParticleColB = diRhythmHexColor(pb,
             [UIColor colorWithRed:0.749 green:0.804 blue:0.973 alpha:1.0]);
     }
+    /* 3.0.55: 频谱条自己的颜色(与环/粒子同一套三态) */
+    {
+        int sm = (int)pInt(@"SpectrumColorMode", 0);
+        if (sm < 0 || sm > 2) sm = 0;
+        spectrumColorMode = sm;
+        spectrumColorA = pString(@"SpectrumColorA");
+        spectrumColorB = pString(@"SpectrumColorB");
+    }
+}
+
+static void refreshPrefs(void) {
+    /* 2.6.3: 每次重载都清空音乐岛学习结果, 由下一次在播音乐时重新确认, 避免沿用旧的错误 id */
+    gMusicIslandId = nil; gMusicIslandCls = nil;
+    enabled = pBool(@"enabled", NO);
+    notifyColorOn = pBool(@"notifyColorOn", NO);
+    notifyBgOff = pBool(@"notifyBgOff", NO);
+    notifyFlowOn = pBool(@"notifyFlowOn", NO);
+    /* 2.9.28: 模拟系统外观 —— 开=深色, 关=浅色; 总开关关=跟随系统 */
+    gThemeOn = pBool(@"themeMasterOn", NO);
+    gThemeDark = pBool(@"themeForceDark", NO);
+    {
+        /* 2.2.8: 多色数组(diNotifColors, 逗号分隔 HEX)。
+           流光关 = 取第1个颜色单色固定; 流光开 = 沿文字从左到右循环流动。 */
+        NSString *raw = pString(@"diNotifColors");
+        NSMutableArray<UIColor *> *cols = [NSMutableArray array];
+        if (raw.length) {
+            for (NSString *h in [raw componentsSeparatedByString:@","]) {
+                UIColor *c = diColorFromHex(h);
+                if (c) [cols addObject:c];
+            }
+        }
+        if (!cols.count) {
+            /* 旧版兼容: notifyColorHex / 默认柔白 */
+            UIColor *legacy = diColorFromHex(pString(@"notifyColorHex"));
+            [cols addObject:legacy ?: [UIColor colorWithRed:1.0 green:0.937 blue:0.918 alpha:1.0]];
+        }
+        gNotifyColors = cols;
+        gNotifyColor = cols.firstObject; // 单色模式/兜底色
+        static BOOL lastOn = -1, lastFlow = -1; static NSUInteger lastCnt = 999; static BOOL lastBg = -1;
+        if (lastOn != notifyColorOn || lastFlow != notifyFlowOn || lastCnt != cols.count || lastBg != notifyBgOff) {
+            lastOn = notifyColorOn; lastFlow = notifyFlowOn; lastCnt = cols.count; lastBg = notifyBgOff;
+            DLog(@"通知文字颜色: 开关=%d 流光=%d 颜色数=%lu 背景过滤=%d 首色=%@",
+                 notifyColorOn, notifyFlowOn, (unsigned long)cols.count, notifyBgOff, diHexFromUIColor(cols.firstObject));
+        }
+    }
+    /* 3.0.55: 特效参数走单独的轻量读取(只读特效键, 不碰全量偏好) */
+    diFxLoadPrefs();
     hideNoMusic = pBool(@"hideNoMusic", NO); // 无音乐时隐藏小岛视频
     lockWOn = pBool(@"lockWOn", NO);
     lockWPercent = pDouble(@"lockWPercent", 85);
@@ -17967,8 +17988,7 @@ static void diNPQueryNowPlaying(void) {
     });
 }
 
-static NSHashTable *gDITimeTouched = nil;    /* 我们压过 alpha 的 view(弱表) */
-static void (*gDITimeOrigLayout)(id, SEL) = NULL;
+static NSHashTable *gDITimeTouched = nil;    /* 我们套过位移 transform 的 view(弱表) */
 
 /* 3.0.43/3.0.44: 只看折叠态的播放器卡片 —— 展开整块完全不动(用户明确要求)。
    3.0.43 用 bounds 高度判, 用户实测"展开的也被藏了(时好时坏)", 原因两条:
@@ -17995,47 +18015,32 @@ static BOOL diTimeExpanded(UIView *v) {
 }
 
 /* 3.0.54: 用户把「隐藏时间」改成「时间条上下移动」。
-   实现: 系统每次 layout 完, 在同一个提交帧里套一层垂直平移的 transform。
-   用 transform 而不是改 frame —— 系统重排只写 frame, 不改 transform, 两者不会打架;
-   也避免了改 frame 引起的布局回环(历史上 4 万行刷屏就是这么来的)。
-   只动折叠态, 展开态还原(展开是另一套布局, 动了会错位)。 */
-static void diTimeLayoutHook(id self, SEL cmd) {
-    if (gDITimeOrigLayout) gDITimeOrigLayout(self, cmd);
-    UIView *v = (UIView *)self;
-    if (!gDITimeTouched) gDITimeTouched = [NSHashTable weakObjectsHashTable];
-    if (diTimeExpanded(v)) {
-        if ([gDITimeTouched containsObject:v]) {
-            v.transform = CGAffineTransformIdentity;
-            [gDITimeTouched removeObject:v];
-        }
-        return;
-    }
-    if (fabs(timeYOffset) < 0.01) {
-        if ([gDITimeTouched containsObject:v]) {
-            v.transform = CGAffineTransformIdentity;
-            [gDITimeTouched removeObject:v];
+   ------------------------------------------------------------------
+   3.0.55 把 layoutSubviews 钩子整个删掉了(它就是"一设置就卡死"的元凶):
+     · 在 layoutSubviews 里给视图设 transform, transform 会影响 frame, UIKit 随即
+       再给父视图排一次版 → 又进钩子 → 每帧无限重排, SpringBoard 主线程直接卡死;
+     · 钩子里还调 diTimeExpanded() → convertRect:toView: → 在布局过程中强制布局,
+       形成重入, 更糟。
+   现在只保留"巡检式"应用: 由 0.25/0.4 秒的轻量扫描(和设置页的 fxtune 通知)去设
+   transform。系统重排只写 frame、不会清 transform, 所以位移能稳定保持;
+   万一系统把控件换了个新实例, 下一次巡检会重新套上。 */
+static void diTimeApplyTo(UIView *tc) {
+    if (!tc) return;
+    BOOL wantZero = (fabs(timeYOffset) < 0.01);
+    if (wantZero) {
+        if ([gDITimeTouched containsObject:tc]) {
+            tc.transform = CGAffineTransformIdentity;
+            [gDITimeTouched removeObject:tc];
         }
         return;
     }
     CGAffineTransform want = CGAffineTransformMakeTranslation(0, (CGFloat)timeYOffset);
-    if (!CGAffineTransformEqualToTransform(v.transform, want)) {
-        v.transform = want;
-        [gDITimeTouched addObject:v];
+    if (!CGAffineTransformEqualToTransform(tc.transform, want)) {
+        [UIView performWithoutAnimation:^{ tc.transform = want; }];
     }
+    [gDITimeTouched addObject:tc];
 }
 
-static void diTimeInstallHook(void) {
-    static BOOL done = NO;
-    if (done) return;
-    Class c = NSClassFromString(@"MRUNowPlayingTimeControlsView");
-    if (!c) return;
-    done = YES;
-    Method m = class_getInstanceMethod(c, @selector(layoutSubviews));
-    IMP before = m ? method_getImplementation(m) : NULL;
-    MSHookMessageEx(c, @selector(layoutSubviews), (IMP)diTimeLayoutHook, (IMP *)&gDITimeOrigLayout);
-    if (!gDITimeOrigLayout) gDITimeOrigLayout = (void (*)(id, SEL))before;
-    RLog(@"[时间] 时间条布局钩子已装 (%@)", gDITimeOrigLayout ? @"OK" : @"失败");
-}
 
 /* 标签现在是不是"真的看得见": 在窗口里, 自身与祖先都没被系统收起。
    被我们自己 hidden 的那个仍然算数(否则开着「隐藏未在」时, 这里就再也认不出空状态)。 */
@@ -18084,20 +18089,15 @@ static UIView *diNPFindTimeControls(UIView *root, BOOL *outIdle) {
 }
 
 /* 3.0.54: 「隐藏时间」下线, 改为「时间条上下移动」。
-   每 0.4 秒扫一遍播放卡, 找到 MRUNowPlayingTimeControlsView, 套垂直平移。
-   原来那套"未播放就压 alpha"的逻辑整段删除 —— 用户明确说不要隐藏了。 */
-static void diNPApplyHideTime(void) {
-    static CFAbsoluteTime lastScan = 0;
-    CFTimeInterval now = CFAbsoluteTimeGetCurrent();
-    if (now - lastScan < 0.4) return;
-    lastScan = now;
-
-    diTimeInstallHook();
-    diNPQueryNowPlaying();   /* 律动那边还靠 gDIHasNowPlaying 判"到底有没有歌" */
+   3.0.55: 不再挂 layoutSubviews, 改为**巡检 + 通知即时应用**两路:
+     · 巡检 0.4s 一次(跟着播放卡的模块布局走), 负责"新出现的播放卡";
+     · 设置页拖动滑杆发 fxtune 通知 → diTimeApplyNow() 立刻套上, 手感跟手。
+   全程不读文件、不重排、不改 frame, 只写一次 transform, 不会再有热循环。 */
+static void diTimeScanAndApply(void) {
     if (gDITimeTouched) {
         NSArray *snap = gDITimeTouched.allObjects;
         for (UIView *v in snap) {
-            if (!v.window) { [gDITimeTouched removeObject:v]; continue; }
+            if (!v.window) [gDITimeTouched removeObject:v];
         }
     }
     if (fabs(timeYOffset) < 0.01 && (!gDITimeTouched || gDITimeTouched.count == 0)) return;
@@ -18114,17 +18114,44 @@ static void diNPApplyHideTime(void) {
         UIView *tc = nil;
         @try { tc = diNPFindTimeControls(r, &idle); } @catch (__unused NSException *e) {}
         if (!tc || diTimeExpanded(tc)) continue;
-        if (fabs(timeYOffset) < 0.01) {
-            if ([gDITimeTouched containsObject:tc]) {
-                tc.transform = CGAffineTransformIdentity;
-                [gDITimeTouched removeObject:tc];
-            }
-        } else {
-            tc.transform = CGAffineTransformMakeTranslation(0, (CGFloat)timeYOffset);
-            [gDITimeTouched addObject:tc];
-        }
+        diTimeApplyTo(tc);
     }
 }
+
+static void diTimeApplyNow(void) {
+    @try { diTimeScanAndApply(); } @catch (__unused NSException *e) {}
+}
+
+/* 3.0.55: 设置页特效参数变化(拖滑杆 / 换颜色 / 换颜色模式) 的**轻量通道**。
+   以前这些键写完后发的是通用的 prefsChanged / artwork-changed, 那两条会触发
+   "全量偏好重读 + 壁纸/视频/锁屏卡片全刷 + mask.png 重新导出" —— 拖一下滑杆
+   每秒三五次, SpringBoard 主线程直接被按住, 用户看到的就是"一设置就卡死"。
+   现在只做: 重读特效参数 → 立即套时间条位移 → 确保引擎在跑。
+   合并 0.12 秒, 连续拖动也只会在停顿处生效一两次。 */
+static void diFxTuneChanged(CFNotificationCenterRef c, void *obs, CFStringRef name,
+                            const void *obj, CFDictionaryRef info) {
+    static BOOL pending = NO;
+    if (pending) return;
+    pending = YES;
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.12 * NSEC_PER_SEC)),
+                   dispatch_get_main_queue(), ^{
+        pending = NO;
+        @try { diFxLoadPrefs(); } @catch (__unused NSException *e) {}
+        @try { diTimeApplyNow(); } @catch (__unused NSException *e) {}
+        @try { diRhythmEnsure(); } @catch (__unused NSException *e) {}
+    });
+}
+
+static void diNPApplyHideTime(void) {
+    static CFAbsoluteTime lastScan = 0;
+    CFTimeInterval now = CFAbsoluteTimeGetCurrent();
+    if (now - lastScan < 0.4) return;
+    lastScan = now;
+
+    diNPQueryNowPlaying();   /* 律动那边还靠 gDIHasNowPlaying 判"到底有没有歌" */
+    diTimeScanAndApply();
+}
+
 
 /* ---------- 模块容器钩子 ---------- */
 static void (*gDIOrigModuleLayout)(id, SEL) = NULL;
@@ -18493,8 +18520,8 @@ static void diArtInstallGated(void) {
        一次都没真正拦下过瞬跳(没有一条 [抖动] 拦下...) —— 它没在修问题, 只在跟系统
        布局抢 frame。现在完全不碰传送栏的任何 frame/动画, 由系统自己排。 */
     RLog(@"[抖动] 传送栏 setFrame 接管已停用(3.0.15: 不再改写系统 frame, 档位=%d)", gDIStage);
-    /* 3.0.42: 时间条布局钩子 —— 与模块钩子同一档位安装, 尽早把 alpha 压住 */
-    @try { diTimeInstallHook(); } @catch (__unused NSException *e) {}
+    /* 3.0.55: 时间条布局钩子已删除(会在 layoutSubviews 里设 transform 造成无限重排),
+       现在就靠 diNPApplyHideTime 的巡检 + 设置页 fxtune 通知。 */
     (void)tcc;
 }
 
@@ -18690,6 +18717,10 @@ __attribute__((constructor)) static void init(void) {
             CFNotificationCenterAddObserver(CFNotificationCenterGetDarwinNotifyCenter(), NULL,
                 diArtChanged, CFSTR("com.local.playerexact/artwork-changed"), NULL,
                 CFNotificationSuspensionBehaviorDeliverImmediately);
+            /* 3.0.55: 特效参数专用轻量通知(见 diFxTuneChanged) */
+            CFNotificationCenterAddObserver(CFNotificationCenterGetDarwinNotifyCenter(), NULL,
+                diFxTuneChanged, CFSTR("com.abgg332.driftisland.fxtune"), NULL,
+                CFNotificationSuspensionBehaviorDeliverImmediately);
             CFNotificationCenterAddObserver(CFNotificationCenterGetDarwinNotifyCenter(), NULL,
                 colorChanged, CFSTR("com.abgg332.driftisland.colorchanged"), NULL,
                 CFNotificationSuspensionBehaviorDeliverImmediately);
@@ -18859,36 +18890,41 @@ static BOOL diAuAlive(void) {
 }
 
 /* ---------- 全局状态 ---------- */
-static NSTimer *gDIRhythmTimer = nil;
+/* 3.0.55: NSTimer(60Hz) → CADisplayLink(原生刷新率)。
+   这台机器是 ProMotion(120Hz), 60Hz 定时器每两帧才动一次, 再叠加主线程抖动,
+   看起来就是"一卡一卡"。CADisplayLink 严格跟屏幕刷新走, 120Hz 下每帧都更新。 */
+static CADisplayLink *gDIRhythmLink = nil;
+static id gDIRhythmTicker = nil;
 static __weak UIView *gDIRhythmTarget = nil;
 static __weak UIView *gDIRhythmHost = nil;
 static CALayer *gDIRhythmRingBox = nil;
 static CAGradientLayer *gDIRhythmRingGrad = nil;
 static CAShapeLayer *gDIRhythmRingMask = nil;
 static CAShapeLayer *gDIRhythmRingBack = nil;
-static CAShapeLayer *gDIRhythmBars = nil;
+static CAGradientLayer *gDIRhythmBarsGrad = nil;
+static CAShapeLayer *gDIRhythmBars = nil;      /* 条形的 mask 形状 */
 static CATransform3D gDIRhythmBase;
 static BOOL gDIRhythmBaseValid = NO;
 static CGRect gDIRhythmRingFrame = {{0, 0}, {0, 0}};
 static NSString *gDIRhythmUsedA = nil;
 static NSString *gDIRhythmUsedB = nil;
-static float gDIBeatEnv = 0.0f;
-static float gDISteady = 0.0f;
-static float gDIBassPrev = 0.0f;
-/* 3.0.53: 低音包络 —— 之前用"帧间差值"判拍, 鼓点密集时每帧 bass 只在小范围抖,
-   差值大多够不到 0.05 阈值, gDIBeatEnv 长期贴 0, 粒子看着就是不动。
-   改成对低音段(前 6 段)的**绝对能量**做 attack/release, 再减去缓慢跟随的底噪,
-   得到 0~1 的拍点脉冲 —— 底鼓每一下都会把粒子/封面顶起来。 */
-static float gDIBassEnv = 0.0f;      /* 低音包络(fast attack / slow release) */
-static float gDIBassFloor = 0.0f;    /* 底噪基线(缓慢上爬, 用来抵消持续的低频轰鸣) */
-static float gDIBassPulse = 0.0f;    /* 拍点脉冲 0~1 */
+static int gDIBarsModeUsed = -1;
+static NSString *gDIBarsUsedA = nil;
+static NSString *gDIBarsUsedB = nil;
+static float gDIBeatEnv = 0.0f;      /* 视觉拍点(平滑后 0~1): 缩放/透明度用它 */
+static float gDISteady = 0.0f;       /* 整体响度 0~1 */
+static float gDIBassPrev = 0.0f;     /* 上一帧低音能量(算通量) */
+static float gDIBassPulse = 0.0f;    /* 物理冲击 0~1: 粒子外推用它 */
+static float gDIBeatRaw = 0.0f;      /* 起音瞬间的强度, 快速衰减 */
+static float gDIOnsetAvg = 0.0f;     /* 低音滑动均值(自适应阈值) */
+static float gDIOnsetVar = 0.0f;     /* 低音滑动方差 */
+static CFTimeInterval gDILastOnset = 0;
 static double gDIHuePhase = 0.0;     /* 3.0.54: 流光模式的色相相位 */
 static int gDIRingModeUsed = -1;     /* 3.0.54: 上次建环用的颜色模式 */
 static double gDISynPhase = 0.0;
-static CFTimeInterval gDIFxLast = 0;
 static CFTimeInterval gDIClock = 0;
 static CFTimeInterval gDITargetAt = 0;
-static BOOL gDIFxLogged = NO;
+static BOOL gDIFxRealLogged = NO;
 
 static __weak UIView *gDICoverRounded = nil;
 static CGFloat gDICoverOrigRadius = 0;
@@ -18912,14 +18948,26 @@ static UIColor *diRhythmHexColor(NSString *hex, UIColor *def) {
                             blue:(v & 0xFF) / 255.0 alpha:1.0];
 }
 
-/* ---------- 粒子池(实心点 + 空心几何) ---------- */
-#define DI_DOT_CAP 48
+/* ---------- 粒子池(实心点 + 空心几何) ----------
+   3.0.55 重写, 针对"一卡一卡"和"不自然"两个问题:
+
+   ① 位置不再"跳": 旧版每个鼓点直接给 position 加 2.6~7px 的偏移, 然后 180ms 衰减,
+      本质是**瞬移**, 一帧之内位置突变 → 肉眼就是卡一下。现在鼓点只往速度里注入
+      冲量(push), 位置靠积分推进, 任何时刻都是连续的。
+   ② 去掉 shadow: 每颗粒子都带 shadowRadius 的 CAShapeLayer, 在灵动岛这么大的
+      合成层里 25~40 颗粒子 = 几十次离屏模糊, 主线程/GPU 一忙就掉帧。
+   ③ 时间常数化: 摆动、冲量衰减全部用 dt 计算, 60/120Hz 手感一致。
+   ④ 出生/消失都带淡入淡出, 不会凭空出现或突然消失。 */
+#define DI_DOT_CAP 64
 typedef struct {
-    float ang, rad, spin, drift;
+    float ang, rad;          /* 极坐标位置 */
+    float spin, drift;       /* 角速度 / 恒定向外速度(px/s) */
+    float push;              /* 鼓点冲量(px/s), 指数衰减 */
+    float sway, swayAmp, swayPhase;   /* 横向自然摆动 */
     float size, rot, rotSpd;
-    float life, maxLife, phase;
-    int   shape;      /* 0 实心点 1 空心菱形 2 空心方块 3 空心三角 */
-    float tint;       /* 0~1: 在粒子起始色/结束色之间插值的位置 */
+    float life, maxLife, phase, beatGain;
+    int   shape;             /* 0 实心点 1 空心菱形 2 空心方块 3 空心三角 */
+    float tint;              /* 0~1: 在粒子起始色/结束色之间插值的位置 */
 } DIDot;
 
 static DIDot gDIDots[DI_DOT_CAP];
@@ -18969,9 +19017,7 @@ static void diFxRemoveAllDots(void) {
     gDISpawnAcc = 0;
 }
 
-/* 3.0.53: 粒子颜色改成 FlexMusic 设置里的"渐变起始色/结束色"两色之间插值,
-   与截图一致(默认 #FFFFBC -> #BFCDF8)。 */
-/* 3.0.54: 调色板定义在后面的重建区, 粒子出生时要先用, 这里前置声明 */
+/* 调色板定义在后面的重建区, 粒子出生时要先用, 这里前置声明 */
 static void diColorPalette(int mode, NSString *hexA, NSString *hexB,
                            UIColor *defA, UIColor *defB,
                            double huePhase, BOOL forParticles,
@@ -18993,7 +19039,7 @@ static UIColor *diFxParticleColorBetween(UIColor *a, UIColor *b, float t) {
 
 static void diFxSpawnDot(UIView *host, CGRect cover, float maxRad) {
     if (!host) return;
-    (void)maxRad;                 /* 3.0.50: 出生点固定在专辑边缘, 上限由更新循环裁掉 */
+    (void)maxRad;
     int slot = -1;
     for (int i = 0; i < gDIDotCount; i++)
         if (gDIDots[i].life <= 0) { slot = i; break; }
@@ -19004,28 +19050,31 @@ static void diFxSpawnDot(UIView *host, CGRect cover, float maxRad) {
     DIDot *d = &gDIDots[slot];
     CGFloat R = cover.size.width * 0.5f;
     d->ang = diFxRand01() * (float)M_PI * 2.0f;
-    /* 3.0.50: 出生在专辑边缘一圈(1.02~1.18R), 之后**只向外飘** ——
-       "看起来就是专辑头像散出来的"。以前出生在 1.12~2.3R 的环带里且内外乱飘,
-       视觉上是凭空出现在半空。 */
-    d->rad = (float)R * (1.02f + diFxRand01() * 0.16f);
-    d->spin = (diFxRand01() - 0.5f) * 0.10f;
-    d->drift = 2.4f + diFxRand01() * 5.0f;                 /* 恒定向外 */
+    /* 出生在专辑边缘(1.00~1.14R): 视觉上是"从专辑散出来的" */
+    d->rad = (float)R * (1.00f + diFxRand01() * 0.14f);
+    d->spin = (diFxRand01() - 0.5f) * 0.08f;
+    /* 3.0.55: 基础外飘速度抬高一点(3.0~8.0px/s), 2~3 秒内能看出"在走",
+       以前 2.4~7.4 太慢, 加上掉帧就完全像静止的。 */
+    d->drift = 3.0f + diFxRand01() * 5.0f;
+    d->push = 0.0f;
+    d->sway = 0.55f + diFxRand01() * 0.85f;          /* 摆动角速度 */
+    d->swayAmp = 1.2f + diFxRand01() * 2.6f;         /* 摆动幅度(速度, px/s) */
+    d->swayPhase = diFxRand01() * (float)M_PI * 2.0f;
     int sh = arc4random() % 10;
-    d->shape = (sh < 5) ? 0 : (sh < 7 ? 1 : (sh < 9 ? 2 : 3));   /* 一半是实心点 */
-    /* 3.0.54: 用户说"1 太小、1.5 太大" —— 原先是线性乘, 1.0~1.5 之间跨度 50%。
-       改成 0.90 + 0.40×滑杆: 1.0 → 1.30 倍(比原来大 30%), 1.5 → 1.50 倍(只再大 15%),
-       中间过渡细腻, 滑杆拉满 3.0 也只到 2.1 倍, 不会爆。 */
+    d->shape = (sh < 5) ? 0 : (sh < 7 ? 1 : (sh < 9 ? 2 : 3));
+    /* 0.90 + 0.40×滑杆: 1.0 → 1.30 倍, 1.5 → 1.50 倍。滑杆 0.1 一档, 可细调。 */
     float sizeMul = 0.90f + 0.40f * (float)rhythmParticleSize;
-    d->size = ((d->shape == 0) ? (1.8f + diFxRand01() * 1.6f)
-                               : (3.2f + diFxRand01() * 2.4f)) * sizeMul;
+    d->size = ((d->shape == 0) ? (1.7f + diFxRand01() * 1.5f)
+                               : (3.0f + diFxRand01() * 2.2f)) * sizeMul;
     d->rot = diFxRand01() * (float)M_PI * 2.0f;
-    d->rotSpd = (diFxRand01() - 0.5f) * 0.5f;
-    d->maxLife = 2.4f + diFxRand01() * 2.4f;
+    d->rotSpd = (diFxRand01() - 0.5f) * 0.45f;
+    d->maxLife = 3.0f + diFxRand01() * 2.6f;
     d->life = d->maxLife;
     d->phase = diFxRand01() * (float)M_PI * 2.0f;
     d->tint = diFxRand01();
+    /* 每颗粒子对鼓点的敏感度略有差异 —— 一起整齐放大反而假 */
+    d->beatGain = 0.65f + diFxRand01() * 0.70f;
 
-    /* 3.0.54: 粒子颜色也按模式走(跟随专辑 / 固定 / 流光) */
     UIColor *pa = nil, *pb = nil;
     diColorPalette(particleColorMode, nil, nil, gDIParticleColA, gDIParticleColB,
                    gDIHuePhase, YES, &pa, &pb);
@@ -19052,12 +19101,21 @@ static void diFxSpawnDot(UIView *host, CGRect cover, float maxRad) {
         sl.lineWidth = 1.0;
     }
     sl.lineJoin = kCALineJoinRound;
-    sl.shadowColor = tint.CGColor;
-    sl.shadowOpacity = (d->shape == 0) ? 0.55f : 0.25f;
-    sl.shadowRadius = 1.5;
-    sl.shadowOffset = CGSizeZero;
+    /* 3.0.55: 不再给每颗粒子加 shadow(离屏模糊, 掉帧主因)。
+       靠"实心点 + 略高的透明度"就够亮, 几何体本来就是描边。 */
+    sl.shadowOpacity = 0.0f;
     sl.opacity = 0;
     if (!layer.superlayer) [host.layer addSublayer:layer];
+}
+
+/* 鼓点到来: 只给速度加冲量(不直接改位置) —— 位置连续, 看起来是"被推了一把" */
+static void diFxKickDots(float strength) {
+    if (strength <= 0.0f) return;
+    for (int i = 0; i < gDIDotCount; i++) {
+        DIDot *d = &gDIDots[i];
+        if (d->life <= 0) continue;
+        d->push += strength * d->beatGain * (18.0f + diFxRand01() * 16.0f);
+    }
 }
 
 static void diFxUpdateDots(UIView *host, CGRect cover, float dt,
@@ -19073,9 +19131,6 @@ static void diFxUpdateDots(UIView *host, CGRect cover, float dt,
     for (int i = 0; i < gDIDotCount; i++) {
         DIDot *d = &gDIDots[i];
         CALayer *layer = gDIDotLayer[i];
-        /* 3.0.50: 死掉的粒子必须**回收槽位**。以前只 removeFromSuperlayer,
-           gDIDotCount 不减 —— 第一批发完(5~11 秒)之后"数量已满"的判定永远成立,
-           补发逻辑一次都不触发, 表现就是"显示一下就不显示了"。 */
         if (!layer || d->life <= 0) {
             [layer removeFromSuperlayer];
             int last = gDIDotCount - 1;
@@ -19089,7 +19144,7 @@ static void diFxUpdateDots(UIView *host, CGRect cover, float dt,
             continue;
         }
         d->life -= dt;
-        if (!active && d->life > 0.30f) d->life = 0.30f;
+        if (!active && d->life > 0.35f) d->life = 0.35f;
         if (d->life <= 0) {
             [layer removeFromSuperlayer];
             int last = gDIDotCount - 1;
@@ -19102,9 +19157,14 @@ static void diFxUpdateDots(UIView *host, CGRect cover, float dt,
             i--;
             continue;
         }
+        /* 冲量按 0.42s 衰减(积分出来就是一次柔和的"推出去再缓下来") */
+        d->push *= expf(-dt / 0.42f);
         d->ang += d->spin * dt;
-        d->rad += d->drift * dt;
-        if (d->rad > maxRad) {          /* 3.0.50: 飘出卡片边界当帧收掉 */
+        d->rad += (d->drift + d->push) * dt;
+        /* 横向自然摆动: 沿切线方向的速度, 幅度很小, 但让轨迹不再是死板的直线 */
+        float swayV = sinf((float)gDIClock * d->sway + d->swayPhase) * d->swayAmp;
+        d->ang += (swayV / MAX(8.0f, d->rad)) * dt;
+        if (d->rad > maxRad * 1.08f) {
             [layer removeFromSuperlayer];
             int last = gDIDotCount - 1;
             if (i != last) {
@@ -19117,21 +19177,20 @@ static void diFxUpdateDots(UIView *host, CGRect cover, float dt,
             continue;
         }
         d->rot += d->rotSpd * dt;
+        float age = d->maxLife - d->life;
+        float fade = MIN(1.0f, age / 0.35f);            /* 淡入 */
         float k = d->life / d->maxLife;
-        float fade = MIN(1.0f, k * 8.0f);
-        if (k < 0.20f) fade = k / 0.20f;
-        float tw = 0.66f + 0.34f * sinf(d->phase + (float)gDIClock * 1.6f);
-        float alpha = (0.34f + 0.52f * energy) * fade * tw * (0.78f + 0.85f * beat);
+        if (k < 0.22f) fade = MIN(fade, k / 0.22f);     /* 淡出 */
+        float tw = 0.72f + 0.28f * sinf(d->phase + (float)gDIClock * 1.5f);
+        float alpha = (0.40f + 0.30f * energy) * fade * tw * (0.86f + 0.30f * beat);
         alpha *= (float)rhythmParticleAlpha;
         if (alpha < 0.04f) alpha = 0.04f;
         if (alpha > 0.95f) alpha = 0.95f;
-        /* 3.0.53: 拍点 = 放大 + 沿半径往外弹 + 提亮, 三样一起才有"被鼓点顶了一下"的感觉。
-           光靠缩放(尤其几何体只有 3~5pt)在真机上看不出来。 */
-        CGFloat bounce = (CGFloat)beat * (2.6 + d->size * 0.9);
-        layer.position = CGPointMake(cx + cosf(d->ang) * (d->rad + bounce),
-                                     cy + sinf(d->ang) * (d->rad + bounce));
+        layer.position = CGPointMake(cx + cosf(d->ang) * d->rad,
+                                     cy + sinf(d->ang) * d->rad);
         layer.opacity = alpha;
-        float pulse = 1.0f + 1.30f * beat;
+        /* 缩放也用平滑后的 beat(0.55 倍幅度), 不是每帧从 1 跳到 2.3 */
+        float pulse = 1.0f + 0.55f * beat * d->beatGain;
         CATransform3D tr = CATransform3DMakeRotation(d->rot, 0, 0, 1);
         layer.transform = CATransform3DScale(tr, pulse, pulse, 1.0f);
     }
@@ -19225,10 +19284,15 @@ static void diRhythmDetach(void) {
         [gDIRhythmRingBox removeFromSuperlayer];
         gDIRhythmRingBox = nil;
     }
+    if (gDIRhythmBarsGrad) {
+        [gDIRhythmBarsGrad removeFromSuperlayer];
+        gDIRhythmBarsGrad = nil;
+    }
     if (gDIRhythmBars) {
         [gDIRhythmBars removeFromSuperlayer];
         gDIRhythmBars = nil;
     }
+    gDIBarsModeUsed = -1;
     gDIRhythmRingGrad = nil;
     gDIRhythmRingMask = nil;
     gDIRhythmRingBack = nil;
@@ -19306,13 +19370,8 @@ static void diRhythmLayoutRing(CGRect cover, const float *bands, BOOL active) {
     CGPoint c = CGPointMake(gDIRhythmRingBox.bounds.size.width / 2,
                             gDIRhythmRingBox.bounds.size.height / 2);
     CGFloat r0 = R + gap;
-    /* 3.0.49: 80 段路径每帧重建 + 每帧换渐变遮罩 path, 渲染端压力翻倍。
-       30Hz 重建路径, 60Hz 只做 frame 同步和线宽 —— 肉眼无差, 负载减半。 */
-    static CFTimeInterval gDIRingPathAt = 0;
-    CFTimeInterval tNow = CACurrentMediaTime();
-    BOOL doPath = (tNow - gDIRingPathAt >= 0.032);
-    if (doPath) gDIRingPathAt = tNow;
-    if (!doPath) return;
+    /* 3.0.55: 取消 30Hz 降频 —— 120Hz 屏上 30Hz 更新就是"每四帧才动一下"的顿感。
+       80 段直线路径的构建开销很小, 每帧重建肉眼才连得上。 */
     CGMutablePathRef tp = CGPathCreateMutable();
     for (int i = 0; i < DI_TICK_N; i++) {
         CGFloat a = (CGFloat)i / (CGFloat)DI_TICK_N * M_PI * 2.0 - M_PI_2;
@@ -19358,7 +19417,8 @@ static CFAbsoluteTime gDIRhythmSliderAt = 0;
 static void diRhythmUpdateBars(UIView *host, BOOL active) {
     if (!host) return;
     if (!rhythmBarsOn) {
-        if (gDIRhythmBars) { [gDIRhythmBars removeFromSuperlayer]; gDIRhythmBars = nil; }
+        if (gDIRhythmBarsGrad) { [gDIRhythmBarsGrad removeFromSuperlayer]; gDIRhythmBarsGrad = nil; }
+        if (gDIRhythmBars) { gDIRhythmBars = nil; }
         return;
     }
     UIView *sl = gDIRhythmSliderW;
@@ -19368,25 +19428,24 @@ static void diRhythmUpdateBars(UIView *host, BOOL active) {
         gDIRhythmSliderAt = CACurrentMediaTime();
     }
     if (!sl) {
-        if (gDIRhythmBars) { [gDIRhythmBars removeFromSuperlayer]; gDIRhythmBars = nil; }
+        if (gDIRhythmBarsGrad) { [gDIRhythmBarsGrad removeFromSuperlayer]; gDIRhythmBarsGrad = nil; }
+        if (gDIRhythmBars) { gDIRhythmBars = nil; }
         return;
     }
     CGRect sf = [sl convertRect:sl.bounds toView:host];
-    /* 3.0.54: 正数=上移 */
     CGFloat bottom = CGRectGetMinY(sf) - 5.0 - (CGFloat)rhythmBarsOffsetY;
-    CGFloat height = (CGFloat)rhythmBarsHeight;      /* 3.0.50: 长度可调 */
+    CGFloat height = (CGFloat)rhythmBarsHeight;
     CGFloat top = bottom - height;
     if (top < 4) return;
 
     CGFloat x0 = 14.0, x1 = host.bounds.size.width - 14.0;
     CGFloat avail = x1 - x0;
-    int n = rhythmBarsCount;                          /* 3.0.50: 根数可调 */
+    int n = rhythmBarsCount;
     if (n < 4) n = 4;
     CGFloat gap = 2.0;
     CGFloat bw = (avail - gap * (n - 1)) / (CGFloat)n;
     if (bw < 1.2) { gap = 1.2; bw = (avail - gap * (n - 1)) / (CGFloat)n; }
     if (bw < 0.5) { bw = 0.5; }
-    /* 3.0.51: 单根宽度可调 —— 上限压住后整排重新居中, 而不是靠在左边 */
     CGFloat maxW = (CGFloat)rhythmBarsWidth;
     if (bw > maxW) {
         bw = maxW;
@@ -19394,53 +19453,73 @@ static void diRhythmUpdateBars(UIView *host, BOOL active) {
         x0 = (host.bounds.size.width - total) * 0.5f;
         if (x0 < 10.0) x0 = 10.0;
     }
-    /* 3.0.52: 整排水平位移可调(负=左 正=右), 不夹死——用户可能就想挪一半出去 */
     x0 += (CGFloat)rhythmBarsOffset;
 
-    if (!gDIRhythmBars) {
+    /* 3.0.55: 条形改成"渐变 + 形状遮罩" —— 这样频谱条也能跟随专辑/固定色/流光,
+       而不是写死一个紫色。遮罩是形状层, 渐变填色, 换色不用重建路径。 */
+    if (!gDIRhythmBarsGrad) {
+        gDIRhythmBarsGrad = [CAGradientLayer layer];
+        gDIRhythmBarsGrad.zPosition = 890;
+        gDIRhythmBarsGrad.startPoint = CGPointMake(0.0, 0.5);
+        gDIRhythmBarsGrad.endPoint = CGPointMake(1.0, 0.5);
         gDIRhythmBars = [CAShapeLayer layer];
-        gDIRhythmBars.zPosition = 890;
-        gDIRhythmBars.fillColor = [UIColor colorWithRed:0.60 green:0.54 blue:0.95 alpha:0.95].CGColor;
-        [host.layer addSublayer:gDIRhythmBars];
+        gDIRhythmBars.fillColor = UIColor.whiteColor.CGColor;
+        gDIRhythmBars.strokeColor = UIColor.clearColor.CGColor;
+        gDIRhythmBarsGrad.mask = gDIRhythmBars;
+        [host.layer addSublayer:gDIRhythmBarsGrad];
+        gDIBarsModeUsed = -1;
     }
-    /* 3.0.49: 同刻度环, 路径重建 30Hz; 圆角半径必须 <= 短边一半,
-       否则个别 iOS 版本 CoreGraphics 会直接 abort(这就是"莫名安全模式"的候选之一)。 */
-    static CFTimeInterval gDIBarsPathAt = 0;
-    CFTimeInterval tNow = CACurrentMediaTime();
-    if (tNow - gDIBarsPathAt >= 0.032) {
-        gDIBarsPathAt = tNow;
-        CGMutablePathRef p = CGPathCreateMutable();
-        for (int i = 0; i < n; i++) {
-            /* 3.0.50: 中间高、左右对称依次排开 —— 以中轴为 0 向两边取频段,
-               中间是最低频(通常最响=最高), 越往两边频率越高、条越矮。 */
-            CGFloat mid = (CGFloat)(n - 1) * 0.5f;
-            CGFloat dist = mid > 0 ? fabs((CGFloat)i - mid) / mid : 0.0f;
-            /* 3.0.53: 改用 dist^0.55 —— 线性映射时只有最中间几根吃低频,
-               两侧直接掉到最高频(能量极小), 视觉上两端几乎没有条;
-               参考视频里两侧仍有约四成高度。 */
-            CGFloat bp = pow(dist, 0.55f) * (CGFloat)(DI_AU_BANDS - 1);
-            int b0 = (int)bp % DI_AU_BANDS, b1 = MIN(b0 + 1, DI_AU_BANDS - 1);
-            CGFloat bf = bp - floor(bp);
-            float v = active ? (gDIBandSmooth[b0] * (1.0f - bf) + gDIBandSmooth[b1] * bf) : 0.0f;
-            CGFloat h = 1.5 + (height - 1.5) * pow(v, 0.85);
-            CGRect r = CGRectMake(x0 + i * (bw + gap), bottom - h, bw, h);
-            /* 3.0.53: 圆角上限压到 1.6pt —— 之前取 MIN(bw,h)*0.5, 矮条(高<宽)
-               直接变成圆点, 整排看着是一串珠子。视频里是圆头竖条。 */
-            CGFloat rr = MIN(bw * 0.5f, MIN(h * 0.45f, 1.6f));
-            CGPathAddRoundedRect(p, NULL, r, rr, rr);
-        }
+    if (!CGRectEqualToRect(gDIRhythmBarsGrad.frame, host.bounds)) {
         [CATransaction begin];
         [CATransaction setDisableActions:YES];
-        gDIRhythmBars.path = p;
-        gDIRhythmBars.opacity = active ? 1.0f : 0.25f;
-        [CATransaction commit];
-        CGPathRelease(p);
-    } else {
-        [CATransaction begin];
-        [CATransaction setDisableActions:YES];
-        gDIRhythmBars.opacity = active ? 1.0f : 0.25f;
+        gDIRhythmBarsGrad.frame = host.bounds;
+        gDIRhythmBars.frame = host.bounds;
         [CATransaction commit];
     }
+
+    UIColor *ca = nil, *cb = nil;
+    diColorPalette(spectrumColorMode, spectrumColorA, spectrumColorB,
+                   [UIColor colorWithRed:0.60 green:0.54 blue:0.95 alpha:1.0],
+                   [UIColor colorWithRed:0.42 green:0.72 blue:1.00 alpha:1.0],
+                   gDIHuePhase, NO, &ca, &cb);
+    static double lastBarsHue = -1.0;
+    BOOL colorsDirty = (spectrumColorMode != gDIBarsModeUsed)
+        || ![gDIBarsUsedA isEqualToString:(spectrumColorA ?: @"")]
+        || ![gDIBarsUsedB isEqualToString:(spectrumColorB ?: @"")]
+        || (spectrumColorMode == 2 && fabs(gDIHuePhase - lastBarsHue) > 0.004);
+    if (colorsDirty) {
+        gDIBarsModeUsed = spectrumColorMode;
+        gDIBarsUsedA = [(spectrumColorA ?: @"") copy];
+        gDIBarsUsedB = [(spectrumColorB ?: @"") copy];
+        lastBarsHue = gDIHuePhase;
+        [CATransaction begin];
+        [CATransaction setDisableActions:YES];
+        gDIRhythmBarsGrad.colors = @[ (__bridge id)ca.CGColor, (__bridge id)cb.CGColor ];
+        [CATransaction commit];
+    }
+
+    /* 每帧重建(40 根圆角矩形, 开销很小); 不再 30Hz 降频 */
+    CGMutablePathRef p = CGPathCreateMutable();
+    for (int i = 0; i < n; i++) {
+        CGFloat mid = (CGFloat)(n - 1) * 0.5f;
+        CGFloat dist = mid > 0 ? fabs((CGFloat)i - mid) / mid : 0.0f;
+        CGFloat bp = pow(dist, 0.55f) * (CGFloat)(DI_AU_BANDS - 1);
+        int b0 = (int)bp % DI_AU_BANDS, b1 = MIN(b0 + 1, DI_AU_BANDS - 1);
+        CGFloat bf = bp - floor(bp);
+        float v = active ? (gDIBandSmooth[b0] * (1.0f - bf) + gDIBandSmooth[b1] * bf) : 0.0f;
+        CGFloat h = 1.5 + (height - 1.5) * pow(v, 0.85);
+        CGRect r = CGRectMake(x0 + i * (bw + gap), bottom - h, bw, h);
+        CGFloat rr = MIN(bw * 0.5f, MIN(h * 0.45f, 1.6f));
+        if (rr < 0.0f) rr = 0.0f;
+        CGPathAddRoundedRect(p, NULL, r, rr, rr);
+    }
+    [CATransaction begin];
+    [CATransaction setDisableActions:YES];
+    gDIRhythmBars.path = p;
+    gDIRhythmBarsGrad.opacity = active ? 1.0f : 0.25f;
+    gDIRhythmBars.opacity = 1.0f;
+    [CATransaction commit];
+    CGPathRelease(p);
 }
 
 /* ---------- 重建 / 复位 / tick ---------- */
@@ -19580,77 +19659,101 @@ static void diRhythmReset(void) {
     gDIRhythmTarget = nil;
     gDISteady = 0;
     gDIBeatEnv = 0;
+    gDIBassPulse = 0;
+    gDIBeatRaw = 0;
+    gDIBassPrev = 0;
+    gDIOnsetAvg = 0;
+    gDIOnsetVar = 0;
     diRhythmDetach();
     if (rhythmRoundCover) diCoverUnround();
     for (int i = 0; i < DI_AU_BANDS; i++) { gDIBandRaw[i] = 0; gDIBandSmooth[i] = 0; }
 }
 
+/* 3.0.55: 频谱跟随 + 鼓点检测(重写)
+   旧版三个毛病, 直接对应"一卡一卡"和"鼓点不明显":
+     ① 平滑系数写成"每帧常数"(0.40/0.82)。帧率一变手感就变, 而且 DIAudio 是 30Hz
+        发包, 120Hz 屏上每 4 帧才拿到一个新值 —— 条和粒子都是一顿一顿的;
+     ② 鼓点用"绝对能量 - 缓慢基线", 基线爬升也是每帧常数, 底鼓密集时脉冲被吃掉;
+     ③ 阈值写死 0.05, 小音量下完全没有反应。
+   现在: ① 全部换成**时间常数** 1-exp(-dt/tau), 60/120Hz 完全一致;
+        ② 低音取 60~250Hz 四段加权, 做"谱通量 + 自适应阈值(局部均值/方差) + 不应期",
+           这是常规的 onset 检测, 跟着底鼓走而不是跟着音量走;
+        ③ 脉冲分两层: gDIBassPulse(物理, 快) / gDIBeatEnv(视觉, 40ms 起 260ms 落)。 */
 static void diRhythmAdvanceSpectrum(BOOL active, BOOL real, float dt) {
+    if (dt < 0.001f) dt = 0.001f;
+    if (dt > 0.05f) dt = 0.05f;
+    float kUp = 1.0f - expf(-dt / 0.045f);      /* 上冲 ~45ms */
+    float kDn = 1.0f - expf(-dt / 0.190f);      /* 回落 ~190ms */
     if (active && real) {
-        float sum = 0, bass = 0;
+        float sum = 0;
         for (int i = 0; i < DI_AU_BANDS; i++) {
             float v = gDIBandRaw[i];
-            if (v > gDIBandSmooth[i]) gDIBandSmooth[i] = gDIBandSmooth[i] * 0.40f + v * 0.60f;
-            else gDIBandSmooth[i] = gDIBandSmooth[i] * 0.82f + v * 0.18f;
+            gDIBandSmooth[i] += (v - gDIBandSmooth[i]) * (v > gDIBandSmooth[i] ? kUp : kDn);
             sum += gDIBandSmooth[i];
-            if (i < 4) bass += gDIBandSmooth[i];
         }
-        bass /= 4.0f;
         gDISteady = MIN(1.0f, sum / (float)DI_AU_BANDS * 1.5f);
-        /* 3.0.53: 低音(前 6 段)绝对能量的 attack/release 包络 */
-        float lo = 0;
-        for (int i = 0; i < 6; i++) lo += gDIBandSmooth[i];
-        lo /= 6.0f;
-        gDIBassEnv += (lo - gDIBassEnv) * (lo > gDIBassEnv ? 0.62f : 0.10f);
-        /* 底噪基线: 往上慢慢爬(压掉持续轰鸣), 一旦包络掉到基线以下就立刻跟下去 */
-        if (gDIBassEnv < gDIBassFloor)
-            gDIBassFloor += (gDIBassEnv - gDIBassFloor) * 0.30f;
-        else
-            gDIBassFloor += dt * 0.055f;
-        if (gDIBassFloor < 0.0f) gDIBassFloor = 0.0f;
-        if (gDIBassFloor > 0.86f) gDIBassFloor = 0.86f;
-        float pulse01 = (gDIBassEnv - gDIBassFloor) / 0.24f;
-        if (pulse01 < 0.0f) pulse01 = 0.0f;
-        if (pulse01 > 1.0f) pulse01 = 1.0f;
-        /* 快速上冲 + 0.18s 衰减: 每一记底鼓都是一个清晰的"弹" */
-        gDIBassPulse = MAX(pulse01, gDIBassPulse * expf(-dt * 5.5f));
-        gDIBeatEnv = gDIBassPulse;
+
+        float bass = gDIBandSmooth[0] * 0.40f + gDIBandSmooth[1] * 0.30f
+                   + gDIBandSmooth[2] * 0.20f + gDIBandSmooth[3] * 0.10f;
+        float flux = bass - gDIBassPrev;
         gDIBassPrev = bass;
+        if (flux < 0.0f) flux = 0.0f;
+
+        float kAvg = 1.0f - expf(-dt / 0.70f);
+        float prevAvg = gDIOnsetAvg;
+        gDIOnsetAvg += (bass - prevAvg) * kAvg;
+        float dev = bass - gDIOnsetAvg;
+        gDIOnsetVar += (dev * dev - gDIOnsetVar) * kAvg;
+        float std = sqrtf(MAX(0.0f, gDIOnsetVar));
+        float thr = gDIOnsetAvg + MAX(0.028f, std * 0.85f);
+
+        CFTimeInterval nowS = CACurrentMediaTime();
+        BOOL hit = (bass > thr) && (flux > 0.010f) && (nowS - gDILastOnset > 0.115);
+        if (!hit && flux > 0.070f && nowS - gDILastOnset > 0.20) hit = YES;
+        if (hit) {
+            gDILastOnset = nowS;
+            float strength = 0.40f + (bass - thr) * 3.0f + flux * 6.0f;
+            if (strength < 0.35f) strength = 0.35f;
+            if (strength > 1.0f) strength = 1.0f;
+            gDIBeatRaw = MAX(gDIBeatRaw, strength);
+        }
+        gDIBassPulse = MAX(gDIBeatRaw, gDIBassPulse * expf(-dt / 0.18f));
+        gDIBeatRaw *= expf(-dt / 0.10f);
     } else if (active) {
-        gDISynPhase += dt * 1.9;
+        /* 没有真频谱(没重启 mediaserverd / 没装 DIAudio): 合成节拍, 别让特效"死"着 */
+        gDISynPhase += dt * 1.85;
         double frac = fmod(gDISynPhase, 1.0);
         double pulse = exp(-frac * 6.0);
         for (int i = 0; i < DI_AU_BANDS; i++) {
             double w = 0.30 + 0.70 * fabs(sin(gDIClock * 0.9 + i * 0.75));
-            gDIBandSmooth[i] = (float)(0.10 + 0.66 * pulse * w);
+            float v = (float)(0.10 + 0.66 * pulse * w);
+            gDIBandSmooth[i] += (v - gDIBandSmooth[i]) * (v > gDIBandSmooth[i] ? kUp : kDn);
         }
         gDISteady = (float)(0.28 + 0.50 * pulse);
-        if (pulse > 0.55) gDIBeatEnv = MAX(gDIBeatEnv, (float)pulse * 0.9f);
-        gDIBassPulse = gDIBeatEnv;      /* 3.0.53: 合成节拍时也让粒子跟同一个脉冲 */
+        gDIBassPulse = MAX((float)pulse, gDIBassPulse * expf(-dt / 0.18f));
         gDIBassPrev = 0.3f;
     } else {
-        for (int i = 0; i < DI_AU_BANDS; i++) gDIBandSmooth[i] *= expf(-dt * 5.0f);
-        gDISteady *= expf(-dt * 4.0f);
-        gDIBassPrev = 0;
+        float k = 1.0f - expf(-dt / 0.12f);
+        for (int i = 0; i < DI_AU_BANDS; i++) gDIBandSmooth[i] -= gDIBandSmooth[i] * k;
+        gDISteady *= expf(-dt / 0.16f);
+        gDIBassPrev = 0.0f;
+        gDIBassPulse *= expf(-dt / 0.10f);
+        gDIOnsetAvg *= expf(-dt / 0.40f);
+        gDIOnsetVar *= expf(-dt / 0.40f);
     }
-    if (!active) {
-        gDIBeatEnv *= expf(-dt * 6.0f);
-        gDIBassPulse *= expf(-dt * 8.0f);
-        gDIBassEnv *= expf(-dt * 5.0f);
-        gDIBassFloor *= expf(-dt * 2.0f);
-    } else {
-        gDIBeatEnv *= expf(-dt * 4.5f);
-    }
+    /* 视觉拍点: 上升 40ms / 下降 260ms —— 缩放、透明度都用它, 绝不单帧跳变 */
+    float visK = (gDIBassPulse > gDIBeatEnv)
+        ? (1.0f - expf(-dt / 0.040f)) : (1.0f - expf(-dt / 0.260f));
+    gDIBeatEnv += (gDIBassPulse - gDIBeatEnv) * visK;
 }
 
-static void diRhythmTick(void) {
+static void diRhythmTickWithDelta(float dtIn) {
     BOOL anyFx = (rhythmOn || rhythmRingOn || rhythmParticlesOn || rhythmBarsOn);
     if (!rhythmFxOn || !anyFx) { diRhythmReset(); return; }
 
     UIView *t = gDIRhythmTarget;
     BOOL stale = (!t || !t.window || t.hidden || t.alpha < 0.1);
     if (!stale) {
-        /* 1.5s 防抖: 目标没消失就别换, 免得在两个页面之间来回重建 */
         UIView *better = nil;
         CFTimeInterval now2 = CACurrentMediaTime();
         if (now2 - gDITargetAt > 1.5) {
@@ -19658,7 +19761,7 @@ static void diRhythmTick(void) {
             if (better && better != t) {
                 CGFloat a1 = t.bounds.size.width * t.bounds.size.height;
                 CGFloat a2 = better.bounds.size.width * better.bounds.size.height;
-                if (a2 > a1 * 1.6f) { stale = YES; }
+                if (a2 > a1 * 1.6f) stale = YES;
             } else {
                 gDITargetAt = now2;
             }
@@ -19689,18 +19792,16 @@ static void diRhythmTick(void) {
             if (rhythmRoundCover) diCoverUnround();
         }
     }
-    if (!t) { gDISteady = 0; gDIBeatEnv = 0; return; }
+    if (!t) { gDISteady = 0; gDIBeatEnv = 0; gDIBassPulse = 0; return; }
 
-    /* 3.0.52: 特效只在不展开的折叠卡上显示。卡片一展开(尺寸和隐藏时间的判定同源,
-       window 坐标量 MRUNowPlaying 容器真实宽高)就整体隐藏: 环/条压到 0、粒子立即
-       淡出不再补发、封面缩放还原 —— 与"隐藏时间"模块展开放行的行为对齐。 */
+    /* 展开态: 特效整体隐藏(与"特效只在不展开的播放卡显示"一致) */
     BOOL expanded = diTimeExpanded(t);
     if (expanded) {
         [CATransaction begin];
         [CATransaction setDisableActions:YES];
         if (gDIRhythmRingGrad) gDIRhythmRingGrad.opacity = 0.0f;
         if (gDIRhythmRingBack) gDIRhythmRingBack.opacity = 0.0f;
-        if (gDIRhythmBars) gDIRhythmBars.opacity = 0.0f;
+        if (gDIRhythmBarsGrad) gDIRhythmBarsGrad.opacity = 0.0f;
         [CATransaction commit];
         if (gDIRhythmBaseValid) {
             [CATransaction begin];
@@ -19709,8 +19810,8 @@ static void diRhythmTick(void) {
             [CATransaction commit];
         }
         if (gDIDotCount > 0)
-            diFxUpdateDots(gDIRhythmHost, diRhythmCoverRect(t, gDIRhythmHost), 1.0f/60.0f,
-                           0.0f, 0.0f, NO);   /* active=NO -> 0.3s 内全部淡出 */
+            diFxUpdateDots(gDIRhythmHost, diRhythmCoverRect(t, gDIRhythmHost),
+                           dtIn, 0.0f, 0.0f, NO);
         return;
     }
 
@@ -19722,9 +19823,8 @@ static void diRhythmTick(void) {
         diRhythmRebuild(t);
     }
 
-    /* 3.0.54: 流光模式 —— 色相每 0.1 秒推一点(约 100 秒转一圈), 10Hz 刷新环的渐变。
-       固定色/跟随专辑不动, 省掉每帧改 colors 的开销。 */
-    if (ringColorMode == 2 || particleColorMode == 2) {
+    /* 流光: 色相每 0.1s 推一点(约 100 秒一圈) */
+    if (ringColorMode == 2 || particleColorMode == 2 || spectrumColorMode == 2) {
         static CFTimeInterval lastHue = 0;
         CFTimeInterval nowH = CACurrentMediaTime();
         if (nowH - lastHue >= 0.10) {
@@ -19750,15 +19850,15 @@ static void diRhythmTick(void) {
     diAuPoll();
     BOOL real = diAuAlive();
 
-    CFTimeInterval now = CACurrentMediaTime();
-    float dt = (gDIFxLast > 0) ? (float)MIN(0.05, now - gDIFxLast) : (1.0f / 60.0f);
-    gDIFxLast = now;
+    float dt = dtIn;
+    if (dt < 0.002f) dt = 0.002f;
+    if (dt > 0.05f) dt = 0.05f;
     gDIClock += dt;
 
     diRhythmAdvanceSpectrum(active, real, dt);
 
-    if (!gDIFxLogged && active && real && gDIBandSeen) {
-        gDIFxLogged = YES;
+    if (!gDIFxRealLogged && active && real && gDIBandSeen) {
+        gDIFxRealLogged = YES;
         float pk = 0, sum = 0;
         for (int i = 0; i < DI_AU_BANDS; i++) { pk = MAX(pk, gDIBandRaw[i]); sum += gDIBandRaw[i]; }
         RLog(@"[律动] 频谱已就绪: 24 段 峰值=%.2f 均值=%.2f (真 FFT)", pk, sum / (float)DI_AU_BANDS);
@@ -19766,9 +19866,6 @@ static void diRhythmTick(void) {
 
     if (rhythmRoundCover) diCoverRound(t);
     if (rhythmOn && gDIRhythmBaseValid) {
-        /* 3.0.54: 用户反馈"专辑没有跟随鼓点抖动(跟粒子一样)"。
-           ① 缩放从 0.055/1.10 提到 0.085/1.16, 幅度看得见;
-           ② 拍点同时向上弹 0~3pt 再回落 —— 和粒子同一个脉冲, 视觉上是"被顶了一下"。 */
         CGFloat amp = 0.085 * rhythmBeatScale;
         CGFloat s = 1.0 + (0.25 * gDISteady + 0.75 * gDIBeatEnv) * amp;
         if (s < 0.93) s = 0.93;
@@ -19815,18 +19912,14 @@ static void diRhythmTick(void) {
                 diFxSpawnDot(host, cover, (float)maxRad);
             }
         }
-        /* 3.0.54: 拍点上升沿 = 一次小爆发 —— 所有粒子沿半径瞬间外推, 再从边缘补几颗。
-           视频里粒子是"被鼓点炸开"的, 只靠缓慢漂移 + 缩放做不出那个感觉。 */
+        /* 鼓点上升沿: 给所有粒子一个"外推冲量"(速度), 再从边缘补两颗。
+           位置由积分推进, 所以是柔和的加速, 不是瞬移 —— 这是 3.0.55 手感的关键。 */
         static float prevPulse = 0.0f;
-        BOOL burst = (gDIBassPulse > 0.42f && prevPulse <= 0.42f);
+        BOOL burst = (gDIBassPulse > 0.38f && prevPulse <= 0.38f);
         prevPulse = gDIBassPulse;
         if (burst) {
-            CGFloat Rr = cover.size.width * 0.5f;
-            for (int i = 0; i < gDIDotCount; i++) {
-                gDIDots[i].rad += 2.2f + diFxRand01() * 3.4f;
-                if (gDIDots[i].rad > maxRad) gDIDots[i].rad = (float)(Rr * 1.06f);
-            }
-            for (int i = 0; i < 4 && gDIDotCount < want + 4; i++)
+            diFxKickDots(gDIBassPulse);
+            for (int i = 0; i < 2 && gDIDotCount < want + 2; i++)
                 diFxSpawnDot(host, cover, (float)maxRad);
         }
     }
@@ -19835,23 +19928,38 @@ static void diRhythmTick(void) {
     diRhythmUpdateBars(host, active);
 }
 
+/* CADisplayLink 的 target: 用一个独立小对象, 不 retain 任何视图 */
+@interface DIFxTicker : NSObject
+- (void)onFrame:(CADisplayLink *)link;
+@end
+@implementation DIFxTicker
+- (void)onFrame:(CADisplayLink *)link {
+    double dt = link.targetTimestamp - link.timestamp;
+    if (dt <= 0.0 || dt > 0.12) dt = 1.0 / 60.0;
+    @try { diRhythmTickWithDelta((float)dt); } @catch (__unused NSException *e) {}
+}
+@end
+
 static void diRhythmEnsure(void) {
     /* 3.0.49: 与保险档位联动 —— 连续崩两次(档位≤1)时律动整体停, 先保系统能开机。
        用户在设置里拨任意开关会重新拉满档位, 律动随之恢复。 */
     BOOL need = (rhythmFxOn && (rhythmOn || rhythmRingOn || rhythmParticlesOn || rhythmBarsOn)
                  && gDIStage >= 2);
-    if (need && !gDIRhythmTimer) {
-        gDIRhythmTimer = [NSTimer scheduledTimerWithTimeInterval:(1.0 / 60.0)
-            repeats:YES block:^(NSTimer *__unused tm) {
-                @try { diRhythmTick(); } @catch (__unused NSException *e) {}
-            }];
-        gDIRhythmTimer.tolerance = 0.008;
-        RLog(@"[律动] 引擎启动 60Hz (总=%d 圆=%d 缩放=%d 环=%d 粒=%d 条=%d)",
+    if (need && !gDIRhythmLink) {
+        if (!gDIRhythmTicker) gDIRhythmTicker = [DIFxTicker new];
+        gDIRhythmLink = [CADisplayLink displayLinkWithTarget:gDIRhythmTicker
+                                                    selector:@selector(onFrame:)];
+        /* 0 = 跟随屏幕原生刷新率(ProMotion 120Hz)。以前写死 60Hz, 在 120Hz 屏上
+           每两帧才动一次 —— 这就是"一卡一卡"的直接原因。 */
+        gDIRhythmLink.preferredFramesPerSecond = 0;
+        [gDIRhythmLink addToRunLoop:[NSRunLoop mainRunLoop] forMode:NSRunLoopCommonModes];
+        RLog(@"[律动] 引擎启动 CADisplayLink %.0fHz (总=%d 圆=%d 缩放=%d 环=%d 粒=%d 条=%d)",
+             gDIRhythmLink.preferredFramesPerSecond,
              rhythmFxOn, rhythmRoundCover, rhythmOn, rhythmRingOn,
              rhythmParticlesOn, rhythmBarsOn);
-    } else if (!need && gDIRhythmTimer) {
-        [gDIRhythmTimer invalidate];
-        gDIRhythmTimer = nil;
+    } else if (!need && gDIRhythmLink) {
+        [gDIRhythmLink invalidate];
+        gDIRhythmLink = nil;
         diRhythmReset();
         RLog(@"[律动] 引擎停止");
     }
