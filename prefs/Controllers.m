@@ -308,6 +308,9 @@ static void diStepSeedCache(UITableViewCell *cell, NSString *key, NSString *doma
    新方案: 布局时把 key/domain/min/max/default 直接存到 cell 上(关联对象),
    ± 按钮只读这些存好的值, 一个 objc_msgSend 都不打 → 不可能崩。 */
 
+/* 3.0.60: 前置声明 —— diStepCacheSpec 里要按 key 兜底步进, 定义在下面 */
+static double diStepForKeyOverride(NSString *key);
+
 /* 把 specifier 的关键信息缓存到 cell 上(布局时调用一次) */
 static void diStepCacheSpec(UITableViewCell *cell) {
     if (!cell) return;
