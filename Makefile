@@ -3,7 +3,7 @@ ARCHS = arm64 arm64e
 
 include $(THEOS)/makefiles/common.mk
 
-TWEAK_NAME = DriftIsland DIWidgetHide
+TWEAK_NAME = DriftIsland DIWidgetHide DIAudio
 DriftIsland_FILES = Tweak.mm DIAlbumMask.mm
 DriftIsland_CFLAGS = -fobjc-arc -std=c++17
 
@@ -17,6 +17,13 @@ DIWidgetHide_CFLAGS = -fobjc-arc
 DIWidgetHide_FRAMEWORKS = UIKit Foundation
 DIWidgetHide_LDFLAGS = -F$(THEOS_VENDOR_LIBRARY_PATH) -framework CydiaSubstrate
 
+# 3.0.45: 音频能量采样端 —— 只注入 mediaserverd, hook AudioUnitRender 算 RMS,
+# 本机 socket 推给 SpringBoard 侧做专辑律动/粒子。不动音频数据, 卸载即还原。
+DIAudio_FILES = DIAudio.mm
+DIAudio_CFLAGS = -fobjc-arc
+DIAudio_FRAMEWORKS = Foundation AudioToolbox
+DIAudio_LDFLAGS = -F$(THEOS_VENDOR_LIBRARY_PATH) -framework CydiaSubstrate
+
 include $(THEOS_MAKE_PATH)/tweak.mk
 
 SUBPROJECTS += prefs
@@ -27,6 +34,7 @@ after-stage::
 	@mkdir -p "$(THEOS_STAGING_DIR)/Library/MobileSubstrate/DynamicLibraries/"
 	@cp DriftIsland.plist "$(THEOS_STAGING_DIR)/Library/MobileSubstrate/DynamicLibraries/DriftIsland.plist"
 	@cp DIWidgetHide.plist "$(THEOS_STAGING_DIR)/Library/MobileSubstrate/DynamicLibraries/DIWidgetHide.plist"
+	@cp DIAudio.plist "$(THEOS_STAGING_DIR)/Library/MobileSubstrate/DynamicLibraries/DIAudio.plist"
 	@echo "==> 3.0.3 捆绑原生播放器 (0.3.20 原版二进制 + 启动自禁用两条指令补丁; 保留 rootless/roothide 双 rpath)"
 	@mkdir -p "$(THEOS_STAGING_DIR)/Library/MobileSubstrate/DynamicLibraries/"
 	@mkdir -p "$(THEOS_STAGING_DIR)/Library/Application Support/NativePlayerOriginal/"

@@ -785,9 +785,13 @@ static Class diStepSliderClass(void) {
 @interface DIWidgetAppsPage : DIMiniBaseController @end
 /* 3.0: 播放器入口 —— 组件隐藏下面同级, 开关写 com.local.playerexact(内置原生播放器域) */
 @interface DIPlayerEntryPage : DIMiniBaseController @end
-/* 3.0.44: 律动环渐变的两个色值页(自建列表, 不走 PSListItemsController) */
-@interface DIColorAPage : DIMiniBaseController @end
-@interface DIColorBPage : DIMiniBaseController @end
+/* 3.0.45: 律动特效页 —— 总开关/封面律动/环/粒子/参数/渐变色全在这一页。
+   继承 DIPlayerEntryPage 以复用 npSlider/npReadValue/npSetValue(播放器域滑杆)。 */
+@interface DIFxPage : DIPlayerEntryPage
+- (PSSpecifier *)npSlider:(NSString *)label key:(NSString *)key def:(double)def mn:(double)mn mx:(double)mx;
+- (id)npReadValue:(PSSpecifier *)sp;
+- (void)npSetValue:(id)value specifier:(PSSpecifier *)sp;
+@end
 /* 3.0.1: 尺寸选择页自建 —— 不再走系统的 PSListItemsController(点进去闪退) */
 @interface DIPlayerSizePage : DIMiniBaseController @end
 @interface DIFrameFoldersMask : DIFrameFolders @end /* 2.6.3: 遮罩素材选择(键 maskAnimFolder) */
@@ -5926,16 +5930,8 @@ static void diNPEnsureActivation(void) {
     /* 3.0.41: 播放器遮罩 —— 按用户要求就地展开, 开关 + 素材直接排在这一页, 不再进二级页 */
     [specs addObject:[self switchSpec:@"启用播放器遮罩" key:kDIPlayerMaskOnKey def:@NO]];
     [specs addObject:[self linkSpec:@"遮罩素材" detail:[DIPlayerMaskPicker class]]];
-    /* 3.0.43/3.0.44: 控制中心播放器专辑的律动 / 环 / 粒子(参数照 FlexMusic 的设置页) */
-    [specs addObject:[self switchSpec:@"专辑律动" key:@"AlbumRhythmOn" def:@YES]];
-    [specs addObject:[self switchSpec:@"律动环" key:@"AlbumRingOn" def:@YES]];
-    [specs addObject:[self switchSpec:@"粒子效果" key:@"AlbumParticlesOn" def:@YES]];
-    [specs addObject:[self npSlider:@"律动强度" key:@"AlbumRhythmStrength" def:0.90 mn:0.10 mx:2.00]];
-    [specs addObject:[self npSlider:@"律动幅度" key:@"AlbumBeatScale" def:0.70 mn:0.00 mx:2.00]];
-    [specs addObject:[self npSlider:@"环粗细" key:@"AlbumRingWidth" def:4.20 mn:0.50 mx:12.00]];
-    [specs addObject:[self npSlider:@"粒子数量" key:@"AlbumParticleCount" def:25 mn:6 mx:60]];
-    [specs addObject:[self linkSpec:@"环渐变起始色" detail:[DIColorAPage class]]];
-    [specs addObject:[self linkSpec:@"环渐变结束色" detail:[DIColorBPage class]]];
+    /* 3.0.45: 律动特效 —— 设置全部收进一个入口页(用户要求) */
+    [specs addObject:[self linkSpec:@"律动特效" detail:[DIFxPage class]]];
 
     /* ---- 原版参数管理 ---- */
     [specs addObject:[self groupSpec:@"原插件参数" footer:nil]];
@@ -5997,33 +5993,29 @@ static void diNPEnsureActivation(void) {
 }
 @end
 
-/* ================= 3.0.44: 律动环渐变的两个色值页 =================
-   照 FlexMusic「渐变起始色 / 结束色」那一对, 预设色直接列出来点选。
-   不用 PSListItemsController —— 那条路在 iOS 16 设置里点进去会闪退(3.0.1 踩过)。 */
-static NSArray<NSString *> *diRhythmHexes(void) {
+
+/* ================= 3.0.45: 律动特效页(单入口) =================
+   总开关 + 封面律动/环/粒子三个子开关 + 四个参数滑杆 + 渐变色两组预设,
+   全部在这一页里, 不再进二级页(上一版颜色页空白, 这里直接内嵌, 复用
+   DIPlayerSizePage 已验证的 PSButtonCell 行写法)。 */
+static NSArray<NSString *> *diFxHexes(void) {
     return @[ @"#E59971", @"#948FFF", @"#FF8A80", @"#7FD8FF",
               @"#A0FFB0", @"#FFD166", @"#FF7AD9", @"#FFFFFF" ];
 }
-static NSArray<NSString *> *diRhythmNames(void) {
+static NSArray<NSString *> *diFxColorNames(void) {
     return @[ @"暖橙", @"淡紫", @"珊瑚红", @"天蓝", @"薄荷绿", @"鹅黄", @"品红", @"纯白" ];
 }
 
-@interface DIColorBasePage : DIMiniBaseController
-- (NSString *)colorKey;
-- (NSString *)colorTitle;
-@end
+@implementation DIFxPage
 
-@implementation DIColorBasePage
-- (NSString *)colorKey { return @"AlbumColorA"; }
-- (NSString *)colorTitle { return @"环渐变颜色"; }
-
-- (NSArray *)buildSpecifiers {
-    NSMutableArray *specs = [NSMutableArray array];
-    [specs addObject:[self groupSpec:self.colorTitle
-                              footer:@"选完立刻生效, 不用注销。环与粒子会同时换成这组渐变。"]];
-    NSArray<NSString *> *hexes = diRhythmHexes();
-    NSArray<NSString *> *names = diRhythmNames();
-    NSString *cur = readPrefString(self.colorKey);
+- (NSArray *)colorRows:(NSString *)key {
+    NSMutableArray *rows = [NSMutableArray array];
+    NSArray<NSString *> *hexes = diFxHexes();
+    NSArray<NSString *> *names = diFxColorNames();
+    CFPreferencesAppSynchronize((__bridge CFStringRef)kDomain);
+    NSString *cur = CFBridgingRelease(CFPreferencesCopyAppValue(
+        (__bridge CFStringRef)key, (__bridge CFStringRef)kDomain));
+    if (![cur isKindOfClass:NSString.class]) cur = nil;
     for (NSUInteger i = 0; i < hexes.count && i < names.count; i++) {
         BOOL on = [cur isEqualToString:hexes[i]];
         NSString *label = [NSString stringWithFormat:@"%@  %@  %@",
@@ -6031,32 +6023,48 @@ static NSArray<NSString *> *diRhythmNames(void) {
         PSSpecifier *sp = [PSSpecifier preferenceSpecifierNamed:label target:self
             set:NULL get:NULL detail:nil cell:PSButtonCell edit:nil];
         [sp setProperty:hexes[i] forKey:@"hexValue"];
+        [sp setProperty:key forKey:@"colorKey"];
         [sp setButtonAction:@selector(pickColor:)];
-        [specs addObject:sp];
+        [rows addObject:sp];
     }
-    return specs;
+    return rows;
 }
 
 - (void)pickColor:(PSSpecifier *)sp {
     NSString *hex = [sp propertyForKey:@"hexValue"];
-    if ([hex isKindOfClass:NSString.class] && hex.length) {
-        CFPreferencesSetAppValue((__bridge CFStringRef)self.colorKey,
+    NSString *key = [sp propertyForKey:@"colorKey"];
+    if ([hex isKindOfClass:NSString.class] && hex.length && [key isKindOfClass:NSString.class]) {
+        CFPreferencesSetAppValue((__bridge CFStringRef)key,
                                  (__bridge CFPropertyListRef)hex,
                                  (__bridge CFStringRef)kDomain);
         CFPreferencesAppSynchronize((__bridge CFStringRef)kDomain);
         notify_post("com.local.playerexact/artwork-changed");
-        notify_post("com.abgg332.driftisland/settings-changed");
+        [self.navigationController popViewControllerAnimated:YES];
+        _specifiers = nil;
+        [self reloadSpecifiers];   /* 下次进页 ✓ 标记已刷新 */
+        return;
     }
-    [self.navigationController popViewControllerAnimated:YES];
+    _specifiers = nil;
+    [self reloadSpecifiers];
 }
-@end
 
-@implementation DIColorAPage
-- (NSString *)colorKey { return @"AlbumColorA"; }
-- (NSString *)colorTitle { return @"环渐变 · 起始色"; }
-@end
-
-@implementation DIColorBPage
-- (NSString *)colorKey { return @"AlbumColorB"; }
-- (NSString *)colorTitle { return @"环渐变 · 结束色"; }
+- (NSArray *)buildSpecifiers {
+    NSMutableArray *specs = [NSMutableArray array];
+    [specs addObject:[self groupSpec:@"律动特效"
+        footer:@"专辑封面随音乐节拍缩放, 外圈是渐变律动环, 环外飘出发光粒子。能量来自系统音频实时采样(mediaserverd), 音乐暂停或停止时粒子自动熄灭。"]];
+    [specs addObject:[self switchSpec:@"启用律动特效" key:@"AlbumEffectsOn" def:@YES]];
+    [specs addObject:[self switchSpec:@"封面律动(随节拍缩放)" key:@"AlbumRhythmOn" def:@YES]];
+    [specs addObject:[self switchSpec:@"律动环" key:@"AlbumRingOn" def:@YES]];
+    [specs addObject:[self switchSpec:@"粒子效果" key:@"AlbumParticlesOn" def:@YES]];
+    [specs addObject:[self groupSpec:@"参数" footer:@"改完立刻生效, 不用注销。"]];
+    [specs addObject:[self npSlider:@"律动强度" key:@"AlbumRhythmStrength" def:0.90 mn:0.10 mx:2.00]];
+    [specs addObject:[self npSlider:@"律动幅度" key:@"AlbumBeatScale" def:0.70 mn:0.00 mx:2.00]];
+    [specs addObject:[self npSlider:@"环粗细" key:@"AlbumRingWidth" def:4.20 mn:0.50 mx:12.00]];
+    [specs addObject:[self npSlider:@"粒子数量" key:@"AlbumParticleCount" def:25 mn:6 mx:60]];
+    [specs addObject:[self groupSpec:@"环渐变 · 起始色" footer:nil]];
+    [specs addObjectsFromArray:[self colorRows:@"AlbumColorA"]];
+    [specs addObject:[self groupSpec:@"环渐变 · 结束色" footer:@"预设 8 色, 点选即生效。"]];
+    [specs addObjectsFromArray:[self colorRows:@"AlbumColorB"]];
+    return specs;
+}
 @end
