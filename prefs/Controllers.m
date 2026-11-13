@@ -6256,7 +6256,7 @@ static NSString *diModeName(int m) {
     [specs addObject:[self npSlider:@"专辑律动幅度" key:@"AlbumBeatScale" def:0.70 mn:0.00 mx:2.00]];
 
     [specs addObject:[self groupSpec:@"律动粒子"
-        footer:@"粒子从专辑背后随机位置冒出, 自然向外飘散, 不受鼓点影响。颜色: 跟随专辑 / 固定颜色 / 流光颜色; 三种都可用「自定义粒子颜色」改。「流光」是在你选的颜色基础上缓慢变色。大小 0.1 一档。"]];
+        footer:@"粒子从专辑背后随机位置冒出, 自然向外飘散, 不受鼓点影响。颜色: 「跟随专辑」取封面颜色;「固定颜色」和「流光颜色」都用你自定义的色值(流光 = 在你选的颜色基础上缓慢变色), 应用自定义色时会自动切到固定颜色。大小 0.1 一档。"]];
     [specs addObject:[self switchSpec:@"启用律动粒子" key:@"AlbumParticlesOn" def:@YES]];
     [specs addObject:[self npSlider:@"粒子数量" key:@"AlbumParticleCount2" def:25 mn:0 mx:40]];
     [specs addObject:[self modeSpec:@"粒子颜色" key:@"ParticleColorMode"]];
@@ -6269,7 +6269,7 @@ static NSString *diModeName(int m) {
     [specs addObject:[self buttonSpec:@"自定义粒子颜色(渐变)" action:@selector(diPickParticleColors:)]];
 
     [specs addObject:[self groupSpec:@"频谱条"
-        footer:@"进度条上方那一排小竖条, 中间高向两侧递减。颜色: 跟随专辑 / 固定颜色 / 流光颜色, 都可用「自定义频谱条颜色」改。上下位移 -150~150。"]];
+        footer:@"进度条上方那一排小竖条, 中间高向两侧递减。「跟随专辑」取封面颜色;「固定颜色」「流光颜色」用你自定义的色值。上下位移 -150~150。"]];
     [specs addObject:[self switchSpec:@"启用频谱条" key:@"AlbumBarsOn" def:@YES]];
     [specs addObject:[self modeSpec:@"频谱条颜色" key:@"SpectrumColorMode"]];
     [specs addObject:[self buttonSpec:@"自定义频谱条颜色(渐变)" action:@selector(diPickSpectrumColors:)]];
