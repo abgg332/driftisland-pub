@@ -5917,8 +5917,8 @@ static void diNPEnsureActivation(void) {
     [specs addObject:[self npSwitch:@"封面背景" key:@"MusicArtworkGradientEnabled" def:YES]];
     /* 3.1.0: 参考 CCUIPlayer 的 HideNotPlaying —— 打开后隐藏模块里的「未在播放」文字 */
     [specs addObject:[self npSwitch:@"隐藏未在" key:@"HideNotPlaying" def:NO]];
-    /* 3.0.41: 隐藏时间 —— 没在放歌时把进度条横条与两侧时间一起藏掉 */
-    [specs addObject:[self npSwitch:@"隐藏时间" key:@"HideTimeWhenIdle" def:NO]];
+    /* 3.0.54: 隐藏时间下线, 改为时间条上下移动(正=上移) */
+    [specs addObject:[self npSlider:@"时间条上下移动" key:@"TimeYOffset" def:0.0 mn:-40.0 mx:40.0]];
     [specs addObject:[self npRotateSwitch]];
     /* 3.0.24: 「禁止 N95 修改专辑图」删除(用不上); 「隐藏投送图标」改名「隐藏投送」。 */
     [specs addObject:[self npSwitch:@"隐藏投送" key:@"HideRoutingIcon" def:NO]];
@@ -6003,6 +6003,39 @@ static NSArray<NSString *> *diFxColorNames(void) {
 
 
 @implementation DIFxPage
+
+/* 3.0.54: 颜色模式行 —— 点一下切下一个模式(跟随专辑 → 固定颜色 → 流光颜色)。
+   不用 PSListItemsController: 这个环境里它必闪退(踩过两次)。 */
+static NSString *diModeName(int m) {
+    return m == 0 ? @"跟随专辑" : (m == 1 ? @"固定颜色" : @"流光颜色");
+}
+- (int)diModeValue:(NSString *)key {
+    CFPreferencesAppSynchronize((__bridge CFStringRef)kDomain);
+    id v = (__bridge_transfer id)CFPreferencesCopyAppValue((__bridge CFStringRef)key,
+                                                           (__bridge CFStringRef)kDomain);
+    int m = v ? [v intValue] : 0;
+    if (m < 0 || m > 2) m = 0;
+    return m;
+}
+- (PSSpecifier *)modeSpec:(NSString *)title key:(NSString *)key {
+    int m = [self diModeValue:key];
+    NSString *label = [NSString stringWithFormat:@"%@  ·  %@", title, diModeName(m)];
+    PSSpecifier *sp = [PSSpecifier preferenceSpecifierNamed:label target:self
+        set:NULL get:NULL detail:nil cell:PSButtonCell edit:nil];
+    [sp setProperty:key forKey:@"diModeKey"];
+    sp.buttonAction = @selector(diCycleMode:);
+    return sp;
+}
+- (void)diCycleMode:(PSSpecifier *)sp {
+    NSString *key = [sp propertyForKey:@"diModeKey"];
+    int m = ([self diModeValue:key] + 1) % 3;
+    CFPreferencesSetAppValue((__bridge CFStringRef)key,
+                             (__bridge CFPropertyListRef)@(m),
+                             (__bridge CFStringRef)kDomain);
+    CFPreferencesAppSynchronize((__bridge CFStringRef)kDomain);
+    postReload();
+    [self reloadSpecifiers];
+}
 
 /* 3.0.45: 播放器域滑杆(与 DIPlayerEntryPage 同一套, 保留两位小数) */
 - (PSSpecifier *)npSlider:(NSString *)label key:(NSString *)key
@@ -6100,6 +6133,7 @@ static NSArray<NSString *> *diFxColorNames(void) {
     [specs addObject:[self switchSpec:@"启用律动专辑环" key:@"AlbumRingOn" def:@YES]];
     [specs addObject:[self switchSpec:@"圆形封面" key:@"AlbumRoundCover" def:@YES]];
     [specs addObject:[self switchSpec:@"专辑跟随律动" key:@"AlbumRhythmOn" def:@YES]];
+    [specs addObject:[self modeSpec:@"环颜色" key:@"RingColorMode"]];
     [specs addObject:[self npSlider:@"律动强度" key:@"AlbumRhythmStrength" def:0.90 mn:0.10 mx:2.00]];
     [specs addObject:[self npSlider:@"专辑律动幅度" key:@"AlbumBeatScale" def:0.70 mn:0.00 mx:2.00]];
     [specs addObject:[self npSlider:@"刻度粗细" key:@"AlbumRingWidth2" def:2.20 mn:0.80 mx:8.00]];
@@ -6112,6 +6146,7 @@ static NSArray<NSString *> *diFxColorNames(void) {
         footer:@"粒子从专辑边缘向外散开, 每一记低音鼓点会同时放大、外弹并提亮。颜色在下面的起止色之间渐变。"]];
     [specs addObject:[self switchSpec:@"启用律动粒子" key:@"AlbumParticlesOn" def:@YES]];
     [specs addObject:[self npSlider:@"粒子数量" key:@"AlbumParticleCount2" def:25 mn:0 mx:40]];
+    [specs addObject:[self modeSpec:@"粒子颜色" key:@"ParticleColorMode"]];
     [specs addObject:[self npSlider:@"粒子透明" key:@"RhythmParticleAlpha" def:0.74 mn:0.10 mx:1.50]];
     [specs addObject:[self npSlider:@"粒子大小" key:@"AlbumParticleSize" def:1.0 mn:0.5 mx:3.0]];
     [specs addObject:[self groupSpec:@"粒子渐变 · 起始色" footer:nil]];
@@ -6125,7 +6160,8 @@ static NSArray<NSString *> *diFxColorNames(void) {
     [specs addObject:[self npSlider:@"根数" key:@"AlbumBarsCount" def:40 mn:8 mx:64]];
     [specs addObject:[self npSlider:@"长度" key:@"AlbumBarsHeight" def:13.0 mn:4.0 mx:40.0]];
     [specs addObject:[self npSlider:@"宽度" key:@"AlbumBarsWidth" def:3.0 mn:1.0 mx:8.0]];
-    [specs addObject:[self npSlider:@"位移(左右)" key:@"AlbumBarsOffset" def:0.0 mn:-120.0 mx:120.0]];
+    [specs addObject:[self npSlider:@"左右位移" key:@"AlbumBarsOffset" def:0.0 mn:-120.0 mx:120.0]];
+    [specs addObject:[self npSlider:@"上下位移" key:@"AlbumBarsOffsetY" def:0.0 mn:-60.0 mx:60.0]];
     [specs addObject:[self groupSpec:@"其它" footer:@"改完立刻生效, 不用注销。"]];
     [specs addObject:[self npSlider:@"环跟随透明度" key:@"RhythmRingFollowAlpha" def:1.00 mn:0.10 mx:1.50]];
     return specs;

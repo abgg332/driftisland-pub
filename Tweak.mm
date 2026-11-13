@@ -73,6 +73,10 @@ static double rhythmBarsHeight = 13.0;         // 3.0.50: 频谱条长度(可调
 static double rhythmBarsWidth = 3.0;           // 3.0.51: 频谱条单根最大宽度(可调)
 static double rhythmBarsOffset = 0.0;          // 3.0.52: 频谱条水平位移(可调, 负=左 正=右)
 static double rhythmParticleSize = 1.0;        // 3.0.51: 粒子大小倍率(可调)
+static double rhythmBarsOffsetY = 0.0;         // 3.0.54: 频谱条垂直位移(正=上移)
+static double timeYOffset = 0.0;               // 3.0.54: 时间条垂直位移(取代"隐藏时间")
+static int    ringColorMode = 0;               // 3.0.54: 0=跟随专辑 1=固定色 2=流光
+static int    particleColorMode = 0;           // 3.0.54: 同上
 static double rhythmParticleAlpha = 1.0;       // 3.0.48: 粒子透明度
 static double rhythmRingFollowAlpha = 1.0;     // 3.0.48: 环跟随透明度
 static int  rhythmParticleCount = 12;          // 3.0.47: 参考视频里只有十几颗
@@ -924,6 +928,26 @@ static void refreshPrefs(void) {
         if (off < -120.0) off = -120.0;
         if (off > 120.0) off = 120.0;
         rhythmBarsOffset = off;
+        double offY = pDouble(@"AlbumBarsOffsetY", 0.0);
+        if (offY < -60.0) offY = -60.0;
+        if (offY > 60.0) offY = 60.0;
+        rhythmBarsOffsetY = offY;
+    }
+    /* 3.0.54: 时间条垂直位移(取代"隐藏时间") */
+    {
+        double ty = pDouble(@"TimeYOffset", 0.0);
+        if (ty < -40.0) ty = -40.0;
+        if (ty > 40.0) ty = 40.0;
+        timeYOffset = ty;
+    }
+    /* 3.0.54: 颜色模式 0=跟随专辑 1=固定色 2=流光 */
+    {
+        int m = (int)pInt(@"RingColorMode", 0);
+        if (m < 0 || m > 2) m = 0;
+        ringColorMode = m;
+        int pm = (int)pInt(@"ParticleColorMode", 0);
+        if (pm < 0 || pm > 2) pm = 0;
+        particleColorMode = pm;
     }
     rhythmParticleAlpha = pDouble(@"RhythmParticleAlpha", 0.74);
     if (rhythmParticleAlpha < 0.1) rhythmParticleAlpha = 0.1;
@@ -17943,7 +17967,6 @@ static void diNPQueryNowPlaying(void) {
     });
 }
 
-static BOOL gDITimeShouldHide = NO;          /* 全局: 这一帧所有时间条都该藏 */
 static NSHashTable *gDITimeTouched = nil;    /* 我们压过 alpha 的 view(弱表) */
 static void (*gDITimeOrigLayout)(id, SEL) = NULL;
 
@@ -17971,19 +17994,33 @@ static BOOL diTimeExpanded(UIView *v) {
     return (bw >= 320.0 || bh >= 235.0);
 }
 
+/* 3.0.54: 用户把「隐藏时间」改成「时间条上下移动」。
+   实现: 系统每次 layout 完, 在同一个提交帧里套一层垂直平移的 transform。
+   用 transform 而不是改 frame —— 系统重排只写 frame, 不改 transform, 两者不会打架;
+   也避免了改 frame 引起的布局回环(历史上 4 万行刷屏就是这么来的)。
+   只动折叠态, 展开态还原(展开是另一套布局, 动了会错位)。 */
 static void diTimeLayoutHook(id self, SEL cmd) {
     if (gDITimeOrigLayout) gDITimeOrigLayout(self, cmd);
     UIView *v = (UIView *)self;
-    if (gDITimeShouldHide && !diTimeExpanded(v)) {
-        if (v.alpha != 0.0) v.alpha = 0.0;
-        /* 系统常用 opacity 动画把时间条淡进来; 动画还在的话, 光写 alpha 会被动画盖住,
-           视觉上就是"闪一下才消失"。这里把那条动画也摘掉, 同一帧内直接不见。 */
-        if ([v.layer animationForKey:@"opacity"]) [v.layer removeAnimationForKey:@"opacity"];
-        if (!gDITimeTouched) gDITimeTouched = [NSHashTable weakObjectsHashTable];
+    if (!gDITimeTouched) gDITimeTouched = [NSHashTable weakObjectsHashTable];
+    if (diTimeExpanded(v)) {
+        if ([gDITimeTouched containsObject:v]) {
+            v.transform = CGAffineTransformIdentity;
+            [gDITimeTouched removeObject:v];
+        }
+        return;
+    }
+    if (fabs(timeYOffset) < 0.01) {
+        if ([gDITimeTouched containsObject:v]) {
+            v.transform = CGAffineTransformIdentity;
+            [gDITimeTouched removeObject:v];
+        }
+        return;
+    }
+    CGAffineTransform want = CGAffineTransformMakeTranslation(0, (CGFloat)timeYOffset);
+    if (!CGAffineTransformEqualToTransform(v.transform, want)) {
+        v.transform = want;
         [gDITimeTouched addObject:v];
-    } else if (gDITimeTouched && [gDITimeTouched containsObject:v]) {
-        v.alpha = 1.0;
-        [gDITimeTouched removeObject:v];
     }
 }
 
@@ -18068,6 +18105,9 @@ static void diNPDumpTimeCandidates(UIView *root) {
          names.count ? [names componentsJoinedByString:@", "] : @"(无)");
 }
 
+/* 3.0.54: 「隐藏时间」下线, 改为「时间条上下移动」。
+   每 0.4 秒扫一遍播放卡, 找到 MRUNowPlayingTimeControlsView, 套垂直平移。
+   原来那套"未播放就压 alpha"的逻辑整段删除 —— 用户明确说不要隐藏了。 */
 static void diNPApplyHideTime(void) {
     static CFAbsoluteTime lastScan = 0;
     CFTimeInterval now = CFAbsoluteTimeGetCurrent();
@@ -18075,78 +18115,35 @@ static void diNPApplyHideTime(void) {
     lastScan = now;
 
     diTimeInstallHook();
-    diNPQueryNowPlaying();   /* 3.0.42: 用 MediaRemote 判"到底有没有歌" */
-    /* 开关关着、也没有被我们压过的视图 → 本轮没事可做(但复位全局状态, 防止新视图被误压) */
-    if (!gDIHideTime && (!gDITimeTouched || gDITimeTouched.count == 0)) {
-        gDITimeShouldHide = NO;
-        return;
+    if (gDITimeTouched) {
+        NSArray *snap = gDITimeTouched.allObjects;
+        for (UIView *v in snap) {
+            if (!v.window) { [gDITimeTouched removeObject:v]; continue; }
+        }
     }
+    if (fabs(timeYOffset) < 0.01 && (!gDITimeTouched || gDITimeTouched.count == 0)) return;
+    if (!gDITimeTouched) gDITimeTouched = [NSHashTable weakObjectsHashTable];
 
-    /* 宿主: 播放器视图 + 模块卡片(去重后逐个找) */
     NSMutableArray<UIView *> *roots = [NSMutableArray array];
     if (gDIBgPlayers) for (UIView *v in gDIBgPlayers.allObjects) [roots addObject:v];
     if (gDIBgHosts) for (UIView *v in gDIBgHosts.allObjects) if (![roots containsObject:v]) [roots addObject:v];
 
-    NSHashTable *tcs = [NSHashTable weakObjectsHashTable];
-    BOOL labelIdle = NO;
-    BOOL expandedAny = NO;
     for (UIView *r in roots) {
-        /* 3.0.44: 展开态整块不许动 —— 而且必须把之前压过的当场还原,
-           否则展开动画期间那一下就一直透明(用户看到的"时好时坏") */
-        if (diTimeExpanded(r)) {
-            expandedAny = YES;
-            if (gDITimeTouched) {
-                NSArray *snap = gDITimeTouched.allObjects;
-                for (UIView *v in snap) {
-                    if (v.window && ([v isDescendantOfView:r] || [r isDescendantOfView:v])) {
-                        v.alpha = 1.0;
-                        [gDITimeTouched removeObject:v];
-                    }
-                }
-            }
-            continue;
-        }
+        if (!r.window) continue;
+        if (diTimeExpanded(r)) continue;          /* 展开态不动 */
         BOOL idle = NO;
         UIView *tc = nil;
         @try { tc = diNPFindTimeControls(r, &idle); } @catch (__unused NSException *e) {}
-        if (idle) labelIdle = YES;
-        if (tc && !diTimeExpanded(tc)) [tcs addObject:tc];
-    }
-    {
-        static int lastExpanded = -1;
-        int cur = expandedAny ? 1 : 0;
-        if (cur != lastExpanded) {
-            lastExpanded = cur;
-            RLog(@"[时间] 卡片%@ → %@", expandedAny ? @"已展开" : @"已折叠",
-                 expandedAny ? @"跳过, 并把展开态还原" : @"恢复折叠态隐藏逻辑");
+        if (!tc || diTimeExpanded(tc)) continue;
+        if (fabs(timeYOffset) < 0.01) {
+            if ([gDITimeTouched containsObject:tc]) {
+                tc.transform = CGAffineTransformIdentity;
+                [gDITimeTouched removeObject:tc];
+            }
+        } else {
+            tc.transform = CGAffineTransformMakeTranslation(0, (CGFloat)timeYOffset);
+            [gDITimeTouched addObject:tc];
         }
-    }
-    /* 3.0.42: 以 MediaRemote 为准(有歌=有, 暂停也算有); 还没就绪的前几秒用文案兜底 */
-    BOOL idleAny = gDIInfoReady ? !gDIHasNowPlaying : labelIdle;
-
-    /* 3.0.42: 不再加防抖 —— 用户要的是"播放了立刻显示"。MediaRemote 给的
-       now playing info 在切歌时不会变空(只有真的没有歌才会), 所以直接跟它走。 */
-    BOOL want = gDIHideTime && idleAny;
-
-    if (want != gDITimeShouldHide) {
-        gDITimeShouldHide = want;
-        RLog(@"[时间] %@", want ? @"未播放 → 隐藏时间条"
-                                : @"播放中/开关关 → 恢复时间条");
-    }
-    /* 立刻应用一次(不等下一次系统布局); 系统重排的兜底交给上面的 layout 钩子 */
-    if (!gDITimeTouched) gDITimeTouched = [NSHashTable weakObjectsHashTable];
-    for (UIView *v in tcs.allObjects) {
-        if (gDITimeShouldHide) {
-            if (v.alpha != 0.0) v.alpha = 0.0;
-            [gDITimeTouched addObject:v];
-        } else if ([gDITimeTouched containsObject:v]) {
-            v.alpha = 1.0;
-            [gDITimeTouched removeObject:v];
-        }
-    }
-    if (gDITimeShouldHide && tcs.count == 0 && roots.count > 0) {
-        UIView *r0 = roots.firstObject;
-        diNPDumpTimeCandidates(r0);
     }
 }
 
@@ -18906,6 +18903,8 @@ static float gDIBassPrev = 0.0f;
 static float gDIBassEnv = 0.0f;      /* 低音包络(fast attack / slow release) */
 static float gDIBassFloor = 0.0f;    /* 底噪基线(缓慢上爬, 用来抵消持续的低频轰鸣) */
 static float gDIBassPulse = 0.0f;    /* 拍点脉冲 0~1 */
+static double gDIHuePhase = 0.0;     /* 3.0.54: 流光模式的色相相位 */
+static int gDIRingModeUsed = -1;     /* 3.0.54: 上次建环用的颜色模式 */
 static double gDISynPhase = 0.0;
 static CFTimeInterval gDIFxLast = 0;
 static CFTimeInterval gDIClock = 0;
@@ -18993,9 +18992,15 @@ static void diFxRemoveAllDots(void) {
 
 /* 3.0.53: 粒子颜色改成 FlexMusic 设置里的"渐变起始色/结束色"两色之间插值,
    与截图一致(默认 #FFFFBC -> #BFCDF8)。 */
-static UIColor *diFxParticleColor(float t) {
-    UIColor *a = gDIParticleColA ?: [UIColor colorWithRed:1.000 green:1.000 blue:0.737 alpha:1.0]; /* #FFFFBC */
-    UIColor *b = gDIParticleColB ?: [UIColor colorWithRed:0.749 green:0.804 blue:0.973 alpha:1.0]; /* #BFCDF8 */
+/* 3.0.54: 调色板定义在后面的重建区, 粒子出生时要先用, 这里前置声明 */
+static void diColorPalette(int mode, NSString *hexA, NSString *hexB,
+                           UIColor *defA, UIColor *defB,
+                           double huePhase, BOOL forParticles,
+                           UIColor **outA, UIColor **outB);
+
+static UIColor *diFxParticleColorBetween(UIColor *a, UIColor *b, float t) {
+    if (!a) a = [UIColor colorWithRed:1.000 green:1.000 blue:0.737 alpha:1.0]; /* #FFFFBC */
+    if (!b) b = [UIColor colorWithRed:0.749 green:0.804 blue:0.973 alpha:1.0]; /* #BFCDF8 */
     CGFloat ar = 1, ag = 1, ab = 1, aa = 1, br = 1, bg = 1, bb = 1, ba = 1;
     [a getRed:&ar green:&ag blue:&ab alpha:&aa];
     [b getRed:&br green:&bg blue:&bb alpha:&ba];
@@ -19028,8 +19033,12 @@ static void diFxSpawnDot(UIView *host, CGRect cover, float maxRad) {
     d->drift = 2.4f + diFxRand01() * 5.0f;                 /* 恒定向外 */
     int sh = arc4random() % 10;
     d->shape = (sh < 5) ? 0 : (sh < 7 ? 1 : (sh < 9 ? 2 : 3));   /* 一半是实心点 */
+    /* 3.0.54: 用户说"1 太小、1.5 太大" —— 原先是线性乘, 1.0~1.5 之间跨度 50%。
+       改成 0.90 + 0.40×滑杆: 1.0 → 1.30 倍(比原来大 30%), 1.5 → 1.50 倍(只再大 15%),
+       中间过渡细腻, 滑杆拉满 3.0 也只到 2.1 倍, 不会爆。 */
+    float sizeMul = 0.90f + 0.40f * (float)rhythmParticleSize;
     d->size = ((d->shape == 0) ? (1.8f + diFxRand01() * 1.6f)
-                               : (3.2f + diFxRand01() * 2.4f)) * (float)rhythmParticleSize;
+                               : (3.2f + diFxRand01() * 2.4f)) * sizeMul;
     d->rot = diFxRand01() * (float)M_PI * 2.0f;
     d->rotSpd = (diFxRand01() - 0.5f) * 0.5f;
     d->maxLife = 2.4f + diFxRand01() * 2.4f;
@@ -19037,7 +19046,11 @@ static void diFxSpawnDot(UIView *host, CGRect cover, float maxRad) {
     d->phase = diFxRand01() * (float)M_PI * 2.0f;
     d->tint = diFxRand01();
 
-    UIColor *tint = diFxParticleColor(d->tint);
+    /* 3.0.54: 粒子颜色也按模式走(跟随专辑 / 固定 / 流光) */
+    UIColor *pa = nil, *pb = nil;
+    diColorPalette(particleColorMode, nil, nil, gDIParticleColA, gDIParticleColB,
+                   gDIHuePhase, YES, &pa, &pb);
+    UIColor *tint = diFxParticleColorBetween(pa, pb, d->tint);
     CALayer *layer = gDIDotLayer[slot];
     if (!layer) {
         layer = [CAShapeLayer layer];
@@ -19380,7 +19393,8 @@ static void diRhythmUpdateBars(UIView *host, BOOL active) {
         return;
     }
     CGRect sf = [sl convertRect:sl.bounds toView:host];
-    CGFloat bottom = CGRectGetMinY(sf) - 5.0;
+    /* 3.0.54: 正数=上移 */
+    CGFloat bottom = CGRectGetMinY(sf) - 5.0 - (CGFloat)rhythmBarsOffsetY;
     CGFloat height = (CGFloat)rhythmBarsHeight;      /* 3.0.50: 长度可调 */
     CGFloat top = bottom - height;
     if (top < 4) return;
@@ -19451,18 +19465,122 @@ static void diRhythmUpdateBars(UIView *host, BOOL active) {
 }
 
 /* ---------- 重建 / 复位 / tick ---------- */
+/* ---------- 3.0.54: 颜色模式(跟随专辑 / 固定颜色 / 流光颜色) ----------
+   用户要求像 FlexMusic 那样可选, 而不是把色值写死。三种来源统一成一个调色板:
+   mode 0 = 从专辑封面取平均色(提高饱和/亮度), 结束色取同色相偏移;
+   mode 1 = 设置页选的固定起止色;
+   mode 2 = 色相随时间旋转的流光, 起止色相差 0.14 圈。 */
+static UIColor *diHSB(double h, double sat, double bri) {
+    h = fmod(h, 1.0); if (h < 0) h += 1.0;
+    return [UIColor colorWithHue:h saturation:sat brightness:bri alpha:1.0];
+}
+static void diRGB2HSB(UIColor *c, double *h, double *s, double *b) {
+    CGFloat r=0,g=0,bb=0,a=0;
+    if (![c getRed:&r green:&g blue:&bb alpha:&a]) { *h=0; *s=0; *b=1; return; }
+    double mx = MAX(r, MAX(g, bb)), mn = MIN(r, MIN(g, bb));
+    double d = mx - mn;
+    double hh = 0;
+    if (d > 1e-6) {
+        if (mx == r) hh = fmod((g - bb) / d, 6.0);
+        else if (mx == g) hh = (bb - r) / d + 2.0;
+        else hh = (r - g) / d + 4.0;
+        hh /= 6.0; if (hh < 0) hh += 1.0;
+    }
+    *h = hh; *s = (mx > 1e-6) ? d / mx : 0; *b = mx;
+}
+
+/* 封面主色: 递归找 UIImageView 的图, 取不到就从 layer.contents 取 CGImage;
+   缩到 6x6 求平均, 跳过近黑像素, 最后把饱和度/亮度抬到能看清的程度。 */
+static UIColor *diCoverAverageColor(UIView *cover) {
+    if (!cover) return nil;
+    UIImage *img = nil;
+    NSMutableArray *st = [NSMutableArray arrayWithObject:cover];
+    int budget = 300;
+    while (st.count && budget-- > 0) {
+        UIView *v = st.lastObject; [st removeLastObject];
+        if ([v isKindOfClass:UIImageView.class]) {
+            UIImage *im = ((UIImageView *)v).image;
+            if (im) { img = im; break; }
+        }
+        for (UIView *c in v.subviews) [st addObject:c];
+    }
+    CGImageRef cg = img.CGImage;
+    if (!cg) {
+        id cont = cover.layer.contents;
+        if (cont) {
+            @try { cg = (__bridge CGImageRef)cont; } @catch (__unused NSException *e) { cg = NULL; }
+        }
+    }
+    if (!cg) return nil;
+    unsigned char px[6 * 6 * 4] = {0};
+    CGColorSpaceRef cs = CGColorSpaceCreateDeviceRGB();
+    CGContextRef ctx = CGBitmapContextCreate(px, 6, 6, 8, 24, cs, kCGImageAlphaPremultipliedLast);
+    CGColorSpaceRelease(cs);
+    if (!ctx) return nil;
+    CGContextDrawImage(ctx, CGRectMake(0, 0, 6, 6), cg);
+    CGContextRelease(ctx);
+    double r = 0, g = 0, b = 0, n = 0;
+    for (int i = 0; i < 36; i++) {
+        double rr = px[i*4] / 255.0, gg = px[i*4+1] / 255.0, bb = px[i*4+2] / 255.0;
+        if (rr + gg + bb < 0.12) continue;          /* 跳过近黑边角 */
+        r += rr; g += gg; b += bb; n += 1;
+    }
+    if (n < 1) return nil;
+    UIColor *avg = [UIColor colorWithRed:r/n green:g/n blue:b/n alpha:1.0];
+    double h, sat, bri;
+    diRGB2HSB(avg, &h, &sat, &bri);
+    sat = MIN(1.0, MAX(0.45, sat * 1.35));
+    bri = MIN(1.0, MAX(0.55, bri * 1.20));
+    return diHSB(h, sat, bri);
+}
+
+/* 统一调色板: 返回 A/B 两个颜色 */
+static void diColorPalette(int mode, NSString *hexA, NSString *hexB,
+                           UIColor *defA, UIColor *defB,
+                           double huePhase, BOOL forParticles,
+                           UIColor **outA, UIColor **outB) {
+    if (mode == 0) {
+        UIColor *base = gDIRhythmTarget ? diCoverAverageColor(gDIRhythmTarget) : nil;
+        if (!base) base = defA;
+        double h, sat, bri;
+        diRGB2HSB(base, &h, &sat, &bri);
+        *outA = diHSB(h, sat, MIN(1.0, bri * 1.05));
+        *outB = diHSB(h + 0.10, MAX(0.30, sat * 0.85), MIN(1.0, bri * 1.10));
+        if (forParticles) {   /* 粒子偏浅: 参考里粒子是米白/淡紫, 不是满饱和 */
+            *outA = diHSB(h, MIN(0.55, sat), MIN(1.0, bri * 1.15));
+            *outB = diHSB(h + 0.14, MIN(0.45, sat * 0.8), MIN(1.0, bri * 1.20));
+        }
+        return;
+    }
+    if (mode == 2) {
+        double h0 = huePhase;
+        if (forParticles) {
+            *outA = diHSB(h0, 0.42, 1.00);
+            *outB = diHSB(h0 + 0.16, 0.35, 1.00);
+        } else {
+            *outA = diHSB(h0, 0.72, 1.00);
+            *outB = diHSB(h0 + 0.14, 0.62, 1.00);
+        }
+        return;
+    }
+    *outA = diRhythmHexColor(hexA, defA);
+    *outB = diRhythmHexColor(hexB, defB);
+}
+
 static void diRhythmRebuild(UIView *t) {
     diRhythmDetach();
     if (!t) return;
     UIView *host = diRhythmHostFor(t);
     gDIRhythmHost = host;
     if (!host) return;
-    UIColor *ca = diRhythmHexColor(rhythmColorA,
-        [UIColor colorWithRed:0.898 green:0.600 blue:0.443 alpha:1.0]);   /* #E59971 */
-    UIColor *cb = diRhythmHexColor(rhythmColorB,
-        [UIColor colorWithRed:0.580 green:0.561 blue:1.000 alpha:1.0]);   /* #948FFF */
+    UIColor *ca = nil, *cb = nil;
+    diColorPalette(ringColorMode, rhythmColorA, rhythmColorB,
+                   [UIColor colorWithRed:0.898 green:0.600 blue:0.443 alpha:1.0],   /* #E59971 */
+                   [UIColor colorWithRed:0.580 green:0.561 blue:1.000 alpha:1.0],   /* #948FFF */
+                   gDIHuePhase, NO, &ca, &cb);
     gDIRhythmUsedA = [(rhythmColorA.length ? rhythmColorA : @"#E59971") copy];
     gDIRhythmUsedB = [(rhythmColorB.length ? rhythmColorB : @"#948FFF") copy];
+    gDIRingModeUsed = ringColorMode;
     if (rhythmRoundCover) diCoverRound(t);
     if (rhythmRingOn) diRhythmBuildRing(host, ca, cb);
     RLog(@"[律动] 目标封面 %@ %.0fx%.0f, 宿主 %@ %.0fx%.0f, 圆=%d 环=%d 粒=%d 条=%d",
@@ -19620,8 +19738,30 @@ static void diRhythmTick(void) {
     NSString *hexA = (rhythmColorA.length ? rhythmColorA : @"#E59971");
     NSString *hexB = (rhythmColorB.length ? rhythmColorB : @"#948FFF");
     if (![hexA isEqualToString:gDIRhythmUsedA] || ![hexB isEqualToString:gDIRhythmUsedB]
+        || ringColorMode != gDIRingModeUsed
         || (rhythmRingOn && !gDIRhythmRingBox) || (!rhythmRingOn && gDIRhythmRingBox)) {
         diRhythmRebuild(t);
+    }
+
+    /* 3.0.54: 流光模式 —— 色相每 0.1 秒推一点(约 100 秒转一圈), 10Hz 刷新环的渐变。
+       固定色/跟随专辑不动, 省掉每帧改 colors 的开销。 */
+    if (ringColorMode == 2 || particleColorMode == 2) {
+        static CFTimeInterval lastHue = 0;
+        CFTimeInterval nowH = CACurrentMediaTime();
+        if (nowH - lastHue >= 0.10) {
+            lastHue = nowH;
+            gDIHuePhase = fmod(gDIHuePhase + 0.010, 1.0);
+            if (gDIRhythmRingGrad) {
+                UIColor *ua = nil, *ub = nil;
+                diColorPalette(2, nil, nil, nil, nil, gDIHuePhase, NO, &ua, &ub);
+                [CATransaction begin];
+                [CATransaction setDisableActions:YES];
+                gDIRhythmRingGrad.colors = @[ (__bridge id)ua.CGColor,
+                                              (__bridge id)ub.CGColor,
+                                              (__bridge id)ua.CGColor ];
+                [CATransaction commit];
+            }
+        }
     }
 
     BOOL hasSong = gDIInfoReady ? gDIHasNowPlaying : YES;
@@ -19647,15 +19787,19 @@ static void diRhythmTick(void) {
 
     if (rhythmRoundCover) diCoverRound(t);
     if (rhythmOn && gDIRhythmBaseValid) {
-        /* 3.0.51: 0.028 且上限 1.06 时最大缩放只有 ~2%, 视觉上等于没动。
-           改成 0.055、上限 1.10 —— 拍点上来封面明显"弹"一下, 落下回位。 */
-        CGFloat amp = 0.055 * rhythmBeatScale;
-        CGFloat s = 1.0 + (0.30 * gDISteady + 0.70 * gDIBeatEnv) * amp;
-        if (s < 0.94) s = 0.94;
-        if (s > 1.10) s = 1.10;
+        /* 3.0.54: 用户反馈"专辑没有跟随鼓点抖动(跟粒子一样)"。
+           ① 缩放从 0.055/1.10 提到 0.085/1.16, 幅度看得见;
+           ② 拍点同时向上弹 0~3pt 再回落 —— 和粒子同一个脉冲, 视觉上是"被顶了一下"。 */
+        CGFloat amp = 0.085 * rhythmBeatScale;
+        CGFloat s = 1.0 + (0.25 * gDISteady + 0.75 * gDIBeatEnv) * amp;
+        if (s < 0.93) s = 0.93;
+        if (s > 1.16) s = 1.16;
+        CGFloat dy = -(CGFloat)gDIBeatEnv * 3.2 * (CGFloat)rhythmBeatScale;
         [CATransaction begin];
         [CATransaction setDisableActions:YES];
-        t.layer.transform = CATransform3DConcat(gDIRhythmBase, CATransform3DMakeScale(s, s, 1));
+        CATransform3D tr = CATransform3DConcat(gDIRhythmBase,
+                                               CATransform3DMakeTranslation(0, dy, 0));
+        t.layer.transform = CATransform3DConcat(tr, CATransform3DMakeScale(s, s, 1));
         [CATransaction commit];
     } else if (!rhythmOn && gDIRhythmBaseValid) {
         [CATransaction begin];
@@ -19692,8 +19836,18 @@ static void diRhythmTick(void) {
                 diFxSpawnDot(host, cover, (float)maxRad);
             }
         }
-        if (gDIBeatEnv > 0.75f) {
-            for (int i = 0; i < 2 && gDIDotCount < want; i++)
+        /* 3.0.54: 拍点上升沿 = 一次小爆发 —— 所有粒子沿半径瞬间外推, 再从边缘补几颗。
+           视频里粒子是"被鼓点炸开"的, 只靠缓慢漂移 + 缩放做不出那个感觉。 */
+        static float prevPulse = 0.0f;
+        BOOL burst = (gDIBassPulse > 0.42f && prevPulse <= 0.42f);
+        prevPulse = gDIBassPulse;
+        if (burst) {
+            CGFloat Rr = cover.size.width * 0.5f;
+            for (int i = 0; i < gDIDotCount; i++) {
+                gDIDots[i].rad += 2.2f + diFxRand01() * 3.4f;
+                if (gDIDots[i].rad > maxRad) gDIDots[i].rad = (float)(Rr * 1.06f);
+            }
+            for (int i = 0; i < 4 && gDIDotCount < want + 4; i++)
                 diFxSpawnDot(host, cover, (float)maxRad);
         }
     }
