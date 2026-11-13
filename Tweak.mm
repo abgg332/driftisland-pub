@@ -19953,8 +19953,8 @@ static void diRhythmEnsure(void) {
            每两帧才动一次 —— 这就是"一卡一卡"的直接原因。 */
         gDIRhythmLink.preferredFramesPerSecond = 0;
         [gDIRhythmLink addToRunLoop:[NSRunLoop mainRunLoop] forMode:NSRunLoopCommonModes];
-        RLog(@"[律动] 引擎启动 CADisplayLink %.0fHz (总=%d 圆=%d 缩放=%d 环=%d 粒=%d 条=%d)",
-             gDIRhythmLink.preferredFramesPerSecond,
+        RLog(@"[律动] 引擎启动 CADisplayLink %ld (0=跟随原生刷新率) (总=%d 圆=%d 缩放=%d 环=%d 粒=%d 条=%d)",
+             (long)gDIRhythmLink.preferredFramesPerSecond,
              rhythmFxOn, rhythmRoundCover, rhythmOn, rhythmRingOn,
              rhythmParticlesOn, rhythmBarsOn);
     } else if (!need && gDIRhythmLink) {
