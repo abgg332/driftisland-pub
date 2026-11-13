@@ -71,6 +71,7 @@ static BOOL rhythmBarsOn = YES;                // 3.0.48: 频谱条(进度条上
 static int  rhythmBarsCount = 40;              // 3.0.50: 频谱条根数(可调)
 static double rhythmBarsHeight = 13.0;         // 3.0.50: 频谱条长度(可调)
 static double rhythmBarsWidth = 3.0;           // 3.0.51: 频谱条单根最大宽度(可调)
+static double rhythmBarsOffset = 0.0;          // 3.0.52: 频谱条水平位移(可调, 负=左 正=右)
 static double rhythmParticleSize = 1.0;        // 3.0.51: 粒子大小倍率(可调)
 static double rhythmParticleAlpha = 1.0;       // 3.0.48: 粒子透明度
 static double rhythmRingFollowAlpha = 1.0;     // 3.0.48: 环跟随透明度
@@ -914,6 +915,10 @@ static void refreshPrefs(void) {
         if (ps < 0.5) ps = 0.5;
         if (ps > 3.0) ps = 3.0;
         rhythmParticleSize = ps;
+        double off = pDouble(@"AlbumBarsOffset", 0.0);
+        if (off < -120.0) off = -120.0;
+        if (off > 120.0) off = 120.0;
+        rhythmBarsOffset = off;
     }
     rhythmParticleAlpha = pDouble(@"RhythmParticleAlpha", 1.0);
     if (rhythmParticleAlpha < 0.1) rhythmParticleAlpha = 0.1;
@@ -19095,7 +19100,7 @@ static void diFxUpdateDots(UIView *host, CGRect cover, float dt,
         float fade = MIN(1.0f, k * 8.0f);
         if (k < 0.20f) fade = k / 0.20f;
         float tw = 0.66f + 0.34f * sinf(d->phase + (float)gDIClock * 1.6f);
-        float alpha = (0.30f + 0.45f * energy) * fade * tw * (1.0f + 0.25f * beat);
+        float alpha = (0.30f + 0.45f * energy) * fade * tw * (1.0f + 0.55f * beat);   /* 3.0.52: 拍点亮闪同步加大 */
         alpha *= (float)rhythmParticleAlpha;
         if (alpha < 0.04f) alpha = 0.04f;
         if (alpha > 0.95f) alpha = 0.95f;
@@ -19103,7 +19108,7 @@ static void diFxUpdateDots(UIView *host, CGRect cover, float dt,
                                      cy + sinf(d->ang) * d->rad);
         layer.opacity = alpha;
         /* 3.0.51: 跟着鼓点震 —— 拍点上升时整颗放大, 落下缩回, 和封面/刻度同拍 */
-        float pulse = 1.0f + 0.50f * beat;
+        float pulse = 1.0f + 1.00f * beat;   /* 3.0.52: 0.5*beat 拍点满也只放大到1.5倍, beat 峰值通常不到0.5 -> 肉眼看不出。改1.0 */
         CATransform3D tr = CATransform3DMakeRotation(d->rot, 0, 0, 1);
         layer.transform = CATransform3DScale(tr, pulse, pulse, 1.0f);
     }
@@ -19365,6 +19370,8 @@ static void diRhythmUpdateBars(UIView *host, BOOL active) {
         x0 = (host.bounds.size.width - total) * 0.5f;
         if (x0 < 10.0) x0 = 10.0;
     }
+    /* 3.0.52: 整排水平位移可调(负=左 正=右), 不夹死——用户可能就想挪一半出去 */
+    x0 += (CGFloat)rhythmBarsOffset;
 
     if (!gDIRhythmBars) {
         gDIRhythmBars = [CAShapeLayer layer];
@@ -19458,7 +19465,7 @@ static void diRhythmAdvanceSpectrum(BOOL active, BOOL real, float dt) {
         bass /= 4.0f;
         gDISteady = MIN(1.0f, sum / (float)DI_AU_BANDS * 1.5f);
         if (bass > gDIBassPrev + 0.05f)
-            gDIBeatEnv = MIN(1.0f, gDIBeatEnv + (bass - gDIBassPrev) * 2.2f);
+            gDIBeatEnv = MIN(1.0f, gDIBeatEnv + (bass - gDIBassPrev) * 3.2f);   /* 3.0.52: 拍点环境值更容易到顶 */
         gDIBassPrev = bass;
     } else if (active) {
         gDISynPhase += dt * 1.9;
@@ -19527,6 +19534,29 @@ static void diRhythmTick(void) {
         }
     }
     if (!t) { gDISteady = 0; gDIBeatEnv = 0; return; }
+
+    /* 3.0.52: 特效只在不展开的折叠卡上显示。卡片一展开(尺寸和隐藏时间的判定同源,
+       window 坐标量 MRUNowPlaying 容器真实宽高)就整体隐藏: 环/条压到 0、粒子立即
+       淡出不再补发、封面缩放还原 —— 与"隐藏时间"模块展开放行的行为对齐。 */
+    BOOL expanded = diTimeExpanded(t);
+    if (expanded) {
+        [CATransaction begin];
+        [CATransaction setDisableActions:YES];
+        if (gDIRhythmRingGrad) gDIRhythmRingGrad.opacity = 0.0f;
+        if (gDIRhythmRingBack) gDIRhythmRingBack.opacity = 0.0f;
+        if (gDIRhythmBars) gDIRhythmBars.opacity = 0.0f;
+        [CATransaction commit];
+        if (gDIRhythmBaseValid) {
+            [CATransaction begin];
+            [CATransaction setDisableActions:YES];
+            t.layer.transform = gDIRhythmBase;
+            [CATransaction commit];
+        }
+        if (gDIDotCount > 0)
+            diFxUpdateDots(gDIRhythmHost, diRhythmCoverRect(t, gDIRhythmHost), 1.0f/60.0f,
+                           0.0f, 0.0f, NO);   /* active=NO -> 0.3s 内全部淡出 */
+        return;
+    }
 
     NSString *hexA = (rhythmColorA.length ? rhythmColorA : @"#F58A7E");
     NSString *hexB = (rhythmColorB.length ? rhythmColorB : @"#8C7BF0");
