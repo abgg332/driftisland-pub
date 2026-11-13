@@ -6246,9 +6246,26 @@ static NSString *diModeName(int m) {
     }
 }
 
-/* 3.0.57: 流光开关 —— 在"自定义颜色"基础上缓慢转色相。 */
+/* 3.0.57: 流光开关 —— 在"自定义颜色"基础上缓慢转色相。
+   走自己的 setter: 只发轻量 fxtune 通知, 不触发 SpringBoard 全量刷新(那样会闪一下)。 */
 - (PSSpecifier *)fxFlowSpec:(NSString *)title key:(NSString *)key {
-    return [self switchSpec:title key:key def:@NO];
+    PSSpecifier *sp = [PSSpecifier preferenceSpecifierNamed:title target:self
+        set:@selector(diSetFxBool:specifier:) get:@selector(readPreferenceValue:)
+        detail:nil cell:PSSwitchCell edit:nil];
+    [sp setProperty:key forKey:@"key"];
+    [sp setProperty:kDomain forKey:@"defaults"];
+    [sp setProperty:@NO forKey:@"default"];
+    return sp;
+}
+
+- (void)diSetFxBool:(id)value specifier:(PSSpecifier *)sp {
+    NSString *key = [sp propertyForKey:@"key"];
+    if (!key.length) return;
+    CFPreferencesSetAppValue((__bridge CFStringRef)key,
+                             (__bridge CFPropertyListRef)@([value boolValue]),
+                             (__bridge CFStringRef)kDomain);
+    diPostFxTune();
+    diStep(@"%@ = %d", key, [value boolValue] ? 1 : 0);
 }
 
 /* 3.0.45: 播放器域滑杆(与 DIPlayerEntryPage 同一套, 保留两位小数) */
