@@ -18083,28 +18083,6 @@ static UIView *diNPFindTimeControls(UIView *root, BOOL *outIdle) {
     return tc;
 }
 
-/* 找不到时打一次候选类名, 方便下一版精确命中(不刷屏, 全生命周期最多 3 次) */
-static void diNPDumpTimeCandidates(UIView *root) {
-    static int dumped = 0;
-    if (dumped >= 3) return;
-    dumped++;
-    NSMutableArray *names = [NSMutableArray array];
-    NSMutableArray *st = [NSMutableArray arrayWithObject:root];
-    int budget = 800;
-    while (st.count && budget-- > 0) {
-        UIView *v = st.lastObject; [st removeLastObject];
-        NSString *cn = NSStringFromClass(v.class);
-        if ([cn containsString:@"Time"] || [cn containsString:@"Progress"]
-            || [cn containsString:@"Slider"] || [cn containsString:@"Duration"]) {
-            [names addObject:[NSString stringWithFormat:@"%@(%.0fx%.0f)",
-                              cn, v.bounds.size.width, v.bounds.size.height]];
-        }
-        for (UIView *c in v.subviews) [st addObject:c];
-    }
-    RLog(@"[时间] 没找到 TimeControls(根=%@); 候选: %@", NSStringFromClass(root.class),
-         names.count ? [names componentsJoinedByString:@", "] : @"(无)");
-}
-
 /* 3.0.54: 「隐藏时间」下线, 改为「时间条上下移动」。
    每 0.4 秒扫一遍播放卡, 找到 MRUNowPlayingTimeControlsView, 套垂直平移。
    原来那套"未播放就压 alpha"的逻辑整段删除 —— 用户明确说不要隐藏了。 */
@@ -18115,6 +18093,7 @@ static void diNPApplyHideTime(void) {
     lastScan = now;
 
     diTimeInstallHook();
+    diNPQueryNowPlaying();   /* 律动那边还靠 gDIHasNowPlaying 判"到底有没有歌" */
     if (gDITimeTouched) {
         NSArray *snap = gDITimeTouched.allObjects;
         for (UIView *v in snap) {
