@@ -73,6 +73,7 @@ static double rhythmBarsHeight = 13.0;         // 3.0.50: 频谱条长度(可调
 static double rhythmBarsWidth = 3.0;           // 3.0.51: 频谱条单根最大宽度(可调)
 static double rhythmBarsOffset = 0.0;          // 3.0.52: 频谱条水平位移(可调, 负=左 正=右)
 static double rhythmParticleSize = 1.0;        // 3.0.51: 粒子大小倍率(可调)
+static double rhythmParticleStrength = 1.0;    // 3.0.61: 粒子自己的强度(与鼓点/专辑律动无关)
 static double rhythmBarsOffsetY = 0.0;         // 3.0.54: 频谱条垂直位移(正=上移)
 static int    ringColorMode = 0;               // 3.0.54: 0=跟随专辑 1=固定色 2=流光
 static int    particleColorMode = 0;           // 3.0.54: 同上
@@ -902,7 +903,7 @@ static void diFxLoadPrefs(void) {
     rhythmBeatScale = pDouble(@"AlbumBeatScale", 0.70);
     if (rhythmBeatScale < 0.0) rhythmBeatScale = 0.0;
     if (rhythmBeatScale > 2.0) rhythmBeatScale = 2.0;
-    rhythmRoundCover = pBool(@"AlbumRoundCover", YES);
+    rhythmRoundCover = YES;   /* 3.0.61: 开关已从律动页移除(与「启用遮罩」重复), 恒为圆形 */
     rhythmBarsOn = pBool(@"AlbumBarsOn", YES);
     {
         int c = (int)pInt(@"AlbumBarsCount", 40);
@@ -921,6 +922,11 @@ static void diFxLoadPrefs(void) {
         if (ps < 0.2) ps = 0.2;      /* 3.0.56: 与设置页 0.2~2.0 / 0.1 步进对齐 */
         if (ps > 2.0) ps = 2.0;
         rhythmParticleSize = ps;
+        /* 3.0.61: 粒子强度 —— 只管粒子自己(外飘速度/摆动/亮度), 与律动/鼓点完全解耦 */
+        double pst = pDouble(@"AlbumParticleStrength", 1.0);
+        if (pst < 0.0) pst = 0.0;
+        if (pst > 2.0) pst = 2.0;
+        rhythmParticleStrength = pst;
         double off = pDouble(@"AlbumBarsOffset", 0.0);
         if (off < -120.0) off = -120.0;
         if (off > 120.0) off = 120.0;
@@ -16675,6 +16681,11 @@ static void diArtDress(UIView *v) {
             RLog(@"[封面] %@已挂 %@", wantAsset ? @"播放器遮罩" : @"圆形蒙版", desc);
         }
     }
+    /* 3.0.61: **遮罩和旋转彻底分开**。
+       以前这两件事绑在同一个 diArtPrefOn()(「专辑旋转」) 上: 关掉旋转 → 连遮罩一起摘,
+       开着旋转 → 不管遮罩开关都会贴素材。用户 472「启用遮罩关了还显示」/474「专辑冲突」
+       的根就是这个。现在: 遮罩只看「启用遮罩」, 旋转只看「专辑旋转」。 */
+    if (!diArtPrefOn()) return;
     if (![layer animationForKey:@"di.art.spin"]) {
         /* 3.0.57: 律动正在接管这层的 transform(旋转+缩放一起算), 这时再挂 CA 动画
            就是两个写入者抢同一个属性 —— 旋转会忽快忽慢、缩放会被顶掉。直接跳过。 */
@@ -17334,7 +17345,7 @@ static void diArtFlushRun(void) {
         @try {
             if (!a.window || a.hidden || a.alpha < 0.05) continue;
             if (!diArtInControlCenter(a)) continue;
-            if (diArtPrefOn()) diArtDress(a);
+            if (diArtPrefOn() || diArtMaskWanted()) diArtDress(a);   /* 3.0.61: 遮罩独立 */
         } @catch (__unused NSException *e) {}
     }
 }
@@ -17388,7 +17399,8 @@ static void diArtPlayerPost(UIView *root) {
 static void diArtPostFlush(UIView *root) {
     if (!root || !root.window) return;
     diPhase("art");
-    BOOL on = diArtPrefOn();
+    /* 3.0.61: 遮罩(启用遮罩)和旋转(专辑旋转)分开判断 */
+    BOOL on = diArtPrefOn() || diArtMaskWanted();
     /* 3.0.15: 专辑背景跟着"播放器视图"走 —— 播放器视图本身就是各尺寸下的可见卡片
        (3×2 小卡 / 展开卡), 背景铺在它的 bounds 上, 换尺寸自动跟随, 不用再去猜卡片。
        只在图层层面插子层, 不动任何视图/约束。 */
@@ -18513,8 +18525,9 @@ static void diArtChanged(CFNotificationCenterRef c, void *obs, CFStringRef name,
                     diPhase("prefs");
                     diArtDisableNPRSpin();
                     @try { diExportMaskSoon(); } @catch (__unused NSException *e) {}  /* 3.0.24: 保证 mask.png 在 */
-                    BOOL on = diArtPrefOn();
-                    RLog(@"[封面] 开关变化 → %@", on ? @"圆 + 旋转" : @"方形 + 停止");
+                    BOOL on = diArtPrefOn() || diArtMaskWanted();
+                    RLog(@"[封面] 开关变化 → 遮罩/旋转=%@ 遮罩=%@ 旋转=%@", on ? @"开" : @"关",
+                         diArtMaskWanted() ? @"开" : @"关", diArtPrefOn() ? @"开" : @"关");
                     diNPRefreshBackgrounds();
                     for (UIView *host in gDIBgHosts.allObjects) {
                         diNPHideNotPlayingLabels(host, diNPPrefFlag(@"HideNotPlaying", NO));
@@ -18873,34 +18886,109 @@ static __weak UIView *gDIRhythmDrive = nil;   /* 真正承载缩放的视图(封
 /* 3.0.60: 473 日志把问题钉死了 —— `[探针][3x2] 封面#1 MRUArtworkView ... 有内容=0`。
    MRUArtworkView 只是个**空壳**(layer.contents 为 NULL), 真正的专辑图在同位置同尺寸的
    另一个 UIImageView 上。我们缩放空壳, 用户看到的就是"底层一个黑块圆圈在抖, 上面的
-   专辑不动"。现在把那个"有内容的兄弟视图"也找出来, 两个一起写同一个 transform。 */
-static __weak UIView *gDIRhythmExtra = nil;
+   专辑不动"。现在把那个"有内容的兄弟视图"也找出来, 两个一起写同一个 transform。
+   3.0.61: 兄弟不止一个(474 日志里 图=无, 说明真正的图不在 dv.superview 这一层),
+   改成"最多 3 个可写视图"的集合: dv 本身 + 与它同位置同尺寸、且有图像内容的
+   兄弟/叔伯视图。真正的专辑图落在哪一层, 都能被一起缩放。 */
+#define DI_RHYTHM_EXTRA_MAX 3
+static __weak UIView *gDIRhythmExtras[DI_RHYTHM_EXTRA_MAX];
+static int gDIRhythmExtraN = 0;
+static CGSize gDIRhythmBaseSize;       /* 记 base 时 dv 的尺寸 —— 变了说明展开/收起, base 作废 */
+static BOOL gDIRhythmDriving = NO;     /* 上一帧我们是否在写 transform(用于"只还原一次") */
+
+/* 3.0.61: 图层里有内容吗? (CALayer 的 contents 常常挂在子层上, 比如 CAPortalLayer / 图片层) */
+static BOOL diLayerHasContent(CALayer *l, int depth) {
+    if (!l || depth > 4) return NO;
+    if (l.contents != NULL) return YES;
+    for (CALayer *s in l.sublayers)
+        if (diLayerHasContent(s, depth + 1)) return YES;
+    return NO;
+}
 
 static BOOL diViewHasArt(UIView *v) {
     if (!v || v.hidden || v.alpha < 0.05) return NO;
+    if (v.isHiddenOrHasHiddenAncestor) return NO;
     if ([v isKindOfClass:UIImageView.class] && ((UIImageView *)v).image != nil) return YES;
     if (v.layer.contents != NULL) return YES;
     NSString *cn = NSStringFromClass(v.class);
     if ([cn containsString:@"Image"] || [cn containsString:@"Artwork"]) return YES;
+    if (diLayerHasContent(v.layer, 0)) return YES;
     return NO;
 }
 
-/* 同父、同尺寸、同中心、有内容、排在我们之后(更靠上) */
-static UIView *diRhythmExtraFor(UIView *t) {
-    UIView *p = t.superview;
-    if (!p || !t) return nil;
-    CGRect r = t.frame;
-    UIView *best = nil;
-    for (UIView *s in p.subviews) {
-        if (s == t) continue;
+/* 两个视图"是同一块封面"吗: 中心对齐(容差 8pt) + 尺寸接近(0.82~1.18) */
+static BOOL diSameCoverRect(UIView *a, UIView *b, UIView *space) {
+    if (!a || !b || !space || a == b) return NO;
+    CGRect ra = a.superview ? [a.superview convertRect:a.frame toView:space] : a.frame;
+    CGRect rb = b.superview ? [b.superview convertRect:b.frame toView:space] : b.frame;
+    if (fabs(CGRectGetMidX(ra) - CGRectGetMidX(rb)) > 8.0) return NO;
+    if (fabs(CGRectGetMidY(ra) - CGRectGetMidY(rb)) > 8.0) return NO;
+    CGFloat wa = ra.size.width, wb = rb.size.width;
+    if (wa < 8.0 || wb < 8.0) return NO;
+    CGFloat k = wa / wb;
+    if (k < 0.82 || k > 1.18) return NO;
+    CGFloat ha = ra.size.height, hb = rb.size.height;
+    if (ha < 8.0 || hb < 8.0) return NO;
+    CGFloat ky = ha / hb;
+    if (ky < 0.82 || ky > 1.18) return NO;
+    return YES;
+}
+
+/* 3.0.61: 收集"跟封面壳同一块区域、并且真的有图像内容"的其它视图。
+   搜索范围比 3.0.60 宽一层:
+     · dv 的兄弟(dv.superview.subviews)
+     · dv 的叔伯(dv.superview.superview.subviews —— 播放卡里图片常常挂在这一层)
+   子视图不用收: 它们本来就会跟着 dv 的 transform 一起缩放(收了会缩两次)。 */
+static void diRhythmRememberBase(UIView *v);
+static void diRhythmCollectExtras(UIView *dv) {
+    gDIRhythmExtraN = 0;
+    for (int i = 0; i < DI_RHYTHM_EXTRA_MAX; i++) gDIRhythmExtras[i] = nil;
+    if (!dv) return;
+    UIView *space = dv.superview ?: dv;
+    NSMutableArray<UIView *> *pool = [NSMutableArray array];
+    if (dv.superview) [pool addObjectsFromArray:dv.superview.subviews];
+    UIView *gp = dv.superview.superview;
+    if (gp) [pool addObjectsFromArray:gp.subviews];
+    /* 后加入的(更上层)优先 —— 用户要的是"最上面那张真的专辑图" */
+    for (UIView *s in [pool reverseObjectEnumerator]) {
+        if (gDIRhythmExtraN >= DI_RHYTHM_EXTRA_MAX) break;
+        if (s == dv) continue;
+        if (!diSameCoverRect(dv, s, space)) continue;
         if (!diViewHasArt(s)) continue;
-        if (fabs(s.frame.size.width - r.size.width) > 4.0) continue;
-        if (fabs(s.frame.size.height - r.size.height) > 4.0) continue;
-        if (fabs(CGRectGetMidX(s.frame) - CGRectGetMidX(r)) > 4.0) continue;
-        if (fabs(CGRectGetMidY(s.frame) - CGRectGetMidY(r)) > 4.0) continue;
-        best = s;    /* 取数组里最后一个(最上层) */
+        /* 已经是某个已选视图的子孙 → 会缩两次, 跳过 */
+        BOOL nested = NO;
+        for (int i = 0; i < gDIRhythmExtraN; i++) {
+            UIView *e = gDIRhythmExtras[i];
+            if (e && ([s isDescendantOfView:e] || [e isDescendantOfView:s])) { nested = YES; break; }
+        }
+        if (nested) continue;
+        /* 3.0.61: 兄弟层里"真的专辑图"如果排在黑壳下面, 提到壳上面 ——
+           用户 474: "专辑头像应该在最上层吧? 你抓到没有?"。
+           只在自己这一层内调整, 绝不动更上层的系统控件。 */
+        if (s.superview == dv.superview) {
+            @try { [s.superview bringSubviewToFront:s]; } @catch (__unused NSException *e) {}
+        }
+        diRhythmRememberBase(s);
+        gDIRhythmExtras[gDIRhythmExtraN++] = s;
     }
-    return best;
+}
+
+static UIView *diRhythmExtraAt(int i) __attribute__((unused));
+static UIView *diRhythmExtraAt(int i) {
+    return (i >= 0 && i < gDIRhythmExtraN) ? gDIRhythmExtras[i] : nil;
+}
+
+/* 3.0.61: 把一个"被我们写过"的 transform 还原成中性基准 ——
+   同时剥掉缩放和旋转。只剥缩放的话, 重新记 base 时会把上一帧的角度带进去,
+   下一帧再叠一个角度 → 越转越快。 */
+static CATransform3D diRhythmNeutral(CATransform3D cur) {
+    CGFloat sx = sqrt(cur.m11 * cur.m11 + cur.m12 * cur.m12);
+    if (sx < 0.01) sx = 1.0;
+    CGFloat ang = atan2(cur.m12, cur.m11);
+    CATransform3D out = cur;
+    if (fabs(ang) > 0.0005)
+        out = CATransform3DConcat(CATransform3DMakeRotation(-ang, 0, 0, 1), cur);
+    return CATransform3DScale(out, 1.0 / sx, 1.0 / sx, 1.0);
 }
 
 static CATransform3D diRhythmBaseOf(UIView *v) {
@@ -18913,9 +19001,7 @@ static CATransform3D diRhythmBaseOf(UIView *v) {
 
 static void diRhythmRememberBase(UIView *v) {
     if (!v || v == gDIRhythmDrive) return;
-    CATransform3D cur = v.layer.transform;
-    CGFloat sx = sqrt(cur.m11 * cur.m11 + cur.m12 * cur.m12);
-    if (sx > 0.01 && fabs(sx - 1.0) > 0.001) cur = CATransform3DScale(cur, 1.0 / sx, 1.0 / sx, 1.0);
+    CATransform3D cur = diRhythmNeutral(v.layer.transform);
     objc_setAssociatedObject(v, "di.rhythm.base", [NSValue valueWithCATransform3D:cur],
                              OBJC_ASSOCIATION_RETAIN_NONATOMIC);
 }
@@ -18925,14 +19011,13 @@ static void diRhythmWriteTransform(UIView *v, CATransform3D tr) {
     v.layer.transform = tr;
 }
 
-/* 把同一个 tr 写到封面壳 + 有内容的那个视图上 */
+/* 把同一个 tr 写到封面壳 + 所有"有图像内容"的同区域视图上(最多 3 个额外视图) */
 static void diRhythmWriteAll(CGFloat s, CGFloat dy, BOOL spin, double ang, BOOL restored) {
     UIView *dv = gDIRhythmDrive;
-    UIView *ex = gDIRhythmExtra;
     [CATransaction begin];
     [CATransaction setDisableActions:YES];
-    for (int i = 0; i < 2; i++) {
-        UIView *v = (i == 0) ? dv : ex;
+    for (int i = 0; i < 1 + gDIRhythmExtraN; i++) {
+        UIView *v = (i == 0) ? dv : gDIRhythmExtras[i - 1];
         if (!v) continue;
         if (restored) { diRhythmWriteTransform(v, diRhythmBaseOf(v)); continue; }
         CATransform3D tr = diRhythmBaseOf(v);
@@ -19102,12 +19187,13 @@ static void diFxUpdateMask(CGRect cover, float coverScale) {
         gDIDotClipLayer.bounds = b;
         gDIDotClipLayer.position = CGPointMake(hs.width / 2.0, hs.height / 2.0);
     }
-    /* 孔只在封面**放大**时跟着变大 —— 缩小时固定 1.02R。
-       如果随缩放一起缩, 拍点每一下遮挡边界都在动, 边缘粒子忽隐忽现(就是"一卡一卡"的来源之一)。
-       固定下限后: 封面缩小 → 孔比封面大, 边缘那圈粒子正常显示; 封面放大 → 孔跟上, 粒子不会
-       跑到封面图上面来。 */
-    CGFloat sc = MAX(1.0f, coverScale);
-    CGFloat r = MAX(4.0, cover.size.width * 0.5 * sc * 1.02);
+    /* 3.0.61: 孔**固定** 1.02R, 绝不跟封面缩放走。
+       474 用户: "专辑跟随律动怎么会加到粒子上呢? 我要的是专辑" —— 根就在这一行:
+       孔跟着封面一涨一缩, 边缘那圈粒子每一下鼓点被"吃掉"又"吐出来",
+       看上去就是粒子在跟着鼓点抽。现在孔不动, 粒子的可见范围就完全由它自己的
+       漂移决定; 封面涨到 1.18R 时顶多在边缘盖住几颗粒子(物理上就该被挡住)。 */
+    (void)coverScale;
+    CGFloat r = MAX(4.0, cover.size.width * 0.5 * 1.02);
     CGPoint c = CGPointMake(CGRectGetMidX(cover) - (sup ? sup.bounds.origin.x : 0.0),
                             CGRectGetMidY(cover) - (sup ? sup.bounds.origin.y : 0.0));
     static CGRect lastB; static CGPoint lastC; static CGFloat lastR;
@@ -19248,6 +19334,7 @@ static void diFxUpdateDots(UIView *host, CGRect cover, float dt,
     if (gDIDotCount == 0) return;
     if (beat < 0.0f) beat = 0.0f;
     if (beat > 1.0f) beat = 1.0f;
+    (void)energy; (void)beat;      /* 3.0.61: 粒子不再读音频包络 */
     CGFloat cx = CGRectGetMidX(cover) - host.bounds.origin.x;
     CGFloat cy = CGRectGetMidY(cover) - host.bounds.origin.y;
     CGFloat Rc = cover.size.width * 0.5f;
@@ -19273,8 +19360,10 @@ static void diFxUpdateDots(UIView *host, CGRect cover, float dt,
         /* 恒定的外飘 + 摆动, 没有冲量、没有拍点位移 —— 位置永远连续 */
         d->push *= expf(-dt / 0.42f);
         d->ang += d->spin * dt;
-        d->rad += d->drift * dt;
-        float swayV = sinf((float)gDIClock * d->sway + d->swayPhase) * d->swayAmp;
+        /* 3.0.61: 外飘速度/摆动幅度乘「粒子强度」(0=停住, 1=基准, 2=两倍) */
+        float stg = (float)rhythmParticleStrength;
+        d->rad += d->drift * stg * dt;
+        float swayV = sinf((float)gDIClock * d->sway + d->swayPhase) * d->swayAmp * stg;
         d->ang += (swayV / MAX(8.0f, d->rad)) * dt;
         d->rot += d->rotSpd * dt;
 
@@ -19303,7 +19392,11 @@ static void diFxUpdateDots(UIView *host, CGRect cover, float dt,
         /* 3.0.58: 不再用 alpha 假装"藏在专辑后面"(那样粒子只会在边缘凭空出现)。
            现在图层真的排在封面下面, 被封面挡住, 飘出去才露出来。
            亮度也抬上来了: 以前 0.34+0.26, 小尺寸下就是一团灰。 */
-        float alpha = (0.62f + 0.28f * energy) * fadeIn * fadeOut * edgeOut * tw;
+        /* 3.0.61: 亮度只看「粒子强度」—— 跟音乐电平/鼓点**彻底无关**。
+           474 用户: "专辑跟随律动怎么会加到粒子上呢? 我要的是专辑, 粒子是单独的"。
+           现在粒子的呼吸完全由自己的强度决定, 音频包络一个字都不读。 */
+        float bright = 0.55f + 0.30f * MIN(1.2f, stg);
+        float alpha = bright * fadeIn * fadeOut * edgeOut * tw;
         alpha *= (float)rhythmParticleAlpha;
         if (alpha < 0.05f) alpha = 0.05f;
         if (alpha > 0.96f) alpha = 0.96f;
@@ -19488,13 +19581,17 @@ static void diRhythmDetach(void) {
         gDIArtSpinYield = nil;
         if (yv.window) @try { diArtDress(yv); } @catch (__unused NSException *e) {}
     }
-    if (gDIRhythmExtra) {
+    if (gDIRhythmExtraN > 0) {
         [CATransaction begin];
         [CATransaction setDisableActions:YES];
-        gDIRhythmExtra.layer.transform = diRhythmBaseOf(gDIRhythmExtra);
+        for (int i = 0; i < gDIRhythmExtraN; i++)
+            if (gDIRhythmExtras[i])
+                gDIRhythmExtras[i].layer.transform = diRhythmBaseOf(gDIRhythmExtras[i]);
         [CATransaction commit];
     }
-    gDIRhythmExtra = nil;
+    for (int i = 0; i < DI_RHYTHM_EXTRA_MAX; i++) gDIRhythmExtras[i] = nil;
+    gDIRhythmExtraN = 0;
+    gDIRhythmDriving = NO;
     diFxRemoveAllDots();
 }
 
@@ -20055,10 +20152,13 @@ static void diRhythmTickWithDelta(float dtIn) {
             [CATransaction begin];
             [CATransaction setDisableActions:YES];
             oldDrive.layer.transform = gDIRhythmBase;
-            if (gDIRhythmExtra) gDIRhythmExtra.layer.transform = diRhythmBaseOf(gDIRhythmExtra);
+            for (int i = 0; i < gDIRhythmExtraN; i++)
+                if (gDIRhythmExtras[i]) gDIRhythmExtras[i].layer.transform = diRhythmBaseOf(gDIRhythmExtras[i]);
             [CATransaction commit];
         }
-        gDIRhythmExtra = nil;
+        for (int i = 0; i < DI_RHYTHM_EXTRA_MAX; i++) gDIRhythmExtras[i] = nil;
+        gDIRhythmExtraN = 0;
+        gDIRhythmDriving = NO;
         /* 3.0.57: 换目标时把旋转交还给原来那层, 否则它会一直停在我们算出来的角度上 */
         if (gDIArtSpinYield && gDIArtSpinYield == oldDrive) {
             UIView *yv = gDIArtSpinYield;
@@ -20072,18 +20172,20 @@ static void diRhythmTickWithDelta(float dtIn) {
         if (t) {
             UIView *dv = diRhythmDriveView(t);
             gDIRhythmDrive = dv;
-            CATransform3D cur = dv.layer.transform;
-            CGFloat sx = sqrt(cur.m11 * cur.m11 + cur.m12 * cur.m12);
-            if (sx > 0.01 && fabs(sx - 1.0) > 0.001)
-                cur = CATransform3DScale(cur, 1.0 / sx, 1.0 / sx, 1.0);
+            CATransform3D cur = diRhythmNeutral(dv.layer.transform);
             gDIRhythmBase = cur;
+            gDIRhythmBaseSize = dv.bounds.size;
             gDIRhythmBaseValid = YES;
-            /* 3.0.60: 顺手找"真正显示专辑图"的那一层(同位置同尺寸、有内容的兄弟) */
-            gDIRhythmExtra = diRhythmExtraFor(dv);
-            if (gDIRhythmExtra) diRhythmRememberBase(gDIRhythmExtra);
-            if (gDIRhythmExtra)
-                RLog(@"[律动] 封面壳=%@ 内容层=%@ (两者一起缩放)",
-                     NSStringFromClass(dv.class), NSStringFromClass(gDIRhythmExtra.class));
+            /* 3.0.61: 找"真正显示专辑图"的那几层(同区域 + 有图像内容) */
+            diRhythmCollectExtras(dv);
+            {
+                NSMutableString *names = [NSMutableString string];
+                [names appendFormat:@"%@(壳)", NSStringFromClass(dv.class)];
+                for (int i = 0; i < gDIRhythmExtraN; i++)
+                    [names appendFormat:@" + %@ %.0fx%.0f", NSStringFromClass(gDIRhythmExtras[i].class),
+                     gDIRhythmExtras[i].bounds.size.width, gDIRhythmExtras[i].bounds.size.height];
+                RLog(@"[律动] 一起缩放: %@", names);
+            }
             diRhythmRebuild(t);
         } else {
             gDIRhythmDrive = nil;
@@ -20093,8 +20195,17 @@ static void diRhythmTickWithDelta(float dtIn) {
     }
     if (!t) { gDISteady = 0; gDIBeatEnv = 0; gDIBassPulse = 0; return; }
 
+    UIView *dv = gDIRhythmDrive ?: t;
+
     /* 展开态: 特效整体隐藏(与"特效只在不展开的播放卡显示"一致) */
     BOOL expanded = diTimeExpanded(t);
+    /* 3.0.61: 尺寸一变(57 ↔ 308 展开/收起、模块缩放), 之前记的 base 立刻作废。
+       这时**一个字都不写** —— 展开态那张大图的适配缩放是系统用 transform 做的,
+       我们把它按 57pt 时的 base 写回去, 用户看到的就是"关掉旋转后展开全乱了"。 */
+    if (gDIRhythmBaseValid && t && !CGSizeEqualToSize(dv.bounds.size, gDIRhythmBaseSize)) {
+        gDIRhythmBaseValid = NO;
+        gDIRhythmDriving = NO;
+    }
     if (expanded) {
         [CATransaction begin];
         [CATransaction setDisableActions:YES];
@@ -20102,8 +20213,9 @@ static void diRhythmTickWithDelta(float dtIn) {
         if (gDIRhythmRingBack) gDIRhythmRingBack.opacity = 0.0f;
         if (gDIRhythmBarsGrad) gDIRhythmBarsGrad.opacity = 0.0f;
         [CATransaction commit];
-        if (gDIRhythmBaseValid) {
-            diRhythmWriteAll(1.0, 0.0, NO, 0.0, YES);
+        if (gDIRhythmDriving) {
+            if (gDIRhythmBaseValid) diRhythmWriteAll(1.0, 0.0, NO, 0.0, YES);
+            gDIRhythmDriving = NO;
         }
         gDICoverScaleNow = 1.0f;
         if (gDIDotCount > 0)
@@ -20157,68 +20269,74 @@ static void diRhythmTickWithDelta(float dtIn) {
         RLog(@"[律动] 频谱已就绪: 24 段 峰值=%.2f 均值=%.2f (真 FFT)", pk, sum / (float)DI_AU_BANDS);
     }
 
-    UIView *dv = gDIRhythmDrive ?: t;
     CGFloat sDbg = 1.0;
     BOOL ownsSpin = NO;
-    if (!active && gDIRhythmBaseValid) {
-        /* 3.0.59: 没音乐(暂停/停播/切走)时**彻底停下**。
-           472 日志末段: 播=0 之后 缩放还停在 0.940 —— 因为下面那个分支不看 active,
-           包络衰减到 0 后还剩 breath 在写, transform 永远回不到 base, 封面就一直是
-           "被缩小 6% 且轻微呼吸"的状态, 用户看到的就是"没音乐了还在动"。
-           现在直接复位成 base, 并且不再接管旋转(动画已摘掉, 画面完全静止)。 */
-        diRhythmWriteAll(1.0, 0.0, NO, 0.0, YES);
-        gDICoverScaleNow = 1.0f;
-        sDbg = 1.0;
-    } else if (active && rhythmOn && gDIRhythmBaseValid) {
-        /* 3.0.57: 旋转归属权 —— 这层上挂着 di.art.spin(transform.rotation.z, 10s 一圈)。
-           我们每帧写整个 transform 就是在跟这条动画抢同一个属性: 探针里 m11 会间歇
-           变回 1.000(写进去又被顶掉), 旋转看着也一会儿快一会儿慢。
-           律动接管期间把动画摘掉, 旋转和缩放由这一帧一次算完; 律动关了再交还。 */
-        /* 3.0.60: 接管旋转**必须**看「专辑旋转」开关（ArtworkRotationEnabled）。
-           473 用户: 关掉旋转后"不展开的也还转" —— 因为 3.0.57 起我们只要律动开着就
-           每帧算一个旋转角写进 transform, 压根没看开关; 而 CA 动画早被我们摘掉了,
-           所以开关失效、只能一直转。
-           关掉开关时: 不接管、不加旋转角, 把归属权标记清掉, 让 diArtDress 那边
-           也不要再挂动画(它自己会读同一个开关)。 */
-        BOOL spinAllowed = diArtPrefOn();
-        if (!spinAllowed && gDIArtSpinYield == dv) {
-            gDIArtSpinYield = nil;
-            [dv.layer removeAnimationForKey:@"di.art.spin"];
-        }
-        if (spinAllowed && [dv.layer animationForKey:@"di.art.spin"]) {
-            [dv.layer removeAnimationForKey:@"di.art.spin"];
-            gDIArtSpinYield = dv;
-            RLog(@"[律动] 接管封面旋转(摘掉 di.art.spin, 改为每帧与缩放一起算)");
-        }
-        if (spinAllowed && gDIArtSpinYield == dv) ownsSpin = YES;
+    /* 3.0.61: 旋转**只认**「原生播放 → 专辑旋转」这一个开关。
+       律动页的「圆形封面」已删除, 不再有第二个东西去改专辑的形状/旋转。 */
+    BOOL wantSpin = diArtPrefOn();
 
-        /* 3.0.58: 幅度按"围绕 1.0 上下摆"算, 不再是一直往上顶。3.0.57 的幅度上限被
-           顶到 1.28 且包络回不去, 封面上就停在"一直很大"的状态, 看着像没动。 */
-        /* 3.0.59: 幅度加大(0.24→0.30), 并且**基准点从 0.40 抬到 0.28** ——
-           472 日志里包络几乎一直在 0.4~0.7, 减掉 0.4 之后只剩 0~0.3 个单位的起伏,
-           再乘 0.24 就是 ±3%, 57pt 的封面上不到 2pt, 肉眼当然"没效果"。
-           现在每个拍点往上冲 15%~20%, 拍之间落回 1.0 以下, 有收有放才看得出"抖"。 */
-        CGFloat amp = 0.30 * rhythmBeatScale;
-        CGFloat e = 0.25 * gDISteady + 0.75 * gDIBeatEnv;
-        CGFloat breath = 0.005 * sin((CGFloat)gDIClock * 1.15);
-        CGFloat s = 1.0 + (e - 0.28) * amp + breath;
-        if (s < 0.86) s = 0.86;
-        if (s > 1.20) s = 1.20;
-        sDbg = s;
-        gDICoverScaleNow = (float)s;      /* 粒子遮罩的孔要跟着封面一起缩放 */
-        CGFloat dy = -(CGFloat)gDIBeatEnv * 5.0 * (CGFloat)rhythmBeatScale;
-        double ang = 0.0;
-        if (ownsSpin) {
-            if (gDISpinEpoch <= 0) gDISpinEpoch = CACurrentMediaTime();
-            ang = fmod(CACurrentMediaTime() - gDISpinEpoch, kDISpinDur) / kDISpinDur * M_PI * 2.0;
+    if (!active) {
+        /* 3.0.59: 没音乐(暂停/停播/切走)时**彻底停下**。
+           3.0.61: 只还原一次(以前每帧都写, 停播后 transform 一直被我们按着)。 */
+        if (gDIRhythmDriving) {
+            if (gDIRhythmBaseValid) diRhythmWriteAll(1.0, 0.0, NO, 0.0, YES);
+            gDIRhythmDriving = NO;
         }
-        diRhythmWriteAll(s, dy, ownsSpin, ang, NO);
-    } else if (gDIRhythmBaseValid) {
-        /* rhythmOn 关了(但粒子/频谱还开着): 复位缩放, 把旋转交还给 CA 动画 */
-        diRhythmWriteAll(1.0, 0.0, NO, 0.0, YES);
-        if (gDIArtSpinYield == dv) {
+        if (gDIArtSpinYield && gDIArtSpinYield == dv) {
             gDIArtSpinYield = nil;
             if (dv.window) @try { diArtDress(dv); } @catch (__unused NSException *e) {}
+        }
+        gDICoverScaleNow = 1.0f;
+        sDbg = 1.0;
+    } else if (rhythmOn) {
+        /* 尺寸变了之后(展开→收起)base 已作废, 用系统现在的 transform 重新记一次 */
+        if (!gDIRhythmBaseValid && dv) {
+            CATransform3D cur = diRhythmNeutral(dv.layer.transform);
+            gDIRhythmBase = cur;
+            gDIRhythmBaseSize = dv.bounds.size;
+            gDIRhythmBaseValid = YES;
+            gDIRhythmDrive = dv;
+            if (gDIRhythmExtraN == 0) diRhythmCollectExtras(dv);
+        }
+        if (gDIRhythmBaseValid) {
+            /* 3.0.57: 旋转归属权 —— 这层上挂着 di.art.spin(transform.rotation.z, 10s 一圈)。
+               我们每帧写整个 transform 就是在跟这条动画抢同一个属性: 探针里 m11 会间歇
+               变回 1.000(写进去又被顶掉), 旋转看着也一会儿快一会儿慢。
+               律动接管期间把动画摘掉, 旋转和缩放由这一帧一次算完; 律动关了再交还。 */
+            if ([dv.layer animationForKey:@"di.art.spin"]) {
+                [dv.layer removeAnimationForKey:@"di.art.spin"];
+                RLog(@"[律动] 接管封面旋转(摘掉 di.art.spin, 改为每帧与缩放一起算)");
+            }
+            gDIArtSpinYield = dv;
+            ownsSpin = wantSpin;      /* 开关关了就不给角度 → 静止, 不再"关了还转" */
+
+            /* 3.0.61: 幅度再抬一档, 并且**上下都摆**(以前基准 0.28 偏低, 只在峰值上方
+               才有变化, 大部分帧落在钳位 1.000 上, 看着就是"根本没动")。
+               现在: 拍点冲到 1.10~1.18, 拍与拍之间落回 0.94~0.98, 57pt 上有 8~10pt 起伏。 */
+            CGFloat amp = 0.34 * rhythmBeatScale;
+            CGFloat e = 0.25 * gDISteady + 0.75 * gDIBeatEnv;
+            CGFloat breath = 0.006 * sin((CGFloat)gDIClock * 1.15);
+            CGFloat s = 1.0 + (e - 0.34) * amp * 2.0 + breath;
+            if (s < 0.90) s = 0.90;
+            if (s > 1.18) s = 1.18;
+            sDbg = s;
+            gDICoverScaleNow = (float)s;      /* 粒子遮罩的孔要跟着封面一起缩放 */
+            CGFloat dy = -(CGFloat)gDIBeatEnv * 5.0 * (CGFloat)rhythmBeatScale;
+            double ang = 0.0;
+            if (ownsSpin) {
+                if (gDISpinEpoch <= 0) gDISpinEpoch = CACurrentMediaTime();
+                ang = fmod(CACurrentMediaTime() - gDISpinEpoch, kDISpinDur) / kDISpinDur * M_PI * 2.0;
+            }
+            diRhythmWriteAll(s, dy, ownsSpin, ang, NO);
+            gDIRhythmDriving = YES;
+        }
+    } else if (gDIRhythmDriving) {
+        /* rhythmOn 关了(但粒子/频谱还开着): 复位缩放, 把旋转交还给 CA 动画 */
+        if (gDIRhythmBaseValid) diRhythmWriteAll(1.0, 0.0, NO, 0.0, YES);
+        gDIRhythmDriving = NO;
+        if (gDIArtSpinYield == dv) {
+            gDIArtSpinYield = nil;
+            if (wantSpin && dv.window) @try { diArtDress(dv); } @catch (__unused NSException *e) {}
         }
     }
 
@@ -20233,12 +20351,17 @@ static void diRhythmTickWithDelta(float dtIn) {
             /* 3.0.58: 旋转接管后 m11 = cos(角度)×缩放, 单看 m11 会以为是乱跳。
                这里取 (m11,m12) 的模长 = 真正的缩放倍率。 */
             CGFloat sReal = sqrt(p3.m11 * p3.m11 + p3.m12 * p3.m12);
-            RLog(@"[探针] 通量=%.3f 低频=%.3f 拍=%.2f 缩放=%.3f 实=%.3f 驱动=%@ 图=%@ 旋=%@ 播=%d 粒=%d",
+            NSMutableString *exs = [NSMutableString string];
+            for (int i = 0; i < gDIRhythmExtraN; i++)
+                [exs appendFormat:@"%@%.0f ", NSStringFromClass(gDIRhythmExtras[i].class),
+                 gDIRhythmExtras[i].bounds.size.width];
+            RLog(@"[探针] 通量=%.3f 低频=%.3f 拍=%.2f 缩放=%.3f 实=%.3f 驱动=%@ 图=%@ 旋=%@ 播=%d 粒=%d 强=%.1f 律=%d 基=%d",
                  gDIFluxNow, gDILowLevel, gDIBeatEnv, sDbg, sReal,
                  NSStringFromClass(dv.class),
-                 gDIRhythmExtra ? NSStringFromClass(gDIRhythmExtra.class) : @"无",
-                 ([dv.layer animationForKey:@"di.art.spin"] ? @"CA" : (ownsSpin ? @"我们" : @"无")),
-                 active ? 1 : 0, gDIDotCount);
+                 gDIRhythmExtraN ? exs : @"无",
+                 ([dv.layer animationForKey:@"di.art.spin"] ? @"CA" : (ownsSpin ? @"我们" : (wantSpin ? @"等" : @"关"))),
+                 active ? 1 : 0, gDIDotCount, rhythmParticleStrength,
+                 rhythmOn ? 1 : 0, gDIRhythmBaseValid ? 1 : 0);
         }
     }
 

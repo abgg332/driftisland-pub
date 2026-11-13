@@ -384,6 +384,7 @@ static double diStepReadValue(UITableViewCell *cell) {
 static double diStepForKeyOverride(NSString *key) {
     if (![key isKindOfClass:NSString.class] || !key.length) return 0.0;
     if ([key isEqualToString:@"AlbumParticleSize"]) return 0.1;
+    if ([key isEqualToString:@"AlbumParticleStrength"]) return 0.1;
     if ([key isEqualToString:@"AlbumBeatScale"]) return 0.05;
     if ([key isEqualToString:@"RhythmParticleAlpha"]) return 0.05;
     return 0.0;
@@ -479,6 +480,10 @@ static void diStepSliderLayout(UITableViewCell *cell) {
     UIView *cv = cell.contentView;
     CGFloat H = cv.bounds.size.height, W = cv.bounds.size.width;
     if (W < 100 || H < 20) return;
+
+    /* 3.0.61: 这一行已经由 DIMiniBaseController 的「单行盒子」(标题 − 滑杆 + 数值)
+       渲染了, 别再画第二套(两行版会跟盒子叠在一起, 出现两条滑杆/两个 + 号)。 */
+    if (objc_getAssociatedObject(cell, "diMiniBox")) return;
 
     diStepCacheSpec(cell);
     if (![objc_getAssociatedObject(cell, "di_k_step") boolValue]) return;
@@ -4620,8 +4625,24 @@ static void diOpenHomeBarPickWindow(void) {
     id v = CFBridgingRelease(CFPreferencesCopyAppValue((__bridge CFStringRef)key, (__bridge CFStringRef)kDomain));
     return v ? [v doubleValue] : def;
 }
+/* 3.0.61: **这里才是设置页真正的步进**。
+   律动特效页(DIFxPage : DIMiniBaseController)的每一行，最终都是本类的
+   willDisplayCell: 里那个"单行盒子"(标题 − 滑杆 + 数值)画出来的，
+   ± 走 diStep: / diSliderMoved: / diApplyValue:，三个都读 numStepForKey，
+   而它以前是 `FPS ? 1.0 : 0.5` —— 所以 3.0.57~3.0.60 里无论怎么改
+   diStepOf / diStepForKeyOverride(那套是给另一个两行渲染器用的)，
+   "粒子大小"永远还是 0.5 一档。现在按 key 精确给步进。 */
 - (double)numStepForKey:(NSString *)key {
-    return ([key containsString:@"FPS"] ? 1.0 : 0.5);
+    if (![key isKindOfClass:NSString.class] || !key.length) return 0.5;
+    if ([key containsString:@"FPS"]) return 1.0;
+    /* 粒子 / 专辑律动：一律 0.1 一档(用户反复强调: 1 为基准, ± 都是 0.1) */
+    if ([key isEqualToString:@"AlbumParticleSize"]) return 0.1;
+    if ([key isEqualToString:@"AlbumParticleStrength"]) return 0.1;
+    if ([key isEqualToString:@"RhythmParticleAlpha"]) return 0.1;
+    if ([key isEqualToString:@"AlbumBeatScale"]) return 0.1;
+    /* 计数类给 1，避免出现 30.5 根频谱条 */
+    if ([key containsString:@"Count"] || [key isEqualToString:@"AlbumBarsCount"]) return 1.0;
+    return 0.5;
 }
 - (id)readSmallAnimName:(PSSpecifier *)sp { return [self folderNameForKey:@"smallAnimFolder"]; }
 - (id)readAudioAnimName:(PSSpecifier *)sp { return [self folderNameForKey:@"miniAudioFolder"]; }
@@ -4751,6 +4772,7 @@ static void diOpenHomeBarPickWindow(void) {
     NSString *key = objc_getAssociatedObject(box, "key");
     double st = [self numStepForKey:key];
     v = round(v / st) * st;
+    v = round(v * 1000.0) / 1000.0;      /* 3.0.61: 0.1 步进会留 1.2000000000000002 */
     if (v < mn) v = mn; if (v > mx) v = mx;
     [self diWrite:key value:v];
     UISlider *sl = objc_getAssociatedObject(box, "slider");
@@ -6497,7 +6519,9 @@ static NSString *diModeName(int m) {
     NSMutableArray *specs = [NSMutableArray array];
     [specs addObject:[self groupSpec:@"专辑律动" footer:nil]];
     [specs addObject:[self switchSpec:@"启用律动特效" key:@"AlbumEffectsOn" def:@YES]];
-    [specs addObject:[self switchSpec:@"圆形封面" key:@"AlbumRoundCover" def:@YES]];
+    /* 3.0.61: 删掉「圆形封面」—— 它和「原生播放 → 启用遮罩」抢同一件事(封面的形状),
+       用户 474 原话"功能里有个旋转、律动里又有个圆形封面, 专辑都冲突了"。
+       专辑形状统一由「启用遮罩」管; 这里恒为圆形(与历史默认一致, 不改观感)。 */
     [specs addObject:[self switchSpec:@"专辑跟随律动" key:@"AlbumRhythmOn" def:@YES]];
     [specs addObject:[self npSlider:@"专辑律动幅度" key:@"AlbumBeatScale" def:0.70 mn:0.00 mx:2.00]];
 
@@ -6505,11 +6529,11 @@ static NSString *diModeName(int m) {
     [specs addObject:[self switchSpec:@"启用律动粒子" key:@"AlbumParticlesOn" def:@YES]];
     [specs addObject:[self npSlider:@"粒子数量" key:@"AlbumParticleCount2" def:25 mn:0 mx:40]];
     [specs addObject:[self npSlider:@"粒子透明" key:@"RhythmParticleAlpha" def:0.74 mn:0.10 mx:1.50]];
-    {
-        PSSpecifier *psz = [self npSlider:@"粒子大小" key:@"AlbumParticleSize" def:1.0 mn:0.1 mx:2.0];
-        [psz setProperty:@(0.1) forKey:@"diStep"];
-        [specs addObject:psz];
-    }
+    /* 3.0.61: 粒子大小/强度都走 0.1 步进, 由 numStepForKey: 决定, 这里不再挂 diStep
+       (挂了会让另一套两行渲染器再画一遍, 出现两条滑杆)。 */
+    [specs addObject:[self npSlider:@"粒子大小" key:@"AlbumParticleSize" def:1.0 mn:0.1 mx:2.0]];
+    /* 3.0.61: 粒子自己的强度 —— 和专辑律动完全无关的一个独立参数 */
+    [specs addObject:[self npSlider:@"粒子强度" key:@"AlbumParticleStrength" def:1.0 mn:0.0 mx:2.0]];
     [specs addObject:[self modeSpec:@"颜色来源" key:@"ParticleColorMode"]];
     [specs addObject:[self fxColorSpec:@"起始颜色" key:@"ParticleColorA" def:@"#FFFFBC" modeKey:@"ParticleColorMode"]];
     [specs addObject:[self fxColorSpec:@"结束颜色" key:@"ParticleColorB" def:@"#BFCDF8" modeKey:@"ParticleColorMode"]];
