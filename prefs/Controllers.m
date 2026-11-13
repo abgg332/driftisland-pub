@@ -245,7 +245,7 @@ static BOOL diIsFxKey(NSString *key) {
     static NSArray<NSString *> *pfx;
     static dispatch_once_t once;
     dispatch_once(&once, ^{
-        pfx = @[@"Album", @"Rhythm", @"Particle", @"Spectrum", @"Ring", @"TimeYOffset"];
+        pfx = @[@"Album", @"Rhythm", @"Particle", @"Spectrum", @"Ring"];
     });
     for (NSString *p in pfx) if ([key hasPrefix:p]) return YES;
     return NO;
@@ -6020,13 +6020,12 @@ static void diNPEnsureActivation(void) {
     [specs addObject:[self npSwitch:@"封面背景" key:@"MusicArtworkGradientEnabled" def:YES]];
     /* 3.1.0: 参考 CCUIPlayer 的 HideNotPlaying —— 打开后隐藏模块里的「未在播放」文字 */
     [specs addObject:[self npSwitch:@"隐藏未在" key:@"HideNotPlaying" def:NO]];
-    /* 3.0.54: 隐藏时间下线, 改为时间条上下移动(正=上移) */
-    [specs addObject:[self npSlider:@"时间条上下移动" key:@"TimeYOffset" def:0.0 mn:-40.0 mx:40.0]];
+    /* 3.0.58: 「时间条上下移动」已按用户要求删除。 */
     [specs addObject:[self npRotateSwitch]];
     /* 3.0.24: 「禁止 N95 修改专辑图」删除(用不上); 「隐藏投送图标」改名「隐藏投送」。 */
     [specs addObject:[self npSwitch:@"隐藏投送" key:@"HideRoutingIcon" def:NO]];
     /* 3.0.41: 播放器遮罩 —— 按用户要求就地展开, 开关 + 素材直接排在这一页, 不再进二级页 */
-    [specs addObject:[self switchSpec:@"启用播放器遮罩" key:kDIPlayerMaskOnKey def:@NO]];
+    [specs addObject:[self switchSpec:@"启用遮罩" key:kDIPlayerMaskOnKey def:@NO]];
     [specs addObject:[self linkSpec:@"遮罩素材" detail:[DIPlayerMaskPicker class]]];
     /* 3.0.45: 律动特效 —— 设置全部收进一个入口页(用户要求) */
     [specs addObject:[self linkSpec:@"律动特效" detail:[DIFxPage class]]];
@@ -6164,6 +6163,51 @@ static id gDIFxColorBridge = nil;
 }
 @end
 
+/* 3.0.58: 颜色行 —— 右边直接显示一个色块。
+   用户原话: "把图二的颜色后面显示颜色出来, 不然不知道什么颜色"。
+   只写 HEX 根本看不出是什么颜色, 这里在行尾画一个 26pt 的圆角色块。 */
+@interface DIFxColorCell : PSButtonCell
+@property (nonatomic, strong) UIView *diChip;
+@end
+
+@implementation DIFxColorCell
+
+- (instancetype)initWithStyle:(UITableViewCellStyle)style reuseIdentifier:(NSString *)reuseIdentifier
+                    specifier:(PSSpecifier *)specifier {
+    self = [super initWithStyle:style reuseIdentifier:reuseIdentifier specifier:specifier];
+    if (self) {
+        _diChip = [[UIView alloc] initWithFrame:CGRectZero];
+        _diChip.layer.cornerRadius = 6.0;
+        _diChip.layer.cornerCurve = kCACornerCurveContinuous;
+        _diChip.layer.borderWidth = 0.5;
+        _diChip.layer.borderColor = [UIColor colorWithWhite:0.55 alpha:0.55].CGColor;
+        _diChip.userInteractionEnabled = NO;
+        [self.contentView addSubview:_diChip];
+    }
+    return self;
+}
+
+- (void)refreshCellContentsWithSpecifier:(PSSpecifier *)specifier {
+    [super refreshCellContentsWithSpecifier:specifier];
+    NSString *hex = [specifier propertyForKey:@"diColorHex"];
+    if ([hex isKindOfClass:NSString.class] && hex.length)
+        _diChip.backgroundColor = diColorFromHexStr(hex, UIColor.whiteColor);
+    self.titleLabel.text = specifier.name;
+    self.titleLabel.textAlignment = NSTextAlignmentLeft;
+    [self setNeedsLayout];
+}
+
+- (void)layoutSubviews {
+    [super layoutSubviews];
+    CGFloat h = self.contentView.bounds.size.height;
+    CGFloat w = self.contentView.bounds.size.width;
+    self.diChip.frame = CGRectMake(MAX(0.0, w - 16.0 - 26.0), (h - 26.0) / 2.0, 26.0, 26.0);
+    self.titleLabel.frame = CGRectMake(16.0, 0.0, MAX(0.0, w - 16.0 - 26.0 - 32.0), h);
+    self.titleLabel.font = [UIFont systemFontOfSize:17.0];
+}
+
+@end
+
 @implementation DIFxPage
 
 /* 3.0.57: 颜色不再"三态循环锁死"。
@@ -6220,6 +6264,8 @@ static NSString *diModeName(int m) {
                                                      target:self set:NULL get:NULL detail:nil cell:PSButtonCell edit:nil];
     [sp setProperty:key forKey:@"diColorKey"];
     [sp setProperty:mk forKey:@"diColorModeKey"];
+    [sp setProperty:upper forKey:@"diColorHex"];    /* 3.0.58: 行尾色块用 */
+    [sp setProperty:NSClassFromString(@"DIFxColorCell") forKey:@"cellClass"];
     sp.buttonAction = @selector(diPickFxColor:);
     return sp;
 }
@@ -6395,20 +6441,18 @@ static NSString *diModeName(int m) {
 
 - (NSArray *)buildSpecifiers {
     NSMutableArray *specs = [NSMutableArray array];
-    [specs addObject:[self groupSpec:@"专辑律动"
-        footer:@"封面裁成正圆, 并跟随音乐拍点缩放(幅度可调)。拍点用全谱通量判定(底鼓/军鼓/拍手/人声起音都会触发), 频谱来自 mediaserverd 的 AudioUnitRender(1024 点 FFT), 暂停时全部归零。特效只在未展开的播放卡上显示。"]];
+    [specs addObject:[self groupSpec:@"专辑律动" footer:nil]];
     [specs addObject:[self switchSpec:@"启用律动特效" key:@"AlbumEffectsOn" def:@YES]];
     [specs addObject:[self switchSpec:@"圆形封面" key:@"AlbumRoundCover" def:@YES]];
     [specs addObject:[self switchSpec:@"专辑跟随律动" key:@"AlbumRhythmOn" def:@YES]];
     [specs addObject:[self npSlider:@"专辑律动幅度" key:@"AlbumBeatScale" def:0.70 mn:0.00 mx:2.00]];
 
-    [specs addObject:[self groupSpec:@"律动粒子"
-        footer:@"粒子从专辑背后随机位置冒出, 跟着拍点向外轻轻一撑再收回, 平时自然飘散。颜色来源: 「跟随封面」取封面颜色;「自定义」用你选的两个色(渐变) —— 选色即生效, 不限颜色数量/色相。流光 = 在你选的颜色上缓慢转色相。粒子大小 1.0 为基准, 每按一次 + 是 0.1。"]];
+    [specs addObject:[self groupSpec:@"律动粒子" footer:nil]];
     [specs addObject:[self switchSpec:@"启用律动粒子" key:@"AlbumParticlesOn" def:@YES]];
     [specs addObject:[self npSlider:@"粒子数量" key:@"AlbumParticleCount2" def:25 mn:0 mx:40]];
     [specs addObject:[self npSlider:@"粒子透明" key:@"RhythmParticleAlpha" def:0.74 mn:0.10 mx:1.50]];
     {
-        PSSpecifier *psz = [self npSlider:@"粒子大小" key:@"AlbumParticleSize" def:1.0 mn:0.2 mx:2.0];
+        PSSpecifier *psz = [self npSlider:@"粒子大小" key:@"AlbumParticleSize" def:1.0 mn:0.1 mx:2.0];
         [psz setProperty:@(0.1) forKey:@"diStep"];
         [specs addObject:psz];
     }
@@ -6417,8 +6461,7 @@ static NSString *diModeName(int m) {
     [specs addObject:[self fxColorSpec:@"结束颜色" key:@"ParticleColorB" def:@"#BFCDF8" modeKey:@"ParticleColorMode"]];
     [specs addObject:[self fxFlowSpec:@"流光(颜色缓慢流动)" key:@"ParticleFlowOn"]];
 
-    [specs addObject:[self groupSpec:@"频谱条"
-        footer:@"进度条上方那一排小竖条, 中间高向两侧递减。颜色来源同上: 「跟随封面」或「自定义」(两个色做渐变, 选色即生效), 流光在自定义色上缓慢转色相。上下位移 -150~150。"]];
+    [specs addObject:[self groupSpec:@"频谱条" footer:nil]];
     [specs addObject:[self switchSpec:@"启用频谱条" key:@"AlbumBarsOn" def:@YES]];
     [specs addObject:[self npSlider:@"根数" key:@"AlbumBarsCount" def:40 mn:8 mx:64]];
     [specs addObject:[self npSlider:@"长度" key:@"AlbumBarsHeight" def:13.0 mn:4.0 mx:40.0]];
