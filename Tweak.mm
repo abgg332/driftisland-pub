@@ -19136,7 +19136,7 @@ static void diRhythmLayoutRing(CGRect cover, const float *bands, BOOL active) {
     CGFloat tickW = MIN(3.4, MAX(1.5, R * 0.055)) * (CGFloat)(rhythmRingWidth / 2.2);
     tickW *= (0.92 + 0.28 * gDIBeatEnv);
     gDIRhythmRingMask.lineWidth = tickW;
-    CGFloat pad = R + gap + maxLen + tickW;
+    CGFloat pad = R + gap + 2.2 + maxLen + tickW + 3.0;   /* +2.2 基线长度 +3 余量, 最长刻度不切头 */
     CGRect boxFrame = CGRectMake(CGRectGetMidX(cover) - pad, CGRectGetMidY(cover) - pad,
                                  pad * 2, pad * 2);
     if (!CGRectEqualToRect(boxFrame, gDIRhythmRingFrame)) {
