@@ -19075,10 +19075,10 @@ static void diFxSpawnDot(UIView *host, CGRect cover, float maxRad) {
        经常一出生就已经在边缘外面, 用户说的"启动太外面了"就是这个。
        现在粒子真的排在专辑图层下面(见 diFxEnsurePool 的 zPosition), 出生在盘子里,
        被封面挡着; 慢慢飘到边缘才"露出来", 这就是视频里那种从专辑后面散出来的感觉。 */
-    d->rad = (float)R * (0.15f + diFxRand01() * 0.65f);
+    d->rad = (float)R * (0.45f + diFxRand01() * 0.40f);   /* 0.45~0.85R: 藏在盘子里, 飘出来才露头 */
     d->spin = (diFxRand01() - 0.5f) * 0.05f;
     /* 外飘 2.5~6px/s: 视频里几乎看不出"在飞", 只是缓缓地、一点点往外挪 */
-    d->drift = 2.5f + diFxRand01() * 3.5f;
+    d->drift = 3.5f + diFxRand01() * 3.5f;
     d->push = 0.0f;
     d->sway = 0.30f + diFxRand01() * 0.45f;          /* 摆动角速度 */
     d->swayAmp = 0.6f + diFxRand01() * 1.4f;         /* 摆动幅度(速度, px/s) */
@@ -19093,7 +19093,7 @@ static void diFxSpawnDot(UIView *host, CGRect cover, float maxRad) {
                                : (4.2f + diFxRand01() * 2.6f)) * sizeMul;
     d->rot = diFxRand01() * (float)M_PI * 2.0f;
     d->rotSpd = (diFxRand01() - 0.5f) * 0.30f;
-    d->maxLife = 6.0f + diFxRand01() * 5.0f;   /* 6~11s: 慢慢飘, 不急着消失 */
+    d->maxLife = 8.0f + diFxRand01() * 6.0f;   /* 8~14s: 前面有一段藏在专辑后面, 露出来还能飘很久 */
     d->life = d->maxLife;
     d->phase = diFxRand01() * (float)M_PI * 2.0f;
     d->tint = diFxRand01();

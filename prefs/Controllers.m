@@ -6166,16 +6166,19 @@ static id gDIFxColorBridge = nil;
 /* 3.0.58: 颜色行 —— 右边直接显示一个色块。
    用户原话: "把图二的颜色后面显示颜色出来, 不然不知道什么颜色"。
    只写 HEX 根本看不出是什么颜色, 这里在行尾画一个 26pt 的圆角色块。 */
-@interface DIFxColorCell : PSButtonCell
+@interface DIFxColorCell : PSTableCell
 @property (nonatomic, strong) UIView *diChip;
 @end
 
 @implementation DIFxColorCell
 
+/* 注意: PSButtonCell 在 Preferences 里是个 cell 类型常量, 不是可继承的类,
+   所以这里继承 PSTableCell, 自己装一个点击手势去调 specifier 的 buttonAction。 */
 - (instancetype)initWithStyle:(UITableViewCellStyle)style reuseIdentifier:(NSString *)reuseIdentifier
                     specifier:(PSSpecifier *)specifier {
     self = [super initWithStyle:style reuseIdentifier:reuseIdentifier specifier:specifier];
     if (self) {
+        self.selectionStyle = UITableViewCellSelectionStyleDefault;
         _diChip = [[UIView alloc] initWithFrame:CGRectZero];
         _diChip.layer.cornerRadius = 6.0;
         _diChip.layer.cornerCurve = kCACornerCurveContinuous;
@@ -6183,8 +6186,22 @@ static id gDIFxColorBridge = nil;
         _diChip.layer.borderColor = [UIColor colorWithWhite:0.55 alpha:0.55].CGColor;
         _diChip.userInteractionEnabled = NO;
         [self.contentView addSubview:_diChip];
+        UITapGestureRecognizer *tap = [[UITapGestureRecognizer alloc] initWithTarget:self
+                                                                             action:@selector(diTap)];
+        [self.contentView addGestureRecognizer:tap];
     }
     return self;
+}
+
+- (void)diTap {
+    PSSpecifier *sp = self.specifier;
+    SEL a = sp.buttonAction;
+    id tgt = sp.target;
+    if (a && tgt && [tgt respondsToSelector:a]) {
+        IMP imp = [tgt methodForSelector:a];
+        void (*fn)(id, SEL, id) = (void (*)(id, SEL, id))imp;
+        fn(tgt, a, sp);
+    }
 }
 
 - (void)refreshCellContentsWithSpecifier:(PSSpecifier *)specifier {
@@ -6193,6 +6210,7 @@ static id gDIFxColorBridge = nil;
     if ([hex isKindOfClass:NSString.class] && hex.length)
         _diChip.backgroundColor = diColorFromHexStr(hex, UIColor.whiteColor);
     self.titleLabel.text = specifier.name;
+    self.titleLabel.textColor = [UIColor systemBlueColor];
     self.titleLabel.textAlignment = NSTextAlignmentLeft;
     [self setNeedsLayout];
 }
