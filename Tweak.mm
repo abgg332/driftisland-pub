@@ -67,6 +67,9 @@ static BOOL rhythmOn = YES;                    // 封面律动: 随节拍缩放
 static BOOL rhythmRingOn = YES;                // 律动环(锥形渐变圆环 + 外圈刻度)
 static BOOL rhythmParticlesOn = YES;           // 封面外圈粒子
 static BOOL rhythmRoundCover = YES;            // 3.0.47: 封面裁成正圆
+static BOOL rhythmBarsOn = YES;                // 3.0.48: 频谱条(进度条上方)
+static double rhythmParticleAlpha = 1.0;       // 3.0.48: 粒子透明度
+static double rhythmRingFollowAlpha = 1.0;     // 3.0.48: 环跟随透明度
 static int  rhythmParticleCount = 12;          // 3.0.47: 参考视频里只有十几颗
 static double rhythmStrength = 0.90;           // 律动强度(刻度最长值的比例)
 static double rhythmBeatScale = 0.70;          // 专辑律动幅度
@@ -872,13 +875,20 @@ static void refreshPrefs(void) {
     if (rhythmBeatScale < 0.0) rhythmBeatScale = 0.0;
     if (rhythmBeatScale > 2.0) rhythmBeatScale = 2.0;
     rhythmRoundCover = pBool(@"AlbumRoundCover", YES);
+    rhythmBarsOn = pBool(@"AlbumBarsOn", YES);
+    rhythmParticleAlpha = pDouble(@"RhythmParticleAlpha", 1.0);
+    if (rhythmParticleAlpha < 0.1) rhythmParticleAlpha = 0.1;
+    if (rhythmParticleAlpha > 1.5) rhythmParticleAlpha = 1.5;
+    rhythmRingFollowAlpha = pDouble(@"RhythmRingFollowAlpha", 1.0);
+    if (rhythmRingFollowAlpha < 0.1) rhythmRingFollowAlpha = 0.1;
+    if (rhythmRingFollowAlpha > 1.5) rhythmRingFollowAlpha = 1.5;
     /* 3.0.47 换了刻度/粒子的画法, 旧值(4.2 / 25)会让新视觉走形, 改用新键重来 */
     rhythmRingWidth = pDouble(@"AlbumRingWidth2", 2.2);
     if (rhythmRingWidth < 0.8) rhythmRingWidth = 0.8;
     if (rhythmRingWidth > 8.0) rhythmRingWidth = 8.0;
     {
         int c = (int)pInt(@"AlbumParticleCount2", 12);
-        if (c < 4) c = 4;
+        if (c < 0) c = 0;
         if (c > 40) c = 40;
         rhythmParticleCount = c;
     }
@@ -18679,27 +18689,27 @@ __attribute__((constructor)) static void init(void) {
     }
 }
 
-/* ================= 3.0.47: 专辑律动特效(按 FlexMusic 参考视频逐帧对齐) =================
-   3.0.46 与参考视频的差距(用户明确否定), 逐条对齐:
+/* ================= 3.0.48: 专辑律动特效(FlexMusic 结构对齐版) =================
+   3.0.47 仍然"不对"的原因, 逐条查过:
 
-   参考视频里真实存在的元素:
-     1. 封面是**正圆**, 不是圆角方块;
-     2. 圆盘外是一圈**粗密的放射刻度**(约 88 根、宽 2pt 以上、圆头),
-        每一根的**长短不同**, 长短跟着 24 段频谱绕圈走 —— 这是"跟拍"的来源,
-        颜色由锥形渐变染出来(珊瑚橙 → 粉 → 紫罗兰 → 淡紫);
-     3. 周围飘的是**空心几何图形**(小方块 / 三角 / 菱形 / 小圆环, 1pt 描边),
-        米金色为主、少量淡紫, 数量很少(十几颗), 贴着封面外圈缓慢漂移自转;
-     4. 没有铺满整卡的发光圆球 —— 3.0.46 的"星尘"正是让画面变成一团污渍的原因。
+     a) 频率端根本没接上 —— FlexMusic 装完会在 postinst 里
+        `killall -9 mediaserverd`, 我们的 DIAudio 是 3.0.45 新加的 dylib,
+        不重启这个守护进程就永远不注入 → 没有真频谱 → 刻度只能一圈一样长。
+        3.0.48 起 postinst 也重启 mediaserverd。
+     b) 目标乱跳 —— 日志里 10 秒内 4 次重建, 在 MRUNowPlayingView(263x170) 和
+        MRUMediaSuggestionsView(356x407) 之间来回切。特效被挂到"媒体建议"页上,
+        看起来就是闪/错位。3.0.48 只认控制中心播放卡, 且加 1.5s 防抖。
+     c) 画法还是不对 —— 把参考视频逐帧放大到 6 倍量过(480p 录屏):
+        · 刻度是**实心圆头短棒**(不是细线): 宽≈0.065R、长约 0.25R、约 80 根、
+          间距≈0.045R, 几乎贴着封面外沿; 下面垫一层同形状的宽描边做柔光;
+        · 粒子是**实心小圆点 + 空心菱形/方块/三角**的混合, 不是纯描边;
+        · 颜色不是我们猜的: FlexMusic 包里就有 #FFFFDA / #BFCDBA / #C6A9DC
+          三个常量(淡黄/灰绿/淡紫), 粒子直接用它们。
+     d) 参考里还有一条**频谱条**(进度条上方的紫色小竖条), 这一版补上。
 
-   3.0.47 的做法:
-     · 封面裁成正圆(可关), 环画在封面外 2.5pt 处;
-     · 刻度环 88 根, 长短 = 24 段真实频谱插值(3.0.46 只有 RMS, 所以永远是一圈
-       等长短线, 怎么调都不像);
-     · 粒子换成 4 种空心几何形状, 锚在封面周围的环带上, 不再铺满卡片;
-     · 暂停/停止: 频谱归零 → 刻度收回成小点、环变暗, 粒子淡出, 不再生成。
-
-   频谱来自 DIAudio.dylib(mediaserverd 内 hook AudioUnitRender, 1024 点 FFT,
-   24 段对数频带, 33ms 一包 36 字节走 127.0.0.1:41235)。 */
+   数据链: DIAudio.dylib(mediaserverd) hook AudioUnitRender → 1024 点 FFT →
+   24 段 → 127.0.0.1:41235 每 33ms 一包。暂停/没歌 → 频谱归零。
+   ===================================================================== */
 #include <sys/socket.h>
 #include <netinet/in.h>
 #include <arpa/inet.h>
@@ -18719,8 +18729,8 @@ static float gDIAuFast = 0.0f, gDIAuSlow = 0.0f;
 static CFAbsoluteTime gDIAuStamp = 0;
 static uint8_t gDIAuBuf[512];
 static int gDIAuLen = 0;
-static float gDIBandRaw[DI_AU_BANDS];      /* 最新一包(0..1) */
-static float gDIBandSmooth[DI_AU_BANDS];   /* 显示用(快起慢落) */
+static float gDIBandRaw[DI_AU_BANDS];
+static float gDIBandSmooth[DI_AU_BANDS];
 static BOOL gDIBandSeen = NO;
 static BOOL gDIAuLogged = NO, gDIAuFailLogged = NO;
 
@@ -18732,7 +18742,7 @@ static void diAuClose(void) {
 
 static void diAuParse(void) {
     while (gDIAuLen >= DI_AU_PKT) {
-        if (gDIAuBuf[0] != 0xD7) {          /* 失步: 丢一个字节重新对齐 */
+        if (gDIAuBuf[0] != 0xD7) {
             memmove(gDIAuBuf, gDIAuBuf + 1, (size_t)(gDIAuLen - 1));
             gDIAuLen--;
             continue;
@@ -18747,9 +18757,8 @@ static void diAuParse(void) {
             gDIAuSlow = s;
             for (int i = 0; i < DI_AU_BANDS; i++)
                 gDIBandRaw[i] = (i < nb) ? (float)gDIAuBuf[12 + i] / 255.0f : 0.0f;
-            if (!gDIBandSeen) {
+            if (!gDIBandSeen)
                 RLog(@"[律动] 频谱首包: %d 段 fast=%.3f slow=%.3f (真 FFT)", nb, f, s);
-            }
             gDIBandSeen = YES;
             gDIAuStamp = CFAbsoluteTimeGetCurrent();
         }
@@ -18773,13 +18782,12 @@ static void diAuPoll(void) {
         if (r == 0) {
             gDIAuFd = fd; gDIAuConnecting = NO;
             if (!gDIAuLogged) { gDIAuLogged = YES; RLog(@"[律动] 频谱端已连接 127.0.0.1:%d", DI_AU_PORT); }
-        }
-        else if (errno == EINPROGRESS) { gDIAuFd = fd; gDIAuConnecting = YES; }
+        } else if (errno == EINPROGRESS) { gDIAuFd = fd; gDIAuConnecting = YES; }
         else {
             close(fd);
             if (!gDIAuFailLogged) {
                 gDIAuFailLogged = YES;
-                RLog(@"[律动] 频谱端连不上 (errno=%d) —— 检查 DIAudio.dylib 是否注入 mediaserverd", errno);
+                RLog(@"[律动] 频谱端连不上 (errno=%d) —— DIAudio 未注入 mediaserverd", errno);
             }
         }
         return;
@@ -18799,7 +18807,7 @@ static void diAuPoll(void) {
             if (errno != EAGAIN && errno != EWOULDBLOCK) diAuClose();
             break;
         }
-        if (gDIAuLen + (int)n > (int)sizeof(gDIAuBuf)) gDIAuLen = 0;  /* 异常: 重来 */
+        if (gDIAuLen + (int)n > (int)sizeof(gDIAuBuf)) gDIAuLen = 0;
         memcpy(gDIAuBuf + gDIAuLen, tmp, (size_t)n);
         gDIAuLen += (int)n;
         diAuParse();
@@ -18819,27 +18827,31 @@ static __weak UIView *gDIRhythmHost = nil;
 static CALayer *gDIRhythmRingBox = nil;
 static CAGradientLayer *gDIRhythmRingGrad = nil;
 static CAShapeLayer *gDIRhythmRingMask = nil;
+static CAShapeLayer *gDIRhythmRingBack = nil;
+static CAShapeLayer *gDIRhythmBars = nil;
 static CATransform3D gDIRhythmBase;
 static BOOL gDIRhythmBaseValid = NO;
 static CGRect gDIRhythmRingFrame = {{0, 0}, {0, 0}};
 static NSString *gDIRhythmUsedA = nil;
 static NSString *gDIRhythmUsedB = nil;
-static float gDIBeatEnv = 0.0f;      /* 拍点包络 0..1 */
-static float gDISteady = 0.0f;       /* 稳态能量 0..1 */
+static float gDIBeatEnv = 0.0f;
+static float gDISteady = 0.0f;
 static float gDIBassPrev = 0.0f;
-static double gDISynPhase = 0.0;     /* 合成频谱相位(兜底) */
+static double gDISynPhase = 0.0;
 static CFTimeInterval gDIFxLast = 0;
 static CFTimeInterval gDIClock = 0;
+static CFTimeInterval gDITargetAt = 0;
 static BOOL gDIFxLogged = NO;
 
-/* 圆角还原 */
 static __weak UIView *gDICoverRounded = nil;
 static CGFloat gDICoverOrigRadius = 0;
 static BOOL gDICoverOrigClip = NO;
 
-/* 刻度全部按封面半径等比缩放 —— 参考视频里 刻度宽≈0.055R、刻度长≈0.15~0.30R、
-   间距≈0.08R(约 78 根/圈)。写死 pt 数在小封面上会互相重叠糊成一圈实线。 */
-#define DI_TICK_N      78
+/* 量出来的比例(见文件头): 刻度 80 根 / 宽 0.065R / 长 0.26R / 间距 0.045R */
+#define DI_TICK_N      80
+#define DI_TICK_W      0.065
+#define DI_TICK_LEN    0.26
+#define DI_TICK_GAP    0.045
 
 static UIColor *diRhythmHexColor(NSString *hex, UIColor *def) {
     if (![hex isKindOfClass:NSString.class]) return def;
@@ -18853,20 +18865,14 @@ static UIColor *diRhythmHexColor(NSString *hex, UIColor *def) {
                             blue:(v & 0xFF) / 255.0 alpha:1.0];
 }
 
-/* ---------- 粒子池(空心几何图形) ---------- */
-#define DI_DOT_CAP 40
+/* ---------- 粒子池(实心点 + 空心几何) ---------- */
+#define DI_DOT_CAP 48
 typedef struct {
-    float ang;        /* 绕封面角度(rad) */
-    float rad;        /* 到封面中心距离(pt) */
-    float spin;       /* 角速度 rad/s */
-    float drift;      /* 径向速度 pt/s */
-    float size;       /* 边长 pt */
-    float rot;        /* 自转角 */
-    float rotSpd;     /* 自转角速度 */
-    float life, maxLife;
-    float phase;
-    int   shape;      /* 0 方块 1 三角 2 菱形 3 圆环 */
-    int   colorIdx;
+    float ang, rad, spin, drift;
+    float size, rot, rotSpd;
+    float life, maxLife, phase;
+    int   shape;      /* 0 实心点 1 空心菱形 2 空心方块 3 空心三角 */
+    int   colorIdx;   /* 0 #FFFFDA 1 #BFCDBA 2 #C6A9DC */
 } DIDot;
 
 static DIDot gDIDots[DI_DOT_CAP];
@@ -18874,39 +18880,34 @@ static CALayer *gDIDotLayer[DI_DOT_CAP];
 static int gDIDotCount = 0;
 static float gDISpawnAcc = 0.0f;
 
-static float diFxRand01(void) {
-    return (float)((double)arc4random() / (double)UINT32_MAX);
-}
+static float diFxRand01(void) { return (float)((double)arc4random() / (double)UINT32_MAX); }
 
-/* 以 layer 本地坐标为中心的空心图形路径 */
 static CGPathRef diFxShapePath(int shape, CGFloat s) {
     CGMutablePathRef p = CGPathCreateMutable();
-    CGFloat h = s * 0.5f, inset = 1.2f;
+    CGFloat h = s * 0.5f, in2 = 1.1f;
     switch (shape) {
-        case 0:   /* 方块 */
-            CGPathAddRect(p, NULL, CGRectMake(-h + inset, -h + inset,
-                                              s - inset * 2, s - inset * 2));
-            break;
-        case 1: { /* 三角 */
-            CGFloat r = h - inset;
+        case 1: {
+            CGFloat r = h - in2;
             CGPathMoveToPoint(p, NULL, 0, -r);
-            CGPathAddLineToPoint(p, NULL, r * 0.92f, r * 0.72f);
-            CGPathAddLineToPoint(p, NULL, -r * 0.92f, r * 0.72f);
-            CGPathCloseSubpath(p);
-            break;
-        }
-        case 2: { /* 菱形 */
-            CGFloat r = h - inset;
-            CGPathMoveToPoint(p, NULL, 0, -r);
-            CGPathAddLineToPoint(p, NULL, r * 0.78f, 0);
+            CGPathAddLineToPoint(p, NULL, r * 0.72f, 0);
             CGPathAddLineToPoint(p, NULL, 0, r);
-            CGPathAddLineToPoint(p, NULL, -r * 0.78f, 0);
+            CGPathAddLineToPoint(p, NULL, -r * 0.72f, 0);
             CGPathCloseSubpath(p);
             break;
         }
-        default:  /* 圆环 */
-            CGPathAddEllipseInRect(p, NULL, CGRectMake(-h + inset, -h + inset,
-                                                       s - inset * 2, s - inset * 2));
+        case 2:
+            CGPathAddRect(p, NULL, CGRectMake(-h + in2, -h + in2, s - in2 * 2, s - in2 * 2));
+            break;
+        case 3: {
+            CGFloat r = h - in2;
+            CGPathMoveToPoint(p, NULL, 0, -r);
+            CGPathAddLineToPoint(p, NULL, r * 0.88f, r * 0.66f);
+            CGPathAddLineToPoint(p, NULL, -r * 0.88f, r * 0.66f);
+            CGPathCloseSubpath(p);
+            break;
+        }
+        default:
+            CGPathAddEllipseInRect(p, NULL, CGRectMake(-h, -h, s, s));
             break;
     }
     return p;
@@ -18921,7 +18922,14 @@ static void diFxRemoveAllDots(void) {
     gDISpawnAcc = 0;
 }
 
-/* 在封面外圈环带上放一颗 */
+static UIColor *diFxParticleColor(int idx) {
+    switch (idx) {
+        case 0: return [UIColor colorWithRed:1.000 green:1.000 blue:0.855 alpha:1.0]; /* #FFFFDA */
+        case 1: return [UIColor colorWithRed:0.749 green:0.804 blue:0.729 alpha:1.0]; /* #BFCDBA */
+        default: return [UIColor colorWithRed:0.776 green:0.663 blue:0.863 alpha:1.0];/* #C6A9DC */
+    }
+}
+
 static void diFxSpawnDot(UIView *host, CGRect cover, float maxRad) {
     if (!host) return;
     int slot = -1;
@@ -18934,24 +18942,23 @@ static void diFxSpawnDot(UIView *host, CGRect cover, float maxRad) {
     DIDot *d = &gDIDots[slot];
     CGFloat R = cover.size.width * 0.5f;
     d->ang = diFxRand01() * (float)M_PI * 2.0f;
-    float lo = (float)R * 1.18f, hi = MIN(maxRad, (float)R * 2.05f);
+    float lo = (float)R * 1.12f, hi = MIN(maxRad, (float)R * 2.30f);
     if (hi < lo + 4) hi = lo + 4;
     d->rad = lo + diFxRand01() * (hi - lo);
-    d->spin = (diFxRand01() - 0.5f) * 0.16f;
-    d->drift = (diFxRand01() - 0.5f) * 2.6f;
-    d->size = 4.2f + diFxRand01() * 3.4f;
+    d->spin = (diFxRand01() - 0.5f) * 0.14f;
+    d->drift = (diFxRand01() - 0.5f) * 2.2f;
+    int sh = arc4random() % 10;
+    d->shape = (sh < 5) ? 0 : (sh < 7 ? 1 : (sh < 9 ? 2 : 3));   /* 一半是实心点 */
+    d->size = (d->shape == 0) ? (2.6f + diFxRand01() * 2.2f)
+                              : (4.6f + diFxRand01() * 3.0f);
     d->rot = diFxRand01() * (float)M_PI * 2.0f;
-    d->rotSpd = (diFxRand01() - 0.5f) * 0.5f;
-    d->maxLife = 6.0f + diFxRand01() * 6.0f;
+    d->rotSpd = (diFxRand01() - 0.5f) * 0.45f;
+    d->maxLife = 5.5f + diFxRand01() * 6.0f;
     d->life = d->maxLife;
     d->phase = diFxRand01() * (float)M_PI * 2.0f;
-    d->shape = (int)(arc4random() % 4);
-    int cr = arc4random() % 10;
-    d->colorIdx = (cr < 7) ? 0 : (cr < 9 ? 1 : 2);   /* 7 米金 / 2 淡紫 / 1 白 */
+    d->colorIdx = (int)(arc4random() % 10 < 6 ? 0 : (arc4random() % 2 ? 1 : 2));
 
-    UIColor *gold = [UIColor colorWithRed:0.929 green:0.886 blue:0.752 alpha:1.0];
-    UIColor *lav  = [UIColor colorWithRed:0.788 green:0.753 blue:0.961 alpha:1.0];
-    UIColor *tint = (d->colorIdx == 0) ? gold : ((d->colorIdx == 1) ? lav : UIColor.whiteColor);
+    UIColor *tint = diFxParticleColor(d->colorIdx);
     CALayer *layer = gDIDotLayer[slot];
     if (!layer) {
         layer = [CAShapeLayer layer];
@@ -18964,21 +18971,26 @@ static void diFxSpawnDot(UIView *host, CGRect cover, float maxRad) {
     CGPathRef path = diFxShapePath(d->shape, sz);
     sl.path = path;
     CGPathRelease(path);
-    sl.fillColor = UIColor.clearColor.CGColor;
-    sl.strokeColor = tint.CGColor;
-    sl.lineWidth = 1.0;
+    if (d->shape == 0) {
+        sl.fillColor = tint.CGColor;
+        sl.strokeColor = UIColor.clearColor.CGColor;
+        sl.lineWidth = 0;
+    } else {
+        sl.fillColor = UIColor.clearColor.CGColor;
+        sl.strokeColor = tint.CGColor;
+        sl.lineWidth = 1.0;
+    }
     sl.lineJoin = kCALineJoinRound;
-    sl.lineCap = kCALineCapRound;
     sl.shadowColor = tint.CGColor;
-    layer.shadowOpacity = 0.35f;
-    layer.shadowRadius = 2.0;
-    layer.shadowOffset = CGSizeZero;
-    layer.opacity = 0;
+    sl.shadowOpacity = (d->shape == 0) ? 0.55f : 0.25f;
+    sl.shadowRadius = 1.5;
+    sl.shadowOffset = CGSizeZero;
+    sl.opacity = 0;
     if (!layer.superlayer) [host.layer addSublayer:layer];
 }
 
 static void diFxUpdateDots(UIView *host, CGRect cover, float dt,
-                          float energy, float beat, BOOL active) {
+                           float energy, float beat, BOOL active) {
     if (!host || gDIDotCount == 0) return;
     CGFloat cx = CGRectGetMidX(cover), cy = CGRectGetMidY(cover);
     [CATransaction begin];
@@ -18989,18 +19001,19 @@ static void diFxUpdateDots(UIView *host, CGRect cover, float dt,
         if (!layer) continue;
         if (d->life <= 0) { [layer removeFromSuperlayer]; continue; }
         d->life -= dt;
-        if (!active && d->life > 0.35f) d->life = 0.35f;   /* 暂停 → 全部淡出 */
+        if (!active && d->life > 0.30f) d->life = 0.30f;
         if (d->life <= 0) { [layer removeFromSuperlayer]; continue; }
         d->ang += d->spin * dt;
         d->rad += d->drift * dt;
         d->rot += d->rotSpd * dt;
         float k = d->life / d->maxLife;
-        float fade = MIN(1.0f, k * 6.0f);                 /* 出生淡入 */
-        if (k < 0.22f) fade = k / 0.22f;                   /* 消亡淡出 */
-        float tw = 0.62f + 0.38f * sinf(d->phase + (float)gDIClock * 1.7f);
-        float alpha = (0.42f + 0.42f * energy) * fade * tw * (1.0f + 0.30f * beat);
-        if (alpha < 0.05f) alpha = 0.05f;
-        if (alpha > 0.92f) alpha = 0.92f;
+        float fade = MIN(1.0f, k * 8.0f);
+        if (k < 0.20f) fade = k / 0.20f;
+        float tw = 0.66f + 0.34f * sinf(d->phase + (float)gDIClock * 1.6f);
+        float alpha = (0.30f + 0.45f * energy) * fade * tw * (1.0f + 0.25f * beat);
+        alpha *= (float)rhythmParticleAlpha;
+        if (alpha < 0.04f) alpha = 0.04f;
+        if (alpha > 0.95f) alpha = 0.95f;
         layer.position = CGPointMake(cx + cosf(d->ang) * d->rad,
                                      cy + sinf(d->ang) * d->rad);
         layer.opacity = alpha;
@@ -19010,12 +19023,22 @@ static void diFxUpdateDots(UIView *host, CGRect cover, float dt,
 }
 
 /* ---------- 目标/宿主 ---------- */
+static BOOL diViewIsSuggestions(UIView *v) {
+    UIView *p = v;
+    for (int i = 0; i < 6 && p; i++) {
+        if ([NSStringFromClass(p.class) containsString:@"Suggestion"]) return YES;
+        p = p.superview;
+    }
+    return NO;
+}
+
 static UIView *diRhythmPickTarget(void) {
     UIView *best = nil;
     CGFloat bestArea = 0;
     if (!gDIArtKnown) return nil;
     for (UIView *v in gDIArtKnown.allObjects) {
         if (!v.window || v.hidden || v.alpha < 0.3) continue;
+        if (diViewIsSuggestions(v)) continue;          /* 3.0.48: 不认"媒体建议"页 */
         CGSize s = v.bounds.size;
         if (s.width < 40 || s.width > 220) continue;
         CGFloat ratio = s.width / MAX(1.0, s.height);
@@ -19026,7 +19049,6 @@ static UIView *diRhythmPickTarget(void) {
     return best;
 }
 
-/* 宿主: 往上找一块"比封面大不少且不裁剪"的祖先(环/粒子都画在这上面) */
 static UIView *diRhythmHostFor(UIView *t) {
     if (!t) return nil;
     CGFloat need = MAX(150.0, t.bounds.size.width * 1.35);
@@ -19045,7 +19067,6 @@ static UIView *diRhythmHostFor(UIView *t) {
     return s ?: t.superview;
 }
 
-/* 封面在宿主坐标系里的矩形(封面在缩放, 不能用 convertRect:) */
 static CGRect diRhythmCoverRect(UIView *t, UIView *host) {
     CGSize s = t.bounds.size;
     CATransform3D tr = t.layer.transform;
@@ -19056,7 +19077,6 @@ static CGRect diRhythmCoverRect(UIView *t, UIView *host) {
     return CGRectMake(c.x - s.width / 2, c.y - s.height / 2, s.width, s.height);
 }
 
-/* 封面裁成正圆(可还原) */
 static void diCoverRound(UIView *t) {
     if (!t) return;
     if (gDICoverRounded != t) {
@@ -19089,8 +19109,13 @@ static void diRhythmDetach(void) {
         [gDIRhythmRingBox removeFromSuperlayer];
         gDIRhythmRingBox = nil;
     }
+    if (gDIRhythmBars) {
+        [gDIRhythmBars removeFromSuperlayer];
+        gDIRhythmBars = nil;
+    }
     gDIRhythmRingGrad = nil;
     gDIRhythmRingMask = nil;
+    gDIRhythmRingBack = nil;
     gDIRhythmRingFrame = CGRectZero;
     gDIRhythmHost = nil;
     diFxRemoveAllDots();
@@ -19102,6 +19127,18 @@ static void diRhythmBuildRing(UIView *host, UIColor *ca, UIColor *cb) {
     box.zPosition = 900;
     box.masksToBounds = NO;
     [host.layer addSublayer:box];
+
+    /* 底层: 同形状的宽描边, 做柔光(参考里刻度是发光的实心棒, 不是细线) */
+    CAShapeLayer *back = [CAShapeLayer layer];
+    back.fillColor = UIColor.clearColor.CGColor;
+    back.strokeColor = ca.CGColor;
+    back.lineCap = kCALineCapRound;
+    back.opacity = 0.0f;
+    back.shadowColor = ca.CGColor;
+    back.shadowOpacity = 0.5f;
+    back.shadowRadius = 3.0;
+    back.shadowOffset = CGSizeZero;
+    [box addSublayer:back];
 
     CAGradientLayer *g = [CAGradientLayer layer];
     @try { [g setValue:@"conical" forKey:@"type"]; } @catch (__unused NSException *e) {}
@@ -19115,7 +19152,7 @@ static void diRhythmBuildRing(UIView *host, UIColor *ca, UIColor *cb) {
     CAShapeLayer *mask = [CAShapeLayer layer];
     mask.fillColor = UIColor.clearColor.CGColor;
     mask.strokeColor = UIColor.whiteColor.CGColor;
-    mask.lineWidth = 2.0;      /* 每帧按封面半径重算 */
+    mask.lineWidth = 2.0;
     mask.lineCap = kCALineCapRound;
     g.mask = mask;
     [box addSublayer:g];
@@ -19123,20 +19160,23 @@ static void diRhythmBuildRing(UIView *host, UIColor *ca, UIColor *cb) {
     gDIRhythmRingBox = box;
     gDIRhythmRingGrad = g;
     gDIRhythmRingMask = mask;
+    gDIRhythmRingBack = back;
     gDIRhythmRingFrame = CGRectZero;
 }
 
-/* 刻度: 88 根圆头线段, 长度按 24 段频谱插值, 环绕一圈 */
+/* 刻度: 80 根实心圆头短棒, 长度按 24 段频谱插值 */
 static void diRhythmLayoutRing(CGRect cover, const float *bands, BOOL active) {
     if (!gDIRhythmRingBox) return;
     CGFloat R = cover.size.width * 0.5f;
-    CGFloat gap = MAX(1.0, R * 0.045);                    /* ≈1.3pt @57 封面 */
-    CGFloat maxLen = R * 0.30 * (CGFloat)rhythmStrength;  /* ≈7.7pt @57 封面 */
-    if (maxLen < 3.0) maxLen = 3.0;
-    CGFloat tickW = MIN(3.4, MAX(1.5, R * 0.055)) * (CGFloat)(rhythmRingWidth / 2.2);
-    tickW *= (0.92 + 0.28 * gDIBeatEnv);
+    CGFloat gap = R * DI_TICK_GAP;
+    CGFloat maxLen = R * DI_TICK_LEN * (CGFloat)rhythmStrength;
+    if (maxLen < 2.5) maxLen = 2.5;
+    CGFloat tickW = MAX(1.4, R * DI_TICK_W) * (CGFloat)(rhythmRingWidth / 2.2);
+    tickW *= (0.94 + 0.22 * gDIBeatEnv);
     gDIRhythmRingMask.lineWidth = tickW;
-    CGFloat pad = R + gap + 2.2 + maxLen + tickW + 3.0;   /* +2.2 基线长度 +3 余量, 最长刻度不切头 */
+    if (gDIRhythmRingBack) gDIRhythmRingBack.lineWidth = tickW * 1.25;
+
+    CGFloat pad = R + gap + maxLen + tickW * 2.2 + 3.0;
     CGRect boxFrame = CGRectMake(CGRectGetMidX(cover) - pad, CGRectGetMidY(cover) - pad,
                                  pad * 2, pad * 2);
     if (!CGRectEqualToRect(boxFrame, gDIRhythmRingFrame)) {
@@ -19144,9 +19184,7 @@ static void diRhythmLayoutRing(CGRect cover, const float *bands, BOOL active) {
         gDIRhythmRingBox.frame = boxFrame;
         gDIRhythmRingGrad.frame = gDIRhythmRingBox.bounds;
         gDIRhythmRingMask.frame = gDIRhythmRingGrad.bounds;
-    } else if (gDIRhythmRingMask.frame.size.width != gDIRhythmRingGrad.bounds.size.width) {
-        gDIRhythmRingGrad.frame = gDIRhythmRingBox.bounds;
-        gDIRhythmRingMask.frame = gDIRhythmRingGrad.bounds;
+        gDIRhythmRingBack.frame = gDIRhythmRingBox.bounds;
     }
 
     CGPoint c = CGPointMake(gDIRhythmRingBox.bounds.size.width / 2,
@@ -19155,7 +19193,6 @@ static void diRhythmLayoutRing(CGRect cover, const float *bands, BOOL active) {
     CGMutablePathRef tp = CGPathCreateMutable();
     for (int i = 0; i < DI_TICK_N; i++) {
         CGFloat a = (CGFloat)i / (CGFloat)DI_TICK_N * M_PI * 2.0 - M_PI_2;
-        /* 24 段频谱按角度插值(平滑过渡, 不会一段一跳) */
         CGFloat pos = (CGFloat)i / (CGFloat)DI_TICK_N * DI_AU_BANDS;
         int b0 = (int)pos % DI_AU_BANDS;
         int b1 = (b0 + 1) % DI_AU_BANDS;
@@ -19163,12 +19200,73 @@ static void diRhythmLayoutRing(CGRect cover, const float *bands, BOOL active) {
         CGFloat band = bands[b0] * (1.0f - fr) + bands[b1] * fr;
         if (band < 0) band = 0;
         if (band > 1) band = 1;
-        CGFloat len = active ? (2.2 + maxLen * pow(band, 0.85)) : 2.2;
+        CGFloat len = active ? (1.2 + maxLen * pow(band, 0.80)) : 1.2;
         CGPathMoveToPoint(tp, NULL, c.x + cos(a) * r0, c.y + sin(a) * r0);
         CGPathAddLineToPoint(tp, NULL, c.x + cos(a) * (r0 + len), c.y + sin(a) * (r0 + len));
     }
     gDIRhythmRingMask.path = tp;
+    if (gDIRhythmRingBack) gDIRhythmRingBack.path = tp;
     CGPathRelease(tp);
+}
+
+/* ---------- 频谱条(进度条上方的小竖条) ---------- */
+static UIView *diFindSliderIn(UIView *v, int depth) {
+    if (!v || depth > 8) return nil;
+    if ([NSStringFromClass(v.class) containsString:@"Slider"] &&
+        v.bounds.size.width >= 60 && !v.hidden) return v;
+    for (UIView *s in v.subviews) {
+        UIView *r = diFindSliderIn(s, depth + 1);
+        if (r) return r;
+    }
+    return nil;
+}
+
+static void diRhythmUpdateBars(UIView *host, BOOL active) {
+    if (!host) return;
+    if (!rhythmBarsOn) {
+        if (gDIRhythmBars) { [gDIRhythmBars removeFromSuperlayer]; gDIRhythmBars = nil; }
+        return;
+    }
+    UIView *sl = diFindSliderIn(host, 0);
+    if (!sl) {
+        if (gDIRhythmBars) { [gDIRhythmBars removeFromSuperlayer]; gDIRhythmBars = nil; }
+        return;
+    }
+    CGRect sf = [sl convertRect:sl.bounds toView:host];
+    CGFloat bottom = CGRectGetMinY(sf) - 5.0;
+    CGFloat height = 13.0;
+    CGFloat top = bottom - height;
+    if (top < 4) return;
+
+    CGFloat x0 = 14.0, x1 = host.bounds.size.width - 14.0;
+    CGFloat avail = x1 - x0;
+    int n = 40;                      /* 参考里是小竖条阵列, 不是 24 根粗柱 */
+    CGFloat gap = 2.0;
+    CGFloat bw = (avail - gap * (n - 1)) / (CGFloat)n;
+    if (bw < 1.2) { bw = 1.2; gap = 1.2; }
+
+    if (!gDIRhythmBars) {
+        gDIRhythmBars = [CAShapeLayer layer];
+        gDIRhythmBars.zPosition = 890;
+        gDIRhythmBars.fillColor = [UIColor colorWithRed:0.60 green:0.54 blue:0.95 alpha:0.95].CGColor;
+        [host.layer addSublayer:gDIRhythmBars];
+    }
+    CGMutablePathRef p = CGPathCreateMutable();
+    for (int i = 0; i < n; i++) {
+        CGFloat bp = (CGFloat)i / (CGFloat)n * DI_AU_BANDS;
+        int b0 = (int)bp % DI_AU_BANDS, b1 = (b0 + 1) % DI_AU_BANDS;
+        CGFloat bf = bp - floor(bp);
+        float v = active ? (gDIBandSmooth[b0] * (1.0f - bf) + gDIBandSmooth[b1] * bf) : 0.0f;
+        CGFloat h = 1.5 + (height - 1.5) * pow(v, 0.85);
+        CGRect r = CGRectMake(x0 + i * (bw + gap), bottom - h, bw, h);
+        CGPathAddRoundedRect(p, NULL, r, bw * 0.5, bw * 0.5);
+    }
+    [CATransaction begin];
+    [CATransaction setDisableActions:YES];
+    gDIRhythmBars.path = p;
+    gDIRhythmBars.opacity = active ? 1.0f : 0.25f;
+    [CATransaction commit];
+    CGPathRelease(p);
 }
 
 /* ---------- 重建 / 复位 / tick ---------- */
@@ -19179,17 +19277,17 @@ static void diRhythmRebuild(UIView *t) {
     gDIRhythmHost = host;
     if (!host) return;
     UIColor *ca = diRhythmHexColor(rhythmColorA,
-        [UIColor colorWithRed:0.941 green:0.561 blue:0.420 alpha:1.0]);   /* #F08F6B */
+        [UIColor colorWithRed:0.961 green:0.541 blue:0.494 alpha:1.0]);   /* #F58A7E */
     UIColor *cb = diRhythmHexColor(rhythmColorB,
-        [UIColor colorWithRed:0.588 green:0.502 blue:1.000 alpha:1.0]);   /* #9680FF */
-    gDIRhythmUsedA = [(rhythmColorA.length ? rhythmColorA : @"#F08F6B") copy];
-    gDIRhythmUsedB = [(rhythmColorB.length ? rhythmColorB : @"#9680FF") copy];
+        [UIColor colorWithRed:0.549 green:0.482 blue:0.941 alpha:1.0]);   /* #8C7BF0 */
+    gDIRhythmUsedA = [(rhythmColorA.length ? rhythmColorA : @"#F58A7E") copy];
+    gDIRhythmUsedB = [(rhythmColorB.length ? rhythmColorB : @"#8C7BF0") copy];
     if (rhythmRoundCover) diCoverRound(t);
     if (rhythmRingOn) diRhythmBuildRing(host, ca, cb);
-    RLog(@"[律动] 目标封面 %@ %.0fx%.0f, 宿主 %@ %.0fx%.0f, 圆封面=%d",
+    RLog(@"[律动] 目标封面 %@ %.0fx%.0f, 宿主 %@ %.0fx%.0f, 圆=%d 环=%d 粒=%d 条=%d",
          NSStringFromClass(t.class), t.bounds.size.width, t.bounds.size.height,
          NSStringFromClass(host.class), host.bounds.size.width, host.bounds.size.height,
-         rhythmRoundCover);
+         rhythmRoundCover, rhythmRingOn, rhythmParticlesOn, rhythmBarsOn);
 }
 
 static void diRhythmReset(void) {
@@ -19209,31 +19307,30 @@ static void diRhythmReset(void) {
     for (int i = 0; i < DI_AU_BANDS; i++) { gDIBandRaw[i] = 0; gDIBandSmooth[i] = 0; }
 }
 
-/* 频谱推进: 真数据快起慢落; 采样端不可用时合成一条"绕圈跑"的假频谱 */
 static void diRhythmAdvanceSpectrum(BOOL active, BOOL real, float dt) {
     if (active && real) {
         float sum = 0, bass = 0;
         for (int i = 0; i < DI_AU_BANDS; i++) {
             float v = gDIBandRaw[i];
-            if (v > gDIBandSmooth[i]) gDIBandSmooth[i] = gDIBandSmooth[i] * 0.45f + v * 0.55f;
-            else gDIBandSmooth[i] = gDIBandSmooth[i] * 0.84f + v * 0.16f;
+            if (v > gDIBandSmooth[i]) gDIBandSmooth[i] = gDIBandSmooth[i] * 0.40f + v * 0.60f;
+            else gDIBandSmooth[i] = gDIBandSmooth[i] * 0.82f + v * 0.18f;
             sum += gDIBandSmooth[i];
             if (i < 4) bass += gDIBandSmooth[i];
         }
         bass /= 4.0f;
         gDISteady = MIN(1.0f, sum / (float)DI_AU_BANDS * 1.5f);
         if (bass > gDIBassPrev + 0.05f)
-            gDIBeatEnv = MIN(1.0f, gDIBeatEnv + (bass - gDIBassPrev) * 2.4f);
+            gDIBeatEnv = MIN(1.0f, gDIBeatEnv + (bass - gDIBassPrev) * 2.2f);
         gDIBassPrev = bass;
     } else if (active) {
-        gDISynPhase += dt * 1.9;                 /* 120BPM 兜底 */
+        gDISynPhase += dt * 1.9;
         double frac = fmod(gDISynPhase, 1.0);
         double pulse = exp(-frac * 6.0);
         for (int i = 0; i < DI_AU_BANDS; i++) {
-            double w = 0.35 + 0.65 * sin(gDIClock * 1.15 + i * 0.55);
-            gDIBandSmooth[i] = (float)(0.22 + 0.62 * pulse * w);
+            double w = 0.30 + 0.70 * fabs(sin(gDIClock * 0.9 + i * 0.75));
+            gDIBandSmooth[i] = (float)(0.10 + 0.66 * pulse * w);
         }
-        gDISteady = (float)(0.30 + 0.50 * pulse);
+        gDISteady = (float)(0.28 + 0.50 * pulse);
         if (pulse > 0.55) gDIBeatEnv = MAX(gDIBeatEnv, (float)pulse * 0.9f);
         gDIBassPrev = 0.3f;
     } else {
@@ -19246,11 +19343,27 @@ static void diRhythmAdvanceSpectrum(BOOL active, BOOL real, float dt) {
 }
 
 static void diRhythmTick(void) {
-    BOOL anyFx = (rhythmOn || rhythmRingOn || rhythmParticlesOn);
+    BOOL anyFx = (rhythmOn || rhythmRingOn || rhythmParticlesOn || rhythmBarsOn);
     if (!rhythmFxOn || !anyFx) { diRhythmReset(); return; }
 
     UIView *t = gDIRhythmTarget;
-    if (!t || !t.window || t.hidden || t.alpha < 0.1) {
+    BOOL stale = (!t || !t.window || t.hidden || t.alpha < 0.1);
+    if (!stale) {
+        /* 1.5s 防抖: 目标没消失就别换, 免得在两个页面之间来回重建 */
+        UIView *better = nil;
+        CFTimeInterval now2 = CACurrentMediaTime();
+        if (now2 - gDITargetAt > 1.5) {
+            better = diRhythmPickTarget();
+            if (better && better != t) {
+                CGFloat a1 = t.bounds.size.width * t.bounds.size.height;
+                CGFloat a2 = better.bounds.size.width * better.bounds.size.height;
+                if (a2 > a1 * 1.6f) { stale = YES; }
+            } else {
+                gDITargetAt = now2;
+            }
+        }
+    }
+    if (stale) {
         UIView *nt = diRhythmPickTarget();
         if (t && gDIRhythmBaseValid && t.window) {
             [CATransaction begin];
@@ -19261,6 +19374,7 @@ static void diRhythmTick(void) {
         gDIRhythmBaseValid = NO;
         gDIRhythmTarget = nt;
         t = nt;
+        gDITargetAt = CACurrentMediaTime();
         if (t) {
             CATransform3D cur = t.layer.transform;
             CGFloat sx = sqrt(cur.m11 * cur.m11 + cur.m12 * cur.m12);
@@ -19276,12 +19390,13 @@ static void diRhythmTick(void) {
     }
     if (!t) { gDISteady = 0; gDIBeatEnv = 0; return; }
 
-    NSString *hexA = (rhythmColorA.length ? rhythmColorA : @"#F08F6B");
-    NSString *hexB = (rhythmColorB.length ? rhythmColorB : @"#9680FF");
+    NSString *hexA = (rhythmColorA.length ? rhythmColorA : @"#F58A7E");
+    NSString *hexB = (rhythmColorB.length ? rhythmColorB : @"#8C7BF0");
     if (![hexA isEqualToString:gDIRhythmUsedA] || ![hexB isEqualToString:gDIRhythmUsedB]
         || (rhythmRingOn && !gDIRhythmRingBox) || (!rhythmRingOn && gDIRhythmRingBox)) {
         diRhythmRebuild(t);
     }
+
     BOOL hasSong = gDIInfoReady ? gDIHasNowPlaying : YES;
     BOOL playing = mrQueryOK ? musicPlaying : AVAudioSession.sharedInstance.isOtherAudioPlaying;
     BOOL active = hasSong && playing;
@@ -19303,10 +19418,9 @@ static void diRhythmTick(void) {
         RLog(@"[律动] 频谱已就绪: 24 段 峰值=%.2f 均值=%.2f (真 FFT)", pk, sum / (float)DI_AU_BANDS);
     }
 
-    /* 1) 封面: 圆 + 随拍轻微缩放 */
     if (rhythmRoundCover) diCoverRound(t);
     if (rhythmOn && gDIRhythmBaseValid) {
-        CGFloat amp = 0.030 * rhythmBeatScale;
+        CGFloat amp = 0.028 * rhythmBeatScale;
         CGFloat s = 1.0 + (0.35 * gDISteady + 0.65 * gDIBeatEnv) * amp;
         if (s < 0.97) s = 0.97;
         if (s > 1.06) s = 1.06;
@@ -19325,25 +19439,23 @@ static void diRhythmTick(void) {
     if (!host) return;
     CGRect cover = diRhythmCoverRect(t, host);
 
-    /* 2) 刻度环: 长短跟频谱, 拍点亮一点 */
     if (gDIRhythmRingBox) {
         [CATransaction begin];
         [CATransaction setDisableActions:YES];
         diRhythmLayoutRing(cover, gDIBandSmooth, active);
-        gDIRhythmRingGrad.opacity = active ? (0.55f + 0.45f * gDIBeatEnv) : 0.12f;
+        float baseA = active ? (0.62f + 0.38f * gDIBeatEnv) : 0.12f;
+        gDIRhythmRingGrad.opacity = baseA * (float)rhythmRingFollowAlpha;
+        if (gDIRhythmRingBack) gDIRhythmRingBack.opacity = active ? 0.18f : 0.05f;
         [CATransaction commit];
     }
 
-    /* 3) 粒子: 数量跟设置, 暂停全部淡出 */
     if (rhythmParticlesOn && active) {
-        /* 参考里粒子是固定的米金 + 淡紫(不跟环的渐变走) */
         CGFloat R = cover.size.width * 0.5f;
         CGFloat maxRad = MIN(MIN(CGRectGetMidX(cover), CGRectGetMidY(cover)),
                              MIN(host.bounds.size.width - CGRectGetMidX(cover),
                                  host.bounds.size.height - CGRectGetMidY(cover))) - 4.0f;
         if (maxRad < R * 1.4f) maxRad = R * 1.4f;
         int want = rhythmParticleCount;
-        if (want < 4) want = 4;
         if (gDIDotCount < want) {
             gDISpawnAcc += (float)(want - gDIDotCount) * 0.8f * dt;
             while (gDISpawnAcc >= 1.0f && gDIDotCount < want) {
@@ -19357,23 +19469,25 @@ static void diRhythmTick(void) {
         }
     }
     if (gDIDotCount > 0) diFxUpdateDots(host, cover, dt, gDISteady, gDIBeatEnv, active);
+
+    diRhythmUpdateBars(host, active);
 }
 
 static void diRhythmEnsure(void) {
-    BOOL need = (rhythmFxOn && (rhythmOn || rhythmRingOn || rhythmParticlesOn));
+    BOOL need = (rhythmFxOn && (rhythmOn || rhythmRingOn || rhythmParticlesOn || rhythmBarsOn));
     if (need && !gDIRhythmTimer) {
         gDIRhythmTimer = [NSTimer scheduledTimerWithTimeInterval:(1.0 / 60.0)
             repeats:YES block:^(NSTimer *__unused tm) {
                 @try { diRhythmTick(); } @catch (__unused NSException *e) {}
             }];
         gDIRhythmTimer.tolerance = 0.008;
-        RLog(@"[律动] 引擎启动 60Hz (开关 总=%d 封面=%d 环=%d 粒子=%d 圆=%d)",
-             rhythmFxOn, rhythmOn, rhythmRingOn, rhythmParticlesOn, rhythmRoundCover);
+        RLog(@"[律动] 引擎启动 60Hz (总=%d 圆=%d 缩放=%d 环=%d 粒=%d 条=%d)",
+             rhythmFxOn, rhythmRoundCover, rhythmOn, rhythmRingOn,
+             rhythmParticlesOn, rhythmBarsOn);
     } else if (!need && gDIRhythmTimer) {
         [gDIRhythmTimer invalidate];
         gDIRhythmTimer = nil;
         diRhythmReset();
-        RLog(@"[律动] 引擎停止 (开关 总=%d 封面=%d 环=%d 粒子=%d)",
-             rhythmFxOn, rhythmOn, rhythmRingOn, rhythmParticlesOn);
+        RLog(@"[律动] 引擎停止");
     }
 }
