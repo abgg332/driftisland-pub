@@ -237,7 +237,7 @@ static void diPostReloadRaw(void) {
     CFNotificationCenterPostNotification(CFNotificationCenterGetDarwinNotifyCenter(),
         (__bridge CFStringRef)kNotifyStr, NULL, NULL, YES);
 }
-/* 3.0.55: 特效类键(律动/粒子/频谱条/时间条位移) —— 这些键只影响灵动岛里的
+/* 3.0.56: 特效类键(律动/粒子/频谱条/时间条位移) —— 这些键只影响灵动岛里的
    实时绘制, 不需要重排壁纸/视频/锁屏卡片。给它们一条独立的轻量通知,
    避免拖滑杆时每次都触发 SpringBoard 的全量刷新(那样会直接卡死)。 */
 static BOOL diIsFxKey(NSString *key) {
@@ -363,6 +363,25 @@ static double diStepReadValue(UITableViewCell *cell) {
     return def ? [def doubleValue] : 0;
 }
 
+/* 3.0.56: 步进值(0.1 这类)。以前这里硬编码 round(v) —— 小数全被抹成整数,
+   所以"粒子大小"怎么调都是 0.5 一档。现在按 specifier 的 diStep 走。 */
+static double diStepOf(UITableViewCell *cell) {
+    id st = objc_getAssociatedObject(cell, "di_k_step");
+    if ([st isKindOfClass:NSNumber.class]) {
+        double d = [st doubleValue];
+        if (d > 0.0 && d < 1.0) return d;      /* 0.1 = 小数步进 */
+    }
+    return 1.0;
+}
+
+static NSString *diStepFormat(double v, double step) {
+    if (step < 1.0) {
+        if (fabs(v - round(v)) < 0.001) return [NSString stringWithFormat:@"%.0f", v];
+        return [NSString stringWithFormat:@"%.1f", v];
+    }
+    return [NSString stringWithFormat:@"%.0f", round(v)];
+}
+
 /* 写值 + 限位, 返回最终值 */
 static double diStepWriteValue(UITableViewCell *cell, double v) {
     NSString *k = objc_getAssociatedObject(cell, "di_k_key");
@@ -370,9 +389,13 @@ static double diStepWriteValue(UITableViewCell *cell, double v) {
     NSNumber *mn = objc_getAssociatedObject(cell, "di_k_min");
     NSNumber *mx = objc_getAssociatedObject(cell, "di_k_max");
     if (!k.length || !d.length) return v;
-    v = round(v);
+    double step = diStepOf(cell);
+    if (step < 1.0) v = round(v / step) * step;
+    else v = round(v);
     if (mn && v < [mn doubleValue]) v = [mn doubleValue];
     if (mx && v > [mx doubleValue]) v = [mx doubleValue];
+    /* 小数步进会有 0.30000000000000004 这种, 收敛到 3 位 */
+    v = round(v * 1000.0) / 1000.0;
     CFPreferencesSetAppValue((__bridge CFStringRef)k, (__bridge CFPropertyListRef)@(v),
                              (__bridge CFStringRef)d);
     CFPreferencesAppSynchronize((__bridge CFStringRef)d);
@@ -395,9 +418,10 @@ static void diStepSliderCommit(UITableViewCell *cell) {
         UISlider *slider = diStepBoxSlider(cell);
         if (!slider) return;
         NSNumber *last = objc_getAssociatedObject(cell, "di_drag_last");
-        double v = last ? last.doubleValue : round(slider.value);
+        double v = last ? last.doubleValue : slider.value;
         diStepWriteValue(cell, v);
-        postReload();
+        NSString *k = objc_getAssociatedObject(cell, "di_k_key");
+        if (diIsFxKey(k)) diPostFxTune(); else postReload();
         diStepSliderSyncLabel(cell);
     } @catch (__unused NSException *e) {}
 }
@@ -408,10 +432,13 @@ static void diStepSliderDrag(UITableViewCell *cell) {
         UISlider *slider = diStepBoxSlider(cell);
         if (!slider) return;
         /* 只在界面层显示, 不写盘 —— 松手时由 diStepSliderCommit 落盘 */
-        double v = round(slider.value);
+        double step = diStepOf(cell);
+        double v = slider.value;
+        if (step < 1.0) v = round(v / step) * step;
+        else v = round(v);
         objc_setAssociatedObject(cell, "di_drag_last", @(v), OBJC_ASSOCIATION_RETAIN_NONATOMIC);
         id val = diStepBoxValue(cell);
-        NSString *t = [NSString stringWithFormat:@"%.0f", v];
+        NSString *t = diStepFormat(v, step);
         if ([val isKindOfClass:[UIButton class]]) {
             [(UIButton *)val setTitle:t forState:UIControlStateNormal];
         } else if ([val isKindOfClass:[UILabel class]]) {
@@ -580,8 +607,8 @@ static void diStepSliderApply(UITableViewCell *cell, double d) {
     double v = [@(diStepReadValue(cell) + d) doubleValue];
     v = diStepWriteValue(cell, v);
     NSString *nm = objc_getAssociatedObject(cell, "di_k_name") ?: key;
-    diStep(@"滑杆[%@]: %@ → %.0f", nm, d > 0 ? @"+" : @"−", v);
-    postReload();
+    diStep(@"滑杆[%@]: %@ → %@", nm, d > 0 ? @"+" : @"−", diStepFormat(v, diStepOf(cell)));
+    if (diIsFxKey(key)) diPostFxTune(); else postReload();
     /* 同步滑块位置(只碰我们自己的 UISlider, 不打 setValue:) */
     UISlider *sl = diStepBoxSlider(cell);
     if (sl) sl.value = (float)v;
@@ -596,7 +623,7 @@ static void diStepSliderSyncLabel(UITableViewCell *cell) {
     NSString *key = objc_getAssociatedObject(cell, "di_k_key");
     if (!key.length) return;
     double v = diStepReadValue(cell);
-    NSString *t = [NSString stringWithFormat:@"%.0f", round(v)];
+    NSString *t = diStepFormat(v, diStepOf(cell));
     /* 2.2.44: 兼容两种载体 —— UIButton 用 setTitle, UILabel 用 text。
        之前无脑 cast 成 UILabel 再点 .text, 对象其实是 UIButton → 崩。 */
     if ([val isKindOfClass:[UIButton class]]) {
@@ -621,8 +648,8 @@ static void diStepSliderEdit(UITableViewCell *cell) {
                                                               message:@"输入数值"
                                                        preferredStyle:UIAlertControllerStyleAlert];
     [ac addTextFieldWithConfigurationHandler:^(UITextField *tf) {
-        tf.keyboardType = UIKeyboardTypeNumberPad;
-        tf.text = [NSString stringWithFormat:@"%.0f", round(v)];
+        tf.keyboardType = UIKeyboardTypeDecimalPad;
+        tf.text = diStepFormat(v, diStepOf(cell));
         tf.textAlignment = NSTextAlignmentCenter;
     }];
     [ac addAction:[UIAlertAction actionWithTitle:@"取消" style:UIAlertActionStyleCancel handler:nil]];
@@ -632,8 +659,9 @@ static void diStepSliderEdit(UITableViewCell *cell) {
         if (!c) return;
         double nv = [ac.textFields.firstObject.text doubleValue];
         nv = diStepWriteValue(c, nv);
-        diStep(@"滑杆[%@]: 输入 %.0f", nm, nv);
-        postReload();
+        diStep(@"滑杆[%@]: 输入 %@", nm, diStepFormat(nv, diStepOf(c)));
+        NSString *k2 = objc_getAssociatedObject(c, "di_k_key");
+        if (diIsFxKey(k2)) diPostFxTune(); else postReload();
         UISlider *sl = diStepBoxSlider(c);
         if (sl) sl.value = (float)nv;
         diStepSliderSyncLabel(c);
@@ -733,9 +761,9 @@ static void diInstallStepSliderOnPSSliderCell(void) {
     /* 动作方法(可重复调用, 已存在就跳过) */
     if (!class_getInstanceMethod(base, NSSelectorFromString(@"diStepDown"))) {
         class_addMethod(base, NSSelectorFromString(@"diStepDown"),
-            imp_implementationWithBlock(^(id slf) { diStepSliderApply(slf, -1); }), "v@:");
+            imp_implementationWithBlock(^(id slf) { diStepSliderApply(slf, -diStepOf(slf)); }), "v@:");
         class_addMethod(base, NSSelectorFromString(@"diStepUp"),
-            imp_implementationWithBlock(^(id slf) { diStepSliderApply(slf, 1); }), "v@:");
+            imp_implementationWithBlock(^(id slf) { diStepSliderApply(slf, diStepOf(slf)); }), "v@:");
         class_addMethod(base, NSSelectorFromString(@"diStepEdit"),
             imp_implementationWithBlock(^(id slf) { diStepSliderEdit(slf); }), "v@:");
         /* 2.2.34: 拖动滑杆 → 立即写偏好 + 刷新右侧数字 */
@@ -3901,8 +3929,11 @@ static NSArray *diHomeBarPresets(void) {
    prefKey 决定写哪个键: lkGlowHex / lkFrameHex。 */
 @interface DIColorPick : UIViewController
 @property (nonatomic, copy) NSString *prefKey;
-/* 3.0.55: 渐变色的第二个键(起始/结束)。填了就按"两色"处理, 只填一个色时两键同色。 */
+/* 3.0.56: 渐变色的第二个键(起始/结束)。填了就按"两色"处理, 只填一个色时两键同色。 */
 @property (nonatomic, copy) NSString *prefKeyB;
+/* 3.0.56: 该颜色属于哪个"模式"键。应用自定义色时如果模式还是"跟随专辑",
+   自动切到"固定颜色" —— 否则自定义色写了也看不见(用户说的"自定义没用")。 */
+@property (nonatomic, copy) NSString *modeKey;
 @end
 @implementation DIColorPick {
     UIScrollView *_scroll;
@@ -4097,6 +4128,19 @@ static NSArray *diHomeBarPresets(void) {
         diStep(@"配色(%@): 已应用 %lu 个色值 %@", self.prefKey, (unsigned long)cols.count, joined);
     }
     CFPreferencesAppSynchronize((__bridge CFStringRef)kDomain);
+    /* 3.0.56: 自定义色在"跟随专辑"模式下是看不见的 —— 自动切到"固定颜色" */
+    if (self.modeKey.length) {
+        CFPreferencesAppSynchronize((__bridge CFStringRef)kDomain);
+        id mv = (__bridge_transfer id)CFPreferencesCopyAppValue(
+            (__bridge CFStringRef)self.modeKey, (__bridge CFStringRef)kDomain);
+        if (!mv || [mv intValue] == 0) {
+            CFPreferencesSetAppValue((__bridge CFStringRef)self.modeKey,
+                                     (__bridge CFPropertyListRef)@1,
+                                     (__bridge CFStringRef)kDomain);
+            CFPreferencesAppSynchronize((__bridge CFStringRef)kDomain);
+            diStep(@"配色: 模式已切到「固定颜色」");
+        }
+    }
     if (fx) diPostFxTune();     /* 特效色: 只让 SpringBoard 重读特效参数 */
     else postReload();
 }
@@ -5898,7 +5942,7 @@ static void diNPEnsureActivation(void) {
         if (v < mn) v = mn;
         if (v > mx) v = mx;
     }
-    /* 3.0.55: 支持 0.1 这类步进(粒子大小); 没设步进就保持两位小数 */
+    /* 3.0.56: 支持 0.1 这类步进(粒子大小); 没设步进就保持两位小数 */
     double step = 0.01;
     NSNumber *st = [sp propertyForKey:@"diStep"];
     if ([st isKindOfClass:NSNumber.class] && st.doubleValue > 0.0) step = st.doubleValue;
@@ -6114,7 +6158,7 @@ static NSString *diModeName(int m) {
         if (v < mn) v = mn;
         if (v > mx) v = mx;
     }
-    /* 3.0.55: 支持 0.1 这类步进(粒子大小); 没设步进就保持两位小数 */
+    /* 3.0.56: 支持 0.1 这类步进(粒子大小); 没设步进就保持两位小数 */
     double step = 0.01;
     NSNumber *st = [sp propertyForKey:@"diStep"];
     if ([st isKindOfClass:NSNumber.class] && st.doubleValue > 0.0) step = st.doubleValue;
@@ -6172,7 +6216,7 @@ static NSString *diModeName(int m) {
     [self reloadSpecifiers];
 }
 
-/* 3.0.55: 环 / 粒子 / 频谱条的颜色都走"真正的取色面板"(预设色卡 + 渐变预览 +
+/* 3.0.56: 环 / 粒子 / 频谱条的颜色都走"真正的取色面板"(预设色卡 + 渐变预览 +
    自定义色值), 与"文字颜色"同一个 DIColorPick, 不再是八个写死的色点。
    一个面板选两个色 = 渐变起始/结束; 只填一个色 = 纯色。 */
 - (void)diOpenFxPickerKeyA:(NSString *)a keyB:(NSString *)b title:(NSString *)t {
@@ -6182,6 +6226,11 @@ static NSString *diModeName(int m) {
         UIViewController *vc = [[cls alloc] initWithNibName:nil bundle:nil];
         [vc setValue:a forKey:@"prefKey"];
         [vc setValue:b forKey:@"prefKeyB"];
+        NSString *mk = nil;
+        if ([a hasPrefix:@"Particle"]) mk = @"ParticleColorMode";
+        else if ([a hasPrefix:@"Spectrum"]) mk = @"SpectrumColorMode";
+        else if ([a hasPrefix:@"Album"]) mk = @"RingColorMode";
+        if (mk.length) [vc setValue:mk forKey:@"modeKey"];
         diPushPanel(vc, t, nil);
     } @catch (NSException *e) {
         diStep(@"配色: 打开失败 %@", e.reason ?: @"(未知)");
@@ -6200,25 +6249,19 @@ static NSString *diModeName(int m) {
 - (NSArray *)buildSpecifiers {
     NSMutableArray *specs = [NSMutableArray array];
     [specs addObject:[self groupSpec:@"专辑律动"
-        footer:@"封面正圆 + 外圈 80 根实心刻度(长短由 24 段真实频谱驱动, 颜色可选跟随专辑/固定/流光) + 封面随低音鼓点缩放。频谱来自 mediaserverd 的 AudioUnitRender(1024 点 FFT, 60Hz), 暂停/停止时全部归零。特效只在未展开的播放卡上显示。"]];
+        footer:@"封面裁成正圆, 并跟随中音鼓点缩放(0.1 幅度可调)。频谱来自 mediaserverd 的 AudioUnitRender(1024 点 FFT, 60Hz), 暂停/停止时全部归零。特效只在未展开的播放卡上显示。「律动专辑环」已下线。"]];
     [specs addObject:[self switchSpec:@"启用律动特效" key:@"AlbumEffectsOn" def:@YES]];
-    [specs addObject:[self switchSpec:@"启用律动专辑环" key:@"AlbumRingOn" def:@YES]];
     [specs addObject:[self switchSpec:@"圆形封面" key:@"AlbumRoundCover" def:@YES]];
     [specs addObject:[self switchSpec:@"专辑跟随律动" key:@"AlbumRhythmOn" def:@YES]];
-    [specs addObject:[self modeSpec:@"环颜色" key:@"RingColorMode"]];
-    [specs addObject:[self npSlider:@"律动强度" key:@"AlbumRhythmStrength" def:0.90 mn:0.10 mx:2.00]];
     [specs addObject:[self npSlider:@"专辑律动幅度" key:@"AlbumBeatScale" def:0.70 mn:0.00 mx:2.00]];
-    [specs addObject:[self npSlider:@"刻度粗细" key:@"AlbumRingWidth2" def:2.20 mn:0.80 mx:8.00]];
-    [specs addObject:[self buttonSpec:@"自定义环颜色(渐变)" action:@selector(diPickRingColors:)]];
 
     [specs addObject:[self groupSpec:@"律动粒子"
-        footer:@"粒子从专辑边缘向外散开, 每一下底鼓会给它们一记向外的推力(不是瞬移), 同时轻微放大提亮。大小 0.1 一档。"]];
+        footer:@"粒子从专辑背后随机位置冒出, 自然向外飘散, 不受鼓点影响。颜色: 跟随专辑 / 固定颜色 / 流光颜色; 三种都可用「自定义粒子颜色」改。「流光」是在你选的颜色基础上缓慢变色。大小 0.1 一档。"]];
     [specs addObject:[self switchSpec:@"启用律动粒子" key:@"AlbumParticlesOn" def:@YES]];
     [specs addObject:[self npSlider:@"粒子数量" key:@"AlbumParticleCount2" def:25 mn:0 mx:40]];
     [specs addObject:[self modeSpec:@"粒子颜色" key:@"ParticleColorMode"]];
     [specs addObject:[self npSlider:@"粒子透明" key:@"RhythmParticleAlpha" def:0.74 mn:0.10 mx:1.50]];
     {
-        /* 3.0.55: 用户要 0.1 一档 —— 1.0 偏小 / 1.5 偏大, 中间能细调 */
         PSSpecifier *psz = [self npSlider:@"粒子大小" key:@"AlbumParticleSize" def:1.0 mn:0.2 mx:2.0];
         [psz setProperty:@(0.1) forKey:@"diStep"];
         [specs addObject:psz];
@@ -6226,7 +6269,7 @@ static NSString *diModeName(int m) {
     [specs addObject:[self buttonSpec:@"自定义粒子颜色(渐变)" action:@selector(diPickParticleColors:)]];
 
     [specs addObject:[self groupSpec:@"频谱条"
-        footer:@"进度条上方那一排小竖条, 中间高向两侧递减; 颜色可跟随专辑/固定/流光, 也可以自定义渐变色。"]];
+        footer:@"进度条上方那一排小竖条, 中间高向两侧递减。颜色: 跟随专辑 / 固定颜色 / 流光颜色, 都可用「自定义频谱条颜色」改。上下位移 -150~150。"]];
     [specs addObject:[self switchSpec:@"启用频谱条" key:@"AlbumBarsOn" def:@YES]];
     [specs addObject:[self modeSpec:@"频谱条颜色" key:@"SpectrumColorMode"]];
     [specs addObject:[self buttonSpec:@"自定义频谱条颜色(渐变)" action:@selector(diPickSpectrumColors:)]];
@@ -6234,9 +6277,7 @@ static NSString *diModeName(int m) {
     [specs addObject:[self npSlider:@"长度" key:@"AlbumBarsHeight" def:13.0 mn:4.0 mx:40.0]];
     [specs addObject:[self npSlider:@"宽度" key:@"AlbumBarsWidth" def:3.0 mn:1.0 mx:8.0]];
     [specs addObject:[self npSlider:@"左右位移" key:@"AlbumBarsOffset" def:0.0 mn:-120.0 mx:120.0]];
-    [specs addObject:[self npSlider:@"上下位移" key:@"AlbumBarsOffsetY" def:0.0 mn:-60.0 mx:60.0]];
-    [specs addObject:[self groupSpec:@"其它" footer:@"改完立刻生效, 不用注销。"]];
-    [specs addObject:[self npSlider:@"环跟随透明度" key:@"RhythmRingFollowAlpha" def:1.00 mn:0.10 mx:1.50]];
+    [specs addObject:[self npSlider:@"上下位移" key:@"AlbumBarsOffsetY" def:0.0 mn:-150.0 mx:150.0]];
     return specs;
 }
 @end
