@@ -92,6 +92,8 @@ static NSString *rhythmColorB = nil;           // 渐变结束色(#948FFF)
    所以定义提到文件前部; 取色函数在律动模块里, 这里先声明。 */
 static UIColor *gDIParticleColA = nil;
 static UIColor *gDIParticleColB = nil;
+/* 3.0.56: 粒子颜色/模式变了 → 已存在的粒子立刻换色(定义提前, 偏好读取里就要用到) */
+static BOOL gDIParticleColorDirty = YES;
 static UIColor *diRhythmHexColor(NSString *hex, UIColor *def);
 /* ===== 2.8.85: 展开定义 —— 展开岛歌词/歌名的自定义位置与大小 =====
    展开岛(407x202 的 Now Playing)整块由 MediaRemoteUI 远程渲染, SpringBoard 只能看到
@@ -18948,7 +18950,6 @@ static BOOL gDIFxRealLogged = NO;
 static __weak UIView *gDIRhythmDrive = nil;   /* 真正承载缩放的视图(封面外面可能还套着一层裁剪容器) */
 static float gDIMidLevel = 0.0f;              /* 当前中音能量(探针) */
 static CFTimeInterval gDIQuietAt = 0;         /* 频谱端"连着但没数据"的起点 */
-static BOOL gDIParticleColorDirty = YES;      /* 粒子颜色/模式变了, 需要刷已存在的粒子 */
 
 static __weak UIView *gDICoverRounded = nil;
 static CGFloat gDICoverOrigRadius = 0;
@@ -19522,7 +19523,12 @@ static void diRhythmUpdateBars(UIView *host, BOOL active) {
     CGFloat bottom = CGRectGetMinY(sf) - 5.0 - (CGFloat)rhythmBarsOffsetY;
     CGFloat height = (CGFloat)rhythmBarsHeight;
     CGFloat top = bottom - height;
-    if (top < 4) return;
+    /* 3.0.56: 上下位移放大到 ±150 后, 条可能被推到岛外。以前这里直接 return,
+       上一次画的路径会留在屏幕上(看着像"卡住")。现在明确隐藏。 */
+    if (top < 2.0 || bottom > host.bounds.size.height - 1.0) {
+        if (gDIRhythmBarsGrad) gDIRhythmBarsGrad.opacity = 0.0f;
+        return;
+    }
 
     CGFloat x0 = 14.0, x1 = host.bounds.size.width - 14.0;
     CGFloat avail = x1 - x0;
