@@ -142,24 +142,39 @@ static NSFileHandle *diLogHandle(void) {
    3.0.22: 改成"先数数再格式化" —— 以前是先把整行拼出来再判断, 一旦某处在布局里刷屏
    (435 日志出现过一秒 30213 次), 光是拼字符串就能把主线程按死。 */
 static void diLogWrite(NSString *out);   /* 下面定义 */
+/* 3.0.49: 刷屏源定位 —— 462 日志里"上一秒省略 40009 行", 但被折叠的到底是哪一句
+   打出来的完全看不出来, 排查死循环全靠猜。DLog/RLog 现在把格式串指针先存进来
+   (静态字面量, 存指针零开销), 第一条被挤掉的行记下它的格式串, 秒末汇总打出来。
+   另加诊断旁路: 崩溃回放/保险这类一次性诊断输出不再跟刷屏源抢 25 行配额。 */
+static NSString *gDILogCurFmt = nil;
+static NSString *gDILogDropFmt = nil;
+static BOOL gDILogBypass = NO;
 static BOOL diLogGate(void) {
     static int n = 0; static int dropped = 0;
     static CFAbsoluteTime sec = 0;
     CFAbsoluteTime now = CFAbsoluteTimeGetCurrent();
     if (now - sec >= 1.0) {
         int d = dropped;
+        NSString *src = gDILogDropFmt;
         dropped = 0;
+        gDILogDropFmt = nil;
         sec = now;
         n = 0;
         if (d > 0) {
             @try {
-                NSString *line = [NSString stringWithFormat:@"[%@] [现场] (上一秒省略 %d 行重复日志)\n",
-                                  [diLogDF() stringFromDate:[NSDate date]], d];
+                NSString *head = src.length > 120 ? [src substringToIndex:120] : src;
+                NSString *line = [NSString stringWithFormat:@"[%@] [现场] (上一秒省略 %d 行重复日志, 刷屏源格式串: %@)\n",
+                                  [diLogDF() stringFromDate:[NSDate date]], d, head ?: @"<空>"];
                 diLogWrite(line);
             } @catch (__unused NSException *e) {}
         }
     }
-    if (n >= 25) { dropped++; return NO; }
+    if (gDILogBypass) return YES;
+    if (n >= 25) {
+        if (dropped == 0) gDILogDropFmt = gDILogCurFmt;
+        dropped++;
+        return NO;
+    }
     n++;
     return YES;
 }
@@ -199,6 +214,7 @@ static void diLogWrite(NSString *out) {
 static void DLog(NSString *fmt, ...) NS_FORMAT_FUNCTION(1,2);
 static void DLog(NSString *fmt, ...) {
     if (!logEnabled) return; // 日志开关关闭时不生成
+    gDILogCurFmt = fmt;
     if (!diLogGate()) return;
     va_list args; va_start(args, fmt);
     NSString *line = [[NSString alloc] initWithFormat:fmt arguments:args];
@@ -211,6 +227,7 @@ static void DLog(NSString *fmt, ...) {
    固定写同一文件, 顶部标记 [现场], 排查时 grep "现场" 即可。 */
 static void RLog(NSString *fmt, ...) NS_FORMAT_FUNCTION(1,2);
 static void RLog(NSString *fmt, ...) {
+    gDILogCurFmt = fmt;
     if (!diLogGate()) return;
     va_list args; va_start(args, fmt);
     NSString *line = [[NSString alloc] initWithFormat:fmt arguments:args];
@@ -16799,6 +16816,9 @@ static void diBootGuardCheck(void) {
    打进主日志。日志文件有 512KB 截断, 引导最开头的内容会被冲掉, 所以放在
    第 2 秒诊断里打(那时内容能活到用户导出日志)。 */
 static void diNPDumpCrashEvidence(void) {
+    /* 3.0.49: 回放是崩溃后唯一能自己说话的窗口 —— 462 日志证明刷屏源会把
+       25 行/秒的配额吃光, 回放一行都挤不出来。这里整体走旁路。 */
+    gDILogBypass = YES;
     @try {
         if (gDIBootVerdict) RLog(@"[保险] 回放: %@", gDIBootVerdict);
 
@@ -16860,6 +16880,7 @@ static void diNPDumpCrashEvidence(void) {
             RLog(@"[足迹回放] 足迹文件为空/不存在");
         }
     } @catch (__unused NSException *e) {}
+    gDILogBypass = NO;
 }
 
 /* 3.1.0: 定义在后面, 这里先声明 —— 播放器每次 layout 顺手把「未在播放」收掉 */
@@ -19190,6 +19211,13 @@ static void diRhythmLayoutRing(CGRect cover, const float *bands, BOOL active) {
     CGPoint c = CGPointMake(gDIRhythmRingBox.bounds.size.width / 2,
                             gDIRhythmRingBox.bounds.size.height / 2);
     CGFloat r0 = R + gap;
+    /* 3.0.49: 80 段路径每帧重建 + 每帧换渐变遮罩 path, 渲染端压力翻倍。
+       30Hz 重建路径, 60Hz 只做 frame 同步和线宽 —— 肉眼无差, 负载减半。 */
+    static CFTimeInterval gDIRingPathAt = 0;
+    CFTimeInterval tNow = CACurrentMediaTime();
+    BOOL doPath = (tNow - gDIRingPathAt >= 0.032);
+    if (doPath) gDIRingPathAt = tNow;
+    if (!doPath) return;
     CGMutablePathRef tp = CGPathCreateMutable();
     for (int i = 0; i < DI_TICK_N; i++) {
         CGFloat a = (CGFloat)i / (CGFloat)DI_TICK_N * M_PI * 2.0 - M_PI_2;
@@ -19221,13 +19249,23 @@ static UIView *diFindSliderIn(UIView *v, int depth) {
     return nil;
 }
 
+/* 3.0.49: 滑条查找缓存 —— 之前每个 tick(60Hz)都全树递归扫一遍, 播放卡视图树
+   上千个节点, 光这一项就是每秒几万次遍历, 主线程直接被吃满(462 日志的
+   "停摆 2~3 秒"+"40009 行日志"就是这种热循环的典型症状)。改 0.5s 找一次。 */
+static __weak UIView *gDIRhythmSliderW = nil;
+static CFAbsoluteTime gDIRhythmSliderAt = 0;
 static void diRhythmUpdateBars(UIView *host, BOOL active) {
     if (!host) return;
     if (!rhythmBarsOn) {
         if (gDIRhythmBars) { [gDIRhythmBars removeFromSuperlayer]; gDIRhythmBars = nil; }
         return;
     }
-    UIView *sl = diFindSliderIn(host, 0);
+    UIView *sl = gDIRhythmSliderW;
+    if (!sl || CACurrentMediaTime() - gDIRhythmSliderAt > 0.5) {
+        sl = diFindSliderIn(host, 0);
+        gDIRhythmSliderW = sl;
+        gDIRhythmSliderAt = CACurrentMediaTime();
+    }
     if (!sl) {
         if (gDIRhythmBars) { [gDIRhythmBars removeFromSuperlayer]; gDIRhythmBars = nil; }
         return;
@@ -19251,16 +19289,36 @@ static void diRhythmUpdateBars(UIView *host, BOOL active) {
         gDIRhythmBars.fillColor = [UIColor colorWithRed:0.60 green:0.54 blue:0.95 alpha:0.95].CGColor;
         [host.layer addSublayer:gDIRhythmBars];
     }
-    CGMutablePathRef p = CGPathCreateMutable();
-    for (int i = 0; i < n; i++) {
-        CGFloat bp = (CGFloat)i / (CGFloat)n * DI_AU_BANDS;
-        int b0 = (int)bp % DI_AU_BANDS, b1 = (b0 + 1) % DI_AU_BANDS;
-        CGFloat bf = bp - floor(bp);
-        float v = active ? (gDIBandSmooth[b0] * (1.0f - bf) + gDIBandSmooth[b1] * bf) : 0.0f;
-        CGFloat h = 1.5 + (height - 1.5) * pow(v, 0.85);
-        CGRect r = CGRectMake(x0 + i * (bw + gap), bottom - h, bw, h);
-        CGPathAddRoundedRect(p, NULL, r, bw * 0.5, bw * 0.5);
+    /* 3.0.49: 同刻度环, 路径重建 30Hz; 圆角半径必须 <= 短边一半,
+       否则个别 iOS 版本 CoreGraphics 会直接 abort(这就是"莫名安全模式"的候选之一)。 */
+    static CFTimeInterval gDIBarsPathAt = 0;
+    CFTimeInterval tNow = CACurrentMediaTime();
+    if (tNow - gDIBarsPathAt >= 0.032) {
+        gDIBarsPathAt = tNow;
+        CGMutablePathRef p = CGPathCreateMutable();
+        for (int i = 0; i < n; i++) {
+            CGFloat bp = (CGFloat)i / (CGFloat)n * DI_AU_BANDS;
+            int b0 = (int)bp % DI_AU_BANDS, b1 = (b0 + 1) % DI_AU_BANDS;
+            CGFloat bf = bp - floor(bp);
+            float v = active ? (gDIBandSmooth[b0] * (1.0f - bf) + gDIBandSmooth[b1] * bf) : 0.0f;
+            CGFloat h = 1.5 + (height - 1.5) * pow(v, 0.85);
+            CGRect r = CGRectMake(x0 + i * (bw + gap), bottom - h, bw, h);
+            CGFloat rr = MIN(bw, h) * 0.5;
+            CGPathAddRoundedRect(p, NULL, r, rr, rr);
+        }
+        [CATransaction begin];
+        [CATransaction setDisableActions:YES];
+        gDIRhythmBars.path = p;
+        gDIRhythmBars.opacity = active ? 1.0f : 0.25f;
+        [CATransaction commit];
+        CGPathRelease(p);
+    } else {
+        [CATransaction begin];
+        [CATransaction setDisableActions:YES];
+        gDIRhythmBars.opacity = active ? 1.0f : 0.25f;
+        [CATransaction commit];
     }
+
     [CATransaction begin];
     [CATransaction setDisableActions:YES];
     gDIRhythmBars.path = p;
@@ -19474,7 +19532,10 @@ static void diRhythmTick(void) {
 }
 
 static void diRhythmEnsure(void) {
-    BOOL need = (rhythmFxOn && (rhythmOn || rhythmRingOn || rhythmParticlesOn || rhythmBarsOn));
+    /* 3.0.49: 与保险档位联动 —— 连续崩两次(档位≤1)时律动整体停, 先保系统能开机。
+       用户在设置里拨任意开关会重新拉满档位, 律动随之恢复。 */
+    BOOL need = (rhythmFxOn && (rhythmOn || rhythmRingOn || rhythmParticlesOn || rhythmBarsOn)
+                 && gDIStage >= 2);
     if (need && !gDIRhythmTimer) {
         gDIRhythmTimer = [NSTimer scheduledTimerWithTimeInterval:(1.0 / 60.0)
             repeats:YES block:^(NSTimer *__unused tm) {
