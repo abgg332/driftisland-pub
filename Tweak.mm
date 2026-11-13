@@ -18894,6 +18894,7 @@ static __weak UIView *gDIRhythmDrive = nil;   /* 真正承载缩放的视图(封
 static __weak UIView *gDIRhythmExtras[DI_RHYTHM_EXTRA_MAX];
 static int gDIRhythmExtraN = 0;
 static CGSize gDIRhythmBaseSize;       /* 记 base 时 dv 的尺寸 —— 变了说明展开/收起, base 作废 */
+static double gDILastAng = 0.0;        /* 3.0.61: 关掉旋转时把角度冻结在这个值上(不跳回 0°) */
 static BOOL gDIRhythmDriving = NO;     /* 上一帧我们是否在写 transform(用于"只还原一次") */
 
 /* 3.0.61: 图层里有内容吗? (CALayer 的 contents 常常挂在子层上, 比如 CAPortalLayer / 图片层) */
@@ -19592,6 +19593,7 @@ static void diRhythmDetach(void) {
     for (int i = 0; i < DI_RHYTHM_EXTRA_MAX; i++) gDIRhythmExtras[i] = nil;
     gDIRhythmExtraN = 0;
     gDIRhythmDriving = NO;
+    gDILastAng = 0.0;
     diFxRemoveAllDots();
 }
 
@@ -20159,6 +20161,7 @@ static void diRhythmTickWithDelta(float dtIn) {
         for (int i = 0; i < DI_RHYTHM_EXTRA_MAX; i++) gDIRhythmExtras[i] = nil;
         gDIRhythmExtraN = 0;
         gDIRhythmDriving = NO;
+        gDILastAng = 0.0;          /* 换了封面, 冻结角度作废 */
         /* 3.0.57: 换目标时把旋转交还给原来那层, 否则它会一直停在我们算出来的角度上 */
         if (gDIArtSpinYield && gDIArtSpinYield == oldDrive) {
             UIView *yv = gDIArtSpinYield;
@@ -20322,12 +20325,14 @@ static void diRhythmTickWithDelta(float dtIn) {
             sDbg = s;
             gDICoverScaleNow = (float)s;      /* 粒子遮罩的孔要跟着封面一起缩放 */
             CGFloat dy = -(CGFloat)gDIBeatEnv * 5.0 * (CGFloat)rhythmBeatScale;
-            double ang = 0.0;
+            double ang = gDILastAng;
             if (ownsSpin) {
                 if (gDISpinEpoch <= 0) gDISpinEpoch = CACurrentMediaTime();
                 ang = fmod(CACurrentMediaTime() - gDISpinEpoch, kDISpinDur) / kDISpinDur * M_PI * 2.0;
+                gDILastAng = ang;
             }
-            diRhythmWriteAll(s, dy, ownsSpin, ang, NO);
+            /* 3.0.61: 关掉旋转时用冻结角度写回 —— 直接给 0 会让封面"啪"地跳回正面 */
+            diRhythmWriteAll(s, dy, (ownsSpin || gDILastAng > 0.0001), ang, NO);
             gDIRhythmDriving = YES;
         }
     } else if (gDIRhythmDriving) {
