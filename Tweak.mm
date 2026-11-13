@@ -18837,9 +18837,9 @@ static __weak UIView *gDICoverRounded = nil;
 static CGFloat gDICoverOrigRadius = 0;
 static BOOL gDICoverOrigClip = NO;
 
-#define DI_COVER_CLIP  1.9          /* 封面圆半径 → 刻度起点间距 */
-#define DI_TICK_MAX    16.0         /* 刻度最长 */
-#define DI_TICK_N      88
+/* 刻度全部按封面半径等比缩放 —— 参考视频里 刻度宽≈0.055R、刻度长≈0.15~0.30R、
+   间距≈0.08R(约 78 根/圈)。写死 pt 数在小封面上会互相重叠糊成一圈实线。 */
+#define DI_TICK_N      78
 
 static UIColor *diRhythmHexColor(NSString *hex, UIColor *def) {
     if (![hex isKindOfClass:NSString.class]) return def;
@@ -19115,7 +19115,7 @@ static void diRhythmBuildRing(UIView *host, UIColor *ca, UIColor *cb) {
     CAShapeLayer *mask = [CAShapeLayer layer];
     mask.fillColor = UIColor.clearColor.CGColor;
     mask.strokeColor = UIColor.whiteColor.CGColor;
-    mask.lineWidth = 2.2;
+    mask.lineWidth = 2.0;      /* 每帧按封面半径重算 */
     mask.lineCap = kCALineCapRound;
     g.mask = mask;
     [box addSublayer:g];
@@ -19130,9 +19130,13 @@ static void diRhythmBuildRing(UIView *host, UIColor *ca, UIColor *cb) {
 static void diRhythmLayoutRing(CGRect cover, const float *bands, BOOL active) {
     if (!gDIRhythmRingBox) return;
     CGFloat R = cover.size.width * 0.5f;
-    CGFloat maxLen = DI_TICK_MAX * (float)rhythmStrength;
-    if (maxLen < 4.0) maxLen = 4.0;
-    CGFloat pad = R + DI_COVER_CLIP + maxLen + 2.0;
+    CGFloat gap = MAX(1.0, R * 0.045);                    /* ≈1.3pt @57 封面 */
+    CGFloat maxLen = R * 0.30 * (CGFloat)rhythmStrength;  /* ≈7.7pt @57 封面 */
+    if (maxLen < 3.0) maxLen = 3.0;
+    CGFloat tickW = MIN(3.4, MAX(1.5, R * 0.055)) * (CGFloat)(rhythmRingWidth / 2.2);
+    tickW *= (0.92 + 0.28 * gDIBeatEnv);
+    gDIRhythmRingMask.lineWidth = tickW;
+    CGFloat pad = R + gap + maxLen + tickW;
     CGRect boxFrame = CGRectMake(CGRectGetMidX(cover) - pad, CGRectGetMidY(cover) - pad,
                                  pad * 2, pad * 2);
     if (!CGRectEqualToRect(boxFrame, gDIRhythmRingFrame)) {
@@ -19147,7 +19151,7 @@ static void diRhythmLayoutRing(CGRect cover, const float *bands, BOOL active) {
 
     CGPoint c = CGPointMake(gDIRhythmRingBox.bounds.size.width / 2,
                             gDIRhythmRingBox.bounds.size.height / 2);
-    CGFloat r0 = R + DI_COVER_CLIP;
+    CGFloat r0 = R + gap;
     CGMutablePathRef tp = CGPathCreateMutable();
     for (int i = 0; i < DI_TICK_N; i++) {
         CGFloat a = (CGFloat)i / (CGFloat)DI_TICK_N * M_PI * 2.0 - M_PI_2;
@@ -19326,7 +19330,6 @@ static void diRhythmTick(void) {
         [CATransaction begin];
         [CATransaction setDisableActions:YES];
         diRhythmLayoutRing(cover, gDIBandSmooth, active);
-        gDIRhythmRingMask.lineWidth = rhythmRingWidth * (0.92 + 0.28 * gDIBeatEnv);
         gDIRhythmRingGrad.opacity = active ? (0.55f + 0.45f * gDIBeatEnv) : 0.12f;
         [CATransaction commit];
     }
