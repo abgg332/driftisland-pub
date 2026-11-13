@@ -6094,30 +6094,40 @@ static NSArray<NSString *> *diFxColorNames(void) {
 
 - (NSArray *)buildSpecifiers {
     NSMutableArray *specs = [NSMutableArray array];
-    [specs addObject:[self groupSpec:@"律动特效"
-        footer:@"按 FlexMusic 的结构对齐: 封面正圆 + 外圈 80 根实心刻度(长短由 24 段真实频谱驱动, 珊瑚橙→紫罗兰) + 实心/空心几何粒子 + 进度条上方频谱条。频谱来自 mediaserverd 的 AudioUnitRender(1024 点 FFT), 暂停/停止时全部归零。"]];
+    [specs addObject:[self groupSpec:@"专辑律动"
+        footer:@"封面正圆 + 外圈 80 根实心刻度(长短由 24 段真实频谱驱动, 珊瑚橙→紫罗兰) + 封面随低音鼓点缩放。频谱来自 mediaserverd 的 AudioUnitRender(1024 点 FFT), 暂停/停止时全部归零。特效只在未展开的播放卡上显示。"]];
     [specs addObject:[self switchSpec:@"启用律动特效" key:@"AlbumEffectsOn" def:@YES]];
+    [specs addObject:[self switchSpec:@"启用律动专辑环" key:@"AlbumRingOn" def:@YES]];
     [specs addObject:[self switchSpec:@"圆形封面" key:@"AlbumRoundCover" def:@YES]];
-    [specs addObject:[self switchSpec:@"封面随拍缩放" key:@"AlbumRhythmOn" def:@YES]];
-    [specs addObject:[self switchSpec:@"频谱刻度环" key:@"AlbumRingOn" def:@YES]];
-    [specs addObject:[self switchSpec:@"几何粒子" key:@"AlbumParticlesOn" def:@YES]];
-    [specs addObject:[self switchSpec:@"频谱条(进度条上方)" key:@"AlbumBarsOn" def:@YES]];
-    [specs addObject:[self groupSpec:@"参数" footer:@"改完立刻生效, 不用注销。"]];
-    [specs addObject:[self npSlider:@"律动强度(刻度最长)" key:@"AlbumRhythmStrength" def:0.90 mn:0.10 mx:2.00]];
-    [specs addObject:[self npSlider:@"封面缩放幅度" key:@"AlbumBeatScale" def:0.70 mn:0.00 mx:2.00]];
+    [specs addObject:[self switchSpec:@"专辑跟随律动" key:@"AlbumRhythmOn" def:@YES]];
+    [specs addObject:[self npSlider:@"律动强度" key:@"AlbumRhythmStrength" def:0.90 mn:0.10 mx:2.00]];
+    [specs addObject:[self npSlider:@"专辑律动幅度" key:@"AlbumBeatScale" def:0.70 mn:0.00 mx:2.00]];
     [specs addObject:[self npSlider:@"刻度粗细" key:@"AlbumRingWidth2" def:2.20 mn:0.80 mx:8.00]];
-    [specs addObject:[self npSlider:@"环跟随透明度" key:@"RhythmRingFollowAlpha" def:1.00 mn:0.10 mx:1.50]];
-    [specs addObject:[self npSlider:@"粒子数量" key:@"AlbumParticleCount2" def:12 mn:0 mx:40]];
-    [specs addObject:[self npSlider:@"粒子透明度" key:@"RhythmParticleAlpha" def:1.00 mn:0.10 mx:1.50]];
-    [specs addObject:[self npSlider:@"频谱条根数" key:@"AlbumBarsCount" def:40 mn:8 mx:64]];
-    [specs addObject:[self npSlider:@"频谱条长度" key:@"AlbumBarsHeight" def:13.0 mn:4.0 mx:40.0]];
-    [specs addObject:[self npSlider:@"频谱条宽度" key:@"AlbumBarsWidth" def:3.0 mn:1.0 mx:8.0]];
-    [specs addObject:[self npSlider:@"频谱条位移(左右)" key:@"AlbumBarsOffset" def:0.0 mn:-120.0 mx:120.0]];
-    [specs addObject:[self npSlider:@"粒子大小" key:@"AlbumParticleSize" def:1.0 mn:0.5 mx:3.0]];
-    [specs addObject:[self groupSpec:@"渐变起始色" footer:@"点选即生效并返回。"]];
+    [specs addObject:[self groupSpec:@"环渐变 · 起始色" footer:@"点选即生效并返回。"]];
     [specs addObjectsFromArray:[self colorRows:@"AlbumColorA"]];
-    [specs addObject:[self groupSpec:@"渐变结束色" footer:nil]];
+    [specs addObject:[self groupSpec:@"环渐变 · 结束色" footer:nil]];
     [specs addObjectsFromArray:[self colorRows:@"AlbumColorB"]];
+
+    [specs addObject:[self groupSpec:@"律动粒子"
+        footer:@"粒子从专辑边缘向外散开, 每一记低音鼓点会同时放大、外弹并提亮。颜色在下面的起止色之间渐变。"]];
+    [specs addObject:[self switchSpec:@"启用律动粒子" key:@"AlbumParticlesOn" def:@YES]];
+    [specs addObject:[self npSlider:@"粒子数量" key:@"AlbumParticleCount2" def:25 mn:0 mx:40]];
+    [specs addObject:[self npSlider:@"粒子透明" key:@"RhythmParticleAlpha" def:0.74 mn:0.10 mx:1.50]];
+    [specs addObject:[self npSlider:@"粒子大小" key:@"AlbumParticleSize" def:1.0 mn:0.5 mx:3.0]];
+    [specs addObject:[self groupSpec:@"粒子渐变 · 起始色" footer:nil]];
+    [specs addObjectsFromArray:[self colorRows:@"ParticleColorA"]];
+    [specs addObject:[self groupSpec:@"粒子渐变 · 结束色" footer:nil]];
+    [specs addObjectsFromArray:[self colorRows:@"ParticleColorB"]];
+
+    [specs addObject:[self groupSpec:@"频谱条"
+        footer:@"进度条上方那一排小竖条, 中间高向两侧递减。"]];
+    [specs addObject:[self switchSpec:@"启用频谱条" key:@"AlbumBarsOn" def:@YES]];
+    [specs addObject:[self npSlider:@"根数" key:@"AlbumBarsCount" def:40 mn:8 mx:64]];
+    [specs addObject:[self npSlider:@"长度" key:@"AlbumBarsHeight" def:13.0 mn:4.0 mx:40.0]];
+    [specs addObject:[self npSlider:@"宽度" key:@"AlbumBarsWidth" def:3.0 mn:1.0 mx:8.0]];
+    [specs addObject:[self npSlider:@"位移(左右)" key:@"AlbumBarsOffset" def:0.0 mn:-120.0 mx:120.0]];
+    [specs addObject:[self groupSpec:@"其它" footer:@"改完立刻生效, 不用注销。"]];
+    [specs addObject:[self npSlider:@"环跟随透明度" key:@"RhythmRingFollowAlpha" def:1.00 mn:0.10 mx:1.50]];
     return specs;
 }
 @end

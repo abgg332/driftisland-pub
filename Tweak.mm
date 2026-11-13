@@ -920,7 +920,7 @@ static void refreshPrefs(void) {
         if (off > 120.0) off = 120.0;
         rhythmBarsOffset = off;
     }
-    rhythmParticleAlpha = pDouble(@"RhythmParticleAlpha", 1.0);
+    rhythmParticleAlpha = pDouble(@"RhythmParticleAlpha", 0.74);
     if (rhythmParticleAlpha < 0.1) rhythmParticleAlpha = 0.1;
     if (rhythmParticleAlpha > 1.5) rhythmParticleAlpha = 1.5;
     rhythmRingFollowAlpha = pDouble(@"RhythmRingFollowAlpha", 1.0);
@@ -931,13 +931,22 @@ static void refreshPrefs(void) {
     if (rhythmRingWidth < 0.8) rhythmRingWidth = 0.8;
     if (rhythmRingWidth > 8.0) rhythmRingWidth = 8.0;
     {
-        int c = (int)pInt(@"AlbumParticleCount2", 12);
+        int c = (int)pInt(@"AlbumParticleCount2", 25);
         if (c < 0) c = 0;
         if (c > 40) c = 40;
         rhythmParticleCount = c;
     }
     rhythmColorA = pString(@"AlbumColorA");
     rhythmColorB = pString(@"AlbumColorB");
+    /* 3.0.53: 粒子自己的渐变起止色(截图为 #FFFFBC / #BFCDF8) */
+    {
+        NSString *pa = pString(@"ParticleColorA");
+        NSString *pb = pString(@"ParticleColorB");
+        gDIParticleColA = diRhythmHexColor(pa,
+            [UIColor colorWithRed:1.000 green:1.000 blue:0.737 alpha:1.0]);
+        gDIParticleColB = diRhythmHexColor(pb,
+            [UIColor colorWithRed:0.749 green:0.804 blue:0.973 alpha:1.0]);
+    }
     hideNoMusic = pBool(@"hideNoMusic", NO); // 无音乐时隐藏小岛视频
     lockWOn = pBool(@"lockWOn", NO);
     lockWPercent = pDouble(@"lockWPercent", 85);
@@ -18885,6 +18894,15 @@ static NSString *gDIRhythmUsedB = nil;
 static float gDIBeatEnv = 0.0f;
 static float gDISteady = 0.0f;
 static float gDIBassPrev = 0.0f;
+/* 3.0.53: 低音包络 —— 之前用"帧间差值"判拍, 鼓点密集时每帧 bass 只在小范围抖,
+   差值大多够不到 0.05 阈值, gDIBeatEnv 长期贴 0, 粒子看着就是不动。
+   改成对低音段(前 6 段)的**绝对能量**做 attack/release, 再减去缓慢跟随的底噪,
+   得到 0~1 的拍点脉冲 —— 底鼓每一下都会把粒子/封面顶起来。 */
+static float gDIBassEnv = 0.0f;      /* 低音包络(fast attack / slow release) */
+static float gDIBassFloor = 0.0f;    /* 底噪基线(缓慢上爬, 用来抵消持续的低频轰鸣) */
+static float gDIBassPulse = 0.0f;    /* 拍点脉冲 0~1 */
+static UIColor *gDIParticleColA = nil;
+static UIColor *gDIParticleColB = nil;
 static double gDISynPhase = 0.0;
 static CFTimeInterval gDIFxLast = 0;
 static CFTimeInterval gDIClock = 0;
@@ -18920,7 +18938,7 @@ typedef struct {
     float size, rot, rotSpd;
     float life, maxLife, phase;
     int   shape;      /* 0 实心点 1 空心菱形 2 空心方块 3 空心三角 */
-    int   colorIdx;   /* 0 #FFFFDA 1 #BFCDBA 2 #C6A9DC */
+    float tint;       /* 0~1: 在粒子起始色/结束色之间插值的位置 */
 } DIDot;
 
 static DIDot gDIDots[DI_DOT_CAP];
@@ -18970,12 +18988,20 @@ static void diFxRemoveAllDots(void) {
     gDISpawnAcc = 0;
 }
 
-static UIColor *diFxParticleColor(int idx) {
-    switch (idx) {
-        case 0: return [UIColor colorWithRed:1.000 green:1.000 blue:0.855 alpha:1.0]; /* #FFFFDA */
-        case 1: return [UIColor colorWithRed:0.749 green:0.804 blue:0.729 alpha:1.0]; /* #BFCDBA */
-        default: return [UIColor colorWithRed:0.776 green:0.663 blue:0.863 alpha:1.0];/* #C6A9DC */
-    }
+/* 3.0.53: 粒子颜色改成 FlexMusic 设置里的"渐变起始色/结束色"两色之间插值,
+   与截图一致(默认 #FFFFBC -> #BFCDF8)。 */
+static UIColor *diFxParticleColor(float t) {
+    UIColor *a = gDIParticleColA ?: [UIColor colorWithRed:1.000 green:1.000 blue:0.737 alpha:1.0]; /* #FFFFBC */
+    UIColor *b = gDIParticleColB ?: [UIColor colorWithRed:0.749 green:0.804 blue:0.973 alpha:1.0]; /* #BFCDF8 */
+    CGFloat ar = 1, ag = 1, ab = 1, aa = 1, br = 1, bg = 1, bb = 1, ba = 1;
+    [a getRed:&ar green:&ag blue:&ab alpha:&aa];
+    [b getRed:&br green:&bg blue:&bb alpha:&ba];
+    if (t < 0) t = 0;
+    if (t > 1) t = 1;
+    return [UIColor colorWithRed:ar + (br - ar) * t
+                           green:ag + (bg - ag) * t
+                            blue:ab + (bb - ab) * t
+                           alpha:1.0];
 }
 
 static void diFxSpawnDot(UIView *host, CGRect cover, float maxRad) {
@@ -19006,9 +19032,9 @@ static void diFxSpawnDot(UIView *host, CGRect cover, float maxRad) {
     d->maxLife = 2.4f + diFxRand01() * 2.4f;
     d->life = d->maxLife;
     d->phase = diFxRand01() * (float)M_PI * 2.0f;
-    d->colorIdx = (int)(arc4random() % 10 < 6 ? 0 : (arc4random() % 2 ? 1 : 2));
+    d->tint = diFxRand01();
 
-    UIColor *tint = diFxParticleColor(d->colorIdx);
+    UIColor *tint = diFxParticleColor(d->tint);
     CALayer *layer = gDIDotLayer[slot];
     if (!layer) {
         layer = [CAShapeLayer layer];
@@ -19100,15 +19126,17 @@ static void diFxUpdateDots(UIView *host, CGRect cover, float dt,
         float fade = MIN(1.0f, k * 8.0f);
         if (k < 0.20f) fade = k / 0.20f;
         float tw = 0.66f + 0.34f * sinf(d->phase + (float)gDIClock * 1.6f);
-        float alpha = (0.30f + 0.45f * energy) * fade * tw * (1.0f + 0.55f * beat);   /* 3.0.52: 拍点亮闪同步加大 */
+        float alpha = (0.34f + 0.52f * energy) * fade * tw * (0.78f + 0.85f * beat);
         alpha *= (float)rhythmParticleAlpha;
         if (alpha < 0.04f) alpha = 0.04f;
         if (alpha > 0.95f) alpha = 0.95f;
-        layer.position = CGPointMake(cx + cosf(d->ang) * d->rad,
-                                     cy + sinf(d->ang) * d->rad);
+        /* 3.0.53: 拍点 = 放大 + 沿半径往外弹 + 提亮, 三样一起才有"被鼓点顶了一下"的感觉。
+           光靠缩放(尤其几何体只有 3~5pt)在真机上看不出来。 */
+        CGFloat bounce = (CGFloat)beat * (2.6 + d->size * 0.9);
+        layer.position = CGPointMake(cx + cosf(d->ang) * (d->rad + bounce),
+                                     cy + sinf(d->ang) * (d->rad + bounce));
         layer.opacity = alpha;
-        /* 3.0.51: 跟着鼓点震 —— 拍点上升时整颗放大, 落下缩回, 和封面/刻度同拍 */
-        float pulse = 1.0f + 1.00f * beat;   /* 3.0.52: 0.5*beat 拍点满也只放大到1.5倍, beat 峰值通常不到0.5 -> 肉眼看不出。改1.0 */
+        float pulse = 1.0f + 1.30f * beat;
         CATransform3D tr = CATransform3DMakeRotation(d->rot, 0, 0, 1);
         layer.transform = CATransform3DScale(tr, pulse, pulse, 1.0f);
     }
@@ -19391,7 +19419,10 @@ static void diRhythmUpdateBars(UIView *host, BOOL active) {
                中间是最低频(通常最响=最高), 越往两边频率越高、条越矮。 */
             CGFloat mid = (CGFloat)(n - 1) * 0.5f;
             CGFloat dist = mid > 0 ? fabs((CGFloat)i - mid) / mid : 0.0f;
-            CGFloat bp = dist * (CGFloat)(DI_AU_BANDS - 1);
+            /* 3.0.53: 改用 dist^0.55 —— 线性映射时只有最中间几根吃低频,
+               两侧直接掉到最高频(能量极小), 视觉上两端几乎没有条;
+               参考视频里两侧仍有约四成高度。 */
+            CGFloat bp = pow(dist, 0.55f) * (CGFloat)(DI_AU_BANDS - 1);
             int b0 = (int)bp % DI_AU_BANDS, b1 = MIN(b0 + 1, DI_AU_BANDS - 1);
             CGFloat bf = bp - floor(bp);
             float v = active ? (gDIBandSmooth[b0] * (1.0f - bf) + gDIBandSmooth[b1] * bf) : 0.0f;
@@ -19422,11 +19453,11 @@ static void diRhythmRebuild(UIView *t) {
     gDIRhythmHost = host;
     if (!host) return;
     UIColor *ca = diRhythmHexColor(rhythmColorA,
-        [UIColor colorWithRed:0.961 green:0.541 blue:0.494 alpha:1.0]);   /* #F58A7E */
+        [UIColor colorWithRed:0.898 green:0.600 blue:0.443 alpha:1.0]);   /* #E59971 */
     UIColor *cb = diRhythmHexColor(rhythmColorB,
-        [UIColor colorWithRed:0.549 green:0.482 blue:0.941 alpha:1.0]);   /* #8C7BF0 */
-    gDIRhythmUsedA = [(rhythmColorA.length ? rhythmColorA : @"#F58A7E") copy];
-    gDIRhythmUsedB = [(rhythmColorB.length ? rhythmColorB : @"#8C7BF0") copy];
+        [UIColor colorWithRed:0.580 green:0.561 blue:1.000 alpha:1.0]);   /* #948FFF */
+    gDIRhythmUsedA = [(rhythmColorA.length ? rhythmColorA : @"#E59971") copy];
+    gDIRhythmUsedB = [(rhythmColorB.length ? rhythmColorB : @"#948FFF") copy];
     if (rhythmRoundCover) diCoverRound(t);
     if (rhythmRingOn) diRhythmBuildRing(host, ca, cb);
     RLog(@"[律动] 目标封面 %@ %.0fx%.0f, 宿主 %@ %.0fx%.0f, 圆=%d 环=%d 粒=%d 条=%d",
@@ -19464,8 +19495,24 @@ static void diRhythmAdvanceSpectrum(BOOL active, BOOL real, float dt) {
         }
         bass /= 4.0f;
         gDISteady = MIN(1.0f, sum / (float)DI_AU_BANDS * 1.5f);
-        if (bass > gDIBassPrev + 0.05f)
-            gDIBeatEnv = MIN(1.0f, gDIBeatEnv + (bass - gDIBassPrev) * 3.2f);   /* 3.0.52: 拍点环境值更容易到顶 */
+        /* 3.0.53: 低音(前 6 段)绝对能量的 attack/release 包络 */
+        float lo = 0;
+        for (int i = 0; i < 6; i++) lo += gDIBandSmooth[i];
+        lo /= 6.0f;
+        gDIBassEnv += (lo - gDIBassEnv) * (lo > gDIBassEnv ? 0.62f : 0.10f);
+        /* 底噪基线: 往上慢慢爬(压掉持续轰鸣), 一旦包络掉到基线以下就立刻跟下去 */
+        if (gDIBassEnv < gDIBassFloor)
+            gDIBassFloor += (gDIBassEnv - gDIBassFloor) * 0.30f;
+        else
+            gDIBassFloor += dt * 0.055f;
+        if (gDIBassFloor < 0.0f) gDIBassFloor = 0.0f;
+        if (gDIBassFloor > 0.86f) gDIBassFloor = 0.86f;
+        float pulse01 = (gDIBassEnv - gDIBassFloor) / 0.24f;
+        if (pulse01 < 0.0f) pulse01 = 0.0f;
+        if (pulse01 > 1.0f) pulse01 = 1.0f;
+        /* 快速上冲 + 0.18s 衰减: 每一记底鼓都是一个清晰的"弹" */
+        gDIBassPulse = MAX(pulse01, gDIBassPulse * expf(-dt * 5.5f));
+        gDIBeatEnv = gDIBassPulse;
         gDIBassPrev = bass;
     } else if (active) {
         gDISynPhase += dt * 1.9;
@@ -19477,14 +19524,21 @@ static void diRhythmAdvanceSpectrum(BOOL active, BOOL real, float dt) {
         }
         gDISteady = (float)(0.28 + 0.50 * pulse);
         if (pulse > 0.55) gDIBeatEnv = MAX(gDIBeatEnv, (float)pulse * 0.9f);
+        gDIBassPulse = gDIBeatEnv;      /* 3.0.53: 合成节拍时也让粒子跟同一个脉冲 */
         gDIBassPrev = 0.3f;
     } else {
         for (int i = 0; i < DI_AU_BANDS; i++) gDIBandSmooth[i] *= expf(-dt * 5.0f);
         gDISteady *= expf(-dt * 4.0f);
         gDIBassPrev = 0;
     }
-    if (!active) gDIBeatEnv *= expf(-dt * 6.0f);
-    else gDIBeatEnv *= expf(-dt * 4.5f);
+    if (!active) {
+        gDIBeatEnv *= expf(-dt * 6.0f);
+        gDIBassPulse *= expf(-dt * 8.0f);
+        gDIBassEnv *= expf(-dt * 5.0f);
+        gDIBassFloor *= expf(-dt * 2.0f);
+    } else {
+        gDIBeatEnv *= expf(-dt * 4.5f);
+    }
 }
 
 static void diRhythmTick(void) {
@@ -19558,8 +19612,8 @@ static void diRhythmTick(void) {
         return;
     }
 
-    NSString *hexA = (rhythmColorA.length ? rhythmColorA : @"#F58A7E");
-    NSString *hexB = (rhythmColorB.length ? rhythmColorB : @"#8C7BF0");
+    NSString *hexA = (rhythmColorA.length ? rhythmColorA : @"#E59971");
+    NSString *hexB = (rhythmColorB.length ? rhythmColorB : @"#948FFF");
     if (![hexA isEqualToString:gDIRhythmUsedA] || ![hexB isEqualToString:gDIRhythmUsedB]
         || (rhythmRingOn && !gDIRhythmRingBox) || (!rhythmRingOn && gDIRhythmRingBox)) {
         diRhythmRebuild(t);
