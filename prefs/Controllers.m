@@ -6092,16 +6092,17 @@ static NSArray<NSString *> *diFxColorNames(void) {
 - (NSArray *)buildSpecifiers {
     NSMutableArray *specs = [NSMutableArray array];
     [specs addObject:[self groupSpec:@"律动特效"
-        footer:@"专辑封面随音乐节拍缩放, 外圈是渐变律动环, 环外飘出发光粒子。能量来自系统音频实时采样(mediaserverd), 音乐暂停或停止时粒子自动熄灭。"]];
+        footer:@"封面裁成正圆, 圆外一圈放射刻度按 24 段真实频谱起伏(珊瑚橙→紫罗兰渐变), 周围飘空心几何图形。频谱来自 mediaserverd 的 AudioUnitRender 实时 FFT, 暂停/停止时刻度收回、粒子淡出。"]];
     [specs addObject:[self switchSpec:@"启用律动特效" key:@"AlbumEffectsOn" def:@YES]];
+    [specs addObject:[self switchSpec:@"圆形封面" key:@"AlbumRoundCover" def:@YES]];
     [specs addObject:[self switchSpec:@"封面律动(随节拍缩放)" key:@"AlbumRhythmOn" def:@YES]];
-    [specs addObject:[self switchSpec:@"律动环" key:@"AlbumRingOn" def:@YES]];
-    [specs addObject:[self switchSpec:@"粒子效果" key:@"AlbumParticlesOn" def:@YES]];
+    [specs addObject:[self switchSpec:@"频谱刻度环" key:@"AlbumRingOn" def:@YES]];
+    [specs addObject:[self switchSpec:@"几何粒子" key:@"AlbumParticlesOn" def:@YES]];
     [specs addObject:[self groupSpec:@"参数" footer:@"改完立刻生效, 不用注销。"]];
     [specs addObject:[self npSlider:@"律动强度" key:@"AlbumRhythmStrength" def:0.90 mn:0.10 mx:2.00]];
     [specs addObject:[self npSlider:@"律动幅度" key:@"AlbumBeatScale" def:0.70 mn:0.00 mx:2.00]];
-    [specs addObject:[self npSlider:@"环粗细" key:@"AlbumRingWidth" def:4.20 mn:0.50 mx:12.00]];
-    [specs addObject:[self npSlider:@"粒子数量" key:@"AlbumParticleCount" def:25 mn:6 mx:60]];
+    [specs addObject:[self npSlider:@"刻度粗细" key:@"AlbumRingWidth2" def:2.20 mn:0.80 mx:8.00]];
+    [specs addObject:[self npSlider:@"粒子数量" key:@"AlbumParticleCount2" def:12 mn:4 mx:40]];
     [specs addObject:[self groupSpec:@"环渐变 · 起始色" footer:nil]];
     [specs addObjectsFromArray:[self colorRows:@"AlbumColorA"]];
     [specs addObject:[self groupSpec:@"环渐变 · 结束色" footer:@"预设 8 色, 点选即生效。"]];
