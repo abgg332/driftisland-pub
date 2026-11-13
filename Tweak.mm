@@ -18722,6 +18722,7 @@ static int gDIAuLen = 0;
 static float gDIBandRaw[DI_AU_BANDS];      /* 最新一包(0..1) */
 static float gDIBandSmooth[DI_AU_BANDS];   /* 显示用(快起慢落) */
 static BOOL gDIBandSeen = NO;
+static BOOL gDIAuLogged = NO, gDIAuFailLogged = NO;
 
 static void diAuClose(void) {
     if (gDIAuFd >= 0) { close(gDIAuFd); gDIAuFd = -1; }
@@ -18746,6 +18747,9 @@ static void diAuParse(void) {
             gDIAuSlow = s;
             for (int i = 0; i < DI_AU_BANDS; i++)
                 gDIBandRaw[i] = (i < nb) ? (float)gDIAuBuf[12 + i] / 255.0f : 0.0f;
+            if (!gDIBandSeen) {
+                RLog(@"[律动] 频谱首包: %d 段 fast=%.3f slow=%.3f (真 FFT)", nb, f, s);
+            }
             gDIBandSeen = YES;
             gDIAuStamp = CFAbsoluteTimeGetCurrent();
         }
@@ -18766,9 +18770,18 @@ static void diAuPoll(void) {
         a.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
         a.sin_port = htons(DI_AU_PORT);
         int r = connect(fd, (struct sockaddr *)&a, sizeof a);
-        if (r == 0) { gDIAuFd = fd; gDIAuConnecting = NO; }
+        if (r == 0) {
+            gDIAuFd = fd; gDIAuConnecting = NO;
+            if (!gDIAuLogged) { gDIAuLogged = YES; RLog(@"[律动] 频谱端已连接 127.0.0.1:%d", DI_AU_PORT); }
+        }
         else if (errno == EINPROGRESS) { gDIAuFd = fd; gDIAuConnecting = YES; }
-        else { close(fd); }
+        else {
+            close(fd);
+            if (!gDIAuFailLogged) {
+                gDIAuFailLogged = YES;
+                RLog(@"[律动] 频谱端连不上 (errno=%d) —— 检查 DIAudio.dylib 是否注入 mediaserverd", errno);
+            }
+        }
         return;
     }
     if (gDIAuConnecting) {
@@ -18921,7 +18934,7 @@ static void diFxSpawnDot(UIView *host, CGRect cover, float maxRad) {
     DIDot *d = &gDIDots[slot];
     CGFloat R = cover.size.width * 0.5f;
     d->ang = diFxRand01() * (float)M_PI * 2.0f;
-    float lo = (float)R * 1.18f, hi = MIN(maxRad, (float)R * 2.35f);
+    float lo = (float)R * 1.18f, hi = MIN(maxRad, (float)R * 2.05f);
     if (hi < lo + 4) hi = lo + 4;
     d->rad = lo + diFxRand01() * (hi - lo);
     d->spin = (diFxRand01() - 0.5f) * 0.16f;
@@ -18946,16 +18959,17 @@ static void diFxSpawnDot(UIView *host, CGRect cover, float maxRad) {
         gDIDotLayer[slot] = layer;
     }
     CGFloat sz = d->size;
-    layer.bounds = CGRectMake(0, 0, sz, sz);
+    CAShapeLayer *sl = (CAShapeLayer *)layer;
+    sl.bounds = CGRectMake(0, 0, sz, sz);
     CGPathRef path = diFxShapePath(d->shape, sz);
-    [(CAShapeLayer *)layer setPath:path];
+    sl.path = path;
     CGPathRelease(path);
-    layer.fillColor = UIColor.clearColor.CGColor;
-    layer.strokeColor = tint.CGColor;
-    layer.lineWidth = 1.0;
-    layer.lineJoin = kCALineJoinRound;
-    layer.lineCap = kCALineCapRound;
-    layer.shadowColor = tint.CGColor;
+    sl.fillColor = UIColor.clearColor.CGColor;
+    sl.strokeColor = tint.CGColor;
+    sl.lineWidth = 1.0;
+    sl.lineJoin = kCALineJoinRound;
+    sl.lineCap = kCALineCapRound;
+    sl.shadowColor = tint.CGColor;
     layer.shadowOpacity = 0.35f;
     layer.shadowRadius = 2.0;
     layer.shadowOffset = CGSizeZero;
