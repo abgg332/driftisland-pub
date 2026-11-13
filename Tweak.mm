@@ -18908,7 +18908,6 @@ static BOOL diLayerHasContent(CALayer *l, int depth) {
 
 static BOOL diViewHasArt(UIView *v) {
     if (!v || v.hidden || v.alpha < 0.05) return NO;
-    if (v.isHiddenOrHasHiddenAncestor) return NO;
     if ([v isKindOfClass:UIImageView.class] && ((UIImageView *)v).image != nil) return YES;
     if (v.layer.contents != NULL) return YES;
     NSString *cn = NSStringFromClass(v.class);
