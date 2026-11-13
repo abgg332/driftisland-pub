@@ -16533,6 +16533,9 @@ static void diNoImplicitActions(CALayer *l) {
    天然每帧都在, 所以从不会"转着转着停了"; 这里把同样的覆盖能力做进 dress 里。 */
 static CFTimeInterval gDISpinEpoch = 0;
 static const CFTimeInterval kDISpinDur = 10.0;
+/* 3.0.57: 律动接管了哪一层的 transform(旋转+缩放)。这层暂时不挂 di.art.spin ——
+   两个写入者抢同一个属性时, 探针里 m11 会间歇变回 1.000, 旋转也会忽快忽慢。 */
+static __weak UIView *gDIArtSpinYield = nil;
 
 /* ===== 3.0.39: 播放器专辑图重新铺「遮罩素材」 =====
    3.0.24 曾把素材直接铺成封面 contents(把专辑图整个换掉), 3.0.28 删掉了。现在改成
@@ -18982,9 +18985,8 @@ static float gDILowLevel = 0.0f;     /* 60~250Hz 能量(探针/低频呼吸) */
 /* 3.0.57: 封面旋转的"归属权"。放了 di.art.spin 这条 CA 动画的层, 我们每帧写 transform
    就是在跟动画抢同一个属性 —— 实测探针里 m11 会间歇性变回 1.000(写进去又被顶掉),
    而且旋转看着一会儿快一会儿慢。律动接管期间先摘掉动画, 由我们同一帧把
-   旋转+缩放一次算完(只有一个写入者), 律动关了再交还给 CA 动画。 */
-static __weak UIView *gDIArtSpinYield = nil;
-static CFTimeInterval gDIArtSpinYieldAt = 0;
+   旋转+缩放一次算完(只有一个写入者), 律动关了再交还给 CA 动画。
+   (定义在 diArtDress 之前, 那里要用它判断是否跳过挂动画) */
 
 static __weak UIView *gDICoverRounded = nil;
 static CGFloat gDICoverOrigRadius = 0;
@@ -20069,7 +20071,6 @@ static void diRhythmTickWithDelta(float dtIn) {
         if ([dv.layer animationForKey:@"di.art.spin"]) {
             [dv.layer removeAnimationForKey:@"di.art.spin"];
             gDIArtSpinYield = dv;
-            gDIArtSpinYieldAt = CACurrentMediaTime();
             RLog(@"[律动] 接管封面旋转(摘掉 di.art.spin, 改为每帧与缩放一起算)");
         }
         if (gDIArtSpinYield == dv) ownsSpin = YES;
