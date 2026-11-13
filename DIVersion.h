@@ -4,5 +4,5 @@
    以后只改这里, 两个目标都包含它。 */
 #ifndef DI_VERSION_H
 #define DI_VERSION_H
-#define DI_VERSION @"3.0.50"
+#define DI_VERSION @"3.0.51"
 #endif

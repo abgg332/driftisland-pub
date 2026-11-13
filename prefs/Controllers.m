@@ -6057,10 +6057,13 @@ static NSArray<NSString *> *diFxColorNames(void) {
     NSString *cur = CFBridgingRelease(CFPreferencesCopyAppValue(
         (__bridge CFStringRef)key, (__bridge CFStringRef)kDomain));
     if (![cur isKindOfClass:NSString.class]) cur = nil;
+    NSArray<NSString *> *dots = @[@"🟠", @"🟣", @"🔴", @"🔵", @"🟢", @"🟡", @"💗", @"⚪"];
     for (NSUInteger i = 0; i < hexes.count && i < names.count; i++) {
         BOOL on = [cur isEqualToString:hexes[i]];
-        NSString *label = [NSString stringWithFormat:@"%@  %@  %@",
-                           on ? @"✓" : @"  ", names[i], hexes[i]];
+        /* 3.0.51: 排版收干净 —— 一行只有"色点 名称 选中勾", HEX 不再占半行 */
+        NSString *label = [NSString stringWithFormat:@"%@  %@%@",
+                           dots.count > i ? dots[i] : @"●", names[i],
+                           on ? @"   ✓" : @""];
         PSSpecifier *sp = [PSSpecifier preferenceSpecifierNamed:label target:self
             set:NULL get:NULL detail:nil cell:PSButtonCell edit:nil];
         [sp setProperty:hexes[i] forKey:@"hexValue"];
@@ -6108,9 +6111,11 @@ static NSArray<NSString *> *diFxColorNames(void) {
     [specs addObject:[self npSlider:@"粒子透明度" key:@"RhythmParticleAlpha" def:1.00 mn:0.10 mx:1.50]];
     [specs addObject:[self npSlider:@"频谱条根数" key:@"AlbumBarsCount" def:40 mn:8 mx:64]];
     [specs addObject:[self npSlider:@"频谱条长度" key:@"AlbumBarsHeight" def:13.0 mn:4.0 mx:40.0]];
-    [specs addObject:[self groupSpec:@"环渐变 · 起始色" footer:nil]];
+    [specs addObject:[self npSlider:@"频谱条宽度" key:@"AlbumBarsWidth" def:3.0 mn:1.0 mx:8.0]];
+    [specs addObject:[self npSlider:@"粒子大小" key:@"AlbumParticleSize" def:1.0 mn:0.5 mx:3.0]];
+    [specs addObject:[self groupSpec:@"渐变起始色" footer:@"点选即生效并返回。"]];
     [specs addObjectsFromArray:[self colorRows:@"AlbumColorA"]];
-    [specs addObject:[self groupSpec:@"环渐变 · 结束色" footer:@"预设 8 色, 点选即生效。"]];
+    [specs addObject:[self groupSpec:@"渐变结束色" footer:nil]];
     [specs addObjectsFromArray:[self colorRows:@"AlbumColorB"]];
     return specs;
 }

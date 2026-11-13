@@ -70,6 +70,8 @@ static BOOL rhythmRoundCover = YES;            // 3.0.47: 封面裁成正圆
 static BOOL rhythmBarsOn = YES;                // 3.0.48: 频谱条(进度条上方)
 static int  rhythmBarsCount = 40;              // 3.0.50: 频谱条根数(可调)
 static double rhythmBarsHeight = 13.0;         // 3.0.50: 频谱条长度(可调)
+static double rhythmBarsWidth = 3.0;           // 3.0.51: 频谱条单根最大宽度(可调)
+static double rhythmParticleSize = 1.0;        // 3.0.51: 粒子大小倍率(可调)
 static double rhythmParticleAlpha = 1.0;       // 3.0.48: 粒子透明度
 static double rhythmRingFollowAlpha = 1.0;     // 3.0.48: 环跟随透明度
 static int  rhythmParticleCount = 12;          // 3.0.47: 参考视频里只有十几颗
@@ -904,6 +906,14 @@ static void refreshPrefs(void) {
         if (h < 4.0) h = 4.0;
         if (h > 40.0) h = 40.0;
         rhythmBarsHeight = h;
+        double w = pDouble(@"AlbumBarsWidth", 3.0);
+        if (w < 1.0) w = 1.0;
+        if (w > 8.0) w = 8.0;
+        rhythmBarsWidth = w;
+        double ps = pDouble(@"AlbumParticleSize", 1.0);
+        if (ps < 0.5) ps = 0.5;
+        if (ps > 3.0) ps = 3.0;
+        rhythmParticleSize = ps;
     }
     rhythmParticleAlpha = pDouble(@"RhythmParticleAlpha", 1.0);
     if (rhythmParticleAlpha < 0.1) rhythmParticleAlpha = 0.1;
@@ -18984,8 +18994,8 @@ static void diFxSpawnDot(UIView *host, CGRect cover, float maxRad) {
     d->drift = 2.4f + diFxRand01() * 5.0f;                 /* 恒定向外 */
     int sh = arc4random() % 10;
     d->shape = (sh < 5) ? 0 : (sh < 7 ? 1 : (sh < 9 ? 2 : 3));   /* 一半是实心点 */
-    d->size = (d->shape == 0) ? (1.8f + diFxRand01() * 1.6f)
-                              : (3.2f + diFxRand01() * 2.4f);
+    d->size = ((d->shape == 0) ? (1.8f + diFxRand01() * 1.6f)
+                               : (3.2f + diFxRand01() * 2.4f)) * (float)rhythmParticleSize;
     d->rot = diFxRand01() * (float)M_PI * 2.0f;
     d->rotSpd = (diFxRand01() - 0.5f) * 0.5f;
     d->maxLife = 2.4f + diFxRand01() * 2.4f;
@@ -19092,7 +19102,10 @@ static void diFxUpdateDots(UIView *host, CGRect cover, float dt,
         layer.position = CGPointMake(cx + cosf(d->ang) * d->rad,
                                      cy + sinf(d->ang) * d->rad);
         layer.opacity = alpha;
-        layer.transform = CATransform3DMakeRotation(d->rot, 0, 0, 1);
+        /* 3.0.51: 跟着鼓点震 —— 拍点上升时整颗放大, 落下缩回, 和封面/刻度同拍 */
+        float pulse = 1.0f + 0.50f * beat;
+        CATransform3D tr = CATransform3DMakeRotation(d->rot, 0, 0, 1);
+        layer.transform = CATransform3DScale(tr, pulse, pulse, 1.0f);
     }
     [CATransaction commit];
 }
@@ -19344,6 +19357,14 @@ static void diRhythmUpdateBars(UIView *host, BOOL active) {
     CGFloat bw = (avail - gap * (n - 1)) / (CGFloat)n;
     if (bw < 1.2) { gap = 1.2; bw = (avail - gap * (n - 1)) / (CGFloat)n; }
     if (bw < 0.5) { bw = 0.5; }
+    /* 3.0.51: 单根宽度可调 —— 上限压住后整排重新居中, 而不是靠在左边 */
+    CGFloat maxW = (CGFloat)rhythmBarsWidth;
+    if (bw > maxW) {
+        bw = maxW;
+        CGFloat total = bw * n + gap * (n - 1);
+        x0 = (host.bounds.size.width - total) * 0.5f;
+        if (x0 < 10.0) x0 = 10.0;
+    }
 
     if (!gDIRhythmBars) {
         gDIRhythmBars = [CAShapeLayer layer];
@@ -19537,10 +19558,12 @@ static void diRhythmTick(void) {
 
     if (rhythmRoundCover) diCoverRound(t);
     if (rhythmOn && gDIRhythmBaseValid) {
-        CGFloat amp = 0.028 * rhythmBeatScale;
-        CGFloat s = 1.0 + (0.35 * gDISteady + 0.65 * gDIBeatEnv) * amp;
-        if (s < 0.97) s = 0.97;
-        if (s > 1.06) s = 1.06;
+        /* 3.0.51: 0.028 且上限 1.06 时最大缩放只有 ~2%, 视觉上等于没动。
+           改成 0.055、上限 1.10 —— 拍点上来封面明显"弹"一下, 落下回位。 */
+        CGFloat amp = 0.055 * rhythmBeatScale;
+        CGFloat s = 1.0 + (0.30 * gDISteady + 0.70 * gDIBeatEnv) * amp;
+        if (s < 0.94) s = 0.94;
+        if (s > 1.10) s = 1.10;
         [CATransaction begin];
         [CATransaction setDisableActions:YES];
         t.layer.transform = CATransform3DConcat(gDIRhythmBase, CATransform3DMakeScale(s, s, 1));
