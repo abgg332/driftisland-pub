@@ -311,7 +311,12 @@ static void diStepSeedCache(UITableViewCell *cell, NSString *key, NSString *doma
 /* 把 specifier 的关键信息缓存到 cell 上(布局时调用一次) */
 static void diStepCacheSpec(UITableViewCell *cell) {
     if (!cell) return;
-    if (objc_getAssociatedObject(cell, "di_k_key")) return;   /* 已缓存 */
+    /* 3.0.60: **不能**只看"有没有缓存"就早退。
+       cell 是复用的 —— 上一行(例如"粒子数量" step=1)被滚出屏幕后,
+       同一个 cell 可能拿来显示"粒子大小", 但 di_k_key 还停在旧 key 上,
+       于是 diStepOf() 永远拿不到 AlbumParticleSize 的 0.1, 按 + 就是 1 的步进
+       (显示上 1 → 2, 用户看到的就是"怎么改都不是 0.1")。
+       现在每次都对比 specifier 当前的 key, 变了就整包重写。 */
     PSSpecifier *sp = nil;
     @try {
         if ([cell respondsToSelector:NSSelectorFromString(@"specifier")]) {
@@ -326,13 +331,20 @@ static void diStepCacheSpec(UITableViewCell *cell) {
         NSString *k = [sp propertyForKey:@"key"];
         NSString *d = [sp propertyForKey:@"defaults"];
         if (!k.length || !d.length) return;
+        NSString *cached = objc_getAssociatedObject(cell, "di_k_key");
+        NSNumber *newStep = [sp propertyForKey:@"diStep"];
+        id cachedStep = objc_getAssociatedObject(cell, "di_k_step");
+        if ([k isEqualToString:cached] && (cachedStep || !newStep)) return;   /* 同一行且 step 没丢 */
         objc_setAssociatedObject(cell, "di_k_key", k, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
         objc_setAssociatedObject(cell, "di_k_dom", d, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
         objc_setAssociatedObject(cell, "di_k_min", [sp propertyForKey:@"min"], OBJC_ASSOCIATION_RETAIN_NONATOMIC);
         objc_setAssociatedObject(cell, "di_k_max", [sp propertyForKey:@"max"], OBJC_ASSOCIATION_RETAIN_NONATOMIC);
         objc_setAssociatedObject(cell, "di_k_def", [sp propertyForKey:@"default"], OBJC_ASSOCIATION_RETAIN_NONATOMIC);
         objc_setAssociatedObject(cell, "di_k_name", [sp name], OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-        objc_setAssociatedObject(cell, "di_k_step", [sp propertyForKey:@"diStep"], OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        /* 3.0.60: 按 key 兜底 —— 就算 specifier 上的 diStep 没传下来, 这几行也强制小数步进 */
+        double ov = diStepForKeyOverride(k);
+        id stp = (ov > 0.0) ? @(ov) : newStep;
+        objc_setAssociatedObject(cell, "di_k_step", stp, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
     } @catch (__unused NSException *e) {}
 }
 
@@ -527,7 +539,14 @@ static void diStepSliderLayout(UITableViewCell *cell) {
         [minus setTitle:@"−" forState:UIControlStateNormal];
         [minus setTitleColor:[UIColor systemBlueColor] forState:UIControlStateNormal];
         minus.titleLabel.font = [UIFont boldSystemFontOfSize:22];
-        [minus addTarget:cell action:NSSelectorFromString(@"diStepDown") forControlEvents:UIControlEventTouchUpInside];
+        {
+            __weak UITableViewCell *wc = cell;
+            [minus addAction:[UIAction actionWithHandler:^(__kindof UIAction *a) {
+                UITableViewCell *c = wc;
+                if (!c) return;
+                diStepSliderApply(c, -diStepOf(c));
+            }] forControlEvents:UIControlEventTouchUpInside];
+        }
         minus.hidden = YES;
         [cv addSubview:minus];
         objc_setAssociatedObject(cell, "di_step_minus", minus, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
@@ -537,7 +556,17 @@ static void diStepSliderLayout(UITableViewCell *cell) {
         [plus setTitle:@"+" forState:UIControlStateNormal];
         [plus setTitleColor:[UIColor systemBlueColor] forState:UIControlStateNormal];
         plus.titleLabel.font = [UIFont boldSystemFontOfSize:24];
-        [plus addTarget:cell action:NSSelectorFromString(@"diStepUp") forControlEvents:UIControlEventTouchUpInside];
+        /* 3.0.60: 直接挂 block, 不再走 class_addMethod 注册的 diStepUp。
+           473 日志里点 + 一条 [滑杆] 都没有 —— 说明 action 根本没进我们的方法
+           (selector 注册在 PSSliderCell 上, 实际 cell 是别的类时不响应)。 */
+        {
+            __weak UITableViewCell *wc = cell;
+            [plus addAction:[UIAction actionWithHandler:^(__kindof UIAction *a) {
+                UITableViewCell *c = wc;
+                if (!c) return;
+                diStepSliderApply(c, diStepOf(c));
+            }] forControlEvents:UIControlEventTouchUpInside];
+        }
         [cv addSubview:plus];
         objc_setAssociatedObject(cell, "di_step_plus", plus, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
 
@@ -5964,6 +5993,8 @@ static void diNPEnsureActivation(void) {
     double step = 0.01;
     NSNumber *st = [sp propertyForKey:@"diStep"];
     if ([st isKindOfClass:NSNumber.class] && st.doubleValue > 0.0) step = st.doubleValue;
+    double ov = diStepForKeyOverride(key);       /* 3.0.60: key 兜底, 不依赖 specifier */
+    if (ov > 0.0) step = ov;
     v = round(v / step) * step;
     v = round(v * 1000.0) / 1000.0;
     CFPreferencesSetAppValue((__bridge CFStringRef)key, (__bridge CFPropertyListRef)@(v),
@@ -6373,6 +6404,8 @@ static NSString *diModeName(int m) {
     double step = 0.01;
     NSNumber *st = [sp propertyForKey:@"diStep"];
     if ([st isKindOfClass:NSNumber.class] && st.doubleValue > 0.0) step = st.doubleValue;
+    double ov = diStepForKeyOverride(key);       /* 3.0.60: key 兜底, 不依赖 specifier */
+    if (ov > 0.0) step = ov;
     v = round(v / step) * step;
     v = round(v * 1000.0) / 1000.0;
     CFPreferencesSetAppValue((__bridge CFStringRef)key, (__bridge CFPropertyListRef)@(v),
