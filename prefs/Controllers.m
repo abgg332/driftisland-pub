@@ -6002,6 +6002,8 @@ static NSArray<NSString *> *diFxColorNames(void) {
 }
 
 
+@implementation DIFxPage
+
 /* 3.0.45: 播放器域滑杆(与 DIPlayerEntryPage 同一套, 保留两位小数) */
 - (PSSpecifier *)npSlider:(NSString *)label key:(NSString *)key
                       def:(double)def mn:(double)mn mx:(double)mx {
@@ -6045,7 +6047,6 @@ static NSArray<NSString *> *diFxColorNames(void) {
     notify_post("com.local.playerexact/artwork-changed");
 }
 
-@implementation DIFxPage
 
 
 - (NSArray *)colorRows:(NSString *)key {
