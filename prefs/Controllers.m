@@ -6106,6 +6106,8 @@ static NSArray<NSString *> *diFxColorNames(void) {
     [specs addObject:[self npSlider:@"环跟随透明度" key:@"RhythmRingFollowAlpha" def:1.00 mn:0.10 mx:1.50]];
     [specs addObject:[self npSlider:@"粒子数量" key:@"AlbumParticleCount2" def:12 mn:0 mx:40]];
     [specs addObject:[self npSlider:@"粒子透明度" key:@"RhythmParticleAlpha" def:1.00 mn:0.10 mx:1.50]];
+    [specs addObject:[self npSlider:@"频谱条根数" key:@"AlbumBarsCount" def:40 mn:8 mx:64]];
+    [specs addObject:[self npSlider:@"频谱条长度" key:@"AlbumBarsHeight" def:13.0 mn:4.0 mx:40.0]];
     [specs addObject:[self groupSpec:@"环渐变 · 起始色" footer:nil]];
     [specs addObjectsFromArray:[self colorRows:@"AlbumColorA"]];
     [specs addObject:[self groupSpec:@"环渐变 · 结束色" footer:@"预设 8 色, 点选即生效。"]];

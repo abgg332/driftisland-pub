@@ -68,6 +68,8 @@ static BOOL rhythmRingOn = YES;                // 律动环(锥形渐变圆环 +
 static BOOL rhythmParticlesOn = YES;           // 封面外圈粒子
 static BOOL rhythmRoundCover = YES;            // 3.0.47: 封面裁成正圆
 static BOOL rhythmBarsOn = YES;                // 3.0.48: 频谱条(进度条上方)
+static int  rhythmBarsCount = 40;              // 3.0.50: 频谱条根数(可调)
+static double rhythmBarsHeight = 13.0;         // 3.0.50: 频谱条长度(可调)
 static double rhythmParticleAlpha = 1.0;       // 3.0.48: 粒子透明度
 static double rhythmRingFollowAlpha = 1.0;     // 3.0.48: 环跟随透明度
 static int  rhythmParticleCount = 12;          // 3.0.47: 参考视频里只有十几颗
@@ -893,6 +895,16 @@ static void refreshPrefs(void) {
     if (rhythmBeatScale > 2.0) rhythmBeatScale = 2.0;
     rhythmRoundCover = pBool(@"AlbumRoundCover", YES);
     rhythmBarsOn = pBool(@"AlbumBarsOn", YES);
+    {
+        int c = (int)pInt(@"AlbumBarsCount", 40);
+        if (c < 8) c = 8;
+        if (c > 64) c = 64;
+        rhythmBarsCount = c;
+        double h = pDouble(@"AlbumBarsHeight", 13.0);
+        if (h < 4.0) h = 4.0;
+        if (h > 40.0) h = 40.0;
+        rhythmBarsHeight = h;
+    }
     rhythmParticleAlpha = pDouble(@"RhythmParticleAlpha", 1.0);
     if (rhythmParticleAlpha < 0.1) rhythmParticleAlpha = 0.1;
     if (rhythmParticleAlpha > 1.5) rhythmParticleAlpha = 1.5;
@@ -18953,6 +18965,7 @@ static UIColor *diFxParticleColor(int idx) {
 
 static void diFxSpawnDot(UIView *host, CGRect cover, float maxRad) {
     if (!host) return;
+    (void)maxRad;                 /* 3.0.50: 出生点固定在专辑边缘, 上限由更新循环裁掉 */
     int slot = -1;
     for (int i = 0; i < gDIDotCount; i++)
         if (gDIDots[i].life <= 0) { slot = i; break; }
@@ -18963,18 +18976,19 @@ static void diFxSpawnDot(UIView *host, CGRect cover, float maxRad) {
     DIDot *d = &gDIDots[slot];
     CGFloat R = cover.size.width * 0.5f;
     d->ang = diFxRand01() * (float)M_PI * 2.0f;
-    float lo = (float)R * 1.12f, hi = MIN(maxRad, (float)R * 2.30f);
-    if (hi < lo + 4) hi = lo + 4;
-    d->rad = lo + diFxRand01() * (hi - lo);
-    d->spin = (diFxRand01() - 0.5f) * 0.14f;
-    d->drift = (diFxRand01() - 0.5f) * 2.2f;
+    /* 3.0.50: 出生在专辑边缘一圈(1.02~1.18R), 之后**只向外飘** ——
+       "看起来就是专辑头像散出来的"。以前出生在 1.12~2.3R 的环带里且内外乱飘,
+       视觉上是凭空出现在半空。 */
+    d->rad = (float)R * (1.02f + diFxRand01() * 0.16f);
+    d->spin = (diFxRand01() - 0.5f) * 0.10f;
+    d->drift = 2.4f + diFxRand01() * 5.0f;                 /* 恒定向外 */
     int sh = arc4random() % 10;
     d->shape = (sh < 5) ? 0 : (sh < 7 ? 1 : (sh < 9 ? 2 : 3));   /* 一半是实心点 */
-    d->size = (d->shape == 0) ? (2.6f + diFxRand01() * 2.2f)
-                              : (4.6f + diFxRand01() * 3.0f);
+    d->size = (d->shape == 0) ? (1.8f + diFxRand01() * 1.6f)
+                              : (3.2f + diFxRand01() * 2.4f);
     d->rot = diFxRand01() * (float)M_PI * 2.0f;
-    d->rotSpd = (diFxRand01() - 0.5f) * 0.45f;
-    d->maxLife = 5.5f + diFxRand01() * 6.0f;
+    d->rotSpd = (diFxRand01() - 0.5f) * 0.5f;
+    d->maxLife = 2.4f + diFxRand01() * 2.4f;
     d->life = d->maxLife;
     d->phase = diFxRand01() * (float)M_PI * 2.0f;
     d->colorIdx = (int)(arc4random() % 10 < 6 ? 0 : (arc4random() % 2 ? 1 : 2));
@@ -19014,18 +19028,58 @@ static void diFxUpdateDots(UIView *host, CGRect cover, float dt,
                            float energy, float beat, BOOL active) {
     if (!host || gDIDotCount == 0) return;
     CGFloat cx = CGRectGetMidX(cover), cy = CGRectGetMidY(cover);
+    CGFloat Rc = cover.size.width * 0.5f;
+    CGFloat maxRad = MIN(MIN(cx, cy), MIN(host.bounds.size.width - cx,
+                                         host.bounds.size.height - cy)) - 4.0f;
+    if (maxRad < Rc * 1.4f) maxRad = Rc * 1.4f;
     [CATransaction begin];
     [CATransaction setDisableActions:YES];
     for (int i = 0; i < gDIDotCount; i++) {
         DIDot *d = &gDIDots[i];
         CALayer *layer = gDIDotLayer[i];
-        if (!layer) continue;
-        if (d->life <= 0) { [layer removeFromSuperlayer]; continue; }
+        /* 3.0.50: 死掉的粒子必须**回收槽位**。以前只 removeFromSuperlayer,
+           gDIDotCount 不减 —— 第一批发完(5~11 秒)之后"数量已满"的判定永远成立,
+           补发逻辑一次都不触发, 表现就是"显示一下就不显示了"。 */
+        if (!layer || d->life <= 0) {
+            [layer removeFromSuperlayer];
+            int last = gDIDotCount - 1;
+            if (i != last) {
+                gDIDots[i] = gDIDots[last];
+                gDIDotLayer[i] = gDIDotLayer[last];
+            }
+            gDIDotLayer[last] = nil;
+            gDIDotCount = last;
+            i--;
+            continue;
+        }
         d->life -= dt;
         if (!active && d->life > 0.30f) d->life = 0.30f;
-        if (d->life <= 0) { [layer removeFromSuperlayer]; continue; }
+        if (d->life <= 0) {
+            [layer removeFromSuperlayer];
+            int last = gDIDotCount - 1;
+            if (i != last) {
+                gDIDots[i] = gDIDots[last];
+                gDIDotLayer[i] = gDIDotLayer[last];
+            }
+            gDIDotLayer[last] = nil;
+            gDIDotCount = last;
+            i--;
+            continue;
+        }
         d->ang += d->spin * dt;
         d->rad += d->drift * dt;
+        if (d->rad > maxRad) {          /* 3.0.50: 飘出卡片边界当帧收掉 */
+            [layer removeFromSuperlayer];
+            int last = gDIDotCount - 1;
+            if (i != last) {
+                gDIDots[i] = gDIDots[last];
+                gDIDotLayer[i] = gDIDotLayer[last];
+            }
+            gDIDotLayer[last] = nil;
+            gDIDotCount = last;
+            i--;
+            continue;
+        }
         d->rot += d->rotSpd * dt;
         float k = d->life / d->maxLife;
         float fade = MIN(1.0f, k * 8.0f);
@@ -19221,10 +19275,16 @@ static void diRhythmLayoutRing(CGRect cover, const float *bands, BOOL active) {
     CGMutablePathRef tp = CGPathCreateMutable();
     for (int i = 0; i < DI_TICK_N; i++) {
         CGFloat a = (CGFloat)i / (CGFloat)DI_TICK_N * M_PI * 2.0 - M_PI_2;
-        CGFloat pos = (CGFloat)i / (CGFloat)DI_TICK_N * DI_AU_BANDS;
-        int b0 = (int)pos % DI_AU_BANDS;
-        int b1 = (b0 + 1) % DI_AU_BANDS;
-        CGFloat fr = pos - floor(pos);
+        /* 3.0.50: 左右对称 —— 以竖轴为镜面, 顶部(中轴)是最低频、最长的刻度,
+           两侧依次向高频展开(和频谱条同一种排列), 不再绕圈扫一条彩虹。 */
+        CGFloat t01 = (CGFloat)i / (CGFloat)DI_TICK_N;
+        CGFloat u = fabs(t01 * 2.0f - 1.0f);              /* 顶部=1, 底部=0 */
+        CGFloat pos = (1.0f - u) * (CGFloat)(DI_AU_BANDS - 1);
+        int b0 = (int)pos;
+        if (b0 < 0) b0 = 0;
+        if (b0 > DI_AU_BANDS - 1) b0 = DI_AU_BANDS - 1;
+        int b1 = MIN(b0 + 1, DI_AU_BANDS - 1);
+        CGFloat fr = pos - floorf((float)pos);
         CGFloat band = bands[b0] * (1.0f - fr) + bands[b1] * fr;
         if (band < 0) band = 0;
         if (band > 1) band = 1;
@@ -19272,16 +19332,18 @@ static void diRhythmUpdateBars(UIView *host, BOOL active) {
     }
     CGRect sf = [sl convertRect:sl.bounds toView:host];
     CGFloat bottom = CGRectGetMinY(sf) - 5.0;
-    CGFloat height = 13.0;
+    CGFloat height = (CGFloat)rhythmBarsHeight;      /* 3.0.50: 长度可调 */
     CGFloat top = bottom - height;
     if (top < 4) return;
 
     CGFloat x0 = 14.0, x1 = host.bounds.size.width - 14.0;
     CGFloat avail = x1 - x0;
-    int n = 40;                      /* 参考里是小竖条阵列, 不是 24 根粗柱 */
+    int n = rhythmBarsCount;                          /* 3.0.50: 根数可调 */
+    if (n < 4) n = 4;
     CGFloat gap = 2.0;
     CGFloat bw = (avail - gap * (n - 1)) / (CGFloat)n;
-    if (bw < 1.2) { bw = 1.2; gap = 1.2; }
+    if (bw < 1.2) { gap = 1.2; bw = (avail - gap * (n - 1)) / (CGFloat)n; }
+    if (bw < 0.5) { bw = 0.5; }
 
     if (!gDIRhythmBars) {
         gDIRhythmBars = [CAShapeLayer layer];
@@ -19297,8 +19359,12 @@ static void diRhythmUpdateBars(UIView *host, BOOL active) {
         gDIBarsPathAt = tNow;
         CGMutablePathRef p = CGPathCreateMutable();
         for (int i = 0; i < n; i++) {
-            CGFloat bp = (CGFloat)i / (CGFloat)n * DI_AU_BANDS;
-            int b0 = (int)bp % DI_AU_BANDS, b1 = (b0 + 1) % DI_AU_BANDS;
+            /* 3.0.50: 中间高、左右对称依次排开 —— 以中轴为 0 向两边取频段,
+               中间是最低频(通常最响=最高), 越往两边频率越高、条越矮。 */
+            CGFloat mid = (CGFloat)(n - 1) * 0.5f;
+            CGFloat dist = mid > 0 ? fabs((CGFloat)i - mid) / mid : 0.0f;
+            CGFloat bp = dist * (CGFloat)(DI_AU_BANDS - 1);
+            int b0 = (int)bp % DI_AU_BANDS, b1 = MIN(b0 + 1, DI_AU_BANDS - 1);
             CGFloat bf = bp - floor(bp);
             float v = active ? (gDIBandSmooth[b0] * (1.0f - bf) + gDIBandSmooth[b1] * bf) : 0.0f;
             CGFloat h = 1.5 + (height - 1.5) * pow(v, 0.85);
