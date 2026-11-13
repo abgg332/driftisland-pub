@@ -785,13 +785,8 @@ static Class diStepSliderClass(void) {
 @interface DIWidgetAppsPage : DIMiniBaseController @end
 /* 3.0: 播放器入口 —— 组件隐藏下面同级, 开关写 com.local.playerexact(内置原生播放器域) */
 @interface DIPlayerEntryPage : DIMiniBaseController @end
-/* 3.0.45: 律动特效页 —— 总开关/封面律动/环/粒子/参数/渐变色全在这一页。
-   继承 DIPlayerEntryPage 以复用 npSlider/npReadValue/npSetValue(播放器域滑杆)。 */
-@interface DIFxPage : DIPlayerEntryPage
-- (PSSpecifier *)npSlider:(NSString *)label key:(NSString *)key def:(double)def mn:(double)mn mx:(double)mx;
-- (id)npReadValue:(PSSpecifier *)sp;
-- (void)npSetValue:(id)value specifier:(PSSpecifier *)sp;
-@end
+/* 3.0.45: 律动特效页 —— 总开关/封面律动/环/粒子/参数/渐变色全在这一页 */
+@interface DIFxPage : DIMiniBaseController @end
 /* 3.0.1: 尺寸选择页自建 —— 不再走系统的 PSListItemsController(点进去闪退) */
 @interface DIPlayerSizePage : DIMiniBaseController @end
 @interface DIFrameFoldersMask : DIFrameFolders @end /* 2.6.3: 遮罩素材选择(键 maskAnimFolder) */
@@ -6006,7 +6001,52 @@ static NSArray<NSString *> *diFxColorNames(void) {
     return @[ @"暖橙", @"淡紫", @"珊瑚红", @"天蓝", @"薄荷绿", @"鹅黄", @"品红", @"纯白" ];
 }
 
+
+/* 3.0.45: 播放器域滑杆(与 DIPlayerEntryPage 同一套, 保留两位小数) */
+- (PSSpecifier *)npSlider:(NSString *)label key:(NSString *)key
+                      def:(double)def mn:(double)mn mx:(double)mx {
+    PSSpecifier *sp = [PSSpecifier preferenceSpecifierNamed:label target:self
+        set:@selector(npSetValue:specifier:) get:@selector(npReadValue:)
+        detail:nil cell:PSSliderCell edit:nil];
+    Class sc = diStepSliderClass();
+    if (sc) [sp setProperty:[sc description] forKey:@"cellClass"];
+    [sp setProperty:self forKey:@"diTarget"];
+    [sp setProperty:label forKey:@"diLabel"];
+    [sp setProperty:key forKey:@"key"];
+    [sp setProperty:kDomain forKey:@"defaults"];
+    [sp setProperty:@(def) forKey:@"default"];
+    [sp setProperty:@(mn) forKey:@"min"];
+    [sp setProperty:@(mx) forKey:@"max"];
+    [sp setProperty:@{ @"min": @(mn), @"max": @(mx), @"label": label } forKey:@"range"];
+    return sp;
+}
+
+- (id)npReadValue:(PSSpecifier *)sp {
+    NSString *key = [sp propertyForKey:@"key"];
+    if (!key.length) return [sp propertyForKey:@"default"];
+    CFPreferencesAppSynchronize((__bridge CFStringRef)kDomain);
+    id v = CFBridgingRelease(CFPreferencesCopyAppValue((__bridge CFStringRef)key, (__bridge CFStringRef)kDomain));
+    return v ?: [sp propertyForKey:@"default"];
+}
+
+- (void)npSetValue:(id)value specifier:(PSSpecifier *)sp {
+    NSString *key = [sp propertyForKey:@"key"];
+    if (!key.length) return;
+    double v = [value doubleValue];
+    NSDictionary *range = [sp propertyForKey:@"range"];
+    if (range) {
+        double mn = [range[@"min"] doubleValue], mx = [range[@"max"] doubleValue];
+        if (v < mn) v = mn;
+        if (v > mx) v = mx;
+    }
+    v = round(v * 100.0) / 100.0;
+    CFPreferencesSetAppValue((__bridge CFStringRef)key, (__bridge CFPropertyListRef)@(v),
+                             (__bridge CFStringRef)kDomain);
+    notify_post("com.local.playerexact/artwork-changed");
+}
+
 @implementation DIFxPage
+
 
 - (NSArray *)colorRows:(NSString *)key {
     NSMutableArray *rows = [NSMutableArray array];
