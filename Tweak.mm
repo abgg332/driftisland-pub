@@ -19318,13 +19318,6 @@ static void diRhythmUpdateBars(UIView *host, BOOL active) {
         gDIRhythmBars.opacity = active ? 1.0f : 0.25f;
         [CATransaction commit];
     }
-
-    [CATransaction begin];
-    [CATransaction setDisableActions:YES];
-    gDIRhythmBars.path = p;
-    gDIRhythmBars.opacity = active ? 1.0f : 0.25f;
-    [CATransaction commit];
-    CGPathRelease(p);
 }
 
 /* ---------- 重建 / 复位 / tick ---------- */
