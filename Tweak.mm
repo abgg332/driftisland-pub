@@ -81,6 +81,11 @@ static double rhythmBeatScale = 0.70;          // 专辑律动幅度
 static double rhythmRingWidth = 2.2;           // 3.0.47: 刻度粗细(参考约 2pt)
 static NSString *rhythmColorA = nil;           // 渐变起始色(#E59971)
 static NSString *rhythmColorB = nil;           // 渐变结束色(#948FFF)
+/* 3.0.53: 粒子独立渐变起止色(截图 #FFFFBC / #BFCDF8), 在偏好读取里就要用到,
+   所以定义提到文件前部; 取色函数在律动模块里, 这里先声明。 */
+static UIColor *gDIParticleColA = nil;
+static UIColor *gDIParticleColB = nil;
+static UIColor *diRhythmHexColor(NSString *hex, UIColor *def);
 /* ===== 2.8.85: 展开定义 —— 展开岛歌词/歌名的自定义位置与大小 =====
    展开岛(407x202 的 Now Playing)整块由 MediaRemoteUI 远程渲染, SpringBoard 只能看到
    一块门户, 拿不到里面的文字视图。所以参数由 SpringBoard 侧写进 MRU 容器的
@@ -18901,8 +18906,6 @@ static float gDIBassPrev = 0.0f;
 static float gDIBassEnv = 0.0f;      /* 低音包络(fast attack / slow release) */
 static float gDIBassFloor = 0.0f;    /* 底噪基线(缓慢上爬, 用来抵消持续的低频轰鸣) */
 static float gDIBassPulse = 0.0f;    /* 拍点脉冲 0~1 */
-static UIColor *gDIParticleColA = nil;
-static UIColor *gDIParticleColB = nil;
 static double gDISynPhase = 0.0;
 static CFTimeInterval gDIFxLast = 0;
 static CFTimeInterval gDIClock = 0;
