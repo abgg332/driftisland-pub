@@ -5910,6 +5910,18 @@ static BOOL diWriteMaskBytes(NSData *raw, NSString *dir, NSString *name) {
     if (ok) [fm setAttributes:@{NSFilePosixPermissions: @0644} ofItemAtPath:out error:NULL];
     return ok;
 }
+/* 3.0.59: 导出遮罩参数时**现读偏好**, 不用全局 playerMaskOn。
+   472 用户: 「启用遮罩」关了还是显示遮罩 —— prefsChanged 会先排一次导出(0.25s 去抖)
+   再排全量刷新(0.18s), 两者几乎同时; 如果导出那一下跑在 refreshPrefs 之前, 写进
+   params.plist 的 pmOn 还是旧值, 而之后不会再有第二次导出, 于是 MRU 那边一直贴素材。 */
+static BOOL diPrefBoolNow(NSString *key, BOOL fallback) {
+    CFStringRef dom = (__bridge CFStringRef)kDomain;
+    CFPreferencesAppSynchronize(dom);
+    Boolean has = false;
+    Boolean v = CFPreferencesGetAppBooleanValue((__bridge CFStringRef)key, dom, &has);
+    return has ? (v ? YES : NO) : fallback;
+}
+
 static void diExportMaskForMRU(void) {
     @autoreleasepool {
         NSString *path = diMaskCurrentPathV2();
@@ -5944,7 +5956,7 @@ static void diExportMaskForMRU(void) {
                                      @"speed": @(maskRotateSpeed), @"active": @(active),
                                      @"mask": path.lastPathComponent ?: @"",
                                      /* 3.0.40: 播放器遮罩 —— 开关与素材名都独立一份 */
-                                     @"pmOn": @(playerMaskOn),
+                                     @"pmOn": @(diPrefBoolNow(@"PlayerMaskOn", playerMaskOn)),
                                      @"pmMask": pmPath.lastPathComponent ?: @"",
                                      /* 2.8.85: 展开定义 —— MRU 内的歌词/歌名位置与大小 */
                                      @"etOn": @(expandTextOn), @"etX": @(expandTextX),
@@ -16579,26 +16591,19 @@ static UIImage *diArtMaskImage(void) {
    读不到再退回主偏好域的文件通道。**不再看 maskOn**(那是岛上的开关)。
    1 秒最多读一次, 文件没变不重解析; 设置页改完 1 秒内生效, 不用注销。 */
 static BOOL diArtMaskWanted(void) {
+    /* 3.0.59: **直接读偏好**, 不再信 params.plist。
+       472 用户「启用遮罩关了还是显示遮罩」的链路是这样的:
+         prefsChanged → 排一次导出(0.25s 去抖) + 排一次全量刷新(0.18s)
+         全量刷新先跑 → diArtDress 读 params.plist(此时还是旧值 pmOn=1) → 认为要贴素材
+         导出后跑完 → params.plist 更新, 但已经没人再调 diArtDress
+       结果就是"关了还亮着"。diArtDress 本来就跑在 SpringBoard 里, 偏好随手可读, 1 秒缓存
+       只是为了避免每帧碰 cfprefsd —— 这个开销比一次跨进程读小得多, 也对得起"开关要即时"。 */
     static BOOL cached = NO;
     static CFAbsoluteTime last = 0;
-    static NSString *lastSig;
     CFAbsoluteTime now = CFAbsoluteTimeGetCurrent();
-    if (last == 0 || now - last > 1.0) {
+    if (last == 0 || now - last > 0.35) {
         last = now;
-        NSString *d = diMruSelfDir();
-        NSString *path = d.length ? [d stringByAppendingPathComponent:@"params.plist"] : nil;
-        NSDictionary *attr = path ? [[NSFileManager defaultManager] attributesOfItemAtPath:path error:NULL] : nil;
-        NSString *sig = [NSString stringWithFormat:@"%@_%@", attr[NSFileModificationDate], attr[NSFileSize]];
-        if (![sig isEqual:lastSig]) {
-            lastSig = [sig copy];
-            NSDictionary *pd = path ? [NSDictionary dictionaryWithContentsOfFile:path] : nil;
-            if ([pd isKindOfClass:NSDictionary.class] && pd[@"pmOn"] != nil) {
-                cached = [pd[@"pmOn"] boolValue];
-            } else {
-                BOOL f = NO;
-                cached = diMruReadFilePref(@"PlayerMaskOn", &f) ? f : playerMaskOn;
-            }
-        }
+        cached = diPrefBoolNow(@"PlayerMaskOn", playerMaskOn);
     }
     return cached;
 }
@@ -19014,13 +19019,22 @@ static void diFxUpdateMask(CGRect cover, float coverScale) {
     [CATransaction begin];
     [CATransaction setDisableActions:YES];
     CALayer *sup = gDIDotClipLayer.superlayer;
-    CGRect b = sup ? sup.bounds : cover;
-    if (!CGRectEqualToRect(gDIDotClipLayer.frame, b)) {
-        gDIDotClipLayer.bounds = CGRectMake(0, 0, b.size.width, b.size.height);
-        gDIDotClipLayer.position = CGPointMake(CGRectGetMidX(b), CGRectGetMidY(b));
+    /* 统一用 (0,0) 原点的坐标: 容器层 bounds 和遮罩 frame 都按这个来,
+       免得宿主 bounds.origin 不为 0 时孔偏掉。 */
+    CGSize hs = sup ? sup.bounds.size : cover.size;
+    CGRect b = CGRectMake(0, 0, hs.width, hs.height);
+    if (!CGSizeEqualToSize(gDIDotClipLayer.bounds.size, hs)) {
+        gDIDotClipLayer.bounds = b;
+        gDIDotClipLayer.position = CGPointMake(hs.width / 2.0, hs.height / 2.0);
     }
-    CGFloat r = MAX(4.0, cover.size.width * 0.5 * coverScale * 1.02);
-    CGPoint c = CGPointMake(CGRectGetMidX(cover) - b.origin.x, CGRectGetMidY(cover) - b.origin.y);
+    /* 孔只在封面**放大**时跟着变大 —— 缩小时固定 1.02R。
+       如果随缩放一起缩, 拍点每一下遮挡边界都在动, 边缘粒子忽隐忽现(就是"一卡一卡"的来源之一)。
+       固定下限后: 封面缩小 → 孔比封面大, 边缘那圈粒子正常显示; 封面放大 → 孔跟上, 粒子不会
+       跑到封面图上面来。 */
+    CGFloat sc = MAX(1.0f, coverScale);
+    CGFloat r = MAX(4.0, cover.size.width * 0.5 * sc * 1.02);
+    CGPoint c = CGPointMake(CGRectGetMidX(cover) - (sup ? sup.bounds.origin.x : 0.0),
+                            CGRectGetMidY(cover) - (sup ? sup.bounds.origin.y : 0.0));
     static CGRect lastB; static CGPoint lastC; static CGFloat lastR;
     if (gDIDotMaskLayer && CGRectEqualToRect(lastB, b)
         && fabs(lastC.x - c.x) < 0.5 && fabs(lastC.y - c.y) < 0.5
@@ -19075,7 +19089,11 @@ static void diFxSpawnDot(UIView *host, CGRect cover, float maxRad) {
        经常一出生就已经在边缘外面, 用户说的"启动太外面了"就是这个。
        现在粒子真的排在专辑图层下面(见 diFxEnsurePool 的 zPosition), 出生在盘子里,
        被封面挡着; 慢慢飘到边缘才"露出来", 这就是视频里那种从专辑后面散出来的感觉。 */
-    d->rad = (float)R * (0.45f + diFxRand01() * 0.40f);   /* 0.45~0.85R: 藏在盘子里, 飘出来才露头 */
+    /* 3.0.59: 出生点改到**封面边缘**(0.94~1.06R)。用户 472: "粒子起点又有点窄了,
+       从专辑头像边开始起点" —— 3.0.58 的 0.45~0.85R 藏在盘子里太靠中心, 露出来的
+       时候已经飘到一半了, 看着像"从很里面冒出来"。现在贴着圆边走, 遮罩孔 1.02R
+       刚好让它在边缘露出一半, 出门就能看到。 */
+    d->rad = (float)R * (0.94f + diFxRand01() * 0.12f);
     d->spin = (diFxRand01() - 0.5f) * 0.05f;
     /* 外飘 2.5~6px/s: 视频里几乎看不出"在飞", 只是缓缓地、一点点往外挪 */
     d->drift = 3.5f + diFxRand01() * 3.5f;
@@ -19310,16 +19328,25 @@ static CGRect diRhythmCoverRect(UIView *t, UIView *host) {
 static UIView *diRhythmDriveView(UIView *t) {
     if (!t) return nil;
     UIView *d = t;
-    for (int i = 0; i < 3; i++) {
+    /* 3.0.59: 472 用户看到"专辑后面还有个黑块有鼓点, 上面一层专辑不会动" ——
+       我们对 MRUArtworkView 做 transform, 但真正显示封面内容的可能是它外面/里面
+       另一层(系统在 MRU 里用了 CAPortalLayer 之类的门户层, 门户内容不跟着源视图的
+       transform 走), 于是缩放的只是一个黑色圆底。
+       现在继续往上找**同尺寸容器**(尺寸差 <12%、近似正方), 把封面和它的内容层
+       一起包进缩放里。3.0.58 要求父层 clipsToBounds 才继续, 这里放宽 —— 播放卡里
+       那层圆形容器常常自己不裁(裁的是里面的 mask), 一放宽就断在封面那一层。 */
+    for (int i = 0; i < 4; i++) {
         UIView *p = d.superview;
         if (!p) break;
-        if (!(p.clipsToBounds || p.layer.masksToBounds)) break;
+        if (p == p.window) break;
         CGSize a = p.bounds.size, b = d.bounds.size;
-        if (b.width < 1.0f) break;
+        if (b.width < 1.0f || a.width < 1.0f) break;
         CGFloat k = a.width / b.width;
-        if (k < 0.85f || k > 1.30f) break;
+        CGFloat ky = a.height / b.height;
+        if (k < 0.88f || k > 1.12f) break;
+        if (ky < 0.88f || ky > 1.12f) break;
         CGFloat ratio = a.width / MAX(1.0f, a.height);
-        if (ratio < 0.75f || ratio > 1.33f) break;
+        if (ratio < 0.80f || ratio > 1.25f) break;
         d = p;
     }
     return d;
@@ -19489,6 +19516,17 @@ static __weak UIView *gDIRhythmSliderW = nil;
 static CFAbsoluteTime gDIRhythmSliderAt = 0;
 static void diRhythmUpdateBars(UIView *host, BOOL active) {
     if (!host) return;
+    /* 3.0.59: 没音乐时整条频谱隐藏。以前 active=NO 仍然画 40 根 1.5pt 的短杠、opacity 0.25,
+       屏幕上就是"一条杠"(用户 472 明确点名)。暂停时它就该彻底消失。 */
+    if (!active) {
+        if (gDIRhythmBarsGrad) {
+            [CATransaction begin];
+            [CATransaction setDisableActions:YES];
+            gDIRhythmBarsGrad.opacity = 0.0f;
+            [CATransaction commit];
+        }
+        return;
+    }
     if (!rhythmBarsOn) {
         if (gDIRhythmBarsGrad) { [gDIRhythmBarsGrad removeFromSuperlayer]; gDIRhythmBarsGrad = nil; }
         if (gDIRhythmBars) { gDIRhythmBars = nil; }
@@ -19594,7 +19632,7 @@ static void diRhythmUpdateBars(UIView *host, BOOL active) {
     [CATransaction begin];
     [CATransaction setDisableActions:YES];
     gDIRhythmBars.path = p;
-    gDIRhythmBarsGrad.opacity = active ? 1.0f : 0.25f;
+    gDIRhythmBarsGrad.opacity = 1.0f;
     gDIRhythmBars.opacity = 1.0f;
     [CATransaction commit];
     CGPathRelease(p);
@@ -19814,16 +19852,22 @@ static void diRhythmAdvanceSpectrum(BOOL active, BOOL real, float dt) {
         }
         gDISteady = MIN(1.0f, sum / (float)DI_AU_BANDS * 1.5f);
 
-        /* 3.0.57: 鼓点 = 全谱通量(spectral flux)。 */
+        /* 3.0.59: 鼓点 = 绝对通量 + 相对通量。
+           472 日志里通量长期 0.000~0.03 —— DIAudio 送的是 dB 归一值, 相邻两包(16ms)
+           差得很小, 只看绝对差几乎判不出拍。现在每个频段同时算
+             abs = cur - prev        (能量涨了多少)
+             rel = abs / (prev+0.10) (相对自己涨了多少倍)
+           两者加权求和, 稳态时两者都趋 0, 起音时一起冲高, 对比度比 3.0.58 大一个量级。 */
         float flux = 0.0f, low = 0.0f, wsum = 0.0f;
         for (int i = 0; i < DI_AU_BANDS; i++) {
             float cur = gDIBandRaw[i];
-            float dlt = cur - gDIBandPrevFlux[i];
+            float prev = gDIBandPrevFlux[i];
             gDIBandPrevFlux[i] = cur;
-            float w = (i < 16) ? 1.0f : 0.70f;         /* 低/中频权重高, 高频只做辅助 */
-            if (dlt > 0.0f) flux += dlt * w;
+            float dlt = cur - prev;
+            float w = (i < 16) ? 1.0f : 0.70f;
+            if (dlt > 0.0f) flux += (dlt * 0.80f + (dlt / (prev + 0.10f)) * 0.55f) * w;
             wsum += w;
-            if (i <= 5) low += cur * (float)(6 - i);   /* 60~235Hz, 越低权重越大 */
+            if (i <= 5) low += cur * (float)(6 - i);
         }
         flux /= MAX(1.0f, wsum);
         gDIFluxNow = flux;
@@ -19836,17 +19880,17 @@ static void diRhythmAdvanceSpectrum(BOOL active, BOOL real, float dt) {
            最大缩放上, 用户看到的就是"一点效果都没有"。现在两拍之间包络会真的掉下去。 */
         float kAvg = 1.0f - expf(-dt / 1.20f);
         gDIFluxAvg += (flux - gDIFluxAvg) * kAvg;
-        float thr = MAX(0.007f, gDIFluxAvg * 1.65f);
+        float thr = MAX(0.020f, gDIFluxAvg * 1.45f);
 
         CFTimeInterval nowS = CACurrentMediaTime();
         float imp = 0.0f;
-        if (flux > thr && (nowS - gDILastOnset) > 0.16) {
-            float rel = (flux - thr) / MAX(0.005f, thr);
-            imp = 0.55f + MIN(1.0f, rel) * 0.40f;
+        if (flux > thr && (nowS - gDILastOnset) > 0.13) {
+            float rel = (flux - thr) / MAX(0.010f, thr);
+            imp = 0.45f + MIN(1.4f, rel) * 0.55f;
             if (imp > 1.0f) imp = 1.0f;
             gDILastOnset = nowS;
         }
-        gDIBeatRaw = MAX(imp, gDIBeatRaw * expf(-dt / 0.075f));
+        gDIBeatRaw = MAX(imp, gDIBeatRaw * expf(-dt / 0.060f));
         gDIBassPrev = flux;
         gDIBassPulse = MAX(gDIBeatRaw, gDIBassPulse * expf(-dt / 0.150f));
     } else if (active) {
@@ -19883,7 +19927,7 @@ static void diRhythmAdvanceSpectrum(BOOL active, BOOL real, float dt) {
     /* 视觉拍点: 上升 25ms / 下降 150ms —— 缩放、透明度都用它, 绝不单帧跳变。
        3.0.58: 回落从 260ms 收到 150ms, 否则密鼓点下包络来不及掉, 看着像"一直很大"。 */
     float visK = (gDIBassPulse > gDIBeatEnv)
-        ? (1.0f - expf(-dt / 0.025f)) : (1.0f - expf(-dt / 0.150f));
+        ? (1.0f - expf(-dt / 0.015f)) : (1.0f - expf(-dt / 0.095f));
     gDIBeatEnv += (gDIBassPulse - gDIBeatEnv) * visK;
 }
 
@@ -20015,7 +20059,19 @@ static void diRhythmTickWithDelta(float dtIn) {
     UIView *dv = gDIRhythmDrive ?: t;
     CGFloat sDbg = 1.0;
     BOOL ownsSpin = NO;
-    if (rhythmOn && gDIRhythmBaseValid) {
+    if (!active && gDIRhythmBaseValid) {
+        /* 3.0.59: 没音乐(暂停/停播/切走)时**彻底停下**。
+           472 日志末段: 播=0 之后 缩放还停在 0.940 —— 因为下面那个分支不看 active,
+           包络衰减到 0 后还剩 breath 在写, transform 永远回不到 base, 封面就一直是
+           "被缩小 6% 且轻微呼吸"的状态, 用户看到的就是"没音乐了还在动"。
+           现在直接复位成 base, 并且不再接管旋转(动画已摘掉, 画面完全静止)。 */
+        [CATransaction begin];
+        [CATransaction setDisableActions:YES];
+        dv.layer.transform = gDIRhythmBase;
+        [CATransaction commit];
+        gDICoverScaleNow = 1.0f;
+        sDbg = 1.0;
+    } else if (active && rhythmOn && gDIRhythmBaseValid) {
         /* 3.0.57: 旋转归属权 —— 这层上挂着 di.art.spin(transform.rotation.z, 10s 一圈)。
            我们每帧写整个 transform 就是在跟这条动画抢同一个属性: 探针里 m11 会间歇
            变回 1.000(写进去又被顶掉), 旋转看着也一会儿快一会儿慢。
@@ -20029,12 +20085,16 @@ static void diRhythmTickWithDelta(float dtIn) {
 
         /* 3.0.58: 幅度按"围绕 1.0 上下摆"算, 不再是一直往上顶。3.0.57 的幅度上限被
            顶到 1.28 且包络回不去, 封面上就停在"一直很大"的状态, 看着像没动。 */
-        CGFloat amp = 0.24 * rhythmBeatScale;
+        /* 3.0.59: 幅度加大(0.24→0.30), 并且**基准点从 0.40 抬到 0.28** ——
+           472 日志里包络几乎一直在 0.4~0.7, 减掉 0.4 之后只剩 0~0.3 个单位的起伏,
+           再乘 0.24 就是 ±3%, 57pt 的封面上不到 2pt, 肉眼当然"没效果"。
+           现在每个拍点往上冲 15%~20%, 拍之间落回 1.0 以下, 有收有放才看得出"抖"。 */
+        CGFloat amp = 0.30 * rhythmBeatScale;
         CGFloat e = 0.25 * gDISteady + 0.75 * gDIBeatEnv;
-        CGFloat breath = 0.006 * sin((CGFloat)gDIClock * 1.15);
-        CGFloat s = 1.0 + (e - 0.40) * amp + breath;
-        if (s < 0.94) s = 0.94;
-        if (s > 1.12) s = 1.12;
+        CGFloat breath = 0.005 * sin((CGFloat)gDIClock * 1.15);
+        CGFloat s = 1.0 + (e - 0.28) * amp + breath;
+        if (s < 0.86) s = 0.86;
+        if (s > 1.20) s = 1.20;
         sDbg = s;
         gDICoverScaleNow = (float)s;      /* 粒子遮罩的孔要跟着封面一起缩放 */
         CGFloat dy = -(CGFloat)gDIBeatEnv * 5.0 * (CGFloat)rhythmBeatScale;
@@ -20050,14 +20110,15 @@ static void diRhythmTickWithDelta(float dtIn) {
         tr = CATransform3DConcat(tr, CATransform3DMakeTranslation(0, dy, 0));
         dv.layer.transform = CATransform3DConcat(tr, CATransform3DMakeScale(s, s, 1));
         [CATransaction commit];
-    } else if (!rhythmOn && gDIRhythmBaseValid) {
+    } else if (gDIRhythmBaseValid) {
+        /* rhythmOn 关了(但粒子/频谱还开着): 复位缩放, 把旋转交还给 CA 动画 */
         [CATransaction begin];
         [CATransaction setDisableActions:YES];
         dv.layer.transform = gDIRhythmBase;
         [CATransaction commit];
-        if (gDIArtSpinYield == dv) {     /* 交还旋转 */
+        if (gDIArtSpinYield == dv) {
             gDIArtSpinYield = nil;
-            @try { diArtDress(dv); } @catch (__unused NSException *e) {}
+            if (dv.window) @try { diArtDress(dv); } @catch (__unused NSException *e) {}
         }
     }
 
@@ -20072,9 +20133,10 @@ static void diRhythmTickWithDelta(float dtIn) {
             /* 3.0.58: 旋转接管后 m11 = cos(角度)×缩放, 单看 m11 会以为是乱跳。
                这里取 (m11,m12) 的模长 = 真正的缩放倍率。 */
             CGFloat sReal = sqrt(p3.m11 * p3.m11 + p3.m12 * p3.m12);
-            RLog(@"[探针] 通量=%.3f 低频=%.3f 拍=%.2f 缩放=%.3f 实=%.3f 驱动=%@ 旋=%@ 播=%d 粒=%d",
+            RLog(@"[探针] 通量=%.3f 低频=%.3f 拍=%.2f 缩放=%.3f 实=%.3f 驱动=%@ 父=%@ 旋=%@ 播=%d 粒=%d",
                  gDIFluxNow, gDILowLevel, gDIBeatEnv, sDbg, sReal,
                  NSStringFromClass(dv.class),
+                 dv.superview ? NSStringFromClass(dv.superview.class) : @"无",
                  ([dv.layer animationForKey:@"di.art.spin"] ? @"CA" : (ownsSpin ? @"我们" : @"无")),
                  active ? 1 : 0, gDIDotCount);
         }
