@@ -20325,7 +20325,7 @@ static void diRhythmAdvanceSpectrum(BOOL active, BOOL real, float dt) {
             if (n > 1.3f) n = 1.3f;
             gDILowN = n;
 
-            gDIKick *= expf(-dt / 0.22f);               /* 视觉包络: 220ms 回到 0 */
+            gDIKick *= expf(-dt / 0.16f);               /* 视觉包络: 160ms 回到 0(快收, 才不会糊成一片) */
             CFTimeInterval nowK = CACurrentMediaTime();
             float riseN = n - gDILowNPrev;
 
@@ -20384,7 +20384,7 @@ static void diRhythmAdvanceSpectrum(BOOL active, BOOL real, float dt) {
         gDIBassPulse = MAX((float)pulse, gDIBassPulse * expf(-dt / 0.18f));
         gDIBassPrev = 0.3f;
         /* 3.0.64: 没真频谱时合成节拍也走同一个包络(静止 = 0) */
-        gDIKick *= expf(-dt / 0.22f);
+        gDIKick *= expf(-dt / 0.16f);
         if (frac < 0.16 && gDIKick < (float)pulse * 0.5f) {
             gDIKick = (float)pulse;
             diFxApplyBeat(gDIKick);
