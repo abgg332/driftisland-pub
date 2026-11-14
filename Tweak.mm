@@ -1434,6 +1434,8 @@ static CGRect diSpecRegion(CGFloat w, CGFloat h) {
 static void updateSingleVideo(UIWindow *win); // 前置声明
 static UIView *diFindPlatter(UIView *v);         // 前向声明: diRefreshContour 用
 static void diStylePlatter(UIView *platter);     // 前向声明: diRefreshContour 用
+static BOOL diInLockScreen(UIView *v);           // 3.0.70: 前向声明 —— 样式只允许落在锁屏
+static void diUnstylePlatter(UIView *platter);   // 3.0.70: 前向声明 —— 非锁屏对象还原
 static void diSyncEdgeGlowAll(void);             // 前向声明: 边框流光同步
 static void diEdgeGeometry(UIView *edge, UIView *island); // 前向声明: 浮层几何
 
@@ -8526,6 +8528,7 @@ static BOOL diApplyWidthToHost(UIView *host, CGFloat targetW) {
 
 static void diApplyWidthToPlatter(UIView *platter) {
     if (!platter || !platter.window) return;
+    if (!diInLockScreen(platter)) return;   /* 3.0.70: 锁屏宽度只改锁屏, 桌面 Dock/长按菜单不碰 */
     UIView *host = platter.superview;
     if (!host) return;
 
@@ -9858,8 +9861,97 @@ static void diEnsureBreathAnim(UIView *platter, UIView *face) {
     }
 }
 
+/* ===== 3.0.70: 样式只允许落在锁屏 =====
+
+   482 反馈: 桌面 Dock 背景、图标长按菜单也出现了边框呼吸 / 发光。
+   根因不是"挑错了 platter", 而是 diStylePlatter 自身没有任何落点校验 ——
+   只要某条链路(宽度自愈 / 呼吸重挂 / 窗口遍历)把它传进来, 就会往那一层写
+   border/shadow/动画。Dock 底板与长按菜单用的正是 PLPlatterView / MaterialView
+   一类, 类名和锁屏卡片完全一样, 光看类名分不出来。
+   这里加两道:
+     ① 入口闸门: 不在锁屏窗口 → 直接走还原, 一个属性都不写;
+     ② 可还原: 第一次染色前把层的原始 border/shadow/cornerRadius 快照下来,
+        判定为非锁屏时原样还回去(不会把系统自己的底纹/投影抹掉)。 */
+static char kDIStyleMark;   /* 我们染过这个 platter (NSNumber YES) */
+static char kDIStyleOrig;   /* 染色前的层属性快照 (NSDictionary) */
+static char kDIStyleSig;    /* 取代原函数内 static kStyleSig —— 还原时要能作废 */
+static NSHashTable *gDIStyled;   /* 3.0.70: 弱表 —— 只登记"被我们染过"的对象, 供误染巡检 */
+
+static NSDictionary *diLayerSnap(CALayer *l) {
+    if (!l) return @{};
+    UIColor *bc = l.borderColor ? [UIColor colorWithCGColor:l.borderColor] : nil;
+    UIColor *sc = l.shadowColor ? [UIColor colorWithCGColor:l.shadowColor] : nil;
+    return @{
+        @"bw": @(l.borderWidth),
+        @"bc": bc ?: NSNull.null,
+        @"so": @(l.shadowOpacity),
+        @"sr": @(l.shadowRadius),
+        @"sc": sc ?: NSNull.null,
+        @"off": [NSValue valueWithCGSize:l.shadowOffset],
+        @"cr": @(l.cornerRadius),
+        @"mtb": @(l.masksToBounds),
+        @"ago": @(l.allowsGroupOpacity),
+        @"sp": @(l.shadowPath != NULL),
+    };
+}
+
+static void diLayerRestore(CALayer *l, NSDictionary *d) {
+    if (!l || ![d isKindOfClass:NSDictionary.class] || !d.count) return;
+    [CATransaction begin]; [CATransaction setDisableActions:YES];
+    l.borderWidth = [d[@"bw"] doubleValue];
+    id bc = d[@"bc"];
+    l.borderColor = [bc isKindOfClass:UIColor.class] ? [(UIColor *)bc CGColor] : NULL;
+    l.shadowOpacity = [d[@"so"] floatValue];
+    l.shadowRadius = [d[@"sr"] doubleValue];
+    id sc = d[@"sc"];
+    l.shadowColor = [sc isKindOfClass:UIColor.class] ? [(UIColor *)sc CGColor] : NULL;
+    l.shadowOffset = [d[@"off"] CGSizeValue];
+    l.cornerRadius = [d[@"cr"] doubleValue];
+    l.masksToBounds = [d[@"mtb"] boolValue];
+    l.allowsGroupOpacity = [d[@"ago"] boolValue];
+    if (![d[@"sp"] boolValue]) l.shadowPath = NULL;   /* 原本没有 path 才清, 有就留系统的 */
+    [CATransaction commit];
+}
+
+static void diStyleMark(UIView *p) {
+    if (!p || objc_getAssociatedObject(p, &kDIStyleMark)) return;
+    NSMutableDictionary *d = [NSMutableDictionary dictionary];
+    d[@"pl"] = diLayerSnap(p.layer);
+    UIView *face = diBorderFace(p);
+    if (face && face != p) d[@"face"] = diLayerSnap(face.layer);
+    objc_setAssociatedObject(p, &kDIStyleOrig, d, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    objc_setAssociatedObject(p, &kDIStyleMark, @YES, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    if (!gDIStyled) gDIStyled = [NSHashTable weakObjectsHashTable];
+    [gDIStyled addObject:p];
+}
+
+static void diUnstylePlatter(UIView *platter) {
+    if (!platter || !objc_getAssociatedObject(platter, &kDIStyleMark)) return;
+    NSDictionary *d = objc_getAssociatedObject(platter, &kDIStyleOrig);
+    CALayer *FL = platter.layer;
+    for (NSString *k in @[@"diBdCycle", @"diBreath", @"diBreathC"])
+        [FL removeAnimationForKey:k];
+    diLayerRestore(FL, d[@"pl"]);
+    UIView *face = diBorderFace(platter);
+    if (face && face != platter) {
+        [face.layer removeAnimationForKey:@"diBdCycle"];
+        [face.layer removeAnimationForKey:@"diBreathC"];
+        diLayerRestore(face.layer, d[@"face"]);
+    }
+    objc_setAssociatedObject(platter, &kDIStyleMark, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    objc_setAssociatedObject(platter, &kDIStyleOrig, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    objc_setAssociatedObject(platter, &kDIStyleSig, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    objc_setAssociatedObject(FL, &kBdSig, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    objc_setAssociatedObject(FL, &kGlowSig, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    [gDIStyled removeObject:platter];
+    DLog(@"样式还原: %@ 不在锁屏, 已清边框/发光", NSStringFromClass(platter.class));
+}
+
 static void diStylePlatter(UIView *platter) {
     if (!platter) return;
+    /* 3.0.70: 只锁屏。Dock 背景 / 图标长按菜单 / 桌面卡片一律还原, 一步都不写。 */
+    if (!diInLockScreen(platter)) { diUnstylePlatter(platter); return; }
+    diStyleMark(platter);
     /* 2.5.3: 2.3.2 的媒体卡跳过已移除(恢复原版 2.3.0)。 */
 
     [CATransaction begin]; [CATransaction setDisableActions:YES];
@@ -9907,7 +9999,8 @@ static void diStylePlatter(UIView *platter) {
        签名含三个开关 + 色表(含单色, 306 的"颜色切换无效"不能复发) + 边框宽 +
        发光/阴影半径 + 卡片矩形圆角, 全同才跳过。 */
     {
-        static char kStyleSig;
+        /* 3.0.70: 签名 key 提到文件作用域(kDIStyleSig) —— 还原函数要能作废它,
+           否则 Dock/长按被还原后再进锁屏, 签名相同会一路早退, 样式永远不回来。 */
         NSMutableString *cs = [NSMutableString string];
         for (UIColor *c in lkBdColors)  [cs appendFormat:@"%@,", diColorHex(c)];
         if (lkBdColor)  [cs appendFormat:@"#%@", diColorHex(lkBdColor)];
@@ -9920,12 +10013,12 @@ static void diStylePlatter(UIView *platter) {
         NSString *sig = [NSString stringWithFormat:@"%d|%d|%d|%.1f|%.1f|%.1f|%.0f,%.0f,%.0f,%.0f r%.0f|%@",
                          lkBdOn, lkShOn, lkGlowOn, lkBdW, lkShR, lkGlowR,
                          brect.origin.x, brect.origin.y, brect.size.width, brect.size.height, br, cs];
-        NSString *prev = objc_getAssociatedObject(platter, &kStyleSig);
+        NSString *prev = objc_getAssociatedObject(platter, &kDIStyleSig);
         if ([sig isEqualToString:prev]) {
             diEnsureBreathAnim(platter, diBorderFace(platter));   /* 2.9.19: 动画丢了就补 */
             [CATransaction commit]; return;
         }
-        objc_setAssociatedObject(platter, &kStyleSig, sig, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        objc_setAssociatedObject(platter, &kDIStyleSig, sig, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
     }
     static char kLastLog;
     {
@@ -10123,10 +10216,41 @@ static void diStylePlatter(UIView *platter) {
    diRestyleAllPlatters / applyLockStyle)统一加这道闸。
    锁屏窗口类名实证: SBCoverSheetWindow(305 日志横条手势挂载点)。 */
 static BOOL diIsLockScreenWindow(UIWindow *w) {
+    if (!w) return NO;
+    /* 3.0.70: 先按窗口类名做**排除** —— 桌面 / Dock / 图标 / 长按菜单 / 聚光灯 / 状态栏
+       这些窗口哪怕类名层级和锁屏有交集, 也一律不认。 */
+    NSString *wc = NSStringFromClass(w.class);
+    if ([wc containsString:@"HomeScreen"] || [wc containsString:@"IconController"]
+        || [wc containsString:@"ContextMenu"] || [wc containsString:@"StatusBar"]
+        || [wc containsString:@"ControlCenter"] || [wc containsString:@"Spotlight"]
+        || [wc containsString:@"Dock"]) return NO;
     return [w isKindOfClass:NSClassFromString(@"SBCoverSheetWindow")];
 }
+
+/* 3.0.70: 视图是否挂在"桌面 UI"里 —— Dock 底板、图标、长按菜单、文件夹、堆栈。
+   482 的误染对象类名(PLPlatterView / MaterialView)和锁屏卡片一模一样,
+   只能靠**父链**分辨归属。锁屏通知/播放器卡的父链里不会有这些 token。 */
+static BOOL diViewOnHomeScreenUI(UIView *v) {
+    if (!v) return NO;
+    UIView *win = v.window;
+    int guard = 0;
+    for (UIView *p = v; p && guard++ < 40; p = p.superview) {
+        NSString *cn = NSStringFromClass(p.class);
+        if ([cn containsString:@"SBDock"] || [cn containsString:@"SBIcon"]
+            || [cn containsString:@"SBHIcon"] || [cn containsString:@"IconListView"]
+            || [cn containsString:@"IconController"] || [cn containsString:@"HomeScreen"]
+            || [cn containsString:@"ContextMenu"] || [cn containsString:@"Spotlight"]
+            || [cn containsString:@"SBHStack"] || [cn containsString:@"Folder"]) return YES;
+        if (p == win) break;
+    }
+    return NO;
+}
+
 static BOOL diInLockScreen(UIView *v) {
-    return v && diIsLockScreenWindow(v.window);
+    if (!v) return NO;
+    if (!diIsLockScreenWindow(v.window)) return NO;
+    if (diViewOnHomeScreenUI(v)) return NO;   /* 3.0.70: 双重保险 */
+    return YES;
 }
 
 static void applyLockStyle(UIView *v) {
@@ -12824,6 +12948,14 @@ static void visibilityTick(void) {
         if (now - tLock > 1.0) {
             tLock = now;
             if (lockWOn) diForEachWindow(^(UIWindow *w){ diWidthWalk(w); });
+            /* 3.0.70: 误染巡检 —— 只遍历"被我们染过"的弱表(通常个位数),
+               不在锁屏的一律还原。这样 Dock/长按菜单即使早先被染过,
+               也会在 1 秒内自动恢复原生, 不需要注销。 */
+            if (lkBdOn || lkShOn || lkGlowOn) {
+                for (UIView *p in gDIStyled.allObjects) {
+                    if (!diInLockScreen(p)) diUnstylePlatter(p);
+                }
+            }
             if (lkBdOn || lkShOn || lkGlowOn) diForEachWindow(^(UIWindow *w){ diRestyleWalk(w); });
         }
     }
