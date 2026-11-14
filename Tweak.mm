@@ -20499,6 +20499,8 @@ static void diRhythmUpdateBars(UIView *host, BOOL active) {
 
     /* 每帧重建(40 根圆角矩形, 开销很小); 不再 30Hz 降频 */
     CGMutablePathRef p = CGPathCreateMutable();
+    /* 3.0.71: "咚"的增益整帧只算一次(每根条都调 expf 没必要) */
+    float kb = 1.0f + 0.38f * diKickPunchNow();
     for (int i = 0; i < n; i++) {
         CGFloat mid = (CGFloat)(n - 1) * 0.5f;
         CGFloat dist = mid > 0 ? fabs((CGFloat)i - mid) / mid : 0.0f;
@@ -20507,7 +20509,7 @@ static void diRhythmUpdateBars(UIView *host, BOOL active) {
         CGFloat bf = bp - floor(bp);
         float v = active ? (gDIBandSmooth[b0] * (1.0f - bf) + gDIBandSmooth[b1] * bf) : 0.0f;
         /* 3.0.71: 和封面/粒子同一个"咚" —— 每一下底鼓整排条一起顶一下 */
-        v *= (1.0f + 0.38f * diKickPunchNow());
+        v *= kb;
         if (v > 1.0f) v = 1.0f;
         CGFloat h = 1.5 + (height - 1.5) * pow(v, 0.85);
         CGRect r = CGRectMake(x0 + i * (bw + gap), bottom - h, bw, h);
