@@ -19029,8 +19029,38 @@ static void diRhythmCollectExtras(UIView *dv) {
 
 /* 3.0.62: 475 用户: "探针不够多, 还是没有探到"。
    连续两个版本 图=无, 说明猜位置没用 —— 直接把 dv 周围 4 层、最多 60 个视图的
-   类名/有无像素内容/是否隐藏/尺寸打到日志; 再用 hitTest 打出"封面中心这个点上
-   最上层是谁"。下次贴日志就能一眼定位"专辑图到底画在哪一层、被谁盖住"。 */
+   类名/有无像素内容/是否隐藏/尺寸打到日志; 再把 dv 的 CALayer 子树打出来
+   (门户层/图片层/遮罩层都在这里); 最后用 hitTest 打出"封面中心点上最上层是谁"。 */
+static BOOL diViewIsSuggestions(UIView *v);
+
+static void diRhythmDumpViewNode(UIView *v, UIView *dv, int depth,
+                                 NSMutableString *out, NSUInteger *budget) {
+    if (!v || *budget == 0) return;
+    (*budget)--;
+    NSString *pad = [@"" stringByPaddingToLength:(NSUInteger)(depth * 2)
+                                      withString:@" " startingAtIndex:0];
+    [out appendFormat:@"%c%@%@%@ c=%d img=%d a=%.2f h=%d %.0fx%.0f", 10,
+     pad, (v == dv ? @"*" : @"-"), NSStringFromClass(v.class),
+     diLayerHasContent(v.layer, 0) ? 1 : 0,
+     ([v isKindOfClass:UIImageView.class] && ((UIImageView *)v).image) ? 1 : 0,
+     v.alpha, v.hidden ? 1 : 0, v.bounds.size.width, v.bounds.size.height];
+    if (depth >= 4) return;
+    for (UIView *c in v.subviews) diRhythmDumpViewNode(c, dv, depth + 1, out, budget);
+}
+
+static void diRhythmDumpLayerNode(CALayer *l, int d,
+                                  NSMutableString *out, NSUInteger *budget) {
+    if (!l || *budget == 0) return;
+    (*budget)--;
+    NSString *pad = [@"" stringByPaddingToLength:(NSUInteger)(d * 2)
+                                      withString:@" " startingAtIndex:0];
+    [out appendFormat:@"%c%@%@ c=%d op=%.2f %.0fx%.0f", 10, pad,
+     NSStringFromClass(l.class), l.contents ? 1 : 0, l.opacity,
+     l.bounds.size.width, l.bounds.size.height];
+    if (d >= 3) return;
+    for (CALayer *sl in l.sublayers) diRhythmDumpLayerNode(sl, d + 1, out, budget);
+}
+
 static void diRhythmDumpTree(UIView *dv) {
     if (!dv) return;
     UIView *root = dv;
@@ -19047,41 +19077,11 @@ static void diRhythmDumpTree(UIView *dv) {
      inWin.origin.x, inWin.origin.y, inWin.size.width];
 
     NSUInteger budget = 60;
-    __block void (^walk)(UIView *, int) = nil;
-    walk = ^(UIView *v, int depth) {
-        if (!v || budget == 0) return;
-        budget--;
-        NSString *pad = [@"" stringByPaddingToLength:(NSUInteger)(depth * 2)
-                                          withString:@" " startingAtIndex:0];
-        [out appendFormat:@"
-%@%@%@ c=%d img=%d a=%.2f h=%d %.0fx%.0f",
-         pad, (v == dv ? @"*" : @"-"), NSStringFromClass(v.class),
-         diLayerHasContent(v.layer, 0) ? 1 : 0,
-         ([v isKindOfClass:UIImageView.class] && ((UIImageView *)v).image) ? 1 : 0,
-         v.alpha, v.hidden ? 1 : 0, v.bounds.size.width, v.bounds.size.height];
-        if (depth >= 4) return;
-        for (UIView *c in v.subviews) walk(c, depth + 1);
-    };
-    walk(root, 0);
+    diRhythmDumpViewNode(root, dv, 0, out, &budget);
 
-    /* dv 自己的图层子树 —— 封面到底画在哪个 CALayer 上(CAPortalLayer / 图片层 / 遮罩层) */
-    {
-        __block void (^lwalk)(CALayer *, int) = nil;
-        NSUInteger lb = 26;
-        [out appendString:@"\n[律动树] dv.layer 子树:"];
-        lwalk = ^(CALayer *l, int d) {
-            if (!l || lb == 0) return;
-            lb--;
-            NSString *pad = [@"" stringByPaddingToLength:(NSUInteger)(d * 2)
-                                              withString:@" " startingAtIndex:0];
-            [out appendFormat:@"\n%@%@ c=%d op=%.2f %.0fx%.0f", pad,
-             NSStringFromClass(l.class), l.contents ? 1 : 0,
-             l.opacity, l.bounds.size.width, l.bounds.size.height];
-            if (d >= 3) return;
-            for (CALayer *sl in l.sublayers) lwalk(sl, d + 1);
-        };
-        lwalk(dv.layer, 0);
-    }
+    budget = 26;
+    [out appendFormat:@"%c[律动树] dv.layer 子树:", 10];
+    diRhythmDumpLayerNode(dv.layer, 0, out, &budget);
 
     /* 中心点命中的最上层视图链 —— 判断"封面是不是被别的层盖住了" */
     if (dv.window && dv.superview) {
@@ -19091,8 +19091,7 @@ static void diRhythmDumpTree(UIView *dv) {
         int n = 0;
         for (UIView *h = hit; h && n < 6; h = h.superview, n++)
             [chain appendFormat:@"%@ < ", NSStringFromClass(h.class)];
-        [out appendFormat:@"
-[律动树] 中心点最上层: %@(是否 dv 自身=%@)", chain,
+        [out appendFormat:@"%c[律动树] 中心点最上层: %@(是否 dv 自身=%@)", 10, chain,
          (hit == dv ? @"是" : @"否")];
     }
     RLog(@"%@", out);
