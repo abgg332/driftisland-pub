@@ -18184,6 +18184,10 @@ static BOOL diTimeExpanded(UIView *v) {
     CFTimeInterval nowE = CACurrentMediaTime();
     if (sExpV == v && CGSizeEqualToSize(sExpSz, v.bounds.size) && nowE - sExpT < 0.35) return sExpRes;
     BOOL res = NO;
+    UIView *win = v.window;
+    UIView *cur = v;
+    int g = 0;
+    CGFloat bw = 0, bh = 0;
     /* 3.0.66: 478 用户: "只有 3×2 有律动/粒子, 其他布局没有"。
        旧判据"宽>=320 或 高>=235"把 4×2/4×3/4×1 这类本来就宽的**折叠模块卡片**
        全部误判成"展开页", 律动/粒子在那些布局下被整体隐藏。
@@ -18193,10 +18197,6 @@ static BOOL diTimeExpanded(UIView *v) {
           宽度判据删除 —— 宽布局的卡片宽 320~400 是常态。 */
     if (diArtInExpandedPlayer(v)) { res = YES; goto diExpDone; }
     /* 3.0.67 的放大比判定已提到函数最上面(每帧都要看, 不进缓存) */
-    UIView *win = v.window;
-    UIView *cur = v;
-    int g = 0;
-    CGFloat bw = 0, bh = 0;
     while (cur && g++ < 14) {
         NSString *cn = NSStringFromClass(cur.class);
         if ([cn containsString:@"MRUNowPlaying"] || [cn containsString:@"ContentModuleContainerView"]) {
