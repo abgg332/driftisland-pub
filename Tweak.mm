@@ -18897,8 +18897,12 @@ static CGSize gDIRhythmBaseSize;       /* 记 base 时 dv 的尺寸 —— 变�
 static double gDILastAng = 0.0;        /* 3.0.61: 关掉旋转时把角度冻结在这个值上(不跳回 0°) */
 static BOOL gDIRhythmDriving = NO;     /* 上一帧我们是否在写 transform(用于"只还原一次") */
 /* 3.0.62 */
-static float gDIBeatKick = 0.0f;       /* 拍点冲量(上升沿触发, 160ms 指数衰减) —— 粒子用它 */
-static float gDIPrevPulse = 0.0f;      /* 上一帧 gDIBassPulse, 用来取上升沿 */
+/* 3.0.63: **统一的低音鼓**。476 用户: "专辑头像跟粒子的鼓点你抓取统一一个低音鼓,
+   这样视觉看起来统一动态"。以前专辑用 gDIBeatEnv(全谱+响度混合), 粒子用
+   gDIBassPulse 的上升沿 —— 两个信号不同步, 看着就是"各动各的"。
+   现在两处都只看这一个 gDIKick: 低频(60~250Hz)能量的上升沿 → 跳到 0~1 → 190ms 衰减。 */
+static float gDIKick = 0.0f;
+static float gDILowPrevK = 0.0f;       /* 上一帧低频能量, 用来取上升沿 */
 static BOOL  gDIRhythmSkipDv = NO;     /* extras 里已经有 dv 的祖先 → dv 不再单独写(否则缩两次) */
 static CFTimeInterval gDIDumpAt = 0;
 
@@ -18951,6 +18955,7 @@ static BOOL diSameCoverRect(UIView *a, UIView *b, UIView *space) {
    子视图不用收: 它们本来就会跟着 dv 的 transform 一起缩放(收了会缩两次)。 */
 static void diRhythmRememberBase(UIView *v);
 static BOOL diViewIsSuggestions(UIView *v);      /* 3.0.62: 定义在后面, 这里先声明 */
+static BOOL diArtInExpandedPlayer(UIView *v);    /* 3.0.63: 同上 */
 static void diRhythmCollectExtras(UIView *dv) {
     gDIRhythmExtraN = 0;
     gDIRhythmSkipDv = NO;
@@ -18974,6 +18979,7 @@ static void diRhythmCollectExtras(UIView *dv) {
             if (!v || v == dv) continue;
             if (!v.window || v.hidden || v.alpha < 0.3) continue;
             if (diViewIsSuggestions(v)) continue;
+            if (diArtInExpandedPlayer(v)) continue;    /* 3.0.63: 展开页不参与 */
             CGFloat vw = v.bounds.size.width;
             if (vw < 30 || vw > 260) continue;
             CGFloat dw = dv.bounds.size.width;
@@ -19001,6 +19007,7 @@ static void diRhythmCollectExtras(UIView *dv) {
                 CGFloat kk = wa / wb;
                 if (kk < 0.70f || kk > 1.35f) continue;
             }
+            if (diArtInExpandedPlayer(s)) continue;   /* 3.0.63: 展开页的层一律不写 */
             if (needArt && !diViewHasArt(s)) continue;
             /* 已经是某个已选视图的子孙 → 会缩两次, 跳过 */
             BOOL nested = NO;
@@ -19134,17 +19141,25 @@ static void diRhythmRememberBase(UIView *v) {
 static void diRhythmWriteTransform(UIView *v, CATransform3D tr) {
     if (!v) return;
     CALayer *l = v.layer;
-    /* 3.0.62: 475 日志里 "缩放=1.180 实=1.000" 交替出现 —— 写进 model 的缩放被系统
-       每帧重新布局时顶回 identity, 视觉上就成了"偶尔抖一下", 用户看到的是"没效果"。
-       这里 model 照写, 再挂一条 1 帧的短动画: 即使 model 被顶掉, 呈现层仍然是我们
-       要的值。from 取呈现层(presentationLayer), 每帧首尾相接, 不会跳。 */
-    CATransform3D from = tr;
+    /* 3.0.62: 475 日志 "缩放=1.180 实=1.000" 交替 —— 写进 model 的缩放会被系统重新布局
+       顶回 identity, 视觉上就是"偶尔抖一下"。
+       3.0.63: 兜底动画从整份 transform 改成 **transform.scale** —— 整份会连旋转一起覆盖,
+       跟 di.art.spin(transform.rotation.z) 打架, 也就是 476 说的"律动和旋转冲突,
+       打开动态就怪怪的"。只动 scale 分量, 旋转留给 spin 动画。 */
+    CGFloat fromS = 1.0, toS = 1.0;
     CALayer *pl = (CALayer *)l.presentationLayer;
-    if (pl) from = pl.transform;
+    if (pl) {
+        CATransform3D pt = pl.transform;
+        CGFloat sx = sqrt(pt.m11 * pt.m11 + pt.m12 * pt.m12);
+        if (sx > 0.01) fromS = sx;
+    }
+    CGFloat tsx = sqrt(tr.m11 * tr.m11 + tr.m12 * tr.m12);
+    if (tsx > 0.01) toS = tsx;
     l.transform = tr;
-    CABasicAnimation *an = [CABasicAnimation animationWithKeyPath:@"transform"];
-    an.fromValue = [NSValue valueWithCATransform3D:from];
-    an.toValue = [NSValue valueWithCATransform3D:tr];
+    if (fabs(toS - fromS) < 0.0005) return;
+    CABasicAnimation *an = [CABasicAnimation animationWithKeyPath:@"transform.scale"];
+    an.fromValue = @(fromS);
+    an.toValue = @(toS);
     an.duration = 1.0 / 60.0;
     an.timingFunction = [CAMediaTimingFunction functionWithName:kCAMediaTimingFunctionLinear];
     an.fillMode = kCAFillModeForwards;
@@ -19541,7 +19556,7 @@ static void diFxUpdateDots(UIView *host, CGRect cover, float dt,
            474 用户: "专辑跟随律动怎么会加到粒子上呢? 我要的是专辑, 粒子是单独的"。
            现在粒子的呼吸完全由自己的强度决定, 音频包络一个字都不读。 */
         /* 3.0.62: 拍点脉冲 —— 强度越大鼓得越明显, 每颗粒子按自己的 beatGain 有差异 */
-        float kick = gDIBeatKick;
+        float kick = gDIKick;
         float kg = kick * stg * d->beatGain;
         float bright = 0.55f + 0.30f * MIN(1.2f, stg) + 0.16f * kg;
         float alpha = bright * fadeIn * fadeOut * edgeOut * tw;
@@ -19606,6 +19621,24 @@ static BOOL diViewIsSuggestions(UIView *v) {
     return NO;
 }
 
+/* 3.0.63: 476 用户: "打开功能会影响展开的专辑, 展开跟不展开的不要影响"。
+   控制中心模块里的封面父链上有 MRUControlCenterView / CCUIContentModule,
+   而"点开的大播放页"父链上是 MRUNowPlayingViewController / *Expanded。
+   前者才归律动管, 后者一个字都不写。 */
+static BOOL diArtInExpandedPlayer(UIView *v) {
+    UIView *p = v;
+    for (int i = 0; i < 16 && p; i++) {
+        NSString *cn = NSStringFromClass(p.class);
+        if ([cn containsString:@"ControlCenter"] || [cn containsString:@"ContentModule"]) return NO;
+        if ([cn containsString:@"SystemAperture"]) return NO;
+        if ([cn containsString:@"NowPlayingViewController"] ||
+            [cn containsString:@"NowPlayingExpanded"] ||
+            [cn containsString:@"Expanded"]) return YES;
+        p = p.superview;
+    }
+    return NO;
+}
+
 static UIView *diRhythmPickTarget(void) {
     UIView *best = nil;
     CGFloat bestArea = 0;
@@ -19613,6 +19646,7 @@ static UIView *diRhythmPickTarget(void) {
     for (UIView *v in gDIArtKnown.allObjects) {
         if (!v.window || v.hidden || v.alpha < 0.3) continue;
         if (diViewIsSuggestions(v)) continue;          /* 3.0.48: 不认"媒体建议"页 */
+        if (diArtInExpandedPlayer(v)) continue;        /* 3.0.63: 展开的播放页不归律动管 */
         CGSize s = v.bounds.size;
         if (s.width < 40 || s.width > 220) continue;
         CGFloat ratio = s.width / MAX(1.0, s.height);
@@ -20229,6 +20263,20 @@ static void diRhythmAdvanceSpectrum(BOOL active, BOOL real, float dt) {
         flux /= MAX(1.0f, wsum);
         gDIFluxNow = flux;
         gDILowLevel = MIN(1.0f, low / 21.0f);          /* 1+2+…+6 = 21 */
+        /* 3.0.63: 低音鼓 —— 低频段能量往上跳的那一下。底鼓/贝斯都落在这里,
+           比"全谱通量"更接近人耳听到的"鼓点"。 */
+        {
+            float lr = gDILowLevel - gDILowPrevK;
+            gDILowPrevK = gDILowLevel;
+            if (lr > 0.035f) {
+                float kv = MIN(1.0f, lr * 2.6f + gDILowLevel * 0.22f);
+                if (kv > gDIKick) {
+                    gDIKick = kv;
+                    diFxApplyBeat(kv);
+                }
+            }
+            gDIKick *= expf(-dt / 0.19f);
+        }
         gDIMidLevel = sum / (float)DI_AU_BANDS;
 
         /* 3.0.58: 阈值抬高 + 加 0.16s 不应期, 冲量 75ms 快速衰减。
@@ -20266,6 +20314,9 @@ static void diRhythmAdvanceSpectrum(BOOL active, BOOL real, float dt) {
         gDIFluxNow = (float)(pulse * 0.5);
         gDIBassPulse = MAX((float)pulse, gDIBassPulse * expf(-dt / 0.18f));
         gDIBassPrev = 0.3f;
+        /* 3.0.63: 没真频谱时, 合成节拍也走同一个 kick */
+        if ((float)pulse > gDIKick) { gDIKick = (float)pulse; diFxApplyBeat(gDIKick); }
+        gDIKick *= expf(-dt / 0.19f);
     } else {
         float k = 1.0f - expf(-dt / 0.12f);
         for (int i = 0; i < DI_AU_BANDS; i++) {
@@ -20280,6 +20331,8 @@ static void diRhythmAdvanceSpectrum(BOOL active, BOOL real, float dt) {
         gDIMidLevel *= expf(-dt / 0.30f);
         gDIFluxNow *= expf(-dt / 0.30f);
         gDIFluxAvg *= expf(-dt / 0.60f);
+        gDIKick *= expf(-dt / 0.12f);
+        gDILowPrevK = 0.0f;
     }
     /* 视觉拍点: 上升 25ms / 下降 150ms —— 缩放、透明度都用它, 绝不单帧跳变。
        3.0.58: 回落从 260ms 收到 150ms, 否则密鼓点下包络来不及掉, 看着像"一直很大"。 */
@@ -20287,15 +20340,7 @@ static void diRhythmAdvanceSpectrum(BOOL active, BOOL real, float dt) {
         ? (1.0f - expf(-dt / 0.015f)) : (1.0f - expf(-dt / 0.095f));
     gDIBeatEnv += (gDIBassPulse - gDIBeatEnv) * visK;
 
-    /* 3.0.62: 拍点冲量。gDIBassPulse 在起音那一帧跳到 0.45~1.0, 之后 150ms 衰减。
-       取它的**上升沿**当作"这一下拍", 一次性给所有在飞的粒子加一个向外的速度冲量。 */
-    float rise = gDIBassPulse - gDIPrevPulse;
-    gDIPrevPulse = gDIBassPulse;
-    if (rise > 0.08f) {
-        gDIBeatKick = MIN(1.0f, rise * 2.0f + gDIBassPulse * 0.35f);
-        diFxApplyBeat(gDIBeatKick);
-    }
-    gDIBeatKick *= expf(-dt / 0.16f);
+    /* 3.0.63: 拍点冲量已经在上面的三个分支里按"低音鼓"统一算完了 */
 }
 
 static void diRhythmTickWithDelta(float dtIn) {
@@ -20484,37 +20529,31 @@ static void diRhythmTickWithDelta(float dtIn) {
             if (gDIRhythmExtraN == 0) diRhythmCollectExtras(dv);
         }
         if (gDIRhythmBaseValid) {
-            /* 3.0.57: 旋转归属权 —— 这层上挂着 di.art.spin(transform.rotation.z, 10s 一圈)。
-               我们每帧写整个 transform 就是在跟这条动画抢同一个属性: 探针里 m11 会间歇
-               变回 1.000(写进去又被顶掉), 旋转看着也一会儿快一会儿慢。
-               律动接管期间把动画摘掉, 旋转和缩放由这一帧一次算完; 律动关了再交还。 */
-            if ([dv.layer animationForKey:@"di.art.spin"]) {
-                [dv.layer removeAnimationForKey:@"di.art.spin"];
-                RLog(@"[律动] 接管封面旋转(摘掉 di.art.spin, 改为每帧与缩放一起算)");
-            }
-            gDIArtSpinYield = dv;
-            ownsSpin = wantSpin;      /* 开关关了就不给角度 → 静止, 不再"关了还转" */
+            /* 3.0.63: 律动**不再接管旋转**。旋转永远由 di.art.spin(transform.rotation.z)
+               这条 CA 动画提供; 我们只写"缩放 + 位移"的 model —— 二者是 CATransform3D
+               的不同分量, 可以共存。476 用户「律动跟旋转会冲突, 打开动态就怪怪的」,
+               根就是 3.0.57 起把动画摘掉、每帧自己算角度: 两个写入者抢同一份 transform。
+               旋转开关仍然只由「专辑旋转」控制(diArtDress 里读 diArtPrefOn)。 */
+            (void)wantSpin;
+            ownsSpin = NO;
 
             /* 3.0.61: 幅度再抬一档, 并且**上下都摆**(以前基准 0.28 偏低, 只在峰值上方
                才有变化, 大部分帧落在钳位 1.000 上, 看着就是"根本没动")。
                现在: 拍点冲到 1.10~1.18, 拍与拍之间落回 0.94~0.98, 57pt 上有 8~10pt 起伏。 */
-            CGFloat amp = 0.34 * rhythmBeatScale;
-            CGFloat e = 0.25 * gDISteady + 0.75 * gDIBeatEnv;
-            CGFloat breath = 0.006 * sin((CGFloat)gDIClock * 1.15);
-            CGFloat s = 1.0 + (e - 0.34) * amp * 2.0 + breath;
-            if (s < 0.90) s = 0.90;
+            /* 3.0.63: 和粒子**同一个低音鼓**(gDIKick)。476 用户: "专辑头像跟粒子的鼓点
+               统一一个低音鼓, 这样视觉看起来统一动态"。以前这里混的是全谱包络+响度,
+               和粒子的信号不同源, 看起来就是各动各的。 */
+            CGFloat k = gDIKick;
+            CGFloat amp = 0.26 * rhythmBeatScale;
+            CGFloat breath = 0.004 * sin((CGFloat)gDIClock * 1.15);
+            CGFloat s = 1.0 + (k - 0.25) * amp * 1.8 + breath;
+            if (s < 0.93) s = 0.93;
             if (s > 1.18) s = 1.18;
             sDbg = s;
             gDICoverScaleNow = (float)s;      /* 粒子遮罩的孔要跟着封面一起缩放 */
-            CGFloat dy = -(CGFloat)gDIBeatEnv * 5.0 * (CGFloat)rhythmBeatScale;
-            double ang = gDILastAng;
-            if (ownsSpin) {
-                if (gDISpinEpoch <= 0) gDISpinEpoch = CACurrentMediaTime();
-                ang = fmod(CACurrentMediaTime() - gDISpinEpoch, kDISpinDur) / kDISpinDur * M_PI * 2.0;
-                gDILastAng = ang;
-            }
-            /* 3.0.61: 关掉旋转时用冻结角度写回 —— 直接给 0 会让封面"啪"地跳回正面 */
-            diRhythmWriteAll(s, dy, (ownsSpin || gDILastAng > 0.0001), ang, NO);
+            CGFloat dy = -(CGFloat)gDIKick * 4.0 * (CGFloat)rhythmBeatScale;
+            /* 只写缩放/位移; 旋转交给 di.art.spin 的 rotation.z 动画 */
+            diRhythmWriteAll(s, dy, NO, 0.0, NO);
             gDIRhythmDriving = YES;
         }
     } else if (gDIRhythmDriving) {
@@ -20551,7 +20590,7 @@ static void diRhythmTickWithDelta(float dtIn) {
                 [exs appendFormat:@"%@%.0f ", NSStringFromClass(gDIRhythmExtras[i].class),
                  gDIRhythmExtras[i].bounds.size.width];
             RLog(@"[探针] 通量=%.3f 低频=%.3f 拍=%.2f 踢=%.2f 缩放=%.3f 实=%.3f 呈=%.3f 尺=%.0f 基尺=%.0f 驱动=%@ 图=%@ 旋=%@ 播=%d 粒=%d 强=%.1f 律=%d 基=%d",
-                 gDIFluxNow, gDILowLevel, gDIBeatEnv, gDIBeatKick, sDbg, sReal, sPres,
+                 gDIFluxNow, gDILowLevel, gDIBeatEnv, gDIKick, sDbg, sReal, sPres,
                  dv.bounds.size.width, gDIRhythmBaseSize.width,
                  NSStringFromClass(dv.class),
                  gDIRhythmExtraN ? exs : @"无",
