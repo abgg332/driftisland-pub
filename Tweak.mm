@@ -19692,13 +19692,48 @@ static void diFxUpdateMask(CGRect cover, float coverScale) {
     [CATransaction commit];
 }
 
-/* 画布: 每帧重画一次(48 个图元, 比 64 个 CAShapeLayer 省得多) */
+/* 3.0.73: 粒子改成**柔光晕圆点**。
+   对着 485 附带的原版录屏逐帧量出来的事实:
+     · 形态: 白色暖调、中心亮边缘雾化的小圆(带光晕), 没有拖尾线
+     · 直径: 约封面宽度的 8~10%(含光晕), 核心只有 4~5px
+     · 数量: 同时 12~16 颗
+     · 运动: 极慢, 0.1 秒内位移不到 1px, 基本是悬停漂浮, 没有下落
+     · 分布: 出生在封面边缘外 0~0.25R, 慢慢漂到 0.8R 以内
+     · 寿命: 数秒, 慢慢地淡入淡出
+   所以画法换成「预渲染一张径向渐变 sprite, 每帧按 alpha 叠加」——
+   48 颗就是 48 次 drawImage, 比逐颗建渐变快得多, 也比硬边圆点像原版。 */
+static CGImageRef gDIFmSprite = NULL;
+static CGFloat    gDIFmSpriteRGBA[4] = {-1,-1,-1,-1};
+static double     gDIFmCoverW = 57.0;     /* 封面宽, 粒子直径按它的比例算 */
+
+static void diFmBuildSprite(CGFloat r, CGFloat g, CGFloat b) {
+    gDIFmSpriteRGBA[0]=r; gDIFmSpriteRGBA[1]=g; gDIFmSpriteRGBA[2]=b; gDIFmSpriteRGBA[3]=1;
+    /* 混白 45%: 原版粒子比封面配色亮得多, 是"暖白光点"而不是彩色点 */
+    r = r * 0.55 + 0.45; g = g * 0.55 + 0.45; b = b * 0.55 + 0.45;
+    size_t S = 64;
+    CGColorSpaceRef cs = CGColorSpaceCreateDeviceRGB();
+    CGContextRef c = CGBitmapContextCreate(NULL, S, S, 8, S * 4, cs,
+                                           kCGImageAlphaPremultipliedLast);
+    if (!c) { CGColorSpaceRelease(cs); return; }
+    CGContextClearRect(c, CGRectMake(0, 0, S, S));
+    CGFloat comps[] = { r,g,b,1.00,  r,g,b,0.62,  r,g,b,0.20,  r,g,b,0.03,  r,g,b,0.00 };
+    CGFloat locs[]  = { 0.00,        0.18,        0.42,        0.72,        1.00 };
+    CGGradientRef gr = CGGradientCreateWithColorComponents(cs, comps, locs, 5);
+    CGPoint cc = CGPointMake(S / 2.0, S / 2.0);
+    CGContextDrawRadialGradient(c, gr, cc, 0.0, cc, S / 2.0, 0);
+    CGImageRef img = CGBitmapContextCreateImage(c);
+    CGGradientRelease(gr);
+    CGContextRelease(c);
+    CGColorSpaceRelease(cs);
+    if (gDIFmSprite) CGImageRelease(gDIFmSprite);
+    gDIFmSprite = img;
+}
+
 static void diFmPaint(CGContextRef ctx);
 @interface DIFmCanvasLayer : CALayer @end
 @implementation DIFmCanvasLayer
 - (void)drawInContext:(CGContextRef)ctx { diFmPaint(ctx); }
 @end
-
 
 static void diFmPaint(CGContextRef ctx) {
     if (gDIDotCount <= 0) return;
@@ -19710,61 +19745,62 @@ static void diFmPaint(CGContextRef ctx) {
     CGFloat ar = 1, ag = 1, ab = 1, br = 1, bg = 1, bb = 1;
     [pa getRed:&ar green:&ag blue:&ab alpha:NULL];
     [pb getRed:&br green:&bg blue:&bb alpha:NULL];
+
     float alphaMul = (float)rhythmParticleAlpha;
     float sizeMul  = (float)rhythmParticleSize;
-    float strength = (float)rhythmParticleStrength;
-    if (strength < 0.3f) strength = 0.3f;
-    if (strength > 2.0f) strength = 2.0f;
-    float sm = sizeMul * (0.85f + 0.15f * strength);
-    CGContextSetLineCap(ctx, kCGLineCapRound);
+    if (sizeMul <= 0.05f) sizeMul = 0.05f;
+
+    /* 颜色变了才重建 sprite: 每帧只比 3 个 float */
+    CGFloat cr = (ar + br) * 0.5, cg = (ag + bg) * 0.5, cb = (ab + bb) * 0.5;
+    if (!gDIFmSprite || fabs(cr - gDIFmSpriteRGBA[0]) > 0.004
+        || fabs(cg - gDIFmSpriteRGBA[1]) > 0.004 || fabs(cb - gDIFmSpriteRGBA[2]) > 0.004) {
+        diFmBuildSprite(cr, cg, cb);
+    }
+    if (!gDIFmSprite) return;
+
+    double base = gDIFmCoverW * 0.16 * (double)sizeMul;   /* sprite 直径(含光晕) */
+
+    CGContextSetBlendMode(ctx, kCGBlendModePlusLighter);
     for (int i = 0; i < gDIDotCount && i < DI_DOT_CAP; i++) {
         DIDot *p = &gDIDots[i];
         double t = (p->maxLife > 0.001) ? (p->life / p->maxLife) : 1.0;
         double a;
-        if (t < 0.15) a = t / 0.15;
-        else a = 1.0 - pow((t - 0.15) / 0.85, 1.5);
-        if (a <= 0.01) continue;
-        if (a < 0.0) a = 0.0;
+        if (t < 0.22) a = t / 0.22;                       /* 淡入占 22% 寿命 */
+        else if (t > 0.55) a = (1.0 - t) / 0.45;          /* 后 45% 慢慢淡出 */
+        else a = 1.0;
+        if (a <= 0.004) continue;
         if (a > 1.0) a = 1.0;
         a *= alphaMul;
         if (a <= 0.004) continue;
-        CGFloat tt = p->tint;
-        CGFloat rr = ar + (br - ar) * tt;
-        CGFloat gg = ag + (bg - ag) * tt;
-        CGFloat bb2 = ab + (bb - ab) * tt;
-        double len = hypot(p->vx, p->vy);
-        double tx = 0, ty = 0;
-        if (len > 0.0001) { double L = len * 1.8; tx = p->vx / len * L; ty = p->vy / len * L; }
-        double lw = p->size * 2.0 * sm;
-        if (lw < 0.6) lw = 0.6;
-        CGContextSetRGBStrokeColor(ctx, rr, gg, bb2, a);
-        CGContextSetLineWidth(ctx, lw);
-        CGContextMoveToPoint(ctx, p->x - tx, p->y - ty);
-        CGContextAddLineToPoint(ctx, p->x, p->y);
-        CGContextStrokePath(ctx);
-        double rad = p->size * 2.5 * sm;
-        CGContextSetRGBFillColor(ctx, rr, gg, bb2, a * 0.4);
-        CGContextFillEllipseInRect(ctx, CGRectMake(p->x - rad, p->y - rad, rad * 2, rad * 2));
+        double d = base * p->size;
+        if (d < 1.0) d = 1.0;
+        CGRect rr = CGRectMake(p->x - d * 0.5, p->y - d * 0.5, d, d);
+        CGContextSetAlpha(ctx, a);
+        CGContextDrawImage(ctx, rr, gDIFmSprite);
     }
+    CGContextSetAlpha(ctx, 1.0);
+    CGContextSetBlendMode(ctx, kCGBlendModeNormal);
 }
 
-/* 生成一颗: 出生点在封面圆边上, 速度沿半径向外 ±26°（原版 -45°~+45° 的等效） */
+/* 生成一颗: 出生在封面边缘外 0~0.25R 的一圈里, 之后极慢地随机漂移 */
 static void diFxSpawnAt(CGPoint c, double R) {
     if (gDIDotCount >= DI_DOT_CAP) return;
     DIDot *p = &gDIDots[gDIDotCount++];
     double ang = diFxRandD() * M_PI * 2.0;
-    double rr = R * 1.02 + diFxRandD() * 2.0;
+    /* 出生就在封面边缘外 0~0.25R 的一圈里(录屏里粒子是从边上冒出来的) */
+    double rr = R * (1.0 + diFxRandD() * 0.25);
     p->x = c.x + cos(ang) * rr;
     p->y = c.y + sin(ang) * rr;
-    double dir = ang + (diFxRandD() - 0.5) * 0.92;
-    double sp = 0.30 + diFxRandD() * 1.00;
+    /* 3.0.73: 速度降到 1/10 —— 录屏里 0.1 秒位移不到 1px, 是"悬停漂浮"不是"喷射" */
+    double dir = diFxRandD() * M_PI * 2.0;
+    double sp = 0.02 + diFxRandD() * 0.08;
     p->vx = cos(dir) * sp;
-    p->vy = sin(dir) * sp;
-    p->size = diFxRandD() * 1.2 + 0.8;
+    p->vy = sin(dir) * sp - 0.01;      /* 极轻微上浮, 抵消一点点视觉下沉 */
+    p->size = 0.70 + diFxRandD() * 0.60;
     p->life = 0.0;
-    p->maxLife = diFxRandD() * 40.0 + 30.0;
+    p->maxLife = 120.0 + diFxRandD() * 180.0;   /* 2~5 秒 */
     p->swayPhase = diFxRandD() * M_PI * 2.0;
-    p->swaySpeed = diFxRandD() * 0.04 + 0.02;
+    p->swaySpeed = diFxRandD() * 0.035 + 0.015;
     p->tint = (float)diFxRandD();
 }
 
@@ -19808,11 +19844,13 @@ static void diFxUpdateDots(UIView *host, CGRect cover, float dt,
         int cap = rhythmParticleCount;
         if (cap > DI_DOT_CAP) cap = DI_DOT_CAP;
         if (cap < 1) cap = 1;
-        double rate = 0.30;                      /* 原版: tracking ? 0.3 : 0.05 */
+        /* 寿命 2~5 秒, 速率 0.075/帧(4.5 颗/秒) → 稳定 12~20 颗, 和录屏密度一致 */
+        double rate = 0.075;
         gDISpawnAcc += rate * f;
         CGPoint c = CGPointMake(CGRectGetMidX(cover) - host.bounds.origin.x,
                                 CGRectGetMidY(cover) - host.bounds.origin.y);
         double R = cover.size.width * 0.5;
+        gDIFmCoverW = cover.size.width;         /* 粒子直径按封面宽度取比例 */
         while (gDISpawnAcc >= 1.0) {
             gDISpawnAcc -= 1.0;
             if (gDIDotCount >= cap) break;
@@ -19821,15 +19859,15 @@ static void diFxUpdateDots(UIView *host, CGRect cover, float dt,
     }
 
     if (gDIDotCount > 0) {
-        double damp = pow(0.92, f);
+        double damp = pow(0.995, f);            /* 几乎不减速, 保持极慢漂移 */
         int i = 0;
         while (i < gDIDotCount) {
             DIDot *p = &gDIDots[i];
             p->vx *= damp;
-            p->vy = p->vy * damp + 0.04 * f;
+            p->vy *= damp;                      /* 无重力: 录屏里粒子不下落 */
             double sv = sin(p->swayPhase);
-            p->x += (p->vx + sv * 0.15) * f;
-            p->y += p->vy * f;
+            p->x += (p->vx + sv * 0.06) * f;
+            p->y += (p->vy + cos(p->swayPhase * 0.7) * 0.045) * f;
             p->swayPhase += p->swaySpeed * f;
             p->life += f;
             if (p->life >= p->maxLife) {
@@ -19872,10 +19910,27 @@ static double gDIFmBeatPulse = 1.0;
 static double gDIFmBeatCur = 1.0;
 static double gDIFmBeatEnergyDbg = 0.0;
 
-static double diFmBeatEnergy(float lowLevel) {
-    double e = ((double)lowLevel - 0.10) / 0.60;
-    if (e < 0.0) e = 0.0;
+/* 3.0.73: energy 归一化改成**自适应**。
+   485 日志实测: gDILowLevel 长期在 0.73~0.88 之间小幅起伏, 原来按固定区间
+   (0.10~0.70) 归一后每一帧都被钳到 1.00 —— 于是 base 恒 1.0、thr 恒 1.105、
+   excess 恒 0、pulse 卡在 0.23 不动, 封面缩放就死死钉在 1.038 不变。
+   现在用"慢基线 + 慢峰值"把当前这首歌自己的动态范围映射到 0~1:
+     base 约 3 秒跟上(底噪), peak 上升立刻跟、下降极慢(约 10 秒)。
+   这样任何歌都能得到 0.4~0.8 的中位值和 ~1.0 的鼓点峰值。 */
+static double gDIFmLowBase = 0.0;
+static double gDIFmLowPeak = 0.0;
+
+static double diFmBeatEnergy(double low, double f) {
+    if (low < 0.0) low = 0.0;
+    if (gDIFmLowBase <= 0.0001) { gDIFmLowBase = low; gDIFmLowPeak = low; }
+    gDIFmLowBase += (low - gDIFmLowBase) * fmin(1.0, 0.006 * f);   /* ~3s */
+    if (low > gDIFmLowPeak) gDIFmLowPeak = low;
+    else gDIFmLowPeak -= (gDIFmLowPeak - low) * fmin(1.0, 0.003 * f); /* ~10s 回落 */
+    double span = gDIFmLowPeak - gDIFmLowBase;
+    if (span < 0.04) span = 0.04;
+    double e = 0.5 + 0.75 * (low - gDIFmLowBase) / span;  /* base→0.5, peak→1.25 */
     if (e > 1.0) e = 1.0;
+    if (e < 0.0) e = 0.0;
     return e;
 }
 
@@ -21004,7 +21059,7 @@ static void diRhythmTickWithDelta(float dtIn) {
             double fB = (double)dt / 0.01666;
             if (fB < 0.05) fB = 0.05;
             if (fB > 6.0) fB = 6.0;
-            double eB = diFmBeatEnergy(gDILowLevel);
+            double eB = diFmBeatEnergy((double)gDILowLevel, fB);
             gDIFmBeatEnergyDbg = eB;
             CGFloat s = (CGFloat)diFmBeatStep(eB, rhythmBeatScale / 0.70, fB, YES);
             sDbg = s;
@@ -21018,6 +21073,7 @@ static void diRhythmTickWithDelta(float dtIn) {
         /* rhythmOn 关了(但粒子/频谱还开着): 复位缩放, 把旋转交还给 CA 动画 */
         (void)diFmBeatStep(0.0, 1.0, 1.0, NO);
         gDIFmBeatEnergyDbg = 0.0;
+        gDIFmLowBase = 0.0; gDIFmLowPeak = 0.0;
         if (gDIRhythmBaseValid) diRhythmWriteAll(1.0, 0.0, NO, 0.0, YES);
         gDIRhythmDriving = NO;
         if (gDIArtSpinYield == dv) {
@@ -21049,8 +21105,8 @@ static void diRhythmTickWithDelta(float dtIn) {
             for (int i = 0; i < gDIRhythmExtraN; i++)
                 [exs appendFormat:@"%@%.0f ", NSStringFromClass(gDIRhythmExtras[i].class),
                  gDIRhythmExtras[i].bounds.size.width];
-            RLog(@"[探针] 通量=%.3f 低频=%.3f 占=%.2f 拍=%.2f 鼓=%.2f 能=%.2f 脉=%.2f 踢=%.2f 隔=%.2f 缩放=%.3f 实=%.3f 呈=%.3f 尺=%.0f 基尺=%.0f 驱动=%@ 图=%@ 旋=%@ 播=%d 粒=%d 强=%.1f 律=%d 基=%d",
-                 gDIFluxNow, gDILowLevel, gDILowShare, gDIBeatEnv, gDILowN, gDIFmBeatEnergyDbg, gDIFmBeatPulse, gDIKick,
+            RLog(@"[探针] 通量=%.3f 低频=%.3f 底=%.2f 峰=%.2f 占=%.2f 拍=%.2f 鼓=%.2f 能=%.2f 脉=%.2f 踢=%.2f 隔=%.2f 缩放=%.3f 实=%.3f 呈=%.3f 尺=%.0f 基尺=%.0f 驱动=%@ 图=%@ 旋=%@ 播=%d 粒=%d 强=%.1f 律=%d 基=%d",
+                 gDIFluxNow, gDILowLevel, gDIFmLowBase, gDIFmLowPeak, gDILowShare, gDIBeatEnv, gDILowN, gDIFmBeatEnergyDbg, gDIFmBeatPulse, gDIKick,
                  (float)(gDILastKickT > 0 ? (CACurrentMediaTime() - gDILastKickT) : 0.0),
                  sDbg, sReal, sPres,
                  dv.bounds.size.width, gDIRhythmBaseSize.width,
