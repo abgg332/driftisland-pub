@@ -5865,6 +5865,8 @@ static void diNPApplySize(NSString *size) {
     diNPWrite(@"ModuleSizes", sizes, kNPDomain);
     diNPWrite(@"PlayerGridVariant", variant, kNPDomain);
     diNPWrite(@"Size", size, kNPDomain);
+    /* 3.0.71: 尺寸实时生效 —— 播放器侧收到后当场重排控制中心模块, 不用注销 */
+    notify_post("com.abgg332.driftisland.sizechanged");
 }
 
 /* 3.0.39: 3×1 档位已整体删除(用户: "3×1 暂时删除, 相关的也删除")。

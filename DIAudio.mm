@@ -58,6 +58,27 @@ static float gDIBandF[DI_BANDS];
 static float gDIBandPeak[DI_BANDS];
 static int   gDIBandLo[DI_BANDS], gDIBandHi[DI_BANDS];
 
+/* ================= 3.0.71: 底鼓("咚")在**样本域**上抓 =================
+   481 用户: "粒子跟专辑头像的鼓点还是差点意思, 没有视频的效果节点";
+   482 用户还给了参考实现(FlexMusicAudioBridge) —— 它就是注入 mediaserverd
+   钩 AudioUnitRender 拿原始 PCM。我们的 DIAudio 走的同一条路, 所以不用再
+   拿 24 段(每段 16ms 的 FFT 结果)去做二次差分: 那种做法一包里可能已经漏掉
+   了起音前沿, 客户端再 40Hz 采样, 拍点必然"飘"。
+   这里每个 render 回调(≈10~23ms)对混音做一次 110Hz 二阶低通 + RMS, 直接抓
+   低频能量的上升沿 —— 和视频里"每一个咚都落在节点上"是同一种数据。 */
+static float gDILp1 = 0.0f, gDILp2 = 0.0f;       /* 两级一阶低通(≈110Hz) */
+static double gDILowAcc = 0.0;
+static int    gDILowAccN = 0;
+static double gDILowEnv = 0.0;                   /* 低频包络(线性) */
+static double gDIBase = 0.0;                     /* 底噪慢跟随 */
+static double gDIPrevEnv = 0.0;
+static double gDILastKick = 0.0;
+static BOOL   gDIKickArmed = YES;
+static volatile float    gDIKickAmp = 0.0f;      /* 0~1: 这一下的强度 */
+static volatile uint32_t gDIKickSerial = 0;      /* 每触发一次 +1, 客户端据此判新鼓点 */
+static volatile double   gDIKickStamp = 0.0;     /* 触发时刻(CFAbsoluteTime) */
+static volatile float    gDILowRms = 0.0f;
+
 static void diFFTPrepare(void) {
     if (gDIFFTReady) return;
     const int bits = 10;                        /* log2(1024) */
@@ -161,12 +182,62 @@ static OSStatus (*gDIOrigRender)(AudioUnit, AudioUnitRenderActionFlags *,
                                  AudioBufferList *) = NULL;
 
 static void diPushSamples(const float *p, int n, int stride) {
+    /* 3.0.71: 边推环形缓冲边算"底鼓频段"能量 —— 110Hz 两级一阶低通,
+       输出平方累加, 每个 render 回调清一次(见 diKickDetect)。 */
+    double a = exp(-2.0 * M_PI * 110.0 / MAX(8000.0, gDISampleRate));
     for (int i = 0; i < n; i++) {
-        gDIRing[gDIRingW] = p[i * stride];
+        float v = p[i * stride];
+        gDIRing[gDIRingW] = v;
         gDIRingW = (gDIRingW + 1) % DI_RING;
+        float f1 = (float)((1.0 - a) * v + a * gDILp1); gDILp1 = f1;
+        float f2 = (float)((1.0 - a) * f1 + a * gDILp2); gDILp2 = f2;
+        gDILowAcc += (double)f2 * (double)f2;
+        gDILowAccN++;
     }
     uint32_t f = gDIRingFill + (uint32_t)n;
     gDIRingFill = (f > DI_RING) ? DI_RING : f;
+}
+
+/* 3.0.71: 一个回调算一次 —— 低频 RMS → 包络 → 起音判定。
+   · 起音(attack): 这一块的 RMS 比上一块冲出去多少(不需要额外平滑, 块本身
+     就是 10~23ms 的窗口, 再平滑就把前沿抹掉了);
+   · 底噪(base): 掉下去立刻跟, 往上 2s 慢爬 —— 自适应, 每首歌/每段响度都成立;
+   · 只响一次: 触发后必须掉回底噪 1.35 倍以内才重新上膛, 鼓身余音不会顶第二下;
+   · 不应期 0.12s: 再快的连击也不会糊成一片。 */
+static void diKickDetect(double blockSec) {
+    if (gDILowAccN <= 0) return;
+    float lowR = (float)sqrt(gDILowAcc / (double)gDILowAccN);
+    gDILowAcc = 0.0; gDILowAccN = 0;
+    gDILowRms = lowR;
+
+    double env = (double)lowR;
+    if (env > gDILowEnv) gDILowEnv = env;                                  /* 起音立刻跟上 */
+    else gDILowEnv += (env - gDILowEnv) * (1.0 - exp(-MAX(0.001, blockSec) / 0.10));
+
+    if (gDIBase <= 1e-5) gDIBase = gDILowEnv * 0.60;
+    if (gDILowEnv < gDIBase) gDIBase += (gDILowEnv - gDIBase) * 0.35;
+    else gDIBase += (gDILowEnv - gDIBase) * (1.0 - exp(-MAX(0.001, blockSec) / 2.0));
+    if (gDIBase < 1e-5) gDIBase = 1e-5;
+
+    double prev = gDIPrevEnv;
+    gDIPrevEnv = gDILowEnv;
+    double delta = gDILowEnv - prev;
+    double ratio = gDILowEnv / gDIBase;
+    double now = CFAbsoluteTimeGetCurrent();
+
+    if (gDILowEnv < gDIBase * 1.35) gDIKickArmed = YES;
+
+    if (gDIKickArmed && gDILowEnv > 0.0035 && ratio > 1.80 &&
+        delta > gDIBase * 0.50 && (now - gDILastKick) > 0.12) {
+        float amp = (float)(0.42 + 0.32 * log2(1.0 + ratio));
+        if (amp > 1.0f) amp = 1.0f;
+        if (amp < 0.35f) amp = 0.35f;
+        gDIKickAmp = amp;
+        gDIKickStamp = now;
+        gDIKickSerial = gDIKickSerial + 1;
+        gDILastKick = now;
+        gDIKickArmed = NO;
+    }
 }
 
 static OSStatus diAudioRenderHook(AudioUnit inUnit,
@@ -198,7 +269,11 @@ static OSStatus diAudioRenderHook(AudioUnit inUnit,
                 rms = sqrt(sum / (double)nf);
                 /* 推到环形缓冲做 FFT: 多声道取交织后的第一声道即可 */
                 int frames = nf / ch;
-                if (frames > 0) diPushSamples(p, frames, ch);
+                if (frames > 0) {
+                    diPushSamples(p, frames, ch);
+                    /* 3.0.71: 每个回调抓一次"咚"(样本域, 见 diKickDetect) */
+                    diKickDetect((double)frames / MAX(8000.0, gDISampleRate));
+                }
                 if (!gDISawFormat) {
                     gDISawFormat = 1;
                     AudioStreamBasicDescription asbd;
@@ -265,14 +340,27 @@ static void *diAudioServerThread(void *arg) {
                 memset(bands, 0, sizeof bands);
                 for (int b = 0; b < DI_BANDS; b++) gDIBandF[b] *= 0.6f;
             }
-            uint8_t pkt[12 + DI_BANDS];
+            uint8_t pkt[48];
+            memset(pkt, 0, sizeof pkt);
             pkt[0] = 0xD7;
-            pkt[1] = 1;
+            pkt[1] = 2;                    /* 3.0.71: 协议 v2 —— 多了"咚"的字段 */
             pkt[2] = DI_BANDS;
             pkt[3] = 0;
             memcpy(pkt + 4, &fast, 4);
             memcpy(pkt + 8, &slow, 4);
             memcpy(pkt + 12, bands, DI_BANDS);
+            /* [36] 强度 [38..39] 距触发多少 ms [40..43] 触发序号 [44..47] 低频 RMS */
+            float kamp = live ? gDIKickAmp : 0.0f;
+            pkt[36] = (uint8_t)(MAX(0.0f, MIN(1.0f, kamp)) * 255.0f);
+            double ageMs = (CFAbsoluteTimeGetCurrent() - gDIKickStamp) * 1000.0;
+            if (ageMs < 0) ageMs = 0;
+            if (ageMs > 60000.0) ageMs = 60000.0;
+            uint16_t age = (uint16_t)ageMs;
+            memcpy(pkt + 38, &age, 2);
+            uint32_t serial = gDIKickSerial;
+            memcpy(pkt + 40, &serial, 4);
+            float lowR = live ? gDILowRms : 0.0f;
+            memcpy(pkt + 44, &lowR, 4);
             ssize_t n = send(c, pkt, sizeof pkt, MSG_NOSIGNAL);
             if (n != (ssize_t)sizeof pkt) break;
         }
