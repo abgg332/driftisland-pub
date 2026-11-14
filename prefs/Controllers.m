@@ -254,6 +254,31 @@ static void diPostFxTune(void) {
     notify_post("com.abgg332.driftisland.fxtune");
 }
 
+/* ===== 3.0.66: 特效参数按播放器尺寸独立保存 =====
+   实际键 = 原键@当前尺寸(如 AlbumBeatScale@3x2)。当前尺寸与 diNPCurrentSize() 同源
+   (PlayerGridVariant 优先, 3x2b 档就存 3x2b; 否则 ModuleSizes; 最后 Size)。
+   写: 只写尺寸键; 读: 尺寸键没写过回落原键(老设置继续生效)。 */
+static NSString *diNPCurrentSize(void);   /* 定义在播放器入口页段(下方) */
+static NSString *diFxSizedKey(NSString *base) {
+    if (![base isKindOfClass:NSString.class] || base.length < 1 || [base containsString:@"@"])
+        return base;
+    return [NSString stringWithFormat:@"%@@%@", base, diNPCurrentSize()];
+}
+/* 读一个"可能是尺寸键"的键: 先读原样, 没有再回落 @ 前面的原键 */
+static id diFxReadSized(NSString *key) {
+    CFPreferencesAppSynchronize((__bridge CFStringRef)kDomain);
+    id v = CFBridgingRelease(CFPreferencesCopyAppValue((__bridge CFStringRef)key,
+                                                      (__bridge CFStringRef)kDomain));
+    if (v) return v;
+    NSRange at = [key rangeOfString:@"@" options:NSBackwardsSearch];
+    if (at.location != NSNotFound && at.location > 0) {
+        NSString *base = [key substringToIndex:at.location];
+        v = CFBridgingRelease(CFPreferencesCopyAppValue((__bridge CFStringRef)base,
+                                                       (__bridge CFStringRef)kDomain));
+    }
+    return v;
+}
+
 static void postReload(void) {
     static CFAbsoluteTime last; static BOOL queued;
     if (!NSThread.isMainThread) { diPostReloadRaw(); return; }
@@ -378,12 +403,25 @@ static double diStepReadValue(UITableViewCell *cell) {
     return def ? [def doubleValue] : 0;
 }
 
+/* 3.0.67: 尺寸键(AlbumParticleSize@4x2)剥掉 @尺寸 后缀 —— 步进/展示按原键匹配,
+   3.0.66 按尺寸存参数后键全带了 @后缀, 这两个函数还在用 isEqualToString 精确比,
+   匹配不上就回落 0.5 —— 用户"0.1 步进怎么又变 0.5 了"就是这里。 */
+static NSString *diFxBaseKey(NSString *key) {
+    if (![key isKindOfClass:NSString.class] || key.length < 1) return key;
+    NSRange at = [key rangeOfString:@"@" options:NSBackwardsSearch];
+    if (at.location != NSNotFound && at.location > 0)
+        return [key substringToIndex:at.location];
+    return key;
+}
+
 /* 3.0.57: 按 key 兜底的步进。
    用户反馈"粒子大小 1 之后按一下就变 1.5" —— 说明那一行拿到的步进是 0.5(不是 0.1),
    不管 specifier 上的 diStep 有没有正确落到 cell 上, 这几个键一律强制按小数走。 */
 static double diStepForKeyOverride(NSString *key) {
     if (![key isKindOfClass:NSString.class] || !key.length) return 0.0;
+    key = diFxBaseKey(key);   /* 3.0.67: 剥 @尺寸 后缀再比 */
     if ([key isEqualToString:@"AlbumParticleSize"]) return 0.1;
+    if ([key isEqualToString:@"AlbumParticleStrength"]) return 0.1;
     if ([key isEqualToString:@"AlbumBeatScale"]) return 0.05;
     if ([key isEqualToString:@"RhythmParticleAlpha"]) return 0.05;
     return 0.0;
@@ -479,6 +517,10 @@ static void diStepSliderLayout(UITableViewCell *cell) {
     UIView *cv = cell.contentView;
     CGFloat H = cv.bounds.size.height, W = cv.bounds.size.width;
     if (W < 100 || H < 20) return;
+
+    /* 3.0.61: 这一行已经由 DIMiniBaseController 的「单行盒子」(标题 − 滑杆 + 数值)
+       渲染了, 别再画第二套(两行版会跟盒子叠在一起, 出现两条滑杆/两个 + 号)。 */
+    if (objc_getAssociatedObject(cell, "diMiniBox")) return;
 
     diStepCacheSpec(cell);
     if (![objc_getAssociatedObject(cell, "di_k_step") boolValue]) return;
@@ -4075,11 +4117,12 @@ static NSArray *diHomeBarPresets(void) {
     [_hexField addTarget:self action:@selector(diRefreshPreview) forControlEvents:UIControlEventEditingChanged];
     [_scroll addSubview:_hexField];
 
-    /* 预填当前色值(渐变键: 起始色,结束色) */
-    CFPreferencesAppSynchronize((__bridge CFStringRef)kDomain);
-    NSString *cur = CFBridgingRelease(CFPreferencesCopyAppValue((__bridge CFStringRef)self.prefKey, (__bridge CFStringRef)kDomain)) ?: @"";
+    /* 预填当前色值(渐变键: 起始色,结束色) —— 3.0.66: 尺寸键读不到回落原键 */
+    NSString *cur = diFxReadSized(self.prefKey) ?: @"";
+    if (![cur isKindOfClass:NSString.class]) cur = @"";
     if (self.prefKeyB.length) {
-        NSString *b = CFBridgingRelease(CFPreferencesCopyAppValue((__bridge CFStringRef)self.prefKeyB, (__bridge CFStringRef)kDomain)) ?: @"";
+        NSString *b = diFxReadSized(self.prefKeyB) ?: @"";
+        if (![b isKindOfClass:NSString.class]) b = @"";
         if (b.length) cur = [NSString stringWithFormat:@"%@,%@", cur, b];
     }
     _hexField.text = cur;
@@ -4620,8 +4663,25 @@ static void diOpenHomeBarPickWindow(void) {
     id v = CFBridgingRelease(CFPreferencesCopyAppValue((__bridge CFStringRef)key, (__bridge CFStringRef)kDomain));
     return v ? [v doubleValue] : def;
 }
+/* 3.0.61: **这里才是设置页真正的步进**。
+   律动特效页(DIFxPage : DIMiniBaseController)的每一行，最终都是本类的
+   willDisplayCell: 里那个"单行盒子"(标题 − 滑杆 + 数值)画出来的，
+   ± 走 diStep: / diSliderMoved: / diApplyValue:，三个都读 numStepForKey，
+   而它以前是 `FPS ? 1.0 : 0.5` —— 所以 3.0.57~3.0.60 里无论怎么改
+   diStepOf / diStepForKeyOverride(那套是给另一个两行渲染器用的)，
+   "粒子大小"永远还是 0.5 一档。现在按 key 精确给步进。 */
 - (double)numStepForKey:(NSString *)key {
-    return ([key containsString:@"FPS"] ? 1.0 : 0.5);
+    if (![key isKindOfClass:NSString.class] || !key.length) return 0.5;
+    key = diFxBaseKey(key);   /* 3.0.67: 尺寸键剥 @后缀再比, 不然 0.1 步进全部回落 0.5 */
+    if ([key containsString:@"FPS"]) return 1.0;
+    /* 粒子 / 专辑律动：一律 0.1 一档(用户反复强调: 1 为基准, ± 都是 0.1) */
+    if ([key isEqualToString:@"AlbumParticleSize"]) return 0.1;
+    if ([key isEqualToString:@"AlbumParticleStrength"]) return 0.1;
+    if ([key isEqualToString:@"RhythmParticleAlpha"]) return 0.1;
+    if ([key isEqualToString:@"AlbumBeatScale"]) return 0.1;
+    /* 计数类给 1，避免出现 30.5 根频谱条 */
+    if ([key containsString:@"Count"] || [key isEqualToString:@"AlbumBarsCount"]) return 1.0;
+    return 0.5;
 }
 - (id)readSmallAnimName:(PSSpecifier *)sp { return [self folderNameForKey:@"smallAnimFolder"]; }
 - (id)readAudioAnimName:(PSSpecifier *)sp { return [self folderNameForKey:@"miniAudioFolder"]; }
@@ -4676,8 +4736,8 @@ static void diOpenHomeBarPickWindow(void) {
 - (id)readPreferenceValue:(PSSpecifier *)spec {
     NSString *key = [spec propertyForKey:@"key"];
     if (!key) return nil;
-    CFPreferencesAppSynchronize((__bridge CFStringRef)kDomain);
-    id v = CFBridgingRelease(CFPreferencesCopyAppValue((__bridge CFStringRef)key, (__bridge CFStringRef)kDomain));
+    /* 3.0.66: 尺寸键(带 @)读不到时回落原键 */
+    id v = diFxReadSized(key);
     if (v && ![v isKindOfClass:NSString.class] && ![v isKindOfClass:NSNumber.class]) v = nil;
     return v ?: [spec propertyForKey:@"default"];
 }
@@ -4751,6 +4811,7 @@ static void diOpenHomeBarPickWindow(void) {
     NSString *key = objc_getAssociatedObject(box, "key");
     double st = [self numStepForKey:key];
     v = round(v / st) * st;
+    v = round(v * 1000.0) / 1000.0;      /* 3.0.61: 0.1 步进会留 1.2000000000000002 */
     if (v < mn) v = mn; if (v > mx) v = mx;
     [self diWrite:key value:v];
     UISlider *sl = objc_getAssociatedObject(box, "slider");
@@ -5804,6 +5865,8 @@ static void diNPApplySize(NSString *size) {
     diNPWrite(@"ModuleSizes", sizes, kNPDomain);
     diNPWrite(@"PlayerGridVariant", variant, kNPDomain);
     diNPWrite(@"Size", size, kNPDomain);
+    /* 3.0.75: 尺寸实时生效通知已删(用户: 实现不了, 删掉避免后台耗电)。
+       尺寸改动照旧在注销/模块重建后生效。 */
 }
 
 /* 3.0.39: 3×1 档位已整体删除(用户: "3×1 暂时删除, 相关的也删除")。
@@ -5977,8 +6040,8 @@ static void diNPEnsureActivation(void) {
 - (id)npReadValue:(PSSpecifier *)sp {
     NSString *key = [sp propertyForKey:@"key"];
     if (!key.length) return [sp propertyForKey:@"default"];
-    CFPreferencesAppSynchronize((__bridge CFStringRef)kDomain);
-    id v = CFBridgingRelease(CFPreferencesCopyAppValue((__bridge CFStringRef)key, (__bridge CFStringRef)kDomain));
+    /* 3.0.66: 尺寸键(带 @)读不到时回落原键; 普通键行为不变 */
+    id v = diFxReadSized(key);
     return v ?: [sp propertyForKey:@"default"];
 }
 
@@ -6064,10 +6127,13 @@ static void diNPEnsureActivation(void) {
     /* 3.0.45: 律动特效 —— 设置全部收进一个入口页(用户要求) */
     [specs addObject:[self linkSpec:@"律动特效" detail:[DIFxPage class]]];
 
-    /* ---- 原版参数管理 ---- */
-    [specs addObject:[self groupSpec:@"原插件参数" footer:nil]];
+    /* ---- 原版参数管理 ----
+       3.0.66: 478 用户要求「原插件参数下的设置项暂时删除(但保留源码配置)」——
+       UI 入口收起, importPlayerPreferences:/resetPlayerPreferences: 两个方法原样保留,
+       以后要恢复把下面三行注释打开即可。 */
+    /* [specs addObject:[self groupSpec:@"原插件参数" footer:nil]];
     [specs addObject:[self buttonSpec:@"导入原播放器参数" action:@selector(importPlayerPreferences:)]];
-    [specs addObject:[self buttonSpec:@"恢复默认播放器参数" action:@selector(resetPlayerPreferences:)]];
+    [specs addObject:[self buttonSpec:@"恢复默认播放器参数" action:@selector(resetPlayerPreferences:)]]; */
 
     [specs addObject:[self groupSpec:nil footer:nil]];
     [specs addObject:[self buttonSpec:@"注销生效" action:@selector(doRespring:)]];
@@ -6270,9 +6336,8 @@ static NSString *diModeName(int m) {
     return m == 0 ? @"跟随封面" : @"自定义";
 }
 - (int)diModeValue:(NSString *)key {
-    CFPreferencesAppSynchronize((__bridge CFStringRef)kDomain);
-    id v = (__bridge_transfer id)CFPreferencesCopyAppValue((__bridge CFStringRef)key,
-                                                           (__bridge CFStringRef)kDomain);
+    /* 3.0.66: 尺寸键读不到回落原键 */
+    id v = diFxReadSized(key);
     int m = v ? [v intValue] : 0;
     if (m < 0) m = 0;
     return m == 0 ? 0 : 1;      /* 旧值 2(流光) 归到"自定义", 流光改由开关控制 */
@@ -6300,9 +6365,8 @@ static NSString *diModeName(int m) {
 /* 3.0.57: 当前色值(供行标题显示) */
 - (NSString *)fxHexForKey:(NSString *)key def:(NSString *)def {
     if (!key.length) return def;
-    CFPreferencesAppSynchronize((__bridge CFStringRef)kDomain);
-    id v = (__bridge_transfer id)CFPreferencesCopyAppValue((__bridge CFStringRef)key,
-                                                           (__bridge CFStringRef)kDomain);
+    /* 3.0.66: 尺寸键读不到回落原键 */
+    id v = diFxReadSized(key);
     if ([v isKindOfClass:NSString.class] && [(NSString *)v length]) return v;
     return def;
 }
@@ -6388,8 +6452,8 @@ static NSString *diModeName(int m) {
 - (id)npReadValue:(PSSpecifier *)sp {
     NSString *key = [sp propertyForKey:@"key"];
     if (!key.length) return [sp propertyForKey:@"default"];
-    CFPreferencesAppSynchronize((__bridge CFStringRef)kDomain);
-    id v = CFBridgingRelease(CFPreferencesCopyAppValue((__bridge CFStringRef)key, (__bridge CFStringRef)kDomain));
+    /* 3.0.66: 尺寸键(带 @)读不到时回落原键; 普通键行为不变 */
+    id v = diFxReadSized(key);
     return v ?: [sp propertyForKey:@"default"];
 }
 
@@ -6424,9 +6488,8 @@ static NSString *diModeName(int m) {
     NSMutableArray *rows = [NSMutableArray array];
     NSArray<NSString *> *hexes = diFxHexes();
     NSArray<NSString *> *names = diFxColorNames();
-    CFPreferencesAppSynchronize((__bridge CFStringRef)kDomain);
-    NSString *cur = CFBridgingRelease(CFPreferencesCopyAppValue(
-        (__bridge CFStringRef)key, (__bridge CFStringRef)kDomain));
+    /* 3.0.66: 尺寸键读不到回落原键 */
+    NSString *cur = diFxReadSized(key);
     if (![cur isKindOfClass:NSString.class]) cur = nil;
     NSArray<NSString *> *dots = @[@"🟠", @"🟣", @"🔴", @"🔵", @"🟢", @"🟡", @"💗", @"⚪"];
     for (NSUInteger i = 0; i < hexes.count && i < names.count; i++) {
@@ -6494,38 +6557,42 @@ static NSString *diModeName(int m) {
 }
 
 - (NSArray *)buildSpecifiers {
+    /* 3.0.66: 所有键都按当前播放器尺寸落键(AlbumBeatScale@3x2 这种形态) ——
+       "应用那个尺寸设置的就当前尺寸保存"。读端(Tweak)对没写过的尺寸键会回落原键。 */
     NSMutableArray *specs = [NSMutableArray array];
     [specs addObject:[self groupSpec:@"专辑律动" footer:nil]];
-    [specs addObject:[self switchSpec:@"启用律动特效" key:@"AlbumEffectsOn" def:@YES]];
-    [specs addObject:[self switchSpec:@"圆形封面" key:@"AlbumRoundCover" def:@YES]];
-    [specs addObject:[self switchSpec:@"专辑跟随律动" key:@"AlbumRhythmOn" def:@YES]];
-    [specs addObject:[self npSlider:@"专辑律动幅度" key:@"AlbumBeatScale" def:0.70 mn:0.00 mx:2.00]];
+    [specs addObject:[self switchSpec:@"启用律动特效" key:diFxSizedKey(@"AlbumEffectsOn") def:@YES]];
+    /* 3.0.61: 删掉「圆形封面」—— 它和「原生播放 → 启用遮罩」抢同一件事(封面的形状),
+       用户 474 原话"功能里有个旋转、律动里又有个圆形封面, 专辑都冲突了"。
+       专辑形状统一由「启用遮罩」管; 这里恒为圆形(与历史默认一致, 不改观感)。 */
+    [specs addObject:[self switchSpec:@"专辑跟随律动" key:diFxSizedKey(@"AlbumRhythmOn") def:@YES]];
+    [specs addObject:[self npSlider:@"专辑律动幅度" key:diFxSizedKey(@"AlbumBeatScale") def:0.70 mn:0.00 mx:2.00]];
 
     [specs addObject:[self groupSpec:@"律动粒子" footer:nil]];
-    [specs addObject:[self switchSpec:@"启用律动粒子" key:@"AlbumParticlesOn" def:@YES]];
-    [specs addObject:[self npSlider:@"粒子数量" key:@"AlbumParticleCount2" def:25 mn:0 mx:40]];
-    [specs addObject:[self npSlider:@"粒子透明" key:@"RhythmParticleAlpha" def:0.74 mn:0.10 mx:1.50]];
-    {
-        PSSpecifier *psz = [self npSlider:@"粒子大小" key:@"AlbumParticleSize" def:1.0 mn:0.1 mx:2.0];
-        [psz setProperty:@(0.1) forKey:@"diStep"];
-        [specs addObject:psz];
-    }
-    [specs addObject:[self modeSpec:@"颜色来源" key:@"ParticleColorMode"]];
-    [specs addObject:[self fxColorSpec:@"起始颜色" key:@"ParticleColorA" def:@"#FFFFBC" modeKey:@"ParticleColorMode"]];
-    [specs addObject:[self fxColorSpec:@"结束颜色" key:@"ParticleColorB" def:@"#BFCDF8" modeKey:@"ParticleColorMode"]];
-    [specs addObject:[self fxFlowSpec:@"流光(颜色缓慢流动)" key:@"ParticleFlowOn"]];
+    [specs addObject:[self switchSpec:@"启用律动粒子" key:diFxSizedKey(@"AlbumParticlesOn") def:@YES]];
+    [specs addObject:[self npSlider:@"粒子数量" key:diFxSizedKey(@"AlbumParticleCount2") def:25 mn:0 mx:40]];
+    [specs addObject:[self npSlider:@"粒子透明" key:diFxSizedKey(@"RhythmParticleAlpha") def:0.74 mn:0.10 mx:1.50]];
+    /* 3.0.61: 粒子大小/强度都走 0.1 步进, 由 numStepForKey: 决定, 这里不再挂 diStep
+       (挂了会让另一套两行渲染器再画一遍, 出现两条滑杆)。 */
+    [specs addObject:[self npSlider:@"粒子大小" key:diFxSizedKey(@"AlbumParticleSize") def:1.0 mn:0.1 mx:2.0]];
+    /* 3.0.61: 粒子自己的强度 —— 和专辑律动完全无关的一个独立参数 */
+    [specs addObject:[self npSlider:@"粒子强度" key:diFxSizedKey(@"AlbumParticleStrength") def:1.0 mn:0.0 mx:2.0]];
+    [specs addObject:[self modeSpec:@"颜色来源" key:diFxSizedKey(@"ParticleColorMode")]];
+    [specs addObject:[self fxColorSpec:@"起始颜色" key:diFxSizedKey(@"ParticleColorA") def:@"#FFFFBC" modeKey:diFxSizedKey(@"ParticleColorMode")]];
+    [specs addObject:[self fxColorSpec:@"结束颜色" key:diFxSizedKey(@"ParticleColorB") def:@"#BFCDF8" modeKey:diFxSizedKey(@"ParticleColorMode")]];
+    [specs addObject:[self fxFlowSpec:@"流光(颜色缓慢流动)" key:diFxSizedKey(@"ParticleFlowOn")]];
 
     [specs addObject:[self groupSpec:@"频谱条" footer:nil]];
-    [specs addObject:[self switchSpec:@"启用频谱条" key:@"AlbumBarsOn" def:@YES]];
-    [specs addObject:[self npSlider:@"根数" key:@"AlbumBarsCount" def:40 mn:8 mx:64]];
-    [specs addObject:[self npSlider:@"长度" key:@"AlbumBarsHeight" def:13.0 mn:4.0 mx:40.0]];
-    [specs addObject:[self npSlider:@"宽度" key:@"AlbumBarsWidth" def:3.0 mn:1.0 mx:8.0]];
-    [specs addObject:[self npSlider:@"左右位移" key:@"AlbumBarsOffset" def:0.0 mn:-120.0 mx:120.0]];
-    [specs addObject:[self npSlider:@"上下位移" key:@"AlbumBarsOffsetY" def:0.0 mn:-150.0 mx:150.0]];
-    [specs addObject:[self modeSpec:@"颜色来源" key:@"SpectrumColorMode"]];
-    [specs addObject:[self fxColorSpec:@"起始颜色" key:@"SpectrumColorA" def:@"#9A8AFF" modeKey:@"SpectrumColorMode"]];
-    [specs addObject:[self fxColorSpec:@"结束颜色" key:@"SpectrumColorB" def:@"#6BB8FF" modeKey:@"SpectrumColorMode"]];
-    [specs addObject:[self fxFlowSpec:@"流光(颜色缓慢流动)" key:@"SpectrumFlowOn"]];
+    [specs addObject:[self switchSpec:@"启用频谱条" key:diFxSizedKey(@"AlbumBarsOn") def:@YES]];
+    [specs addObject:[self npSlider:@"根数" key:diFxSizedKey(@"AlbumBarsCount") def:40 mn:8 mx:64]];
+    [specs addObject:[self npSlider:@"频谱条高度" key:diFxSizedKey(@"AlbumBarsHeight") def:13.0 mn:4.0 mx:40.0]];
+    [specs addObject:[self npSlider:@"宽度" key:diFxSizedKey(@"AlbumBarsWidth") def:3.0 mn:1.0 mx:8.0]];
+    [specs addObject:[self npSlider:@"左右位移" key:diFxSizedKey(@"AlbumBarsOffset") def:0.0 mn:-120.0 mx:120.0]];
+    [specs addObject:[self npSlider:@"上下位移" key:diFxSizedKey(@"AlbumBarsOffsetY") def:0.0 mn:-150.0 mx:150.0]];
+    [specs addObject:[self modeSpec:@"颜色来源" key:diFxSizedKey(@"SpectrumColorMode")]];
+    [specs addObject:[self fxColorSpec:@"起始颜色" key:diFxSizedKey(@"SpectrumColorA") def:@"#9A8AFF" modeKey:diFxSizedKey(@"SpectrumColorMode")]];
+    [specs addObject:[self fxColorSpec:@"结束颜色" key:diFxSizedKey(@"SpectrumColorB") def:@"#6BB8FF" modeKey:diFxSizedKey(@"SpectrumColorMode")]];
+    [specs addObject:[self fxFlowSpec:@"流光(颜色缓慢流动)" key:diFxSizedKey(@"SpectrumFlowOn")]];
     return specs;
 }
 @end
