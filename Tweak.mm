@@ -18146,6 +18146,18 @@ static BOOL diTimeExpanded(UIView *v) {
        ② 尺寸兜底只看高度(展开页高必然 >=420, 折叠模块最高 4×3 也到不了),
           宽度判据删除 —— 宽布局的卡片宽 320~400 是常态。 */
     if (diArtInExpandedPlayer(v)) return YES;
+    /* 3.0.67: 479 用户 "4×2 那些的展开有影响" —— 宽布局的展开页**复用同一张封面**,
+       系统用 transform 把它放大(bounds 还是 57), 于是:
+       · 尺寸兜底(bounds 量出来还是折叠尺寸)量不到 → 展开态漏判;
+       · 律动继续往这张"已经被放大"的封面上写缩放 → 展开页专辑跟着鼓点抽动。
+       用呈现层/模型层的放大比判: 折叠态比例 ≈1.0(律动最多 1.13),
+       展开态系统把它放大 2~5 倍 —— 比例 >1.6 就是展开, 与布局无关。 */
+    {
+        CALayer *pl = v.layer.presentationLayer;
+        CGSize ps = pl ? pl.bounds.size : v.bounds.size;
+        CGFloat bw2 = MAX(1.0, v.bounds.size.width), bh2 = MAX(1.0, v.bounds.size.height);
+        if (ps.width / bw2 > 1.6 || ps.height / bh2 > 1.6) return YES;
+    }
     UIView *win = v.window;
     UIView *cur = v;
     int g = 0;
@@ -18159,7 +18171,9 @@ static BOOL diTimeExpanded(UIView *v) {
         cur = cur.superview;
     }
     if (bw <= 0) return NO;
-    return (bh >= 420.0);
+    /* 3.0.67: 独立展开容器的兜底 —— 宽≥320 且 高≥300 才算展开。
+       折叠卡最高 ~240(2x3/4x3 三行), 不会误伤; 宽布局折叠卡(356x77)高不够也过不了。 */
+    return (bw >= 320.0 && bh >= 300.0);
 }
 
 /* ===== 3.0.66: 3×2 歌名/歌词的原生来回滚动补齐 =====
@@ -19816,6 +19830,16 @@ static UIView *diRhythmPickTarget(void) {
         if (!v.window || v.hidden || v.alpha < 0.3) continue;
         if (diViewIsSuggestions(v)) continue;          /* 3.0.48: 不认"媒体建议"页 */
         if (diArtInExpandedPlayer(v)) continue;        /* 3.0.63: 展开的播放页不归律动管 */
+        /* 3.0.67: 呈现层被系统放大 >1.6 倍 = 展开页复用的这张封面(bounds 不变,
+           transform 放大) —— 一律不选, 不然律动会写到展开的大专辑上。 */
+        {
+            CALayer *pl2 = v.layer.presentationLayer;
+            if (pl2) {
+                CGSize ps2 = pl2.bounds.size;
+                if (ps2.width > v.bounds.size.width * 1.6 + 2.0 ||
+                    ps2.height > v.bounds.size.height * 1.6 + 2.0) continue;
+            }
+        }
         CGSize s = v.bounds.size;
         if (s.width < 40 || s.width > 220) continue;
         CGFloat ratio = s.width / MAX(1.0, s.height);
@@ -19952,6 +19976,19 @@ static void diRhythmDetach(void) {
             if (gDIRhythmExtras[i])
                 gDIRhythmExtras[i].layer.transform = diRhythmBaseOf(gDIRhythmExtras[i]);
         [CATransaction commit];
+    }
+    /* 3.0.67: 摘掉壳和额外视图上遗留的 di.rhythm.tf 兜底动画 —— 它是
+       fillMode=forwards + removedOnCompletion=NO, 拆引擎只复位 model 不摘动画的话,
+       最后一次的 ~1.1x 缩放会一直冻在封面上(展开态看着"缩着/变形"就是它)。 */
+    {
+        CALayer *ls[1 + DI_RHYTHM_EXTRA_MAX];
+        int n = 0;
+        if (gDIRhythmDrive) ls[n++] = gDIRhythmDrive.layer;
+        for (int i = 0; i < gDIRhythmExtraN && n < (int)(1 + DI_RHYTHM_EXTRA_MAX); i++)
+            if (gDIRhythmExtras[i]) ls[n++] = gDIRhythmExtras[i].layer;
+        for (int i = 0; i < n; i++)
+            if ([ls[i] animationForKey:@"di.rhythm.tf"])
+                [ls[i] removeAnimationForKey:@"di.rhythm.tf"];
     }
     for (int i = 0; i < DI_RHYTHM_EXTRA_MAX; i++) gDIRhythmExtras[i] = nil;
     gDIRhythmExtraN = 0;
@@ -20675,6 +20712,15 @@ static void diRhythmTickWithDelta(float dtIn) {
     if (gDIRhythmBaseValid && t &&
         (fabs(dv.bounds.size.width - gDIRhythmBaseSize.width) > 1.5 ||
          fabs(dv.bounds.size.height - gDIRhythmBaseSize.height) > 1.5)) {
+        /* 3.0.67: 作废 base 的同时把上一帧写出去的缩放/位移**当场写回中性** ——
+           以前只停手不擦, 层上 fillMode=forwards 的 di.rhythm.tf 动画会把封面
+           冻在最后一次的 ~1.1x, 用户看到的就是"展开后专辑变形/缩着"。 */
+        if (gDIRhythmDriving) {
+            [CATransaction begin];
+            [CATransaction setDisableActions:YES];
+            diRhythmWriteAll(1.0, 0.0, NO, 0.0, YES);
+            [CATransaction commit];
+        }
         gDIRhythmBaseValid = NO;
         gDIRhythmDriving = NO;
     }

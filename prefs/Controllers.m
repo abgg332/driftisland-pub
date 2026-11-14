@@ -403,11 +403,23 @@ static double diStepReadValue(UITableViewCell *cell) {
     return def ? [def doubleValue] : 0;
 }
 
+/* 3.0.67: 尺寸键(AlbumParticleSize@4x2)剥掉 @尺寸 后缀 —— 步进/展示按原键匹配,
+   3.0.66 按尺寸存参数后键全带了 @后缀, 这两个函数还在用 isEqualToString 精确比,
+   匹配不上就回落 0.5 —— 用户"0.1 步进怎么又变 0.5 了"就是这里。 */
+static NSString *diFxBaseKey(NSString *key) {
+    if (![key isKindOfClass:NSString.class] || key.length < 1) return key;
+    NSRange at = [key rangeOfString:@"@" options:NSBackwardsSearch];
+    if (at.location != NSNotFound && at.location > 0)
+        return [key substringToIndex:at.location];
+    return key;
+}
+
 /* 3.0.57: 按 key 兜底的步进。
    用户反馈"粒子大小 1 之后按一下就变 1.5" —— 说明那一行拿到的步进是 0.5(不是 0.1),
    不管 specifier 上的 diStep 有没有正确落到 cell 上, 这几个键一律强制按小数走。 */
 static double diStepForKeyOverride(NSString *key) {
     if (![key isKindOfClass:NSString.class] || !key.length) return 0.0;
+    key = diFxBaseKey(key);   /* 3.0.67: 剥 @尺寸 后缀再比 */
     if ([key isEqualToString:@"AlbumParticleSize"]) return 0.1;
     if ([key isEqualToString:@"AlbumParticleStrength"]) return 0.1;
     if ([key isEqualToString:@"AlbumBeatScale"]) return 0.05;
@@ -4660,6 +4672,7 @@ static void diOpenHomeBarPickWindow(void) {
    "粒子大小"永远还是 0.5 一档。现在按 key 精确给步进。 */
 - (double)numStepForKey:(NSString *)key {
     if (![key isKindOfClass:NSString.class] || !key.length) return 0.5;
+    key = diFxBaseKey(key);   /* 3.0.67: 尺寸键剥 @后缀再比, 不然 0.1 步进全部回落 0.5 */
     if ([key containsString:@"FPS"]) return 1.0;
     /* 粒子 / 专辑律动：一律 0.1 一档(用户反复强调: 1 为基准, ± 都是 0.1) */
     if ([key isEqualToString:@"AlbumParticleSize"]) return 0.1;
@@ -6570,7 +6583,7 @@ static NSString *diModeName(int m) {
     [specs addObject:[self groupSpec:@"频谱条" footer:nil]];
     [specs addObject:[self switchSpec:@"启用频谱条" key:diFxSizedKey(@"AlbumBarsOn") def:@YES]];
     [specs addObject:[self npSlider:@"根数" key:diFxSizedKey(@"AlbumBarsCount") def:40 mn:8 mx:64]];
-    [specs addObject:[self npSlider:@"长度" key:diFxSizedKey(@"AlbumBarsHeight") def:13.0 mn:4.0 mx:40.0]];
+    [specs addObject:[self npSlider:@"频谱条高度" key:diFxSizedKey(@"AlbumBarsHeight") def:13.0 mn:4.0 mx:40.0]];
     [specs addObject:[self npSlider:@"宽度" key:diFxSizedKey(@"AlbumBarsWidth") def:3.0 mn:1.0 mx:8.0]];
     [specs addObject:[self npSlider:@"左右位移" key:diFxSizedKey(@"AlbumBarsOffset") def:0.0 mn:-120.0 mx:120.0]];
     [specs addObject:[self npSlider:@"上下位移" key:diFxSizedKey(@"AlbumBarsOffsetY") def:0.0 mn:-150.0 mx:150.0]];
