@@ -19768,11 +19768,6 @@ static void diFxSpawnAt(CGPoint c, double R) {
     p->tint = (float)diFxRandD();
 }
 
-/* 兼容旧调用点: 真正的生成在 diFxUpdateDots 里按速率做 */
-static void diFxSpawnDot(UIView *host, CGRect cover, float maxRad) {
-    (void)host; (void)cover; (void)maxRad;
-}
-
 static void diFxRemoveAllDots(void) {
     [gDIFmCanvas removeFromSuperlayer];
     gDIFmCanvas = nil;
