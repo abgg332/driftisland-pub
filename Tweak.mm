@@ -848,6 +848,64 @@ static int diColorModeCompose(int raw, BOOL flow) {
     return flow ? 2 : 1;
 }
 
+/* ===== 3.0.66: 特效参数按播放器尺寸独立保存 =====
+   478 用户: "每个尺寸的参数独立保存、独立设置(应用那个尺寸设置的就当前尺寸保存)"。
+   实际键 = 原键@当前尺寸(如 AlbumBeatScale@3x2、AlbumParticleSize@4x2)。
+   · 读: 先读尺寸键, 没写过就回落原键 —— 老用户已有的设置继续生效, 不用重设一遍;
+   · 写: 由设置页负责, 只写尺寸键; 换尺寸(respring)后 diFxLoadPrefs 自动切到新键。
+   尺寸来源与 diArtIs3x2 同源: PlayerGridVariant 优先(3x2b 档), 否则 ModuleSizes。 */
+static NSString *diFxSizeId(void) {
+    static NSString *cache = nil;
+    static CFTimeInterval ts = 0;
+    CFTimeInterval now = CFAbsoluteTimeGetCurrent();
+    if (cache && now - ts < 2.0) return cache;
+    NSString *cur = nil;
+    id v = CFBridgingRelease(CFPreferencesCopyAppValue(CFSTR("PlayerGridVariant"),
+                                                      CFSTR("com.local.playerexact")));
+    if ([v isKindOfClass:NSString.class] && v.length) cur = v;
+    if (!cur.length) {
+        id dict = CFBridgingRelease(CFPreferencesCopyAppValue(CFSTR("ModuleSizes"),
+                                                             CFSTR("com.local.playerexact")));
+        if ([dict isKindOfClass:NSDictionary.class]) {
+            id s = dict[@"com.apple.mediaremote.controlcenter.nowplaying"];
+            if ([s isKindOfClass:NSString.class] && s.length) cur = s;
+        }
+    }
+    if (!cur.length) cur = @"2x2";
+    cache = cur;
+    ts = now;
+    return cache;
+}
+static NSString *diFxKey(NSString *base) {
+    return [NSString stringWithFormat:@"%@@%@", base, diFxSizeId()];
+}
+/* 读一个"可能是尺寸键"的键: 键里带 @ 时先读原样, 没有再回落 @ 前的原键 */
+static id diFxReadSized(NSString *key) {
+    id v = CFBridgingRelease(CFPreferencesCopyAppValue((__bridge CFStringRef)key,
+                                                      (__bridge CFStringRef)kDomain));
+    if (v) return v;
+    NSRange at = [key rangeOfString:@"@" options:NSBackwardsSearch];
+    if (at.location != NSNotFound && at.location > 0) {
+        NSString *base = [key substringToIndex:at.location];
+        v = CFBridgingRelease(CFPreferencesCopyAppValue((__bridge CFStringRef)base,
+                                                       (__bridge CFStringRef)kDomain));
+    }
+    return v;
+}
+static BOOL fxBool(NSString *base, BOOL def) {
+    id v = diFxReadSized(diFxKey(base)); return v ? [v boolValue] : def;
+}
+static NSInteger fxInt(NSString *base, NSInteger def) {
+    id v = diFxReadSized(diFxKey(base)); return v ? [v integerValue] : def;
+}
+static double fxDouble(NSString *base, double def) {
+    id v = diFxReadSized(diFxKey(base)); return v ? [v doubleValue] : def;
+}
+static NSString *fxString(NSString *base) {
+    id v = diFxReadSized(diFxKey(base));
+    return [v isKindOfClass:NSString.class] ? v : nil;
+}
+
 /* 读一组"来源 + 流光"; 旧值 2 顺手迁移成 1 + 流光开(只写一次, 之后不再动) */
 static int diColorModeLoad(NSString *modeKey, NSString *flowKey) {
     int raw = (int)pInt(modeKey, 0);
@@ -859,6 +917,23 @@ static int diColorModeLoad(NSString *modeKey, NSString *flowKey) {
         return 2;
     }
     return diColorModeCompose(raw, pBool(flowKey, NO));
+}
+
+/* 3.0.66: 「来源 + 流光」的按尺寸版本 —— 键全部走 diFxKey(原键@当前尺寸) */
+static int diColorModeLoadFx(NSString *modeKey, NSString *flowKey) {
+    NSString *mk = diFxKey(modeKey);
+    NSString *fk = diFxKey(flowKey);
+    id mv = diFxReadSized(mk);
+    int raw = mv ? [mv intValue] : 0;
+    if (raw >= 2) {
+        CFPreferencesSetAppValue((__bridge CFStringRef)mk,
+                                 (__bridge CFPropertyListRef)@1, (__bridge CFStringRef)kDomain);
+        CFPreferencesSetAppValue((__bridge CFStringRef)fk,
+                                 (__bridge CFPropertyListRef)@YES, (__bridge CFStringRef)kDomain);
+        return 2;
+    }
+    id fv = diFxReadSized(fk);
+    return diColorModeCompose(raw, fv ? [fv boolValue] : NO);
 }
 
 static void diFxLoadPrefs(void) {
@@ -891,47 +966,47 @@ static void diFxLoadPrefs(void) {
             }
         }
     }
-    /* 3.0.43/3.0.46: 专辑律动 / 环 / 粒子 */
-    rhythmFxOn = pBool(@"AlbumEffectsOn", YES);
-    rhythmOn = pBool(@"AlbumRhythmOn", YES);
-    rhythmRingOn = pBool(@"AlbumRingOn", YES);
-    rhythmParticlesOn = pBool(@"AlbumParticlesOn", YES);
-    rhythmStrength = pDouble(@"AlbumRhythmStrength", 0.90);
+    /* 3.0.43/3.0.46/3.0.66: 专辑律动 / 环 / 粒子 —— 全部按当前播放器尺寸读 */
+    rhythmFxOn = fxBool(@"AlbumEffectsOn", YES);
+    rhythmOn = fxBool(@"AlbumRhythmOn", YES);
+    rhythmRingOn = fxBool(@"AlbumRingOn", YES);
+    rhythmParticlesOn = fxBool(@"AlbumParticlesOn", YES);
+    rhythmStrength = fxDouble(@"AlbumRhythmStrength", 0.90);
     if (rhythmStrength > 3.0) rhythmStrength /= 100.0;   /* 兼容 3.0.43 的百分数 */
     if (rhythmStrength < 0.10) rhythmStrength = 0.10;
     if (rhythmStrength > 2.00) rhythmStrength = 2.00;
-    rhythmBeatScale = pDouble(@"AlbumBeatScale", 0.70);
+    rhythmBeatScale = fxDouble(@"AlbumBeatScale", 0.70);
     if (rhythmBeatScale < 0.0) rhythmBeatScale = 0.0;
     if (rhythmBeatScale > 2.0) rhythmBeatScale = 2.0;
     rhythmRoundCover = YES;   /* 3.0.61: 开关已从律动页移除(与「启用遮罩」重复), 恒为圆形 */
-    rhythmBarsOn = pBool(@"AlbumBarsOn", YES);
+    rhythmBarsOn = fxBool(@"AlbumBarsOn", YES);
     {
-        int c = (int)pInt(@"AlbumBarsCount", 40);
+        int c = (int)fxInt(@"AlbumBarsCount", 40);
         if (c < 8) c = 8;
         if (c > 64) c = 64;
         rhythmBarsCount = c;
-        double h = pDouble(@"AlbumBarsHeight", 13.0);
+        double h = fxDouble(@"AlbumBarsHeight", 13.0);
         if (h < 4.0) h = 4.0;
         if (h > 40.0) h = 40.0;
         rhythmBarsHeight = h;
-        double w = pDouble(@"AlbumBarsWidth", 3.0);
+        double w = fxDouble(@"AlbumBarsWidth", 3.0);
         if (w < 1.0) w = 1.0;
         if (w > 8.0) w = 8.0;
         rhythmBarsWidth = w;
-        double ps = pDouble(@"AlbumParticleSize", 1.0);
+        double ps = fxDouble(@"AlbumParticleSize", 1.0);
         if (ps < 0.2) ps = 0.2;      /* 3.0.56: 与设置页 0.2~2.0 / 0.1 步进对齐 */
         if (ps > 2.0) ps = 2.0;
         rhythmParticleSize = ps;
         /* 3.0.61: 粒子强度 —— 只管粒子自己(外飘速度/摆动/亮度), 与律动/鼓点完全解耦 */
-        double pst = pDouble(@"AlbumParticleStrength", 1.0);
+        double pst = fxDouble(@"AlbumParticleStrength", 1.0);
         if (pst < 0.0) pst = 0.0;
         if (pst > 2.0) pst = 2.0;
         rhythmParticleStrength = pst;
-        double off = pDouble(@"AlbumBarsOffset", 0.0);
+        double off = fxDouble(@"AlbumBarsOffset", 0.0);
         if (off < -120.0) off = -120.0;
         if (off > 120.0) off = 120.0;
         rhythmBarsOffset = off;
-        double offY = pDouble(@"AlbumBarsOffsetY", 0.0);
+        double offY = fxDouble(@"AlbumBarsOffsetY", 0.0);
         if (offY < -150.0) offY = -150.0;   /* 3.0.56: 用户要 -150~150 */
         if (offY > 150.0) offY = 150.0;
         rhythmBarsOffsetY = offY;
@@ -941,30 +1016,30 @@ static void diFxLoadPrefs(void) {
        "改布局 → 系统 layoutSubviews 停不下来"的触发点之一。 */
     /* 3.0.57: 颜色来源(0=跟随封面 1=自定义) + 流光开关 → 内部 0/1/2。
        旧版的 2(流光) 顺手迁移成"自定义 + 流光开关=开", 免得设置页显示和实际不一致。 */
-    ringColorMode = diColorModeLoad(@"RingColorMode", @"RingFlowOn");
-    particleColorMode = diColorModeLoad(@"ParticleColorMode", @"ParticleFlowOn");
-    rhythmParticleAlpha = pDouble(@"RhythmParticleAlpha", 0.74);
+    ringColorMode = diColorModeLoadFx(@"RingColorMode", @"RingFlowOn");
+    particleColorMode = diColorModeLoadFx(@"ParticleColorMode", @"ParticleFlowOn");
+    rhythmParticleAlpha = fxDouble(@"RhythmParticleAlpha", 0.74);
     if (rhythmParticleAlpha < 0.1) rhythmParticleAlpha = 0.1;
     if (rhythmParticleAlpha > 1.5) rhythmParticleAlpha = 1.5;
-    rhythmRingFollowAlpha = pDouble(@"RhythmRingFollowAlpha", 1.0);
+    rhythmRingFollowAlpha = fxDouble(@"RhythmRingFollowAlpha", 1.0);
     if (rhythmRingFollowAlpha < 0.1) rhythmRingFollowAlpha = 0.1;
     if (rhythmRingFollowAlpha > 1.5) rhythmRingFollowAlpha = 1.5;
     /* 3.0.47 换了刻度/粒子的画法, 旧值(4.2 / 25)会让新视觉走形, 改用新键重来 */
-    rhythmRingWidth = pDouble(@"AlbumRingWidth2", 2.2);
+    rhythmRingWidth = fxDouble(@"AlbumRingWidth2", 2.2);
     if (rhythmRingWidth < 0.8) rhythmRingWidth = 0.8;
     if (rhythmRingWidth > 8.0) rhythmRingWidth = 8.0;
     {
-        int c = (int)pInt(@"AlbumParticleCount2", 25);
+        int c = (int)fxInt(@"AlbumParticleCount2", 25);
         if (c < 0) c = 0;
         if (c > 40) c = 40;
         rhythmParticleCount = c;
     }
-    rhythmColorA = pString(@"AlbumColorA");
-    rhythmColorB = pString(@"AlbumColorB");
+    rhythmColorA = fxString(@"AlbumColorA");
+    rhythmColorB = fxString(@"AlbumColorB");
     /* 3.0.53: 粒子自己的渐变起止色(截图为 #FFFFBC / #BFCDF8) */
     {
-        NSString *pa = pString(@"ParticleColorA");
-        NSString *pb = pString(@"ParticleColorB");
+        NSString *pa = fxString(@"ParticleColorA");
+        NSString *pb = fxString(@"ParticleColorB");
         gDIParticleColA = diRhythmHexColor(pa,
             [UIColor colorWithRed:1.000 green:1.000 blue:0.737 alpha:1.0]);
         gDIParticleColB = diRhythmHexColor(pb,
@@ -972,9 +1047,9 @@ static void diFxLoadPrefs(void) {
     }
     /* 3.0.55: 频谱条自己的颜色(与环/粒子同一套) */
     {
-        spectrumColorMode = diColorModeLoad(@"SpectrumColorMode", @"SpectrumFlowOn");
-        spectrumColorA = pString(@"SpectrumColorA");
-        spectrumColorB = pString(@"SpectrumColorB");
+        spectrumColorMode = diColorModeLoadFx(@"SpectrumColorMode", @"SpectrumFlowOn");
+        spectrumColorA = fxString(@"SpectrumColorA");
+        spectrumColorB = fxString(@"SpectrumColorB");
     }
     /* 3.0.56: 「律动专辑环」整块下线 —— 设置项与参数都已删除, 这里强制不建环。
        (环的代码保留但不执行, 以后想恢复只要放开这两行。) */
@@ -984,8 +1059,8 @@ static void diFxLoadPrefs(void) {
     {
         static int lastMode = -1;
         static NSString *lastA = nil, *lastB = nil;
-        NSString *sa = pString(@"ParticleColorA") ?: @"";
-        NSString *sb = pString(@"ParticleColorB") ?: @"";
+        NSString *sa = fxString(@"ParticleColorA") ?: @"";
+        NSString *sb = fxString(@"ParticleColorB") ?: @"";
         if (particleColorMode != lastMode
             || ![sa isEqualToString:(lastA ?: @"")]
             || ![sb isEqualToString:(lastB ?: @"")]) {
@@ -17027,6 +17102,8 @@ static void diNPDumpCrashEvidence(void) {
 
 /* 3.1.0: 定义在后面, 这里先声明 —— 播放器每次 layout 顺手把「未在播放」收掉 */
 static void diNPApplyHideForRoot(UIView *root);
+/* 3.0.66: 3×2 歌名/歌词 marquee 补齐(定义在 diTimeExpanded 后面) */
+static void diNPMarqueeScan(UIView *root);
 /* 3.0.13: 高危钩子(模块背景/隐藏 + 传送栏 setFrame)延迟安装, 定义在后面 */
 static void diArtInstallGated(void);
 static void diArtInstallAVHook(void);   /* 3.0.17: 类级接管(定义在后) */
@@ -17398,6 +17475,9 @@ static void diArtPlayerPost(UIView *root) {
 /* ---- 真正的刷新(在主队列、布局之外执行) ---- */
 static void diArtPostFlush(UIView *root) {
     if (!root || !root.window) return;
+    /* 3.0.66: 播放器每次布局都尝试唤醒特效引擎 —— 打开控制中心/换尺寸的第一帧就能
+       从休眠里恢复, 不用等 1Hz 巡检(diRhythmEnsure 内部有条件, 没休眠时是空操作)。 */
+    @try { diRhythmEnsure(); } @catch (__unused NSException *e) {}
     diPhase("art");
     /* 3.0.61: 遮罩(启用遮罩)和旋转(专辑旋转)分开判断 */
     BOOL on = diArtPrefOn() || diArtMaskWanted();
@@ -17476,6 +17556,8 @@ static void diArtPostFlush(UIView *root) {
             dispatch_async(dispatch_get_main_queue(), ^{
                 diPhase("hidetext");
                 @try { diNPApplyHideForRoot(root); } @catch (__unused NSException *e) {}
+                /* 3.0.66: 3×2 歌名/歌词 marquee 补齐(节流 0.5s 在函数内部) */
+                @try { diNPMarqueeScan(root); } @catch (__unused NSException *e) {}
                 diPhase("art");
             });
         }
@@ -18051,8 +18133,17 @@ static void diNPQueryNowPlaying(void) {
      ② 类名不能用 isEqualToString 比对, 实际拿到的是 MRUNowPlayingView 的子类。
    现在: 沿父链把所有 MRUNowPlaying* / *ContentModuleContainerView 都换算到 window
    坐标量一遍(带 transform 的真实大小), 取最大那块, 宽≥320 或 高≥235 就算展开。 */
+static BOOL diArtInExpandedPlayer(UIView *v);   /* 3.0.66: 定义在律动段, 这里先用 */
 static BOOL diTimeExpanded(UIView *v) {
     if (!v) return NO;
+    /* 3.0.66: 478 用户: "只有 3×2 有律动/粒子, 其他布局没有"。
+       旧判据"宽>=320 或 高>=235"把 4×2/4×3/4×1 这类本来就宽的**折叠模块卡片**
+       全部误判成"展开页", 律动/粒子在那些布局下被整体隐藏。
+       现在两步走:
+       ① 父链判定: 走 MRUNowPlayingViewController / *Expanded 的才是展开播放页;
+       ② 尺寸兜底只看高度(展开页高必然 >=420, 折叠模块最高 4×3 也到不了),
+          宽度判据删除 —— 宽布局的卡片宽 320~400 是常态。 */
+    if (diArtInExpandedPlayer(v)) return YES;
     UIView *win = v.window;
     UIView *cur = v;
     int g = 0;
@@ -18066,7 +18157,67 @@ static BOOL diTimeExpanded(UIView *v) {
         cur = cur.superview;
     }
     if (bw <= 0) return NO;
-    return (bw >= 320.0 || bh >= 235.0);
+    return (bh >= 420.0);
+}
+
+/* ===== 3.0.66: 3×2 歌名/歌词的原生来回滚动补齐 =====
+   478 用户: "4×2 布局的歌词歌名会原生那样来回滚动, 3×2 的没有了, 顺便修一下,
+   保持原生的逻辑"。4×2 等布局系统自带 marquee(3×2 下标签被排得足够宽/换了实现,
+   系统就不滚了)。这里只在 **3x2 / 3x2b** 档生效:
+   · 头部(MRUNowPlayingHeader*)里文本溢出的 UILabel → 层上加来回滚动动画;
+   · 只写 presentation(动画挂在 transform.translation.x 上, model 一字不动)——
+     不会触发系统重排, 也不会和布局打架;
+   · 系统已经在滚(层上有别的动画)的标签一律不碰 —— 保持原生逻辑;
+   · 文本/宽度变了自动重建, 文本放得下自动摘掉。
+   原生节奏: 起停各停 0.5 秒, 移动速度约 30pt/s, 到头停半秒再回来。 */
+static NSString *diMarqueeSigOf(UILabel *lb) {
+    return [NSString stringWithFormat:@"%@|%.0f|%.0f", lb.text ?: @"",
+            lb.bounds.size.width, lb.bounds.size.height];
+}
+static void diMarqueeApply(UILabel *lb) {
+    CGSize fit = [lb sizeThatFits:CGSizeMake(MAX(10.0, lb.bounds.size.width), CGFLOAT_MAX)];
+    CGFloat ov = fit.width - lb.bounds.size.width;
+    if (ov < 6.0) {
+        if ([lb.layer animationForKey:@"di.marquee"]) [lb.layer removeAnimationForKey:@"di.marquee"];
+        objc_setAssociatedObject(lb, @selector(diMarqueeSig), nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        return;
+    }
+    if (lb.layer.animationKeys.count > 0 && ![lb.layer animationForKey:@"di.marquee"])
+        return;   /* 系统自己的动画(marquee/淡入等): 一律不碰 */
+    NSString *sig = diMarqueeSigOf(lb);
+    NSString *last = objc_getAssociatedObject(lb, @selector(diMarqueeSig));
+    if ([sig isEqualToString:last ?: @""] && [lb.layer animationForKey:@"di.marquee"]) return;
+    objc_setAssociatedObject(lb, @selector(diMarqueeSig), sig, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    CGFloat move = ov / 30.0;
+    CGFloat ovX = ov + 8.0;
+    double dur = 0.5 + move + 0.5 + move;
+    CAKeyframeAnimation *a = [CAKeyframeAnimation animationWithKeyPath:@"transform.translation.x"];
+    a.values = @[@0.0, @0.0, @(-ovX), @(-ovX), @0.0];
+    a.keyTimes = @[@0.0, @(0.5 / dur), @((0.5 + move) / dur), @((1.0 + move) / dur), @1.0];
+    a.duration = dur;
+    a.repeatCount = HUGE_VALF;
+    [lb.layer addAnimation:a forKey:@"di.marquee"];
+}
+static void diNPMarqueeScan(UIView *root) {
+    if (!root || !root.window || root.hidden) return;
+    if (!diArtIs3x2()) return;                    /* 其他布局系统原生会滚, 不碰 */
+    if (diArtInExpandedPlayer(root)) return;      /* 展开播放页不碰 */
+    NSMutableArray<UIView *> *stack = [NSMutableArray arrayWithObject:root];
+    int budget = 800;
+    while (stack.count && budget-- > 0) {
+        UIView *v = stack.lastObject; [stack removeLastObject];
+        if ([v isKindOfClass:UILabel.class]) {
+            UILabel *lb = (UILabel *)v;
+            BOOL inHeader = NO;
+            for (UIView *p = lb.superview; p && p != root; p = p.superview) {
+                if ([NSStringFromClass(p.class) containsString:@"Header"]) { inHeader = YES; break; }
+            }
+            if (inHeader && lb.text.length > 0 && !lb.hidden && lb.alpha > 0.3) {
+                @try { diMarqueeApply(lb); } @catch (__unused NSException *e) {}
+            }
+        }
+        for (UIView *c in v.subviews) [stack addObject:c];
+    }
 }
 
 /* 3.0.54: 用户把「隐藏时间」改成「时间条上下移动」。
@@ -20497,7 +20648,20 @@ static void diRhythmTickWithDelta(float dtIn) {
             if (rhythmRoundCover) diCoverUnround();
         }
     }
-    if (!t) { gDISteady = 0; gDIBeatEnv = 0; gDIBassPulse = 0; return; }
+    /* 3.0.66: 播放器"原生休眠"的对齐 —— 控制中心收起/模块不在窗口上时, 目标必然
+       是 nil。以前 CADisplayLink 还在原生刷新率下空转(每帧 pickTarget), 是纯发热。
+       现在直接挂起链; 唤醒由 diRhythmEnsure(1Hz) + diArtPlayerPost(每次播放器布局)
+       负责, 打开控制中心的第一次 layout 就会恢复, 无感。 */
+    if (!t) {
+        if (gDIRhythmLink && !gDIRhythmLink.paused) {
+            gDIRhythmLink.paused = YES;
+            gDISteady = 0; gDIBeatEnv = 0; gDIBassPulse = 0;
+            diRhythmReset();
+            RLog(@"[律动] 播放器不可见 → 引擎挂起(休眠)");
+        }
+        gDISteady = 0; gDIBeatEnv = 0; gDIBassPulse = 0;
+        return;
+    }
 
     UIView *dv = gDIRhythmDrive ?: t;
 
@@ -20750,6 +20914,10 @@ static void diRhythmEnsure(void) {
              (long)gDIRhythmLink.preferredFramesPerSecond,
              rhythmFxOn, rhythmRoundCover, rhythmOn, rhythmRingOn,
              rhythmParticlesOn, rhythmBarsOn);
+    } else if (need && gDIRhythmLink && gDIRhythmLink.paused) {
+        /* 3.0.66: 休眠唤醒 —— 播放器重新布局(控制中心打开/换尺寸)或 1Hz 巡检时恢复 */
+        gDIRhythmLink.paused = NO;
+        RLog(@"[律动] 播放器出现 → 引擎唤醒");
     } else if (!need && gDIRhythmLink) {
         [gDIRhythmLink invalidate];
         gDIRhythmLink = nil;
