@@ -18950,6 +18950,7 @@ static BOOL diSameCoverRect(UIView *a, UIView *b, UIView *space) {
      · dv 的叔伯(dv.superview.superview.subviews —— 播放卡里图片常常挂在这一层)
    子视图不用收: 它们本来就会跟着 dv 的 transform 一起缩放(收了会缩两次)。 */
 static void diRhythmRememberBase(UIView *v);
+static BOOL diViewIsSuggestions(UIView *v);      /* 3.0.62: 定义在后面, 这里先声明 */
 static void diRhythmCollectExtras(UIView *dv) {
     gDIRhythmExtraN = 0;
     gDIRhythmSkipDv = NO;
