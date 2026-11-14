@@ -607,7 +607,10 @@ static NSString *diDirSignature(NSString *dir) {
 static UIImage *frameImage(NSString *path) {
     static NSCache *cache;
     static dispatch_once_t once;
-    dispatch_once(&once, ^{ cache = [NSCache new]; cache.countLimit = 120; cache.totalCostLimit = 64 * 1024 * 1024; }); // 限内存: 最多120帧且总成本64MB
+    /* 3.0.69 内存: 64MB → 24MB / 120 帧 → 80 帧。这是 SpringBoard 进程, 64MB 的
+       解码后位图常驻会明显抬高位内存(系统向"内存最高的进程"首先开刀, 也就是我们);
+       序列帧一般几十张, 24MB 足够覆盖整个循环, 超出部分 NSCache 自己按需回收。 */
+    dispatch_once(&once, ^{ cache = [NSCache new]; cache.countLimit = 80; cache.totalCostLimit = 24 * 1024 * 1024; });
     UIImage *img = [cache objectForKey:path];
     if (!img) { img = [UIImage imageWithContentsOfFile:path]; if (img) [cache setObject:img forKey:path cost:(NSUInteger)(img.size.width * img.size.height * 4)]; }
     return img;
@@ -3011,11 +3014,13 @@ __attribute__((unused)) static BOOL diMiniMusicActive(UIView *host) {
             sGate = AVAudioSession.sharedInstance.isOtherAudioPlaying || (diFindAudioLayer(host) != nil);
         }
         musicGate = sGate;
+        /* 3.0.69 功耗: 0.5s → 2s。每次都要扫目录建数组, 两层素材 = 每秒 4 次文件系统
+           遍历; 换素材本来就要重进设置页, 2 秒内生效完全够。 */
         if (self.side == 1) {
-            if (!sFrR || nowS - sFrTR > 0.5) { sFrTR = nowS; sFrR = framePathsFor(miniAudioFolder); }
+            if (!sFrR || nowS - sFrTR > 2.0) { sFrTR = nowS; sFrR = framePathsFor(miniAudioFolder); }
             frames = sFrR;
         } else {
-            if (!sFrL || nowS - sFrTL > 0.5) { sFrTL = nowS; sFrL = framePathsFor(smallAnimFolder); }
+            if (!sFrL || nowS - sFrTL > 2.0) { sFrTL = nowS; sFrL = framePathsFor(smallAnimFolder); }
             frames = sFrL;
         }
     }
@@ -6522,7 +6527,9 @@ static void applyNotifyStyle(UIView *host) {
     CGFloat phase = (CGFloat)fmod(CFAbsoluteTimeGetCurrent() / 2.5, 1.0); // 2.5秒一轮流光
     NSMutableArray<UIView *> *stack = [NSMutableArray arrayWithObject:host];
     int g = 0, colored = 0;
-    while (stack.count && g++ < 400) {
+    /* 3.0.69 功耗: 预算 400 → 250。播放卡里的标签数远小于此, 超出的都是系统
+       内部的大子树(我们本来也不该给它们上色)。 */
+    while (stack.count && g++ < 250) {
         UIView *v = stack.firstObject; [stack removeObjectAtIndex:0];
         for (UIView *s in v.subviews) [stack addObject:s];
         if (![v isKindOfClass:UILabel.class]) continue;
@@ -7707,7 +7714,10 @@ static void updateSingleVideo(UIWindow *win) {
         [matRoot addSubview:animV]; // 最顶层: 盖住跨进程频谱
         animV.hidden = YES;
     }
-    [matRoot bringSubviewToFront:animV]; // 系统布局会把岛内容分支提到最前, 每轮重申动画层在最顶
+    /* 3.0.69 功耗: 以前每轮(0.25s)无条件 bringSubviewToFront —— 这是在动画层
+       已经在最顶层时也强制重排一次图层树, 系统会跟着重新布局, 是"放歌时原生
+       一直在排版"的隐藏来源之一。现在只在真的不在最顶层时才提。 */
+    if (matRoot.subviews.lastObject != animV) [matRoot bringSubviewToFront:animV];
     }
 
     /* ---- 2.7.26: 歌词岛两层(2.2.45 原版挂载) 左=专辑位 side0, 右=音频位 side1 ----
@@ -7747,7 +7757,14 @@ static void updateSingleVideo(UIWindow *win) {
             mv.hidden = YES;
             mv.iv.image = nil;
         }
-        mv.link.paused = NO;
+        /* 3.0.69 功耗: 以前每轮(0.25s)无条件 unpause, 小岛两层素材永远停不下来;
+           现在 1.5s 才补一次唤醒 —— 层的可见性/音乐态由 stepMini 自己判, 真要
+           显示时最多等 1.5s 也会被这里的补醒接上。 */
+        {
+            static CFAbsoluteTime sMiniWake = 0;
+            CFAbsoluteTime nw = CFAbsoluteTimeGetCurrent();
+            if (mv.link.paused && nw - sMiniWake > 1.5) { sMiniWake = nw; mv.link.paused = NO; }
+        }
     }
 
     /* ---- 2.7.26: 小岛左右原生内容层(专辑/波形)按需隐藏 ----
@@ -7900,11 +7917,12 @@ static void updateHost(UIView *host) {
     }    attach(host);
     if (NSThread.isMainThread && host.window) {
         /* 节流: 岛收/展动画期间 layoutSubviews 每帧触发, 全量扫描很重会卡顿;
-           每 0.25 秒最多一次(逐帧贴合由视频层自己的 displayLink 负责, 不受影响) */
+           3.0.69 功耗: 0.25s → 0.4s。逐帧贴合由视频层自己的 displayLink 负责,
+           宿主挑选每 0.4s 一次完全够(岛的出现/切换本来就有 2s 宽限)。 */
         static char kLastUpd;
         CFAbsoluteTime now = CFAbsoluteTimeGetCurrent();
         NSNumber *last = objc_getAssociatedObject(host.window, &kLastUpd);
-        if (!last || now - [last doubleValue] > 0.25) {
+        if (!last || now - [last doubleValue] > 0.4) {
             objc_setAssociatedObject(host.window, &kLastUpd, @(now), OBJC_ASSOCIATION_RETAIN_NONATOMIC);
             updateSingleVideo(host.window);
         }
@@ -7913,7 +7931,10 @@ static void updateHost(UIView *host) {
         {
             static char kLastStyle;
             NSNumber *lastS = objc_getAssociatedObject(host.window, &kLastStyle);
-            CFTimeInterval gap = (notifyColorOn && notifyFlowOn) ? 0.06 : 0.3;
+            /* 3.0.69 功耗: 流光 0.06s(16fps) → 0.10s(10fps)。2.5 秒一轮的色相滚动,
+               10fps 完全看不出台阶; 而这段要遍历最多 250 个视图 + 给每个标签重做
+               渐变, 16fps 是仅次于律动的第二大 CPU 消耗。 */
+            CFTimeInterval gap = (notifyColorOn && notifyFlowOn) ? 0.10 : 0.3;
             if (!lastS || now - [lastS doubleValue] > gap) {
                 objc_setAssociatedObject(host.window, &kLastStyle, @(now), OBJC_ASSOCIATION_RETAIN_NONATOMIC);
                 applyNotifyStyle(host);
@@ -13859,10 +13880,15 @@ static void diHomeBarTick(void) {
     /* 2.5.2: 诊断与开关解耦 —— 只要日志开着, 每 10s 打一次候选类名,
        不再依赖"底栏横条自定义"是否打开(上一版没日志没法定位类名) */
     static CFAbsoluteTime tDiag;
-    if (logEnabled) {
+    static int diagRounds = 0;
+    /* 3.0.69 功耗: 10s → 60s, 且最多 30 轮。这段是**定位类名**用的诊断, 一次会把
+       整个窗口的 3000 个视图 + 3000 个图层全遍历一遍并拼字符串; 日志一直开着的
+       用户等于每 10 秒被扫一次全树。定位阶段够用, 之后就该彻底停。 */
+    if (logEnabled && diagRounds < 30) {
         CFAbsoluteTime nowD = CFAbsoluteTimeGetCurrent();
-        if (nowD - tDiag > 10.0) {
+        if (nowD - tDiag > 60.0) {
             tDiag = nowD;
+            diagRounds++;
             /* 2.5.4: 关键词扫描(Home/Indicator/Grabber)在 iOS16.2 SpringBoard 零命中,
                说明横条类名不含这些词。改用几何特征: 任何 h∈[3,9] 且 w>=60 的视图/层
                都是横条候选 —— 不依赖类名。 */
@@ -18136,8 +18162,28 @@ static void diNPQueryNowPlaying(void) {
    现在: 沿父链把所有 MRUNowPlaying* / *ContentModuleContainerView 都换算到 window
    坐标量一遍(带 transform 的真实大小), 取最大那块, 宽≥320 或 高≥235 就算展开。 */
 static BOOL diArtInExpandedPlayer(UIView *v);   /* 3.0.66: 定义在律动段, 这里先用 */
+/* 3.0.69 功耗: 展开判定每帧都在跑, 而它要沿父链做 14 次 NSStringFromClass + containsString
+   —— 120Hz 下就是每秒 1700 次字符串分配, 是律动引擎里最贵的一段。
+   判定结果只跟「哪个视图 + 它的尺寸 + 有没有窗口」有关, 这三个不变就没必要重算。
+   展开/收起时 bounds 必然变(57 ↔ 308), 缓存自然失效; 再兜 0.35s 上限防漏判。 */
 static BOOL diTimeExpanded(UIView *v) {
     if (!v) return NO;
+    /* 3.0.67 的"呈现层放大比"必须每次都看(很便宜, 只读一个属性): 展开瞬间系统用
+       transform 放大, bounds 不变, 如果连这条也进了缓存, 展开后的 0.3 秒里律动还会
+       往那张大图上写缩放 —— 用户看到的就是"展开时专辑抽一下"。 */
+    {
+        CALayer *pl = v.layer.presentationLayer;
+        CGSize ps = pl ? pl.bounds.size : v.bounds.size;
+        CGFloat bw2 = MAX(1.0, v.bounds.size.width), bh2 = MAX(1.0, v.bounds.size.height);
+        if (ps.width / bw2 > 1.6 || ps.height / bh2 > 1.6) return YES;
+    }
+    static __weak UIView *sExpV = nil;
+    static CGSize sExpSz = {0, 0};
+    static BOOL sExpRes = NO;
+    static CFTimeInterval sExpT = 0;
+    CFTimeInterval nowE = CACurrentMediaTime();
+    if (sExpV == v && CGSizeEqualToSize(sExpSz, v.bounds.size) && nowE - sExpT < 0.35) return sExpRes;
+    BOOL res = NO;
     /* 3.0.66: 478 用户: "只有 3×2 有律动/粒子, 其他布局没有"。
        旧判据"宽>=320 或 高>=235"把 4×2/4×3/4×1 这类本来就宽的**折叠模块卡片**
        全部误判成"展开页", 律动/粒子在那些布局下被整体隐藏。
@@ -18145,19 +18191,8 @@ static BOOL diTimeExpanded(UIView *v) {
        ① 父链判定: 走 MRUNowPlayingViewController / *Expanded 的才是展开播放页;
        ② 尺寸兜底只看高度(展开页高必然 >=420, 折叠模块最高 4×3 也到不了),
           宽度判据删除 —— 宽布局的卡片宽 320~400 是常态。 */
-    if (diArtInExpandedPlayer(v)) return YES;
-    /* 3.0.67: 479 用户 "4×2 那些的展开有影响" —— 宽布局的展开页**复用同一张封面**,
-       系统用 transform 把它放大(bounds 还是 57), 于是:
-       · 尺寸兜底(bounds 量出来还是折叠尺寸)量不到 → 展开态漏判;
-       · 律动继续往这张"已经被放大"的封面上写缩放 → 展开页专辑跟着鼓点抽动。
-       用呈现层/模型层的放大比判: 折叠态比例 ≈1.0(律动最多 1.13),
-       展开态系统把它放大 2~5 倍 —— 比例 >1.6 就是展开, 与布局无关。 */
-    {
-        CALayer *pl = v.layer.presentationLayer;
-        CGSize ps = pl ? pl.bounds.size : v.bounds.size;
-        CGFloat bw2 = MAX(1.0, v.bounds.size.width), bh2 = MAX(1.0, v.bounds.size.height);
-        if (ps.width / bw2 > 1.6 || ps.height / bh2 > 1.6) return YES;
-    }
+    if (diArtInExpandedPlayer(v)) { res = YES; goto diExpDone; }
+    /* 3.0.67 的放大比判定已提到函数最上面(每帧都要看, 不进缓存) */
     UIView *win = v.window;
     UIView *cur = v;
     int g = 0;
@@ -18170,10 +18205,13 @@ static BOOL diTimeExpanded(UIView *v) {
         }
         cur = cur.superview;
     }
-    if (bw <= 0) return NO;
+    if (bw <= 0) { res = NO; goto diExpDone; }
     /* 3.0.67: 独立展开容器的兜底 —— 宽≥320 且 高≥300 才算展开。
        折叠卡最高 ~240(2x3/4x3 三行), 不会误伤; 宽布局折叠卡(356x77)高不够也过不了。 */
-    return (bw >= 320.0 && bh >= 300.0);
+    res = (bw >= 320.0 && bh >= 300.0);
+diExpDone:
+    sExpV = v; sExpSz = v.bounds.size; sExpRes = res; sExpT = nowE;
+    return res;
 }
 
 /* ===== 3.0.66: 3×2 歌名/歌词的原生来回滚动补齐 =====
@@ -18862,14 +18900,20 @@ __attribute__((constructor)) static void init(void) {
                     DLog(@"音量键事件: 4秒内我们让位, 让系统自己收音量条");
                 }];
             // 播放状态轮询: 岛触发才加载/播放, 无通知(岛收回)即暂停; 锁屏期间整个 timer 挂起(零功耗)
+            /* 3.0.69 功耗: 0.5s → 1.0s。这一拍里要做 refreshPrefs(几十个偏好键跨进程读)、
+               遮罩清扫、MediaRemote 查询、隐藏时间、音量轮询 —— 全是"1 秒粒度完全够"的事,
+               以前半秒一次等于把整套扫描跑了两遍。 */
             gTickTimer = dispatch_source_create(DISPATCH_SOURCE_TYPE_TIMER, 0, 0, dispatch_get_main_queue());
-            dispatch_source_set_timer(gTickTimer, DISPATCH_TIME_NOW, 0.5 * NSEC_PER_SEC, 0.1 * NSEC_PER_SEC);
+            dispatch_source_set_timer(gTickTimer, DISPATCH_TIME_NOW, 1.0 * NSEC_PER_SEC, 0.1 * NSEC_PER_SEC);
             dispatch_source_set_event_handler(gTickTimer, ^{ visibilityTick(); });
             dispatch_resume(gTickTimer);
-            /* 2.5.0: 底栏横条 0.3s 重申(系统重建横条后 0.3s 内恢复自定义) */
+            /* 2.5.0: 底栏横条 0.3s 重申(系统重建横条后恢复自定义)
+               3.0.69 功耗: 0.3s → 1.0s。这个 tick 会遍历整个窗口(最多 3000 个视图)
+               去找底部横条, 0.3s 一次就是每秒 3 遍全树 —— 播放时 CPU 直线上涨的
+               主要来源之一; 横条被系统重建后 1 秒内补上也看不出来。 */
             {
                 dispatch_source_t hb = dispatch_source_create(DISPATCH_SOURCE_TYPE_TIMER, 0, 0, dispatch_get_main_queue());
-                dispatch_source_set_timer(hb, DISPATCH_TIME_NOW, 0.3 * NSEC_PER_SEC, 0.1 * NSEC_PER_SEC);
+                dispatch_source_set_timer(hb, DISPATCH_TIME_NOW, 1.0 * NSEC_PER_SEC, 0.1 * NSEC_PER_SEC);
                 dispatch_source_set_event_handler(hb, ^{ diHomeBarTick(); });
                 dispatch_resume(hb);
             }
@@ -19344,11 +19388,14 @@ static void diRhythmWriteTransform(UIView *v, CATransform3D tr) {
     CGFloat tsx = sqrt(tr.m11 * tr.m11 + tr.m12 * tr.m12);
     if (tsx > 0.01) toS = tsx;
     l.transform = tr;
-    if (fabs(toS - fromS) < 0.0005) return;
+    /* 3.0.69 功耗: 差值 <0.2% 肉眼看不出来, 不必再建一条动画 —— 静止时这里每秒
+       少 120 次 CoreAnimation 提交。动画时长跟 40Hz 帧率对齐(以前 1/60 比帧间隔
+       还长, 会互相堆积)。 */
+    if (fabs(toS - fromS) < 0.002) return;
     CABasicAnimation *an = [CABasicAnimation animationWithKeyPath:@"transform.scale"];
     an.fromValue = @(fromS);
     an.toValue = @(toS);
-    an.duration = 1.0 / 60.0;
+    an.duration = 1.0 / 40.0;
     an.timingFunction = [CAMediaTimingFunction functionWithName:kCAMediaTimingFunctionLinear];
     an.fillMode = kCAFillModeForwards;
     an.removedOnCompletion = NO;
@@ -19358,6 +19405,17 @@ static void diRhythmWriteTransform(UIView *v, CATransform3D tr) {
 /* 把同一个 tr 写到封面壳 + 所有"有图像内容"的同区域视图上(最多 3 个额外视图) */
 static void diRhythmWriteAll(CGFloat s, CGFloat dy, BOOL spin, double ang, BOOL restored) {
     UIView *dv = gDIRhythmDrive;
+    /* 3.0.69 功耗: 静止时 s 恒为 1.000, 以前也每帧照写一遍 model + 建一条 CA 动画,
+       120Hz 下就是每秒 120 次无意义的 CoreAnimation 提交(还会阻止图层休眠)。
+       现在值没变(差 <0.15%)就跳过, 每 0.25s 兜一次防"被系统顶掉后没人再写"。
+       restored 永远执行, 保证能干净复位。 */
+    static CGFloat sLastS = -1.0;
+    static CFTimeInterval sLastW = 0;
+    CFTimeInterval nowW = CACurrentMediaTime();
+    if (!restored && !spin && fabs(dy) < 0.01 && sLastS >= 0.0
+        && fabs(s - sLastS) < 0.0015 && nowW - sLastW < 0.25) return;
+    sLastS = restored ? -1.0 : s;
+    sLastW = nowW;
     [CATransaction begin];
     [CATransaction setDisableActions:YES];
     for (int i = 0; i < 1 + gDIRhythmExtraN; i++) {
@@ -20796,7 +20854,9 @@ static void diRhythmTickWithDelta(float dtIn) {
        我们这边不再动布局(见粒子层的池化), 再补一条: 没在放歌就别按 120Hz 空转。
        播放时立刻恢复 0 = 跟随原生刷新率。 */
     if (gDIRhythmLink) {
-        NSInteger wantFps = active ? 0 : 20;
+        /* 3.0.69 功耗: 播放 40Hz(鼓点足够顺), 暂停/停播 12Hz(只剩粒子余晖)。
+           以前播放跑 120Hz、暂停还跑 20Hz, 是"放歌一会就烫"的第一大来源。 */
+        NSInteger wantFps = active ? 40 : 12;
         if (gDIRhythmLink.preferredFramesPerSecond != wantFps)
             gDIRhythmLink.preferredFramesPerSecond = wantFps;
     }
@@ -20894,7 +20954,7 @@ static void diRhythmTickWithDelta(float dtIn) {
     {
         static CFTimeInterval probeAt = 0;
         CFTimeInterval nowP = CACurrentMediaTime();
-        if (nowP - probeAt >= 1.5) {
+        if (nowP - probeAt >= 3.0) {
             probeAt = nowP;
             CATransform3D p3 = dv.layer.transform;
             /* 3.0.58: 旋转接管后 m11 = cos(角度)×缩放, 单看 m11 会以为是乱跳。
@@ -20985,9 +21045,11 @@ static void diRhythmEnsure(void) {
         if (!gDIRhythmTicker) gDIRhythmTicker = [DIFxTicker new];
         gDIRhythmLink = [CADisplayLink displayLinkWithTarget:gDIRhythmTicker
                                                     selector:@selector(onFrame:)];
-        /* 0 = 跟随屏幕原生刷新率(ProMotion 120Hz)。以前写死 60Hz, 在 120Hz 屏上
-           每两帧才动一次 —— 这就是"一卡一卡"的直接原因。 */
-        gDIRhythmLink.preferredFramesPerSecond = 0;
+        /* 3.0.69 功耗: 120Hz 满帧 → 40Hz。鼓点包络 160ms, 40Hz 采样约 6 帧,
+           缩放/粒子位移都是连续量, 视觉上没有区别; CPU/GPU 直接降到 1/3。
+           (3.0.65 之前"一卡一卡"是 60Hz 固定刷新 + 每帧算 sin 摆动, 与帧率无关,
+             现在只剩鼓点缩放, 40Hz 足够顺。) */
+        gDIRhythmLink.preferredFramesPerSecond = 40;
         [gDIRhythmLink addToRunLoop:[NSRunLoop mainRunLoop] forMode:NSRunLoopCommonModes];
         RLog(@"[律动] 引擎启动 CADisplayLink %ld (0=跟随原生刷新率) (总=%d 圆=%d 缩放=%d 环=%d 粒=%d 条=%d)",
              (long)gDIRhythmLink.preferredFramesPerSecond,
