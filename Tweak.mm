@@ -906,7 +906,9 @@ static NSString *fxString(NSString *base) {
     return [v isKindOfClass:NSString.class] ? v : nil;
 }
 
-/* 读一组"来源 + 流光"; 旧值 2 顺手迁移成 1 + 流光开(只写一次, 之后不再动) */
+/* 读一组"来源 + 流光"; 旧值 2 顺手迁移成 1 + 流光开(只写一次, 之后不再动)。
+   3.0.66: 律动参数已全部按尺寸读(diColorModeLoadFx), 本函数保留备用。 */
+__attribute__((unused))
 static int diColorModeLoad(NSString *modeKey, NSString *flowKey) {
     int raw = (int)pInt(modeKey, 0);
     if (raw >= 2) {
