@@ -18870,11 +18870,10 @@ static UIView *diFindViewContainingClass(UIView *v, NSString *token, int depth) 
 
 static void diForceCCRelayout(void) {
     @try {
-        NSArray<UIWindow *> *wins = UIApplication.sharedApplication.windows;
-        for (UIWindow *w in wins) {
-            if (!w || w.hidden || w.alpha < 0.01) continue;
+        diForEachWindow(^(UIWindow *w) {
+            if (!w || w.hidden || w.alpha < 0.01) return;
             UIView *cv = diFindViewContainingClass(w, @"CCUIModuleCollectionView", 0);
-            if (!cv) continue;
+            if (!cv) return;
             if ([cv isKindOfClass:UICollectionView.class]) {
                 UICollectionView *c = (UICollectionView *)cv;
                 [c.collectionViewLayout invalidateLayout];
@@ -18885,7 +18884,7 @@ static void diForceCCRelayout(void) {
                 [cv layoutIfNeeded];
             }
             RLog(@"[尺寸] 控制中心模块已重建(实时生效, 无需注销)");
-        }
+        });
     } @catch (__unused NSException *e) {}
 }
 
