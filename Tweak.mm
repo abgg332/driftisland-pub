@@ -862,13 +862,13 @@ static NSString *diFxSizeId(void) {
     NSString *cur = nil;
     id v = CFBridgingRelease(CFPreferencesCopyAppValue(CFSTR("PlayerGridVariant"),
                                                       CFSTR("com.local.playerexact")));
-    if ([v isKindOfClass:NSString.class] && v.length) cur = v;
-    if (!cur.length) {
+    if ([v isKindOfClass:NSString.class] && [(NSString *)v length]) cur = v;
+    if (cur.length == 0) {
         id dict = CFBridgingRelease(CFPreferencesCopyAppValue(CFSTR("ModuleSizes"),
                                                              CFSTR("com.local.playerexact")));
         if ([dict isKindOfClass:NSDictionary.class]) {
             id s = dict[@"com.apple.mediaremote.controlcenter.nowplaying"];
-            if ([s isKindOfClass:NSString.class] && s.length) cur = s;
+            if ([s isKindOfClass:NSString.class] && [(NSString *)s length]) cur = s;
         }
     }
     if (!cur.length) cur = @"2x2";
