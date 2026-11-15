@@ -28,6 +28,8 @@
 #import <math.h>
 #import <pthread.h>
 
+#include "DIReferenceSpectrum.h"
+
 #define DI_AU_PORT   41235
 #define DI_FFT_N     1024
 #define DI_BANDS     24
@@ -342,10 +344,18 @@ static void *diAudioClientThread(void *arg) {
                 memset(bands, 0, sizeof bands);
                 for (int b = 0; b < DI_BANDS; b++) gDIBandF[b] *= 0.6f;
             }
-            uint8_t pkt[48];
+            uint8_t reference[72] = {};
+            static float referencePeaks[72] = {};
+            if (live && gDIRingFill >= 512) {
+                float snapshot[512];
+                int start = (gDIRingW - 512 + DI_RING) % DI_RING;
+                for (int i=0;i<512;i++) snapshot[i]=gDIRing[(start+i)%DI_RING];
+                diReferenceSpectrum(snapshot, referencePeaks, reference);
+            }
+            uint8_t pkt[120];
             memset(pkt, 0, sizeof pkt);
             pkt[0] = 0xD7;
-            pkt[1] = 2;                    /* 3.0.71: 协议 v2 —— 多了"咚"的字段 */
+            pkt[1] = 3;                    /* 3.0.71: 协议 v2 —— 多了"咚"的字段 */
             pkt[2] = DI_BANDS;
             pkt[3] = 0;
             memcpy(pkt + 4, &fast, 4);
@@ -363,6 +373,7 @@ static void *diAudioClientThread(void *arg) {
             memcpy(pkt + 40, &serial, 4);
             float lowR = live ? gDILowRms : 0.0f;
             memcpy(pkt + 44, &lowR, 4);
+            memcpy(pkt + 48, reference, 72);
             ssize_t n = send(c, pkt, sizeof pkt, MSG_NOSIGNAL);
             if (n != (ssize_t)sizeof pkt) break;
         }

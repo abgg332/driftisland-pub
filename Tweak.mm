@@ -19241,6 +19241,10 @@ __attribute__((constructor)) static void init(void) {
 #define DI_AU_PORT   41235
 #define DI_AU_BANDS  24
 #define DI_AU_PKT    36          /* v1: 4 头 + 4 fast + 4 slow + 24 bands */
+#define DI_AU_PKT3   120
+static float gDIReferenceRaw[72], gDIReferenceCurrent[72];
+static BOOL gDIReferenceSeen = NO;
+
 #define DI_AU_PKT2   48          /* v2(3.0.71): 再 + 强度/年龄/序号/低频RMS */
 
 /* ---------- 频谱客户端 ---------- */
@@ -19276,7 +19280,7 @@ static void diAuParse(void) {
             continue;
         }
         int ver = gDIAuBuf[1];
-        int pktLen = (ver >= 2) ? DI_AU_PKT2 : DI_AU_PKT;
+        int pktLen = ver == 3 ? DI_AU_PKT3 : (ver == 2 ? DI_AU_PKT2 : DI_AU_PKT);
         if (gDIAuLen < pktLen) break;          /* 半包: 等下一次 recv 补齐 */
         int nb = gDIAuBuf[2];
         if (nb <= 0 || nb > DI_AU_BANDS) nb = DI_AU_BANDS;
@@ -19284,6 +19288,11 @@ static void diAuParse(void) {
         memcpy(&f, gDIAuBuf + 4, 4);
         memcpy(&s, gDIAuBuf + 8, 4);
         if (isfinite(f) && isfinite(s) && f >= 0.0f && f <= 4.0f) {
+            if (ver == 3) {
+                for (int i=0;i<72;i++) gDIReferenceRaw[i]=gDIAuBuf[48+i]/255.0f;
+                if (!gDIReferenceSeen) RLog(@"[参考律动] iOS16 512FFT/72段AGC首包已接通");
+                gDIReferenceSeen=YES;
+            }
             gDIAuFast = f;
             gDIAuSlow = s;
             for (int i = 0; i < DI_AU_BANDS; i++)
@@ -19780,7 +19789,7 @@ static CGFloat gDICoverOrigRadius = 0;
 static BOOL gDICoverOrigClip = NO;
 
 /* 量出来的比例(见文件头): 刻度 80 根 / 宽 0.065R / 长 0.26R / 间距 0.045R */
-#define DI_TICK_N      80
+#define DI_TICK_N      72
 #define DI_TICK_W      0.065
 #define DI_TICK_LEN    0.26
 #define DI_TICK_GAP    0.045
@@ -20098,7 +20107,7 @@ static void diFxUpdateDots(UIView *host, CGRect cover, float dt,
     int limit = rhythmParticleCount;
     if (limit < 0) limit = 0;
     if (limit > DI_DOT_CAP) limit = DI_DOT_CAP;
-    float alphaMul = (float)rhythmParticleAlpha * (float)rhythmParticleStrength;
+    float alphaMul = (float)rhythmParticleAlpha;
     if (alphaMul < 0.0f) alphaMul = 0.0f;
     if (alphaMul > 1.6f) alphaMul = 1.6f;
 
@@ -20190,7 +20199,7 @@ static float diFxClamp01(float v) {
     return v;
 }
 
-static float diFxNormChain(int idx, float v, float step, float minRange) {
+static float __attribute__((unused)) diFxNormChain(int idx, float v, float step, float minRange) {
     float f = gDIFxNormFloor[idx], p = gDIFxNormPeak[idx];
     if (!(p > 0.0f) || p < f) { f = v; p = v + minRange; }
     float kFast = 1.0f - powf(1.0f - 0.30f, step);
@@ -20222,49 +20231,21 @@ static void diFxAdvanceEnergy(BOOL active, BOOL real, float dt) {
         gDIFxEneCur[i] = cur;
         sum += cur;
     }
-    /* 标定: 本机 24 段是"dB 绝对值映射"(没有 AGC), 音乐里稳态均值约 0.65~0.75;
-       参考实现上游有每段 AGC, 稳态也在 0.7 附近但峰值能顶到接近 1。
-       这里做一次固定线性标定(0.20~0.90 → 0~1), 让 baseline/excess 的阈值
-       落在同一个区间 —— 否则本机峰值被压扁, 鼓点永远触发不了。 */
-    float raw = sum / (float)DI_AU_BANDS;
-    gDIFxEnergy = (raw - 0.20f) / 0.70f;
-    if (gDIFxEnergy < 0.0f) gDIFxEnergy = 0.0f;
-    if (gDIFxEnergy > 1.0f) gDIFxEnergy = 1.0f;
-    /* 停播且已经归零: 直接抹平, 下次从干净状态开始(参考实现同款) */
-    if (!active && gDIFxEnergy < 0.0025f) {
-        for (int i = 0; i < DI_AU_BANDS; i++) gDIFxEneCur[i] = 0.0f;
-        gDIFxEnergy = 0.0f;
+    /* Reference channel uses its own FFT/AGC, not legacy dB/kick normalization. */
+    float referenceSum=0;
+    BOOL referenceLive=active && real && gDIReferenceSeen;
+    for(int i=0;i<72;i++) {
+        float target=referenceLive?gDIReferenceRaw[i]:0;
+        float current=gDIReferenceCurrent[i];
+        float rate=target>current?(0.46f+0.10f*target):0.12f;
+        current+=(target-current)*(1-powf(1-rate,step));
+        gDIReferenceCurrent[i]=current;
+        referenceSum+=current;
     }
+    gDIFxEnergy=referenceSum/72.0f;
+    gDIFxBeatE=gDIFxEnergy;
+    gDIFxNormN[0]=gDIFxNormN[1]=0;
 
-    /* ===== 3.0.93: 鼓点能量 ===== */
-    float lowS = 0.0f, lowW = 0.0f, allS = 0.0f;
-    for (int i = 0; i < DI_AU_BANDS; i++) {
-        float v = active ? (real ? gDIBandRaw[i] : gDIBandSmooth[i]) : 0.0f;
-        if (v < 0.0f) v = 0.0f;
-        if (v > 1.0f) v = 1.0f;
-        allS += v;
-        if (i <= 4) {                        /* 0~4 段 ≈ 60~200Hz, 底鼓主体 */
-            float w = (i == 0) ? 3.0f : ((i == 1) ? 2.5f : ((i == 2) ? 2.0f : 1.0f));
-            lowS += v * w;
-            lowW += w;
-        }
-    }
-    lowS /= MAX(lowW, 1.0f);
-    allS /= (float)DI_AU_BANDS;
-    float nLow = diFxNormChain(0, lowS, step, 0.10f);
-    float nAll = diFxNormChain(1, allS, step, 0.08f);
-    gDIFxNormN[0] = nLow;
-    gDIFxNormN[1] = nAll;
-    float eb = 0.72f * nLow + 0.28f * nAll;
-    if (active) {
-        float kick = gDIKick;                /* 样本域那一下"咚", 0~1 */
-        if (kick < 0.0f) kick = 0.0f;
-        if (kick > 1.0f) kick = 1.0f;
-        if (kick > eb) eb = kick;
-    } else {
-        eb = 0.0f;
-    }
-    gDIFxBeatE = diFxClamp01(eb);
 }
 
 /* ===== 3.0.92: 专辑鼓点包络 —— FlexMusic 的 beatScale 原样还原 =====
@@ -20303,7 +20284,7 @@ static float diFxAdvanceBeat(BOOL active, float energy, double strengthSlider, f
         }
         /* 滑杆 0~2 → 参考实现的 strength 域(0.3~2.5)。默认 0.70 → 2.1,
            与旧版"0.20×0.70 幅度"在 pulse≈0.7 时正好对上, 老手感不会突变。 */
-        float st = (float)(strengthSlider * 3.0);
+        float st = (float)strengthSlider;
         if (st < 0.3f) st = 0.3f;
         if (st > 2.5f) st = 2.5f;
         float amp = gDIFxBeatPulse * 0.095f * st;
@@ -20666,6 +20647,10 @@ static void diRhythmLayoutRing(CGRect cover, const float *bands, BOOL active) {
         int b1 = MIN(b0 + 1, DI_AU_BANDS - 1);
         CGFloat fr = pos - floorf((float)pos);
         CGFloat band = bands[b0] * (1.0f - fr) + bands[b1] * fr;
+        if (gDIReferenceSeen) {
+            int left=(i+71)%72, right=(i+1)%72;
+            band=0.1f*gDIReferenceCurrent[left]+0.8f*gDIReferenceCurrent[i]+0.1f*gDIReferenceCurrent[right];
+        }
         if (band < 0) band = 0;
         if (band > 1) band = 1;
         CGFloat len = active ? (1.2 + maxLen * pow(band, 0.80)) : 1.2;
@@ -21957,7 +21942,7 @@ static void diRhythmTickWithDelta(float dtIn) {
     /* 3.0.92: 发射规则照 FlexMusic —— E ≥ 0.08 时, 每帧以 min(0.035+0.30·E, 0.40)
        的概率出生一颗(一次只找一个死槽)。概率是 60Hz 基准, 这里按 dt 换算, ProMotion
        120Hz 上不会翻倍。数量上限仍由「粒子数量」管(池里多余的直接判死等重用)。 */
-    if (rhythmParticlesOn && active && gDIFxEnergy >= 0.08f) {
+    if (rhythmParticlesOn && active && real && gDIReferenceSeen && gDIFxEnergy >= 0.08f) {
         float p60 = 0.035f + 0.30f * gDIFxEnergy;
         if (p60 > 0.40f) p60 = 0.40f;
         float p = 1.0f - powf(1.0f - p60, dt * 60.0f);
