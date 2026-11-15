@@ -20172,10 +20172,13 @@ static void diFxUpdateDots(UIView *host, CGRect cover, float dt,
 
         /* Offset is transient, never accumulated into drift: no speed runaway. */
         float radialPulse = cover.size.width * 0.055f * pulse;
-        layer.position = CGPointMake(cx + cosf(d->ang) * (d->rad + radialPulse),
-                                     cy + sinf(d->ang) * (d->rad + radialPulse));
+        // Reference artRingContainer scales particle offsets AND glyphs together.
+        // Keep the verified visible host; apply the same affine transform numerically.
+        float groupScale = rhythmOn ? gDICoverScaleNow : 1.0f;
+        layer.position = CGPointMake(cx + cosf(d->ang) * ((d->rad + radialPulse)*groupScale),
+                                     cy + sinf(d->ang) * ((d->rad + radialPulse)*groupScale));
         layer.opacity = alpha;
-        float sc = (0.72f + 0.48f * progress) * (1.0f + 0.60f * pulse);
+        float sc = (0.72f + 0.48f * progress) * (1.0f + 0.60f * pulse) * groupScale;
         CATransform3D tr = CATransform3DMakeRotation(d->rot, 0, 0, 1);
         layer.transform = CATransform3DScale(tr, sc, sc, 1.0f);
         alive++;
@@ -20187,7 +20190,7 @@ static void diFxUpdateDots(UIView *host, CGRect cover, float dt,
     particlePeak = fmaxf(particlePeak, beatTarget);
     CFTimeInterval probeNow = CACurrentMediaTime();
     if (active && probeNow - particleProbeAt >= 2.0) {
-        RLog(@"[粒子鼓点] 存活=%d 强度=%.2f 两秒峰值=%.3f 缩放增益=%.3f 径向增益=%.2fpt", alive, strength, particlePeak, 0.60f*particlePeak, cover.size.width*0.055f*particlePeak);
+        RLog(@"[粒子鼓点] 存活=%d 强度=%.2f 两秒峰值=%.3f 缩放增益=%.3f 径向增益=%.2fpt 同步组缩放=%.4f 额外弹跳=%d", alive, strength, particlePeak, 0.60f*particlePeak, cover.size.width*0.055f*particlePeak, gDICoverScaleNow, diParticleExtraBeat);
         particleProbeAt = probeNow;
         particlePeak = 0;
     }
@@ -20294,7 +20297,7 @@ static void diFxAdvanceEnergy(BOOL active, BOOL real, float dt) {
    停用: baseline×0.92、pulse×0.72、desired=1; 距 1 小于 0.0005 时精确归位。
    它是"相对基线的能量瞬态", 不是 BPM/底鼓识别 —— 这正是参考实现的手感来源。
    3.0.93: 公式一个字没改, 只把输入 E 换成 gDIFxBeatE(见上), 并补探针。 */
-static float __attribute__((unused)) diFxAdvanceBeat(BOOL active, float energy, double strengthSlider, float dt) {
+static float diFxAdvanceBeat(BOOL active, float energy, double strengthSlider, float dt) {
     float step = dt * 60.0f;
     if (step <= 0.0f) return gDIFxBeatScale;
     float desired;
@@ -22425,9 +22428,10 @@ static void diISMUpdateDots(CGRect cover, float dt, BOOL active) {
         d->beatGain=pulseGain;
         float fade=fminf(progress/0.001f,1)*fminf(d->life/0.72f,1);
         L.opacity=fminf(1,fmaxf(0,(float)gDIISMDotA*fade*(1+0.22f*pulseGain)));
-        float radius=d->rad+cover.size.width*0.055f*pulseGain;
+        float groupScale=gDIISMBeat?gDIISMScaleNow:1;
+        float radius=(d->rad+cover.size.width*0.055f*pulseGain)*groupScale;
         L.position=CGPointMake(cx+cosf(d->ang)*radius,cy+sinf(d->ang)*radius);
-        float pulse=(0.72f+0.48f*progress)*(1+0.60f*pulseGain);
+        float pulse=(0.72f+0.48f*progress)*(1+0.60f*pulseGain)*groupScale;
         CATransform3D tr = CATransform3DMakeRotation(d->rot, 0, 0, 1);
         L.transform = CATransform3DScale(tr, pulse, pulse, 1.0f);
     }
@@ -22684,7 +22688,8 @@ static void diISMRUFrame(float dtIn) {
             float p60=fminf(0.4f,0.035f+0.30f*diIslandEnergy);
             if(diISMRand01()<1-powf(1-p60,dt*60))diISMSpawnDot();
         }
-        CGRect cover = gDIISMHost ? [art convertRect:art.bounds toView:gDIISMHost] : CGRectZero;
+        CGPoint center = gDIISMHost ? [art convertPoint:CGPointMake(CGRectGetMidX(art.bounds),CGRectGetMidY(art.bounds)) toView:gDIISMHost] : CGPointZero;
+        CGRect cover=CGRectMake(center.x-art.bounds.size.width/2,center.y-art.bounds.size.height/2,art.bounds.size.width,art.bounds.size.height);
         if (cover.size.width < 4.0) cover = CGRectMake(66.0, 46.0, art.bounds.size.width, art.bounds.size.height);
         diISMUpdateDots(cover, dt, YES);
     } else if (gDIISMDotCount > 0 || gDIISMHost) {
