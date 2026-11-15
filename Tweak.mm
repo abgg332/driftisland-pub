@@ -126,7 +126,6 @@ static BOOL islandBeatOn = NO;        // IslandBeatOn: 岛上专辑随节拍缩�
 static BOOL islandParticlesOn = NO;   // IslandParticlesOn: 岛上专辑外圈粒子
 static void diISRegisterGlass(UIView *g);   /* 玻璃注册(实现在律动模块里) */
 static void diISHardStop(void);             /* 清粒子 + 复位缩放 */
-static void diISFrame(float dt, BOOL active);
 /* 3.0.85: 岛专辑特效改到 MRU(真实专辑遮罩)侧 —— 函数定义在律动模块末尾,
    diActivityApply / diActivityStartScanner 在前面就要用 */
 static void diISMRUApply(UIView *artwork, UIView *glass);
@@ -21281,17 +21280,6 @@ static void diISResetDots(void) {
 }
 
 /* 取当前"真在屏上"的那块玻璃: 后注册的更新(SB 小岛 ↔ MRU 展开交接时, 新的覆盖旧的) */
-static UIView *diISLiveGlass(void) {
-    UIView *best = nil;
-    for (int i = 0; i < gDIISGlassN; i++) {
-        UIView *g = gDIISGlasses[i];
-        if (!g || !g.window) continue;
-        if (g.hidden || g.alpha < 0.1) continue;
-        if (g.bounds.size.width < 8.0 || g.bounds.size.height < 8.0) continue;
-        best = g;
-    }
-    return best;
-}
 
 static void diISBeatReset(UIView *g) {
     if (!g) return;
@@ -21306,14 +21294,6 @@ static void diISBeatReset(UIView *g) {
 }
 
 /* 3.0.84: 岛特效独立跑时用它判"到底有没有在放歌"(与主路径同一套优先级) */
-static BOOL diISPlayActiveNow(void) {
-    BOOL hasSong = gDIInfoReady ? gDIHasNowPlaying : YES;
-    diPlayRatePoll();
-    BOOL playing = mrQueryOK ? musicPlaying : AVAudioSession.sharedInstance.isOtherAudioPlaying;
-    if (gDIPlayRateState == 0) playing = NO;
-    else if (gDIPlayRateState == 1) playing = YES;
-    return hasSong && playing;
-}
 
 static void diISHardStop(void) {
     diISResetDots();
@@ -21327,137 +21307,6 @@ static void diISHardStop(void) {
     for (int i = 0; i < gDIISGlassN; i++) diISBeatReset(gDIISGlasses[i]);
 }
 
-static void diISFrame(float dtIn, BOOL active) {
-    if (!islandBeatOn && !islandParticlesOn) return;
-
-    UIView *g = diISLiveGlass();
-    if (!g) {
-        diISResetDots();
-        if (gDIISDotLayer) gDIISDotLayer.opacity = 0.0f;
-        return;
-    }
-
-    float dt = dtIn;
-    if (dt < 0.002f) dt = 0.002f;
-    if (dt > 0.05f) dt = 0.05f;
-
-    /* ---- 律动: 只对 SB 小岛那块玻璃做 (MRU 的玻璃用 frame 定位, 带 transform 会飞) ---- */
-    if (islandBeatOn) {
-        gDIISBeatWasOn = YES;
-        for (int i = 0; i < gDIISGlassN; i++) {
-            UIView *v = gDIISGlasses[i];
-            if (!v || !v.window || ![v isKindOfClass:DIMaskView.class]) continue;
-            CGFloat sc = 1.0;
-            if (active) {
-                float env = gDIBeatEnv, pulse = gDIBassPulse;
-                sc = 1.0 + 0.11 * (0.55 * env + 0.45 * pulse);
-                if (sc < 0.90) sc = 0.90;
-                if (sc > 1.13) sc = 1.13;
-            }
-            /* diPaintGlassAt 在稳定态会短路(1s 内画过就不再画), 所以 transform 必须
-               这边每帧自己写; fxScale 只是给"重新绘制那一帧"同步用, 免得它把值写回 1.0 */
-            DIMaskView *mv = (DIMaskView *)v;
-            mv.fxScale = sc;
-            if (fabs(mv.transform.a - sc) > 0.002 || fabs(mv.transform.d - sc) > 0.002) {
-                mv.transform = CGAffineTransformMakeScale(sc, sc);
-            }
-        }
-    } else if (gDIISBeatWasOn) {
-        /* 开关刚关掉: 复位一次, 别把专辑留在放大状态 */
-        gDIISBeatWasOn = NO;
-        for (int i = 0; i < gDIISGlassN; i++) diISBeatReset(gDIISGlasses[i]);
-    }
-
-    /* ---- 粒子 ---- */
-    if (!islandParticlesOn) {
-        if (gDIISParticleWasOn) {
-            gDIISParticleWasOn = NO;
-            diISResetDots();
-            if (gDIISDotLayer) gDIISDotLayer.opacity = 0.0f;
-        }
-        return;
-    }
-    gDIISParticleWasOn = YES;
-
-    if (gDIISDotHost != g || !gDIISDotLayer) {
-        [gDIISDotLayer removeFromSuperlayer];
-        gDIISDotLayer = nil;
-        gDIISDotHost = g;
-        CAShapeLayer *L = [CAShapeLayer layer];
-        L.name = @"DriftIslandFxDots";
-        L.fillColor = UIColor.whiteColor.CGColor;
-        L.strokeColor = UIColor.clearColor.CGColor;
-        L.zPosition = 6.0;
-        L.frame = g.bounds;
-        [g.layer addSublayer:L];
-        gDIISDotLayer = L;
-        diISResetDots();
-    }
-    if (!CGRectEqualToRect(gDIISDotLayer.frame, g.bounds)) gDIISDotLayer.frame = g.bounds;
-
-    CGPoint c = CGPointMake(CGRectGetMidX(g.bounds), CGRectGetMidY(g.bounds));
-    CGFloat R0 = MIN(g.bounds.size.width, g.bounds.size.height) * 0.5f;
-    if (R0 < 6.0) { gDIISDotLayer.opacity = 0.0f; return; }
-
-    /* 颜色跟着粒子那套配色(0.4s 刷一次, 流光模式下也能慢慢变) */
-    static CFAbsoluteTime sColT = 0;
-    CFAbsoluteTime nt = CACurrentMediaTime();
-    if (!gDIISDotCol || nt - sColT > 0.4) {
-        sColT = nt;
-        UIColor *ca = nil, *cb = nil;
-        diColorPalette(particleColorMode, nil, nil, gDIParticleColA, gDIParticleColB,
-                       gDIHuePhase, YES, &ca, &cb);
-        gDIISDotCol = ca;
-        [CATransaction begin];
-        [CATransaction setDisableActions:YES];
-        gDIISDotLayer.fillColor = ca.CGColor;
-        [CATransaction commit];
-    }
-
-    /* 生成: 能量越大冒得越密 */
-    float energy = active ? (0.20f + 0.70f * gDIBeatEnv + 0.95f * gDIBassPulse) : 0.0f;
-    if (energy > 0.02f) {
-        gDIISSpawn += dt * (9.0f + 26.0f * energy);
-        int guard = 0;
-        while (gDIISSpawn >= 1.0f && guard++ < 6) {
-            gDIISSpawn -= 1.0f;
-            int slot = -1;
-            for (int i = 0; i < DI_IS_DOT_MAX; i++) if (gDIISDots[i].life <= 0.0f) { slot = i; break; }
-            if (slot < 0) break;
-            DIISDot *d = &gDIISDots[slot];
-            d->ang = (float)arc4random_uniform(6283) / 1000.0f;
-            d->rad = (float)R0 - 0.5f;
-            d->spd = 3.0f + 7.5f * energy
-                   + (float)arc4random_uniform(400) / 100.0f;
-            d->size = 0.65f + 0.85f * (float)arc4random_uniform(1000) / 1000.0f;
-            d->maxLife = 0.55f + 0.50f * (float)arc4random_uniform(1000) / 1000.0f;
-            d->life = d->maxLife;
-            d->spin = ((float)arc4random_uniform(1000) / 1000.0f - 0.5f) * 2.2f;
-        }
-    }
-
-    CGMutablePathRef p = CGPathCreateMutable();
-    for (int i = 0; i < DI_IS_DOT_MAX; i++) {
-        DIISDot *d = &gDIISDots[i];
-        if (d->life <= 0.0f) continue;
-        d->life -= dt;
-        if (d->life <= 0.0f) continue;
-        d->rad += d->spd * dt;
-        d->ang += d->spin * dt;
-        float tt = d->life / d->maxLife;
-        float r = d->size * (0.25f + 0.75f * sqrtf(tt));
-        if (r < 0.20f) continue;
-        CGFloat x = c.x + cosf(d->ang) * d->rad;
-        CGFloat y = c.y + sinf(d->ang) * d->rad;
-        CGPathAddEllipseInRect(p, NULL, CGRectMake(x - r, y - r, r * 2.0f, r * 2.0f));
-    }
-    [CATransaction begin];
-    [CATransaction setDisableActions:YES];
-    gDIISDotLayer.path = p;
-    gDIISDotLayer.opacity = 1.0f;
-    [CATransaction commit];
-    CGPathRelease(p);
-}
 
 /* 暂停/停止时: 粒子全部清空、所有视觉层隐藏。
    注意粒子层下一帧会重新变可见(opacity 由 diFxUpdateDots 写), 所以清空用的是
