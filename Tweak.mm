@@ -20091,7 +20091,7 @@ static void diFxSpawnDot(UIView *host, CGRect cover, float energy) {
     sl.opacity = 0.0f;
 }
 
-static float diFxSmoothStep(float a, float b, float x) {
+static float __attribute__((unused)) diFxSmoothStep(float a, float b, float x) {
     if (b <= a) return x >= b ? 1.0f : 0.0f;
     float t = (x - a) / (b - a);
     if (t < 0.0f) t = 0.0f;
