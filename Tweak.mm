@@ -20107,6 +20107,11 @@ static void diFxUpdateDots(UIView *host, CGRect cover, float dt,
     int limit = rhythmParticleCount;
     if (limit < 0) limit = 0;
     if (limit > DI_DOT_CAP) limit = DI_DOT_CAP;
+    /* 3.0.95: existing particles follow the measured kick, not just spawn rate.
+       Strength affects the transient only; zero preserves natural drift/opacity. */
+    float beat = active ? fminf(1.0f, fmaxf(0.0f, gDIKick)) : 0.0f;
+    float strength = fminf(2.0f, fmaxf(0.0f, (float)rhythmParticleStrength));
+    float beatTarget = beat * strength;
     float alphaMul = (float)rhythmParticleAlpha;
     if (alphaMul < 0.0f) alphaMul = 0.0f;
     if (alphaMul > 1.6f) alphaMul = 1.6f;
@@ -20142,20 +20147,35 @@ static void diFxUpdateDots(UIView *host, CGRect cover, float dt,
         if (progress > 1.0f) progress = 1.0f;
         float fadeIn  = MIN(progress / 0.001f, 1.0f);
         float fadeOut = MIN(d->life / 0.72f, 1.0f);
-        float alpha = alphaMul * fadeIn * fadeOut;
+        float tau = beatTarget > d->beatGain ? 0.018f : 0.090f;
+        d->beatGain += (beatTarget - d->beatGain) * (1.0f - expf(-dt / tau));
+        if (strength <= 0.0f) d->beatGain = 0.0f;
+        float pulse = d->beatGain;
+        float alpha = alphaMul * fadeIn * fadeOut * (1.0f + 0.22f * pulse);
         if (alpha < 0.0f) alpha = 0.0f;
         if (alpha > 1.0f) alpha = 1.0f;
 
-        layer.position = CGPointMake(cx + cosf(d->ang) * d->rad,
-                                     cy + sinf(d->ang) * d->rad);
+        /* Offset is transient, never accumulated into drift: no speed runaway. */
+        float radialPulse = cover.size.width * 0.055f * pulse;
+        layer.position = CGPointMake(cx + cosf(d->ang) * (d->rad + radialPulse),
+                                     cy + sinf(d->ang) * (d->rad + radialPulse));
         layer.opacity = alpha;
-        float sc = 0.72f + 0.48f * progress;
+        float sc = (0.72f + 0.48f * progress) * (1.0f + 0.60f * pulse);
         CATransform3D tr = CATransform3DMakeRotation(d->rot, 0, 0, 1);
         layer.transform = CATransform3DScale(tr, sc, sc, 1.0f);
         alive++;
     }
     gDIDotCount = alive;
     [CATransaction commit];
+    static CFTimeInterval particleProbeAt = 0;
+    static float particlePeak = 0;
+    particlePeak = fmaxf(particlePeak, beatTarget);
+    CFTimeInterval probeNow = CACurrentMediaTime();
+    if (active && probeNow - particleProbeAt >= 2.0) {
+        RLog(@"[粒子鼓点] 存活=%d 强度=%.2f 两秒峰值=%.3f 缩放增益=%.3f 径向增益=%.2fpt", alive, strength, particlePeak, 0.60f*particlePeak, cover.size.width*0.055f*particlePeak);
+        particleProbeAt = probeNow;
+        particlePeak = 0;
+    }
 }
 
 /* ===== 3.0.92: 环能量 —— FlexMusic 的 energy 通道 =====
