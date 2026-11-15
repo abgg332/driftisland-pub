@@ -1028,7 +1028,7 @@ static void diFxLoadPrefs(void) {
     /* 3.0.43/3.0.46/3.0.66: 专辑律动 / 环 / 粒子 —— 全部按当前播放器尺寸读 */
     rhythmFxOn = fxBool(@"AlbumEffectsOn", YES);
     rhythmOn = fxBool(@"AlbumRhythmOn", YES);
-    rhythmRingOn = fxBool(@"AlbumRingOn", YES);
+    rhythmRingOn = NO; /* retired at user request */
     rhythmParticlesOn = fxBool(@"AlbumParticlesOn", YES);
     rhythmStrength = fxDouble(@"AlbumRhythmStrength", 0.90);
     if (rhythmStrength > 3.0) rhythmStrength /= 100.0;   /* 兼容 3.0.43 的百分数 */
@@ -19458,6 +19458,7 @@ static BOOL gDIRhythmDriving = NO;     /* 上一帧我们是否在写 transform(
    gDIBassPulse 的上升沿 —— 两个信号不同步, 看着就是"各动各的"。
    现在两处都只看这一个 gDIKick: 低频(3.0.68 起只看 60~140Hz 底鼓基频)的**起音前沿**
    → 跳到 0~1 → 170ms 衰减。 */
+static float diSharedVisualPulse=0;
 static float gDIKick = 0.0f;           /* 视觉包络: 3.0.74 起由统一顺滑包络推进(45ms 顶/170ms 落) */
 static float gDIKickTarget = 0.0f;     /* 3.0.74: 本次咚的目标强度 */
 static CFTimeInterval gDIKickAtkT = 0; /* 3.0.74: 起音时刻(45ms 趋近窗口) */
@@ -20123,7 +20124,7 @@ static void diFxUpdateDots(UIView *host, CGRect cover, float dt,
     if (limit > DI_DOT_CAP) limit = DI_DOT_CAP;
     /* 3.0.95: existing particles follow the measured kick, not just spawn rate.
        Strength affects the transient only; zero preserves natural drift/opacity. */
-    float beat = active ? fminf(1.0f, fmaxf(0.0f, gDIKick)) : 0.0f;
+    float beat = active ? diSharedVisualPulse : 0.0f;
     float strength = fminf(2.0f, fmaxf(0.0f, (float)rhythmParticleStrength));
     float beatTarget = beat * strength;
     float alphaMul = (float)rhythmParticleAlpha;
@@ -20161,10 +20162,8 @@ static void diFxUpdateDots(UIView *host, CGRect cover, float dt,
         if (progress > 1.0f) progress = 1.0f;
         float fadeIn  = MIN(progress / 0.001f, 1.0f);
         float fadeOut = MIN(d->life / 0.72f, 1.0f);
-        float tau = beatTarget > d->beatGain ? 0.018f : 0.090f;
-        d->beatGain += (beatTarget - d->beatGain) * (1.0f - expf(-dt / tau));
-        if (strength <= 0.0f) d->beatGain = 0.0f;
-        float pulse = d->beatGain;
+        d->beatGain = beatTarget;
+        float pulse = beatTarget;
         float alpha = alphaMul * fadeIn * fadeOut * (1.0f + 0.22f * pulse);
         if (alpha < 0.0f) alpha = 0.0f;
         if (alpha > 1.0f) alpha = 1.0f;
@@ -20293,7 +20292,7 @@ static void diFxAdvanceEnergy(BOOL active, BOOL real, float dt) {
    停用: baseline×0.92、pulse×0.72、desired=1; 距 1 小于 0.0005 时精确归位。
    它是"相对基线的能量瞬态", 不是 BPM/底鼓识别 —— 这正是参考实现的手感来源。
    3.0.93: 公式一个字没改, 只把输入 E 换成 gDIFxBeatE(见上), 并补探针。 */
-static float diFxAdvanceBeat(BOOL active, float energy, double strengthSlider, float dt) {
+static float __attribute__((unused)) diFxAdvanceBeat(BOOL active, float energy, double strengthSlider, float dt) {
     float step = dt * 60.0f;
     if (step <= 0.0f) return gDIFxBeatScale;
     float desired;
@@ -21635,7 +21634,7 @@ static void diFxHardStop(void) {
    岛专辑特效在 MediaRemoteUI 进程里跑, 它自己连频谱端当然也能算, 但那样就是"另一份
    包络、另一个鼓点", 和播放器不可能严丝合缝。这里把**已经在算的**这一份(gDIKick/
    gDIBeatEnv/gDIBassPulse)30Hz 落成 24 字节, MRU 直接读 —— 岛上和播放器永远是同一拍。 */
-typedef struct { double t; float kick, env, bass, playing; } DIBeatSnapOut;
+typedef struct { double t; float kick, env, bass, playing, energy; } DIBeatSnapOut;
 static void diISPublishBeat(BOOL playing) {
     static int fd = -2;
     static CFAbsoluteTime lastTry = 0, lastW = 0;
@@ -21656,10 +21655,11 @@ static void diISPublishBeat(BOOL playing) {
     DIBeatSnapOut sn;
     memset(&sn, 0, sizeof sn);
     sn.t = now;
-    sn.kick = playing ? gDIKick : 0.0f;
+    sn.kick = playing ? diSharedVisualPulse : 0.0f;
     sn.env = playing ? gDIBeatEnv : 0.0f;
     sn.bass = playing ? gDIBassPulse : 0.0f;
     sn.playing = playing ? 1.0f : 0.0f;
+    sn.energy = playing ? gDIFxEnergy : 0.0f;
     pwrite(fd, &sn, sizeof sn, 0);
 }
 
@@ -21868,17 +21868,18 @@ static void diRhythmTickWithDelta(float dtIn) {
     gDIClock += dt;
 
     diRhythmAdvanceSpectrum(active, real, dt);
-    diISPublishBeat(active);   /* 3.0.87: 同一份鼓点交给 MRU 的岛专辑特效 */
+
 
     /* ===== 3.0.92: FlexMusic 那套「环能量 + 专辑鼓点包络」只驱动播放器这边 =====
        能量: 24 段原始频谱 → 快升(0.46+0.10·target)慢落(0.12) → 均值 E。
        鼓点: E 的相对基线瞬态(baseline/excess) → pulse → 1+min(0.22, pulse·0.095·强度)。
        岛(MRU)那条链路仍然读 gDIKick/beat.bin, 一行没动。 */
     diFxAdvanceEnergy(active, real, dt);
-    /* 3.0.93: 喂给包络的是 gDIFxBeatE(低频局部归一 + 底鼓包络取大),
-       不再是 24 段均值 —— 均值太平, 包络全流程输出 1.008, 等于没接。 */
-    float fxBeatS = diFxAdvanceBeat(active && rhythmOn && rhythmBeatScale > 0.01,
-                                    gDIFxBeatE, rhythmBeatScale, dt);
+    float pulseTarget=active?fminf(1,fmaxf(0,gDIKick)):0;
+    float pulseTau=pulseTarget>diSharedVisualPulse?0.018f:0.090f;
+    diSharedVisualPulse+=(pulseTarget-diSharedVisualPulse)*(1-expf(-dt/pulseTau));
+    diISPublishBeat(active);
+    float fxBeatS=1+fminf(0.22f,0.20f*(float)rhythmBeatScale*diSharedVisualPulse);
 
     if (!gDIFxRealLogged && active && real && gDIBandSeen) {
         gDIFxRealLogged = YES;
@@ -22106,6 +22107,7 @@ static CAShapeLayer *gDIISMDotLayer[DI_IS_DOT_MAX];
 static float gDIISSpawnAcc = 0.0f;
 static int gDIISMDotCount = 0;
 static float gDIISMKick = 0.0f;
+static float diIslandEnergy=0;
 static float gDIISMScaleNow = 1.0f;
 static float gDIISMClock = 0.0f;
 static CFAbsoluteTime gDIISMParamsAt = 0;
@@ -22139,7 +22141,7 @@ static float diISMRand01(void) {
 }
 
 /* ---------- 鼓点快照: SB 写 beat.bin, 这里读 ---------- */
-typedef struct { double t; float kick, env, bass, playing; } DIBeatSnap;
+typedef struct { double t; float kick, env, bass, playing, energy; } DIBeatSnap;
 static int gDIISMBeatFd = -2;
 static CFAbsoluteTime gDIISMBeatTryAt = 0;
 static DIBeatSnap gDIISMBeatSnap;
@@ -22166,7 +22168,7 @@ static BOOL diISMRUReadBeat(void) {
 }
 
 /* ---------- 形状(与播放器 diFxShapePath 同款) ---------- */
-static CGPathRef diISMShapePath(int shape, CGFloat s2) {
+static CGPathRef __attribute__((unused)) diISMShapePath(int shape, CGFloat s2) {
     CGMutablePathRef p = CGPathCreateMutable();
     CGFloat h = s2 * 0.5f;
     CGFloat in2 = MAX(0.55f, s2 * 0.12f);
@@ -22271,14 +22273,14 @@ static void diISMRURefreshColors(BOOL force) {
    现在退回头像所在的子树, 只挑一个**不裁剪**的祖先(通常就是 MRUActivityAccessoryView):
    宿主自己的框比它大很多, 粒子就能画到岛外去; 裁剪由祖先决定, 挑不裁剪的那个容器
    等于把"裁在胶囊里"这条也去掉了。 */
-static BOOL diISMClips(UIView *v) {
+static BOOL __attribute__((unused)) diISMClips(UIView *v) {
     return v ? (v.layer.masksToBounds || v.clipsToBounds) : NO;
 }
 /* 3.0.91: 就挂在头像的父视图里(3.0.87 的位置, 已验证可见)。
    不再往上爬 —— 往上爬会走到窗体一级, 那正是 3.0.89/90 "粒子数有、屏幕没有"
    和"粒子跑到展开页"的来源。 */
 static UIView *diISMHostParent(UIView *art) {
-    return art.superview ?: art;
+    return art.window; /* bypass clipping capsule ancestors without changing them */
 }
 
 static void diISMEnsureHost(void) {
@@ -22286,10 +22288,11 @@ static void diISMEnsureHost(void) {
     if (!art) return;
     UIView *parent = diISMHostParent(art);
     if (!parent) return;
-    CGRect box = art.frame;
+    CGRect box = [art convertRect:art.bounds toView:parent];
     /* 比 87 的 0.6 倍大一圈: 粒子能飘出小岛, 但宿主仍贴着头像, 不会跑到展开页 */
     CGFloat pad = MAX(box.size.width, box.size.height) * 1.6 + 10.0;
-    CGRect want = CGRectInset(box, -pad, -pad);
+    (void)pad; (void)box;
+    CGRect want = parent.bounds;
     if (gDIISMHost && gDIISMHost.superview == parent) {
         if (!CGRectEqualToRect(gDIISMHost.frame, want)) gDIISMHost.frame = want;
         /* 玻璃/系统层随时可能挤到前面: 每帧把粒子层顶回去(只是改 zPosition, 不动布局) */
@@ -22333,27 +22336,15 @@ static void diISMSpawnDot(void) {
     if (k > 1.15f) k = 1.15f;
 
     DIISMDot *d = &gDIISMDots[slot];
-    d->ang = diISMRand01() * 6.2831853f;
-    /* 出生点 1.02~1.12R: 贴着专辑边, 一出门就能看见(和播放器一致) */
-    d->rad = (float)R * (1.02f + diISMRand01() * 0.10f);
-    d->drift = (3.5f + diISMRand01() * 3.5f) * k;
-    d->push = 0.0f;
-    d->sway = 0.30f + diISMRand01() * 0.45f;
-    d->swayAmp = (0.6f + diISMRand01() * 1.4f) * k;
-    d->swayPhase = diISMRand01() * 6.2831853f;
-    int sh = (int)arc4random_uniform(10);
-    d->shape = (sh < 4) ? 0 : (sh < 6 ? 1 : (sh < 8 ? 2 : 3));
-    float base = (d->shape == 0) ? (2.4f + diISMRand01() * 1.8f)
-                                 : (4.2f + diISMRand01() * 2.6f);
-    d->size = base * k * (float)gDIISMDotS;
-    if (d->size < 1.0f) d->size = 1.0f;
-    d->rot = diISMRand01() * 6.2831853f;
-    d->rotSpd = (diISMRand01() - 0.5f) * 0.30f;
-    d->maxLife = 8.0f + diISMRand01() * 6.0f;      /* 8~14s, 和播放器一样慢 */
-    d->life = d->maxLife;
-    d->phase = diISMRand01() * 6.2831853f;
-    d->tint = diISMRand01();
-    d->beatGain = 0.65f + diISMRand01() * 0.70f;
+    float u1=diISMRand01(),u2=diISMRand01(),u3=diISMRand01();
+    d->ang=2*M_PI*u1; d->rad=(31.5f+2.5f*u2)*k;
+    d->drift=(5+7*u3+4*diIslandEnergy)*k;
+    d->push=0; d->sway=0; d->swayAmp=0;
+    d->shape=arc4random_uniform(4);
+    d->size=diFxShapeSide(d->shape)*k*(float)gDIISMDotS;
+    d->rot=2*M_PI*u2; d->rotSpd=(u1-0.5f)*1.4f;
+    d->maxLife=1.9f+1.4f*u3; d->life=d->maxLife;
+    d->tint=diISMRand01(); d->beatGain=0;
 
     CAShapeLayer *L = gDIISMDotLayer[slot];
     if (!L) {
@@ -22364,19 +22355,19 @@ static void diISMSpawnDot(void) {
         if (gDIISMHost) [gDIISMHost.layer addSublayer:L];
     }
     CGFloat sz = d->size;
-    L.bounds = CGRectMake(0, 0, sz, sz);
-    CGPathRef path = diISMShapePath(d->shape, sz);
+    L.bounds = CGRectMake(-sz/2, -sz/2, sz, sz);
+    CGPathRef path = diFxShapePath(d->shape, k*(float)gDIISMDotS);
     L.path = path;
     CGPathRelease(path);
     UIColor *tint = diFxParticleColorBetween(gDIISMColA, gDIISMColB, d->tint);
-    if (d->shape == 0) {
+    if (d->shape == 2) {
         L.fillColor = tint.CGColor;
         L.strokeColor = UIColor.clearColor.CGColor;
         L.lineWidth = 0.0f;
     } else {
         L.fillColor = UIColor.clearColor.CGColor;
         L.strokeColor = tint.CGColor;
-        L.lineWidth = MAX(0.6f, 1.2f * k);
+        L.lineWidth = diFxShapeLine(d->shape)*k*(float)gDIISMDotS;
     }
     L.lineJoin = kCALineJoinRound;
     gDIISMDotCount++;
@@ -22400,7 +22391,7 @@ static void diISMUpdateDots(CGRect cover, float dt, BOOL active) {
     CGFloat cx = CGRectGetMidX(cover);
     CGFloat cy = CGRectGetMidY(cover);
     CGFloat Rc = cover.size.width * 0.5f;
-    CGFloat W = host.bounds.size.width, H = host.bounds.size.height;
+
     if (Rc < 4.0f) return;
     float stg = (float)gDIISMDotP;
     [CATransaction begin];
@@ -22418,46 +22409,16 @@ static void diISMUpdateDots(CGRect cover, float dt, BOOL active) {
             if (gDIISMDotCount > 0) gDIISMDotCount--;
             continue;
         }
-        d->push *= expf(-dt / 0.32f);
-        d->rad += (d->drift + d->push) * dt;
-        float swayV = sinf(gDIISMClock * d->sway + d->swayPhase) * d->swayAmp;
-        d->ang += (swayV / MAX(8.0f, d->rad)) * dt;
-        d->rot += d->rotSpd * dt;
-
-        CGFloat ca = cosf(d->ang), sa = sinf(d->ang);
-        CGFloat edgePad = Rc * 0.25f;
-        CGFloat tx = (ca > 0.02f) ? (W + edgePad - 4.0f - cx) / ca
-                                  : ((ca < -0.02f) ? (-edgePad + 4.0f - cx) / ca : 1e9f);
-        CGFloat ty = (sa > 0.02f) ? (H + edgePad - 4.0f - cy) / sa
-                                  : ((sa < -0.02f) ? (-edgePad + 4.0f - cy) / sa : 1e9f);
-        CGFloat dirMax = MIN(tx, ty);
-        /* 3.0.90: 2.15R → 4.60R —— 用户要求粒子能飘到岛外面去。
-           23pt 头像 R=11.5, 4.6R≈53pt, 已经越过小岛胶囊(高 52)的边界。 */
-        if (dirMax > Rc * 4.60f) dirMax = Rc * 4.60f;
-        if (dirMax < Rc * 1.15f) dirMax = Rc * 1.15f;
-        if (d->rad > dirMax) {
-            d->rad = dirMax;
-            d->drift = 0.0f;
-            if (d->life > 0.30f) d->life = 0.30f;
-        }
-
-        float age = d->maxLife - d->life;
-        float fadeIn = diFxSmoothStep(0.0f, 0.80f, age);
-        float fadeOut = diFxSmoothStep(0.0f, d->maxLife * 0.25f, d->life);
-        float edgeOut = 1.0f - diFxSmoothStep((float)dirMax * 0.90f, (float)dirMax, d->rad);
-        float tw = 0.86f + 0.14f * sinf(d->phase + gDIISMClock * 0.9f);
-        float kg = gDIISMKick * stg * d->beatGain;
-        float bright = 0.78f + 0.20f * kg;
-        float alpha = bright * fadeIn * fadeOut * edgeOut * tw * (float)gDIISMDotA;
-        if (alpha < 0.05f) alpha = 0.05f;
-        if (alpha > 0.96f) alpha = 0.96f;
-
-        float jx = 1.2f * sinf(d->phase * 3.1f + gDIISMClock * 5.3f);
-        float jy = 1.2f * cosf(d->phase * 2.3f + gDIISMClock * 4.7f);
-        L.position = CGPointMake(cx + ca * d->rad + jx, cy + sa * d->rad + jy);
-        L.opacity = alpha;
-        float pulse = (1.0f + 0.030f * sinf(d->phase * 1.7f + gDIISMClock * 0.7f))
-                      * (1.0f + 0.45f * kg);
+        d->rad+=d->drift*dt;
+        d->rot+=d->rotSpd*dt;
+        float progress=fminf(1,fmaxf(0,1-d->life/MAX(d->maxLife,0.16f)));
+        float pulseGain=active?gDIISMKick*fminf(2,fmaxf(0,stg)):0;
+        d->beatGain=pulseGain;
+        float fade=fminf(progress/0.001f,1)*fminf(d->life/0.72f,1);
+        L.opacity=fminf(1,fmaxf(0,(float)gDIISMDotA*fade*(1+0.22f*pulseGain)));
+        float radius=d->rad+cover.size.width*0.055f*pulseGain;
+        L.position=CGPointMake(cx+cosf(d->ang)*radius,cy+sinf(d->ang)*radius);
+        float pulse=(0.72f+0.48f*progress)*(1+0.60f*pulseGain);
         CATransform3D tr = CATransform3DMakeRotation(d->rot, 0, 0, 1);
         L.transform = CATransform3DScale(tr, pulse, pulse, 1.0f);
     }
@@ -22475,9 +22436,7 @@ static void diISMApplyScale(float kick, BOOL on) {
        布局、frame、形态判定一行都不用改。 */
     UIView *v = gDIISMArt;
     if (!v) { gDIISMScaleNow = 1.0f; return; }
-    CGFloat s = on ? (1.0 + 0.20 * gDIISMAmp * kick) : 1.0;
-    if (s < 1.0) s = 1.0;
-    if (s > 1.22) s = 1.22;
+    CGFloat s=on ? 1+fminf(0.22f,0.20f*(float)gDIISMAmp*kick) : 1;
     if (s <= 1.0015) {
         gDIISMScaleNow = 1.0f;
         if ([v.layer animationForKey:@"di.isl.beat"]) {
@@ -22491,12 +22450,12 @@ static void diISMApplyScale(float kick, BOOL on) {
     if (fabs(s - gDIISMScaleNow) < 0.0015) return;
     gDIISMScaleNow = (float)s;
     CABasicAnimation *a = [CABasicAnimation animationWithKeyPath:@"transform.scale"];
-    a.additive = YES;
-    a.fromValue = @(0.0f);
-    a.toValue = @(s - 1.0);
-    a.duration = 0.10;
-    a.timingFunction = [CAMediaTimingFunction functionWithName:kCAMediaTimingFunctionEaseOut];
-    a.removedOnCompletion = YES;
+    /* Hold the exact shared pulse on presentation scale without a second easing stage. */
+    a.additive = NO;
+    a.fromValue = @(s); a.toValue = @(s);
+    a.duration = 1.0/60.0;
+    a.fillMode = kCAFillModeForwards;
+    a.removedOnCompletion = NO;
     [v.layer addAnimation:a forKey:@"di.isl.beat"];
 }
 
@@ -22660,6 +22619,7 @@ static void diISMRUFrame(float dtIn) {
         gDIISMBeatEver = YES;
         playing = (gDIISMBeatSnap.playing > 0.5f);
         kick = gDIISMBeatSnap.kick;
+        diIslandEnergy=gDIISMBeatSnap.energy;
     } else if (gDIISMBeatEver) {
         /* 3.0.88: beat.bin 读到过 = SpringBoard 那份引擎在管播放态; 现在读不到/过期
            = 它自己停了(暂停、切走、挂了)。**不能**退回"自己连 41235"那条:
@@ -22672,7 +22632,12 @@ static void diISMRUFrame(float dtIn) {
         BOOL real = diAuAlive();
         diRhythmAdvanceSpectrum(real, real, dt);
         playing = real;
-        kick = real ? gDIKick : 0.0f;
+        diFxAdvanceEnergy(real,real,dt);
+        diIslandEnergy=gDIFxEnergy;
+        float target=real?gDIKick:0;
+        float tau=target>diSharedVisualPulse?0.018f:0.090f;
+        diSharedVisualPulse+=(target-diSharedVisualPulse)*(1-expf(-dt/tau));
+        kick=diSharedVisualPulse;
     }
     if (kick < 0.0f) kick = 0.0f;
     if (kick > 1.0f) kick = 1.0f;
@@ -22705,13 +22670,9 @@ static void diISMRUFrame(float dtIn) {
         diISMRURefreshColors(NO);
         int want = (int)gDIISMDotN;
         if (want > DI_IS_DOT_MAX) want = DI_IS_DOT_MAX;
-        if (gDIISMDotCount < want) {
-            gDIISSpawnAcc += (float)(want - gDIISMDotCount) * 0.55f * dt;
-            int guard = 0;
-            while (gDIISSpawnAcc >= 1.0f && gDIISMDotCount < want && guard++ < 6) {
-                gDIISSpawnAcc -= 1.0f;
-                diISMSpawnDot();
-            }
+        if (gDIISMDotCount < want && diIslandEnergy>=0.08f) {
+            float p60=fminf(0.4f,0.035f+0.30f*diIslandEnergy);
+            if(diISMRand01()<1-powf(1-p60,dt*60))diISMSpawnDot();
         }
         CGRect cover = gDIISMHost ? [art convertRect:art.bounds toView:gDIISMHost] : CGRectZero;
         if (cover.size.width < 4.0) cover = CGRectMake(66.0, 46.0, art.bounds.size.width, art.bounds.size.height);
@@ -22723,7 +22684,7 @@ static void diISMRUFrame(float dtIn) {
     if (nowC - gDIISMProbeAt > 3.0) {
         gDIISMProbeAt = nowC;
         diMruFileLog([NSString stringWithFormat:
-            @"岛特效探针 头像=%.0fx%.0f 文件=%d 播放=%d 鼓=%.2f 缩放=%.3f 粒子=%d 宿主=%@ 曾在=%@",
+            @"岛特效同步探针 窗口外飘=1 头像=%.0fx%.0f 文件=%d 播放=%d 鼓=%.2f 缩放=%.3f 粒子=%d 宿主=%@ 曾在=%@",
             art.bounds.size.width, art.bounds.size.height, (int)fromFile,
             (int)playing, kick, gDIISMScaleNow, gDIISMDotCount,
             gDIISMHost ? NSStringFromClass(gDIISMHost.superview.class) : @"无",

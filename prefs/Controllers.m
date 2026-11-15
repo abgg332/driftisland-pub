@@ -5414,7 +5414,7 @@ static void diOpenHomeBarPickWindow(void) {
        键全部用 Island 前缀, 与播放器那套(Album/Particle)互不影响。
        参数由 SpringBoard 1Hz 落盘 fx.plist 交给 MediaRemoteUI(它读不到偏好)。 */
     [specs addObject:[self groupSpec:@"专辑律动"
-                              footer:@"作用于岛上那颗专辑头像，与「播放器 → 律动特效」互不影响。默认关闭。"]];
+                              footer:@"作用于岛上专辑头像；粒子与头像使用同一鼓点相位，幅度分别可调。粒子挂载窗口层，可飘出岛外。默认关闭。"]];
     [specs addObject:[self switchSpec:@"启用律动特效" key:@"IslandFxOn" def:@NO]];
     [specs addObject:[self switchSpec:@"专辑跟随律动" key:@"IslandBeatOn" def:@NO]];
     [specs addObject:[self numSliderD:@"专辑律动幅度" key:@"IslandBeatScale" def:0.70 mn:0.00 mx:2.00]];
@@ -6738,16 +6738,6 @@ static NSString *diBarStyleLabel(int s) {
     [specs addObject:[self switchSpec:@"启用专辑进度环" key:diFxSizedKey(@"ArtworkProgressRingEnabled") def:@NO]];
     [specs addObject:[self npSlider:@"进度环宽度" key:diFxSizedKey(@"ArtworkRingWidth") def:3.0 mn:0.5 mx:10.0]];
     [specs addObject:[self fxColorSpec:@"进度环颜色" key:diFxSizedKey(@"ArtworkRingColor") def:@"#BFCDBA" modeKey:diFxSizedKey(@"ProgressRingColorMode")]];
-
-    [specs addObject:[self groupSpec:@"律动专辑环" footer:@"72段真实音频频谱控制刻度长度；颜色与粒子独立。"]];
-    [specs addObject:[self switchSpec:@"启用律动专辑环" key:diFxSizedKey(@"AlbumRingOn") def:@YES]];
-    [specs addObject:[self npSlider:@"律动强度" key:diFxSizedKey(@"AlbumRhythmStrength") def:0.90 mn:0.30 mx:2.50]];
-    [specs addObject:[self npSlider:@"刻度粗细" key:diFxSizedKey(@"AlbumRingWidth2") def:2.20 mn:0.80 mx:8.00]];
-    [specs addObject:[self npSlider:@"环透明度" key:diFxSizedKey(@"RhythmRingFollowAlpha") def:1.0 mn:0.1 mx:1.0]];
-    [specs addObject:[self modeSpec:@"颜色来源" key:diFxSizedKey(@"RingColorMode")]];
-    [specs addObject:[self fxColorSpec:@"渐变起始色" key:diFxSizedKey(@"AlbumColorA") def:@"#E59971" modeKey:diFxSizedKey(@"RingColorMode")]];
-    [specs addObject:[self fxColorSpec:@"渐变结束色" key:diFxSizedKey(@"AlbumColorB") def:@"#948FFF" modeKey:diFxSizedKey(@"RingColorMode")]];
-    [specs addObject:[self fxFlowSpec:@"环流光" key:diFxSizedKey(@"RingFlowOn")]];
 
     [specs addObject:[self groupSpec:@"律动粒子" footer:nil]];
     [specs addObject:[self switchSpec:@"启用律动粒子" key:diFxSizedKey(@"AlbumParticlesOn") def:@YES]];
