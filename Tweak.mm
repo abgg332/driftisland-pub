@@ -21799,8 +21799,34 @@ static void diRhythmTickWithDelta(float dtIn) {
         return;
     }
 
-    /* 3.0.56: 环下线后这里不再需要"颜色变了就重建" —— 粒子换色走 diFxRefreshColors,
-       频谱条换色自己比字符串, 重建只会让特效闪一下。 */
+    /* 3.0.97: reconcile the ring independently; do not detach working particles,
+       progress ring or artwork transforms when toggling a spectrum preference. */
+    if (!rhythmRingOn && gDIRhythmRingBox) {
+        [gDIRhythmRingBox removeFromSuperlayer];
+        gDIRhythmRingBox=nil; gDIRhythmRingGrad=nil;
+        gDIRhythmRingMask=nil; gDIRhythmRingBack=nil;
+        gDIRhythmRingFrame=CGRectZero;
+    }
+    if (rhythmRingOn && gDIRhythmHost) {
+        if (gDIRhythmRingBox && gDIRhythmRingBox.superlayer != gDIRhythmHost.layer) {
+            [gDIRhythmRingBox removeFromSuperlayer];
+            gDIRhythmRingBox=nil;
+        }
+        UIColor *ringA=nil, *ringB=nil;
+        diColorPalette(ringColorMode, rhythmColorA, rhythmColorB,
+            [UIColor colorWithRed:0.898 green:0.600 blue:0.443 alpha:1],
+            [UIColor colorWithRed:0.580 green:0.561 blue:1 alpha:1],
+            gDIHuePhase, NO, &ringA, &ringB);
+        if (!gDIRhythmRingBox) {
+            diRhythmBuildRing(gDIRhythmHost, ringA, ringB);
+            RLog(@"[专辑环] 已创建 host=%@ 开关=%d", NSStringFromClass(gDIRhythmHost.class), rhythmRingOn);
+        }
+        gDIRhythmRingGrad.colors=@[(__bridge id)ringA.CGColor,
+            (__bridge id)ringB.CGColor,(__bridge id)ringA.CGColor];
+        gDIRhythmRingBack.strokeColor=ringA.CGColor;
+        gDIRhythmRingBox.hidden=NO;
+        gDIRhythmRingBox.opacity=1;
+    }
 
     /* 流光: 色相每 0.1s 推一点(约 100 秒一圈) */
     if (ringColorMode == 2 || particleColorMode == 2 || spectrumColorMode == 2) {
@@ -22006,6 +22032,13 @@ static void diRhythmTickWithDelta(float dtIn) {
         gDIRhythmRingGrad.opacity = baseA * (float)rhythmRingFollowAlpha;
         if (gDIRhythmRingBack) gDIRhythmRingBack.opacity = active ? 0.18f : 0.0f;
         [CATransaction commit];
+        static CFTimeInterval ringProbeAt=0;
+        CFTimeInterval ringNow=CACurrentMediaTime();
+        if (ringNow-ringProbeAt>=3.0) {
+            ringProbeAt=ringNow;
+            CGRect pathBox=gDIRhythmRingMask.path ? CGPathGetBoundingBox(gDIRhythmRingMask.path) : CGRectZero;
+            RLog(@"[专辑环] 开=%d 播=%d 挂载=%d 隐=%d 透明=%.2f 框=%@ 路径=%@ 宿主裁剪=%d 能=%.3f", rhythmRingOn, active, gDIRhythmRingBox.superlayer==host.layer, gDIRhythmRingBox.hidden, gDIRhythmRingGrad.opacity, NSStringFromCGRect(gDIRhythmRingBox.frame), NSStringFromCGRect(pathBox), host.clipsToBounds, gDIFxEnergy);
+        }
     }
 
     /* 3.0.56: 粒子不再跟鼓点(用户要求"不受鼓点影响"), 自然补充、自然消失 */
