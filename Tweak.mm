@@ -19829,32 +19829,58 @@ static float gDISpawnAcc = 0.0f;
 
 static float diFxRand01(void) { return (float)((double)arc4random() / (double)UINT32_MAX); }
 
-static CGPathRef diFxShapePath(int shape, CGFloat s) {
-    CGMutablePathRef p = CGPathCreateMutable();
-    CGFloat h = s * 0.5f, in2 = 1.1f;
+/* ===== 3.0.92: 形状换成 FlexMusic 1.1.6 逆向后逐点还原的那四种 =====
+   style%4: 0 空心三角 / 1 空心菱形 / 2 实心圆 / 3 空心四角星。
+   坐标、线宽都是它二进制里的原始值(三角 6.6x6.6、菱形 6.2x8.0、圆 ⌀4.9、
+   星 9.2x9.2; 线宽 1.15/1.10/0.70/0.95), 再乘用户「粒子大小」倍率。
+   以前那套是自己的画法(实心点/方块/三角), 观感跟参考实现不是一回事。 */
+static CGFloat diFxShapeSide(int shape) {
     switch (shape) {
-        case 1: {
-            CGFloat r = h - in2;
-            CGPathMoveToPoint(p, NULL, 0, -r);
-            CGPathAddLineToPoint(p, NULL, r * 0.72f, 0);
-            CGPathAddLineToPoint(p, NULL, 0, r);
-            CGPathAddLineToPoint(p, NULL, -r * 0.72f, 0);
+        case 1:  return 8.0f;    /* 菱形: 高 8.0 */
+        case 2:  return 4.9f;    /* 圆: ⌀4.9 */
+        case 3:  return 9.2f;    /* 四角星: ±4.6 */
+        default: return 6.6f;    /* 三角: 高 6.6 */
+    }
+}
+static CGFloat diFxShapeLine(int shape) {
+    switch (shape) {
+        case 1:  return 1.10f;
+        case 2:  return 0.70f;
+        case 3:  return 0.95f;
+        default: return 1.15f;
+    }
+}
+static CGPathRef diFxShapePath(int shape, CGFloat m) {
+    CGMutablePathRef p = CGPathCreateMutable();
+    if (m < 0.05f) m = 0.05f;
+    switch (shape) {
+        case 1:   /* 菱形: (0,-4) → (3.1,0) → (0,4) → (-3.1,0) */
+            CGPathMoveToPoint(p, NULL, 0.0f, -4.0f * m);
+            CGPathAddLineToPoint(p, NULL, 3.1f * m, 0.0f);
+            CGPathAddLineToPoint(p, NULL, 0.0f, 4.0f * m);
+            CGPathAddLineToPoint(p, NULL, -3.1f * m, 0.0f);
             CGPathCloseSubpath(p);
             break;
-        }
-        case 2:
-            CGPathAddRect(p, NULL, CGRectMake(-h + in2, -h + in2, s - in2 * 2, s - in2 * 2));
+        case 2:   /* 实心圆: rect(-2.45,-2.45,4.9,4.9) */
+            CGPathAddEllipseInRect(p, NULL,
+                CGRectMake(-2.45f * m, -2.45f * m, 4.9f * m, 4.9f * m));
             break;
-        case 3: {
-            CGFloat r = h - in2;
-            CGPathMoveToPoint(p, NULL, 0, -r);
-            CGPathAddLineToPoint(p, NULL, r * 0.88f, r * 0.66f);
-            CGPathAddLineToPoint(p, NULL, -r * 0.88f, r * 0.66f);
+        case 3:   /* 四角星: 外尖 ±4.6 / 内尖 ±1.15 */
+            CGPathMoveToPoint(p, NULL, 0.0f, -4.6f * m);
+            CGPathAddLineToPoint(p, NULL, 1.15f * m, -1.15f * m);
+            CGPathAddLineToPoint(p, NULL, 4.6f * m, 0.0f);
+            CGPathAddLineToPoint(p, NULL, 1.15f * m, 1.15f * m);
+            CGPathAddLineToPoint(p, NULL, 0.0f, 4.6f * m);
+            CGPathAddLineToPoint(p, NULL, -1.15f * m, 1.15f * m);
+            CGPathAddLineToPoint(p, NULL, -4.6f * m, 0.0f);
+            CGPathAddLineToPoint(p, NULL, -1.15f * m, -1.15f * m);
             CGPathCloseSubpath(p);
             break;
-        }
-        default:
-            CGPathAddEllipseInRect(p, NULL, CGRectMake(-h, -h, s, s));
+        default:  /* 三角: (0,-3.8) → (3.3,2.8) → (-3.3,2.8) */
+            CGPathMoveToPoint(p, NULL, 0.0f, -3.8f * m);
+            CGPathAddLineToPoint(p, NULL, 3.3f * m, 2.8f * m);
+            CGPathAddLineToPoint(p, NULL, -3.3f * m, 2.8f * m);
+            CGPathCloseSubpath(p);
             break;
     }
     return p;
@@ -19966,78 +19992,79 @@ static UIColor *diFxParticleColorBetween(UIColor *a, UIColor *b, float t) {
                            alpha:1.0];
 }
 
-static void diFxSpawnDot(UIView *host, CGRect cover, float maxRad) {
+/* ===== 3.0.92: 出生参数照 FlexMusic 1.1.6 的 spawn 一比一还原 =====
+   u1/u2/u3 = arc4random_uniform(10000)/10000:
+     angle    = 2π·u1
+     radius   = 31.5 + 2.5·u2          (它的布局单位; 这里按封面半径 R/30 等比缩放)
+     speed    = 5 + 7·u3 + 4·E          (E = 环能量, 越响初速越快)
+     rotation = 2π·u2                   (初始自转角)
+     spin     = (u1-0.5)·1.4            (自转速度, rad/s)
+     maxLife  = 1.9 + 1.4·u3            (1.9~3.3s)
+     style    = rand(4)
+   之前那套是"8~14s 寿命 + 摆动 + 鼓点冲量 + 恒定向外 3.5~7px/s", 完全不同。 */
+static void diFxSpawnDot(UIView *host, CGRect cover, float energy) {
     if (!host) return;
-    (void)maxRad;
     diFxEnsurePool(host);
     int slot = -1;
     for (int i = 0; i < DI_DOT_CAP; i++)
         if (gDIDots[i].life <= 0) { slot = i; break; }
     if (slot < 0) return;
     DIDot *d = &gDIDots[slot];
+
+    float E = energy;
+    if (E < 0.0f) E = 0.0f;
+    if (E > 1.0f) E = 1.0f;
     CGFloat R = cover.size.width * 0.5f;
-    d->ang = diFxRand01() * (float)M_PI * 2.0f;
-    /* 3.0.58: 出生点在**专辑正背后**(0.15~0.80R) —— 以前 0.55~0.97R 再加上封面缩放,
-       经常一出生就已经在边缘外面, 用户说的"启动太外面了"就是这个。
-       现在粒子真的排在专辑图层下面(见 diFxEnsurePool 的 zPosition), 出生在盘子里,
-       被封面挡着; 慢慢飘到边缘才"露出来", 这就是视频里那种从专辑后面散出来的感觉。 */
-    /* 3.0.59: 出生点改到**封面边缘**(0.94~1.06R)。用户 472: "粒子起点又有点窄了,
-       从专辑头像边开始起点" —— 3.0.58 的 0.45~0.85R 藏在盘子里太靠中心, 露出来的
-       时候已经飘到一半了, 看着像"从很里面冒出来"。现在贴着圆边走, 遮罩孔 1.02R
-       刚好让它在边缘露出一半, 出门就能看到。 */
-    d->rad = (float)R * (1.02f + diFxRand01() * 0.10f);   /* 3.0.60: 再往外一档(用户: 起点还是有点里面/被遮挡) */
-    d->spin = (diFxRand01() - 0.5f) * 0.05f;
-    /* 外飘 2.5~6px/s: 视频里几乎看不出"在飞", 只是缓缓地、一点点往外挪 */
-    d->drift = 3.5f + diFxRand01() * 3.5f;
-    d->push = 0.0f;
-    d->sway = 0.30f + diFxRand01() * 0.45f;          /* 摆动角速度 */
-    d->swayAmp = 0.6f + diFxRand01() * 1.4f;         /* 摆动幅度(速度, px/s) */
-    d->swayPhase = diFxRand01() * (float)M_PI * 2.0f;
-    int sh = arc4random() % 10;
-    d->shape = (sh < 4) ? 0 : (sh < 6 ? 1 : (sh < 8 ? 2 : 3));
-    /* 3.0.57: 滑杆值直接就是倍率 —— 1.0 = 基准大小, 1.1 / 1.2 每档 10%。
-       3.0.58: 基准再抬一点, 让 1.0 档在 57pt 的封面上看得清(以前 1pt 描边 + 2px 的点,
-       缩到小尺寸就糊成一团灰)。 */
-    float sizeMul = (float)rhythmParticleSize;
-    d->size = ((d->shape == 0) ? (2.4f + diFxRand01() * 1.8f)
-                               : (4.2f + diFxRand01() * 2.6f)) * sizeMul;
-    d->rot = diFxRand01() * (float)M_PI * 2.0f;
-    d->rotSpd = (diFxRand01() - 0.5f) * 0.30f;
-    d->maxLife = 8.0f + diFxRand01() * 6.0f;   /* 8~14s: 前面有一段藏在专辑后面, 露出来还能飘很久 */
-    d->life = d->maxLife;
-    d->phase = diFxRand01() * (float)M_PI * 2.0f;
-    d->tint = diFxRand01();
-    /* 每颗粒子对鼓点的敏感度略有差异 —— 一起整齐放大反而假 */
-    d->beatGain = 0.65f + diFxRand01() * 0.70f;
+    if (R < 6.0f) R = 6.0f;
+    CGFloat k = R / 30.0f;                 /* 参考实现里环半径≈30pt */
+
+    float u1 = diFxRand01(), u2 = diFxRand01(), u3 = diFxRand01();
+    d->ang    = (float)(2.0 * M_PI) * u1;
+    d->rad    = (float)((31.5 + 2.5 * u2) * k);
+    d->drift  = (float)((5.0 + 7.0 * u3 + 4.0 * E) * k);   /* 径向速度 pt/s */
+    d->push   = 0.0f;
+    d->sway   = 0.0f;  d->swayAmp = 0.0f;  d->swayPhase = 0.0f;
+    d->rot    = (float)(2.0 * M_PI) * u2;
+    d->rotSpd = (u1 - 0.5f) * 1.4f;
+    d->shape  = (int)arc4random_uniform(4);
+    d->maxLife = 1.9f + 1.4f * u3;
+    d->life    = d->maxLife;
+    d->phase   = 0.0f;
+    d->beatGain = 0.0f;
+    d->tint    = diFxRand01();
     gDIDotCount++;
+
+    float m = (float)rhythmParticleSize;
+    if (m < 0.05f) m = 0.05f;
+    CGFloat side = diFxShapeSide(d->shape) * m;
+    d->size = (float)side;
 
     UIColor *pa = nil, *pb = nil;
     diColorPalette(particleColorMode, nil, nil, gDIParticleColA, gDIParticleColB,
                    gDIHuePhase, YES, &pa, &pb);
     UIColor *tint = diFxParticleColorBetween(pa, pb, d->tint);
+
     CALayer *layer = gDIDotLayer[slot];
     if (!layer) layer = [CAShapeLayer layer];
-    CGFloat sz = d->size;
     CAShapeLayer *sl = (CAShapeLayer *)layer;
-    sl.bounds = CGRectMake(0, 0, sz, sz);
-    CGPathRef path = diFxShapePath(d->shape, sz);
+    /* bounds 以 0 为中心(负原点): anchorPoint(0.5,0.5) 正好落在 position 上,
+       路径画在 0 附近就居中 —— 以前 bounds 从 (0,0) 起, 图形整体偏左上半个身位。 */
+    sl.bounds = CGRectMake(-side * 0.5f, -side * 0.5f, side, side);
+    CGPathRef path = diFxShapePath(d->shape, m);
     sl.path = path;
     CGPathRelease(path);
-    if (d->shape == 0) {
+    if (d->shape == 2) {                       /* 实心圆 */
         sl.fillColor = tint.CGColor;
         sl.strokeColor = UIColor.clearColor.CGColor;
-        sl.lineWidth = 0;
-    } else {
+        sl.lineWidth = 0.0f;
+    } else {                                   /* 空心几何: 只描边, 内部必须透明 */
         sl.fillColor = UIColor.clearColor.CGColor;
         sl.strokeColor = tint.CGColor;
-        /* 3.0.58: 1.0 → 1.2。1pt 描边在 2x/3x 上偏虚, 这是"粒子显示不清晰"的一半原因 */
-        sl.lineWidth = 1.2;
+        sl.lineWidth = diFxShapeLine(d->shape) * m;
     }
     sl.lineJoin = kCALineJoinRound;
-    /* 3.0.55: 不再给每颗粒子加 shadow(离屏模糊, 掉帧主因)。
-       靠"实心点 + 略高的透明度"就够亮, 几何体本来就是描边。 */
     sl.shadowOpacity = 0.0f;
-    sl.opacity = 0;
+    sl.opacity = 0.0f;
 }
 
 static float diFxSmoothStep(float a, float b, float x) {
@@ -20048,129 +20075,172 @@ static float diFxSmoothStep(float a, float b, float x) {
     return t * t * (3.0f - 2.0f * t);
 }
 
-/* 3.0.56: 粒子改成"纯环境氛围" —— 不受鼓点影响。
-   需求原话: 从专辑背后随机出现、随机分布、过渡自然、飘散远一点。
-   做法:
-     · 出生点在封面背后(0.55~0.97R), 层压在封面之下 → 先被挡住, 向外飘才"露出来";
-     · 半径方向的可见度用 smoothstep(R, 1.2R) 拉起来 → 边缘不会硬生生蹦出来;
-     · 每个粒子有自己的漂移速度/摆动/旋转, 没有统一的"拍点动作", 所以不会齐刷刷地跳;
-     · 快到宿主边界时再淡出, 不会在岛边被生硬裁掉。
-   3.0.57: 用户反馈"粒子不会音律抖动了" —— 恢复跟拍, 但**不做位移冲量**(那就是瞬移),
-   改成整片云按 beat 比例向外撑开再收回, 位置始终连续。 */
+/* ===== 3.0.92: 存活更新照 FlexMusic 的 update 还原 =====
+   life -= dt; radius += speed·dt; rotation += spin·dt;
+   progress = 1 - life/max(maxLife,0.16);
+   fadeIn   = min(progress/0.001, 1)      (出生即满, 没有 0.8s 淡入)
+   fadeOut  = min(life/0.72, 1)           (最后 0.72s 线性淡出)
+   opacity  = 粒子透明 · fadeIn · fadeOut
+   position = center + radius·(cos angle, sin angle)
+   scale    = 0.72 + 0.48·progress        (慢慢变大, 不是鼓点放大)
+   transform= rotateZ(rotation) × scale
+   angle 一帧都不变 —— 粒子只沿出生方向直线外飘, 不绕圈、不摆动、不吃鼓点。 */
 static void diFxUpdateDots(UIView *host, CGRect cover, float dt,
-                           float energy, float beat, BOOL active) {
+                           float energy, BOOL active) {
     if (!host) return;
+    (void)energy;
     if (gDICoverScaleNow <= 0.05f) gDICoverScaleNow = 1.0f;
     diFxUpdateMask(cover, gDICoverScaleNow);
     if (gDIDotCount == 0) return;
-    if (beat < 0.0f) beat = 0.0f;
-    if (beat > 1.0f) beat = 1.0f;
-    (void)energy; (void)beat;      /* 3.0.61: 粒子不再读音频包络 */
+
     CGFloat cx = CGRectGetMidX(cover) - host.bounds.origin.x;
     CGFloat cy = CGRectGetMidY(cover) - host.bounds.origin.y;
-    CGFloat Rc = cover.size.width * 0.5f;
-    CGFloat W = host.bounds.size.width, H = host.bounds.size.height;
+    int limit = rhythmParticleCount;
+    if (limit < 0) limit = 0;
+    if (limit > DI_DOT_CAP) limit = DI_DOT_CAP;
+    float alphaMul = (float)rhythmParticleAlpha * (float)rhythmParticleStrength;
+    if (alphaMul < 0.0f) alphaMul = 0.0f;
+    if (alphaMul > 1.6f) alphaMul = 1.6f;
+
     [CATransaction begin];
     [CATransaction setDisableActions:YES];
+    int alive = 0;
     for (int i = 0; i < DI_DOT_CAP; i++) {
         DIDot *d = &gDIDots[i];
         CALayer *layer = gDIDotLayer[i];
         if (!layer) continue;
-        if (d->life <= 0) {                 /* 空槽: 只保证不可见, 不动图层树 */
+        if (d->life <= 0.0f) {                 /* 空槽: 只保证不可见, 不动图层树 */
             if (layer.opacity != 0.0f) layer.opacity = 0.0f;
             continue;
         }
+        /* 停用 / 暂停 / 超出「粒子数量」: 直接判死并留在池里等重用(参考实现的做法) */
+        if (!active || !rhythmParticlesOn || i >= limit) {
+            d->life = 0.0f;
+            layer.opacity = 0.0f;
+            continue;
+        }
         d->life -= dt;
-        if (!active && d->life > 0.35f) d->life = 0.35f;
         if (d->life <= 0.0f) {
             d->life = 0.0f;
             layer.opacity = 0.0f;
-            if (gDIDotCount > 0) gDIDotCount--;
             continue;
         }
-        /* 恒定的外飘 + 摆动, 没有冲量、没有拍点位移 —— 位置永远连续 */
-        d->push *= expf(-dt / 0.32f);
-        d->ang += d->spin * dt;
-        /* 3.0.64: 「粒子强度」只管**鼓点响应**, 不再乘外飘速度。
-           477 用户: "强度调高了粒子就飘的好快" —— 3.0.61 起 stg 乘在 drift 上,
-           调强度等于调流速, 完全不是要的东西。现在基础漂移恒定, 强度只放大:
-           鼓点冲量 / 尺寸脉冲 / 亮度脉冲。 */
-        float stg = (float)rhythmParticleStrength;
-        d->rad += (d->drift + d->push) * dt;
-        float swayV = sinf((float)gDIClock * d->sway + d->swayPhase) * d->swayAmp;
-        d->ang += (swayV / MAX(8.0f, d->rad)) * dt;
+        d->rad += d->drift * dt;
         d->rot += d->rotSpd * dt;
 
-        /* 该方向到宿主边缘的距离(留 4pt), 再钳在 1.15R~2.15R。
-           3.0.58: 曾经收到 1.55R(贴着封面一圈)。
-           3.0.79: 489 之后用户要求"粒子范围再放大一点, 让他飘的远一点" ——
-           上限 1.55R → 2.15R。宿主够大时这就是真的往外多飘 0.6R(57pt 封面上约 17pt),
-           而且边界外再给 0.25R 的余量: 宿主不裁剪时粒子能飘到卡片外沿,
-           裁剪时最多是贴着边停住, 不会比以前更差。 */
-        CGFloat edgePad = Rc * 0.25f;
-        CGFloat ca = cosf(d->ang), sa2 = sinf(d->ang);
-        CGFloat tx = (ca > 0.02f) ? (W + edgePad - 4.0f - cx) / ca : ((ca < -0.02f) ? (-edgePad + 4.0f - cx) / ca : 1e9f);
-        CGFloat ty = (sa2 > 0.02f) ? (H + edgePad - 4.0f - cy) / sa2 : ((sa2 < -0.02f) ? (-edgePad + 4.0f - cy) / sa2 : 1e9f);
-        CGFloat dirMax = MIN(tx, ty);
-        if (dirMax > Rc * 2.15f) dirMax = Rc * 2.15f;
-        if (dirMax < Rc * 1.15f) dirMax = Rc * 1.15f;
+        float progress = 1.0f - d->life / MAX(d->maxLife, 0.16f);
+        if (progress < 0.0f) progress = 0.0f;
+        if (progress > 1.0f) progress = 1.0f;
+        float fadeIn  = MIN(progress / 0.001f, 1.0f);
+        float fadeOut = MIN(d->life / 0.72f, 1.0f);
+        float alpha = alphaMul * fadeIn * fadeOut;
+        if (alpha < 0.0f) alpha = 0.0f;
+        if (alpha > 1.0f) alpha = 1.0f;
 
-        /* 3.0.79: 走到最远处不再"啪一下没了"(那等于白放大范围, 用户根本看不到多远)。
-           现在到边先停位、径向速度归零, 再用 0.30s 淡出收尾 —— 是"散到头、慢慢没了"。 */
-        if (d->rad > dirMax) {
-            d->rad = dirMax;
-            d->drift = 0.0f;
-            if (d->life > 0.30f) d->life = 0.30f;
-        }
-
-        float age = d->maxLife - d->life;
-        float fadeIn = diFxSmoothStep(0.0f, 0.80f, age);                  /* 出生 0.8s 淡入 */
-        float fadeOut = diFxSmoothStep(0.0f, d->maxLife * 0.25f, d->life); /* 末尾 25% 淡出 */
-        /* 3.0.79: 边缘淡出起点 0.82 → 0.90 —— 粒子要一直亮到很远才开始透明,
-           否则"范围放大了"在视觉上根本看不出来(还没到远处就淡没了)。 */
-        float edgeOut = 1.0f - diFxSmoothStep((float)dirMax * 0.90f, (float)dirMax, d->rad);
-        float tw = 0.86f + 0.14f * sinf(d->phase + (float)gDIClock * 0.9f);
-        /* 3.0.58: 不再用 alpha 假装"藏在专辑后面"(那样粒子只会在边缘凭空出现)。
-           现在图层真的排在封面下面, 被封面挡住, 飘出去才露出来。
-           亮度也抬上来了: 以前 0.34+0.26, 小尺寸下就是一团灰。 */
-        /* 3.0.61: 亮度只看「粒子强度」—— 跟音乐电平/鼓点**彻底无关**。
-           474 用户: "专辑跟随律动怎么会加到粒子上呢? 我要的是专辑, 粒子是单独的"。
-           现在粒子的呼吸完全由自己的强度决定, 音频包络一个字都不读。 */
-        /* 3.0.62: 拍点脉冲 —— 强度越大鼓得越明显, 每颗粒子按自己的 beatGain 有差异 */
-        float kick = gDIKick;
-        float kg = kick * stg * d->beatGain;
-        float bright = 0.78f + 0.20f * kg;
-        float alpha = bright * fadeIn * fadeOut * edgeOut * tw;
-        alpha *= (float)rhythmParticleAlpha;
-        if (alpha < 0.05f) alpha = 0.05f;
-        if (alpha > 0.96f) alpha = 0.96f;
-        /* 3.0.60: 粒子**完全不跟鼓点**。473 用户: "打开专辑律动粒子也跟着抖, 怎么加一起了"
-           —— 3.0.59 里 beat 还乘了 0.03 的半径和 0.06 的尺寸, 律动一开粒子就跟着抽。
-           现在这 3% 换成每颗自己的高频微抖(独立相位/频率, 幅度 ~1.2px), 看起来是
-           "粒子在轻轻颤", 跟音乐的拍点没有任何关系。 */
-        float jx = 1.2f * sinf(d->phase * 3.1f + (float)gDIClock * 5.3f);
-        float jy = 1.2f * cosf(d->phase * 2.3f + (float)gDIClock * 4.7f);
-        layer.position = CGPointMake(cx + cosf(d->ang) * d->rad + jx,
-                                     cy + sinf(d->ang) * d->rad + jy);
+        layer.position = CGPointMake(cx + cosf(d->ang) * d->rad,
+                                     cy + sinf(d->ang) * d->rad);
         layer.opacity = alpha;
-        float pulse = (1.0f + 0.030f * sinf(d->phase * 1.7f + (float)gDIClock * 0.7f))
-                      * (1.0f + 0.45f * kg);
+        float sc = 0.72f + 0.48f * progress;
         CATransform3D tr = CATransform3DMakeRotation(d->rot, 0, 0, 1);
-        layer.transform = CATransform3DScale(tr, pulse, pulse, 1.0f);
+        layer.transform = CATransform3DScale(tr, sc, sc, 1.0f);
+        alive++;
     }
+    gDIDotCount = alive;
     [CATransaction commit];
 }
 
-/* 3.0.62: 拍点到了 —— 一次性把冲量注入所有在飞的粒子。
-   只在"上升沿"调用一次(不是每帧), 否则就成了持续的推力, 粒子会一直往外跑。 */
-static void diFxApplyBeat(float kick) {
-    if (kick <= 0.02f) return;
-    for (int i = 0; i < DI_DOT_CAP; i++) {
-        DIDot *d = &gDIDots[i];
-        if (d->life <= 0) continue;
-        /* 24px/s 冲量 × 0.32s 衰减 ≈ 6~9px 的外推 —— 看得见"一跳", 又不会一下冲出边界 */
-        d->push += kick * 26.0f * (float)rhythmParticleStrength * d->beatGain;
+/* ===== 3.0.92: 环能量 —— FlexMusic 的 energy 通道 =====
+   参考实现: 每段 target 夹到 [0,1]; 上升用 (0.46+0.10·target)、下降用 0.12 的逐帧系数
+   逼近 current; 环能量 = mean(current[0..N-1]), 再夹到 [0,1]。
+   我们的频谱是 dB 绝对值映射(没有 AGC), 但动态走向一致, 公式原样搬过来即可。
+   时间基: 上述系数是 60Hz 每帧的, 这里换成 dt·60 的幂次, 120Hz 上手感一致。 */
+static float gDIFxEneCur[DI_AU_BANDS];
+static float gDIFxEnergy = 0.0f;
+static float gDIFxBeatBase = 0.0f;
+static float gDIFxBeatPulse = 0.0f;
+static float gDIFxBeatScale = 1.0f;
+
+static void diFxAdvanceEnergy(BOOL active, BOOL real, float dt) {
+    float step = dt * 60.0f;
+    if (step <= 0.0f) return;
+    float sum = 0.0f;
+    for (int i = 0; i < DI_AU_BANDS; i++) {
+        /* 真频谱用未平滑的原始段(和参考实现一样自己平滑); 合成节拍没有 raw, 用平滑段 */
+        float tgt = active ? (real ? gDIBandRaw[i] : gDIBandSmooth[i]) : 0.0f;
+        if (tgt < 0.0f) tgt = 0.0f;
+        if (tgt > 1.0f) tgt = 1.0f;
+        float cur = gDIFxEneCur[i];
+        float rate = (tgt > cur) ? (0.46f + 0.10f * tgt) : 0.12f;
+        rate = 1.0f - powf(1.0f - rate, step);
+        cur += (tgt - cur) * rate;
+        if (cur < 0.0f) cur = 0.0f;
+        if (cur > 1.0f) cur = 1.0f;
+        gDIFxEneCur[i] = cur;
+        sum += cur;
     }
+    /* 标定: 本机 24 段是"dB 绝对值映射"(没有 AGC), 音乐里稳态均值约 0.65~0.75;
+       参考实现上游有每段 AGC, 稳态也在 0.7 附近但峰值能顶到接近 1。
+       这里做一次固定线性标定(0.20~0.90 → 0~1), 让 baseline/excess 的阈值
+       落在同一个区间 —— 否则本机峰值被压扁, 鼓点永远触发不了。 */
+    float raw = sum / (float)DI_AU_BANDS;
+    gDIFxEnergy = (raw - 0.20f) / 0.70f;
+    if (gDIFxEnergy < 0.0f) gDIFxEnergy = 0.0f;
+    if (gDIFxEnergy > 1.0f) gDIFxEnergy = 1.0f;
+    /* 停播且已经归零: 直接抹平, 下次从干净状态开始(参考实现同款) */
+    if (!active && gDIFxEnergy < 0.0025f) {
+        for (int i = 0; i < DI_AU_BANDS; i++) gDIFxEneCur[i] = 0.0f;
+        gDIFxEnergy = 0.0f;
+    }
+}
+
+/* ===== 3.0.92: 专辑鼓点包络 —— FlexMusic 的 beatScale 原样还原 =====
+   E 夹到 [0,1]; baseline 以 0.028/帧 跟踪(≈2.4s); 
+     excess = max(E - (baseline·1.08 + 0.025), 0)      ← 相对基线的瞬态
+     drive  = min(1, max(E-0.58,0)·0.55 + excess·5.6)
+     pulse: 上升逼近 72%/帧, 否则每帧 ×0.79
+     desired = 1 + min(0.22, pulse·0.095·clamp(强度,0.3,2.5))
+     scale: 上升 0.58 / 下降 0.20 逼近 desired
+   停用: baseline×0.92、pulse×0.72、desired=1; 距 1 小于 0.0005 时精确归位。
+   它是"相对基线的能量瞬态", 不是 BPM/底鼓识别 —— 这正是参考实现的手感来源。 */
+static float diFxAdvanceBeat(BOOL active, float energy, double strengthSlider, float dt) {
+    float step = dt * 60.0f;
+    if (step <= 0.0f) return gDIFxBeatScale;
+    float desired;
+    if (active) {
+        float E = energy;
+        if (E < 0.0f) E = 0.0f;
+        if (E > 1.0f) E = 1.0f;
+        if (gDIFxBeatBase <= 0.001f) gDIFxBeatBase = E;
+        float kBase = 1.0f - powf(1.0f - 0.028f, step);
+        gDIFxBeatBase += (E - gDIFxBeatBase) * kBase;
+        float excess = E - (gDIFxBeatBase * 1.08f + 0.025f);
+        if (excess < 0.0f) excess = 0.0f;
+        float drive = (E > 0.58f ? (E - 0.58f) : 0.0f) * 0.55f + excess * 5.6f;
+        if (drive > 1.0f) drive = 1.0f;
+        if (drive > gDIFxBeatPulse) {
+            float k = 1.0f - powf(1.0f - 0.72f, step);
+            gDIFxBeatPulse += (drive - gDIFxBeatPulse) * k;
+        } else {
+            gDIFxBeatPulse *= powf(0.79f, step);
+        }
+        /* 滑杆 0~2 → 参考实现的 strength 域(0.3~2.5)。默认 0.70 → 2.1,
+           与旧版"0.20×0.70 幅度"在 pulse≈0.7 时正好对上, 老手感不会突变。 */
+        float st = (float)(strengthSlider * 3.0);
+        if (st < 0.3f) st = 0.3f;
+        if (st > 2.5f) st = 2.5f;
+        float amp = gDIFxBeatPulse * 0.095f * st;
+        if (amp > 0.22f) amp = 0.22f;
+        desired = 1.0f + amp;
+    } else {
+        gDIFxBeatBase *= powf(0.92f, step);
+        gDIFxBeatPulse *= powf(0.72f, step);
+        desired = 1.0f;
+    }
+    float rate = (desired > gDIFxBeatScale) ? 0.58f : 0.20f;
+    rate = 1.0f - powf(1.0f - rate, step);
+    gDIFxBeatScale += (desired - gDIFxBeatScale) * rate;
+    if (!active && fabsf(gDIFxBeatScale - 1.0f) < 0.0005f) gDIFxBeatScale = 1.0f;
+    return gDIFxBeatScale;
 }
 
 /* 3.0.71: 视觉"咚" —— 服务端(样本域)触发时调一次 */
@@ -20190,7 +20260,6 @@ static void diKickFire(float amp, CFTimeInterval at) {
     gDILowNPrev = 1.0f;
     gDIKickHoldN = 1.0f;
     gDIKickArmed = NO;
-    diFxApplyBeat(amp);
 }
 
 /* 当前这一下的视觉量: 16ms 顶到位, 95ms 收回, 0.30s 归零 */
@@ -20217,7 +20286,7 @@ static void diFxRefreshColors(void) {
         if (!layer || gDIDots[i].life <= 0) continue;
         CAShapeLayer *sl = (CAShapeLayer *)layer;
         UIColor *tint = diFxParticleColorBetween(pa, pb, gDIDots[i].tint);
-        if (gDIDots[i].shape == 0) sl.fillColor = tint.CGColor;
+        if (gDIDots[i].shape == 2) sl.fillColor = tint.CGColor;   /* 3.0.92: 实心圆 */
         else sl.strokeColor = tint.CGColor;
     }
     [CATransaction commit];
@@ -21584,7 +21653,7 @@ static void diRhythmTickWithDelta(float dtIn) {
         gDICoverScaleNow = 1.0f;
         if (gDIDotCount > 0)
             diFxUpdateDots(gDIRhythmHost, diRhythmCoverRect(t, gDIRhythmHost),
-                           dtIn, 0.0f, 0.0f, NO);
+                           dtIn, 0.0f, NO);
         return;
     }
 
@@ -21632,6 +21701,14 @@ static void diRhythmTickWithDelta(float dtIn) {
 
     diRhythmAdvanceSpectrum(active, real, dt);
     diISPublishBeat(active);   /* 3.0.87: 同一份鼓点交给 MRU 的岛专辑特效 */
+
+    /* ===== 3.0.92: FlexMusic 那套「环能量 + 专辑鼓点包络」只驱动播放器这边 =====
+       能量: 24 段原始频谱 → 快升(0.46+0.10·target)慢落(0.12) → 均值 E。
+       鼓点: E 的相对基线瞬态(baseline/excess) → pulse → 1+min(0.22, pulse·0.095·强度)。
+       岛(MRU)那条链路仍然读 gDIKick/beat.bin, 一行没动。 */
+    diFxAdvanceEnergy(active, real, dt);
+    float fxBeatS = diFxAdvanceBeat(active && rhythmOn && rhythmBeatScale > 0.01,
+                                    gDIFxEnergy, rhythmBeatScale, dt);
 
     if (!gDIFxRealLogged && active && real && gDIBandSeen) {
         gDIFxRealLogged = YES;
@@ -21701,9 +21778,10 @@ static void diRhythmTickWithDelta(float dtIn) {
                同时去掉上下位移 dy —— 缩放 + 位移叠加在一起, 重心在动, 更"别扭"。 */
             /* 3.0.74: 回到 3.0.68 的微基础动态(用户指定基线): gDIKick 包络 + 0.20 幅度。
                顺滑化只动了包络的"顶到"过程(45ms 趋近, 见统一顺滑包络), 幅度/衰减不变。 */
-            CGFloat k = gDIKick;
-            CGFloat amp = 0.20 * rhythmBeatScale;
-            CGFloat s = 1.0 + amp * k;
+            /* 3.0.92: 缩放值直接取 FlexMusic 的 beatScale(1.000~1.220),
+               不再用 gDIKick·0.20·幅度 自己算 —— 那一套是"底鼓起音前沿",
+               和参考实现的"相对基线能量瞬态"手感不是一回事。 */
+            CGFloat s = fxBeatS;
             if (s < 1.0) s = 1.0;
             if (s > 1.22) s = 1.22;
             sDbg = s;
@@ -21746,7 +21824,7 @@ static void diRhythmTickWithDelta(float dtIn) {
             for (int i = 0; i < gDIRhythmExtraN; i++)
                 [exs appendFormat:@"%@%.0f ", NSStringFromClass(gDIRhythmExtras[i].class),
                  gDIRhythmExtras[i].bounds.size.width];
-            RLog(@"[探针] 通量=%.3f 低频=%.3f 占=%.2f 拍=%.2f 鼓=%.2f 踢=%.2f 咚=%.2f 串=%u 低R=%.4f 隔=%.2f 缩放=%.3f 实=%.3f 呈=%.3f 尺=%.0f 基尺=%.0f 驱动=%@ 图=%@ 旋=%@ 播=%d 率=%d 粒=%d 强=%.1f 律=%d 基=%d",
+            RLog(@"[探针] 通量=%.3f 低频=%.3f 占=%.2f 拍=%.2f 鼓=%.2f 踢=%.2f 咚=%.2f 串=%u 低R=%.4f 隔=%.2f 缩放=%.3f 实=%.3f 呈=%.3f 尺=%.0f 基尺=%.0f 驱动=%@ 图=%@ 旋=%@ 播=%d 率=%d 粒=%d 强=%.1f 律=%d 基=%d 能=%.2f 律缩=%.3f 脉=%.2f",
                  gDIFluxNow, gDILowLevel, gDILowShare, gDIBeatEnv, gDILowN, gDIKick,
                  diKickPunchNow(), (unsigned)gDIPcmKickSerial, gDIPcmLowRms,
                  (float)(gDILastKickT > 0 ? (CACurrentMediaTime() - gDILastKickT) : 0.0),
@@ -21756,7 +21834,8 @@ static void diRhythmTickWithDelta(float dtIn) {
                  gDIRhythmExtraN ? exs : @"无",
                  ([dv.layer animationForKey:@"di.art.spin"] ? @"CA" : (ownsSpin ? @"我们" : (wantSpin ? @"等" : @"关"))),
                  active ? 1 : 0, (int)gDIPlayRateState, gDIDotCount, rhythmParticleStrength,
-                 rhythmOn ? 1 : 0, gDIRhythmBaseValid ? 1 : 0);
+                 rhythmOn ? 1 : 0, gDIRhythmBaseValid ? 1 : 0,
+                 gDIFxEnergy, gDIFxBeatScale, gDIFxBeatPulse);
             /* 3.0.62: 没找到内容层就定期把视图树打出来(20s 一次), 不用等切歌 */
             if (gDIRhythmExtraN == 0 && nowP - gDIDumpAt > 20.0) {
                 gDIDumpAt = nowP;
@@ -21786,17 +21865,16 @@ static void diRhythmTickWithDelta(float dtIn) {
         gDIParticleColorDirty = NO;
         diFxRefreshColors();
     }
-    if (rhythmParticlesOn && active) {
-        int want = rhythmParticleCount;
-        if (gDIDotCount < want) {
-            gDISpawnAcc += (float)(want - gDIDotCount) * 0.55f * dt;
-            while (gDISpawnAcc >= 1.0f && gDIDotCount < want) {
-                gDISpawnAcc -= 1.0f;
-                diFxSpawnDot(host, cover, 0.0f);
-            }
-        }
+    /* 3.0.92: 发射规则照 FlexMusic —— E ≥ 0.08 时, 每帧以 min(0.035+0.30·E, 0.40)
+       的概率出生一颗(一次只找一个死槽)。概率是 60Hz 基准, 这里按 dt 换算, ProMotion
+       120Hz 上不会翻倍。数量上限仍由「粒子数量」管(池里多余的直接判死等重用)。 */
+    if (rhythmParticlesOn && active && gDIFxEnergy >= 0.08f) {
+        float p60 = 0.035f + 0.30f * gDIFxEnergy;
+        if (p60 > 0.40f) p60 = 0.40f;
+        float p = 1.0f - powf(1.0f - p60, dt * 60.0f);
+        if (diFxRand01() < p) diFxSpawnDot(host, cover, gDIFxEnergy);
     }
-    if (gDIDotCount > 0) diFxUpdateDots(host, cover, dt, gDISteady, gDIBeatEnv, active);
+    if (gDIDotCount > 0) diFxUpdateDots(host, cover, dt, gDIFxEnergy, active);
 
     diRhythmUpdateBars(host, active);
 }
