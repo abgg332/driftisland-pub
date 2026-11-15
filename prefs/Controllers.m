@@ -424,6 +424,11 @@ static double diStepForKeyOverride(NSString *key) {
     if ([key isEqualToString:@"AlbumParticleStrength"]) return 0.1;
     if ([key isEqualToString:@"AlbumBeatScale"]) return 0.05;
     if ([key isEqualToString:@"RhythmParticleAlpha"]) return 0.05;
+    /* 3.0.89: 岛特效 —— 和播放器那几行同一套步进, 不再被系统量化成 0.5 一档 */
+    if ([key isEqualToString:@"IslandDotSize"]) return 0.1;
+    if ([key isEqualToString:@"IslandDotStrength"]) return 0.1;
+    if ([key isEqualToString:@"IslandBeatScale"]) return 0.05;
+    if ([key isEqualToString:@"IslandDotAlpha"]) return 0.05;
     return 0.0;
 }
 
@@ -4717,6 +4722,11 @@ static void diOpenHomeBarPickWindow(void) {
     [sp setProperty:@(mn) forKey:@"min"];
     [sp setProperty:@(mx) forKey:@"max"];
     [sp setProperty:@{ @"min": @(mn), @"max": @(mx), @"label": label } forKey:@"range"];
+    /* 3.0.89: 这批 key 需要小数步进(粒子大小 0.1 / 幅度 0.05)。
+       以前只有 npSlider 那条链路带步进, 岛特效走的是本方法 → 系统把它量化成
+       0.5 一档(用户: "增加减少 0.1, 你又是 0.5 递增的")。 */
+    double stp = diStepForKeyOverride(key);
+    if (stp > 0.0) [sp setProperty:@(stp) forKey:@"diStep"];
     return sp;
 }
 - (NSString *)folderNameForKey:(NSString *)key {

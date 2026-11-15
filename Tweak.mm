@@ -21990,13 +21990,18 @@ static void diISMRURefreshColors(BOOL force) {
 /* ---------- 粒子池 ---------- */
 static void diISMEnsureHost(void) {
     UIView *art = gDIISMArt;
-    if (!art) return;
-    UIView *sv = art.superview;
-    if (!sv) return;
-    CGFloat R = MIN(art.bounds.size.width, art.bounds.size.height) * 0.5f;
-    CGFloat pad = R * 1.30f + 4.0f;
-    CGRect want = CGRectInset(art.frame, -pad, -pad);
-    if (gDIISMHost && gDIISMHost.superview == sv) {
+    UIView *win = art.window;
+    if (!art || !win) return;
+    /* ===== 3.0.89: 粒子宿主搬到**窗口层** =====
+       以前挂在 art.superview(岛容器)上, 岛是胶囊裁剪的, 粒子一出生就被裁在岛里,
+       而且那块自绘玻璃(遮罩)就在 art 上面 —— 玻璃每次布局重建, 粒子层就被压下去
+       一次, 看着就是"一闪一闪"。关掉遮罩后玻璃不存在, 所以粒子"正常"了。
+       现在宿主是窗口上的一个透明层, 以专辑为中心铺一块 260x150 左右的区域:
+       粒子能飘出岛外, 也不受玻璃/系统专辑的任何遮挡。 */
+    CGRect inWin = [art convertRect:art.bounds toView:win];
+    CGFloat padX = 66.0, padY = 46.0;
+    CGRect want = CGRectInset(inWin, -padX, -padY);
+    if (gDIISMHost && gDIISMHost.superview == win) {
         if (!CGRectEqualToRect(gDIISMHost.frame, want)) gDIISMHost.frame = want;
         return;
     }
@@ -22008,7 +22013,7 @@ static void diISMEnsureHost(void) {
     h.backgroundColor = UIColor.clearColor;
     h.frame = want;
     gDIISMHost = h;
-    [sv insertSubview:h belowSubview:art];
+    [win addSubview:h];
     for (int i = 0; i < DI_IS_DOT_MAX; i++)
         if (gDIISMDotLayer[i]) [h.layer addSublayer:gDIISMDotLayer[i]];
 }
@@ -22160,17 +22165,38 @@ static void diISMUpdateDots(CGRect cover, float dt, BOOL active) {
 
 /* ---------- 律动: 抓玻璃做缩放 ---------- */
 static void diISMApplyScale(float kick, BOOL on) {
-    UIView *g = gDIISMGlass;
-    if (!g) { gDIISMScaleNow = 1.0f; return; }
+    /* ===== 3.0.89: 改用 additive 动画, 模型层 transform 一个字节不写 =====
+       以前在模型层写 CATransform3DMakeScale。可 diActivityApply 每次布局都会
+       写 glass.frame —— transform 非单位时写 frame 会反过来改 bounds, 于是
+       "缩放被吃掉/展开多一块影子/玻璃带着放大压到系统专辑上"反复出现,
+       3.0.87/88 为此加了一堆"让路"逻辑, 越修越复杂。
+       现在动画只管**呈现层**: 系统读到的 transform 永远是单位矩阵,
+       布局、frame、形态判定一行都不用改。 */
+    UIView *v = gDIISMArt;
+    if (!v) { gDIISMScaleNow = 1.0f; return; }
     CGFloat s = on ? (1.0 + 0.20 * gDIISMAmp * kick) : 1.0;
     if (s < 1.0) s = 1.0;
     if (s > 1.22) s = 1.22;
-    if (fabs(s - gDIISMScaleNow) < 0.0004) return;
+    if (s <= 1.0015) {
+        gDIISMScaleNow = 1.0f;
+        if ([v.layer animationForKey:@"di.isl.beat"]) {
+            [CATransaction begin];
+            [CATransaction setDisableActions:YES];
+            [v.layer removeAnimationForKey:@"di.isl.beat"];
+            [CATransaction commit];
+        }
+        return;
+    }
+    if (fabs(s - gDIISMScaleNow) < 0.0015) return;
     gDIISMScaleNow = (float)s;
-    [CATransaction begin];
-    [CATransaction setDisableActions:YES];
-    g.layer.transform = (s > 1.0005) ? CATransform3DMakeScale(s, s, 1.0f) : CATransform3DIdentity;
-    [CATransaction commit];
+    CABasicAnimation *a = [CABasicAnimation animationWithKeyPath:@"transform.scale"];
+    a.additive = YES;
+    a.fromValue = @(0.0f);
+    a.toValue = @(s - 1.0);
+    a.duration = 0.10;
+    a.timingFunction = [CAMediaTimingFunction functionWithName:kCAMediaTimingFunctionEaseOut];
+    a.removedOnCompletion = YES;
+    [v.layer addAnimation:a forKey:@"di.isl.beat"];
 }
 
 /* ---------- 绑定 ---------- */
@@ -22180,7 +22206,9 @@ static CGFloat diISMSide(UIView *v) {
 }
 
 static void diISMRUBind(UIView *art, UIView *glass) {
-    if (!art || !glass) return;
+    /* 3.0.89: glass 允许为 nil —— 关掉"启用遮罩"时 MRU 不建自绘玻璃,
+       但粒子/律动照样该工作(粒子现在挂在窗口层, 本来就不依赖玻璃)。 */
+    if (!art) return;
     CGFloat side = diISMSide(art);
     /* 只认小岛头像: 展开 66 / 播放器 57 / 全屏都一律不接 —— 493 要的就是"不要展开" */
     if (side < 12.0 || side > 44.0) return;
@@ -22308,8 +22336,7 @@ static void diISMRUFrame(float dtIn) {
         }
     }
     UIView *art = gDIISMArt;
-    UIView *glass = gDIISMGlass;
-    if (!art || !glass) { diISMClearDots(); return; }
+    if (!art) { diISMClearDots(); return; }
 
     float dt = dtIn;
     if (dt < 0.002f) dt = 0.002f;
@@ -22377,9 +22404,9 @@ static void diISMRUFrame(float dtIn) {
                 diISMSpawnDot();
             }
         }
-        CGFloat R = MIN(art.bounds.size.width, art.bounds.size.height) * 0.5f;
-        CGFloat pad = R * 1.30f + 4.0f;
-        diISMUpdateDots(CGRectMake(pad, pad, art.bounds.size.width, art.bounds.size.height), dt, YES);
+        CGRect cover = gDIISMHost ? [art convertRect:art.bounds toView:gDIISMHost] : CGRectZero;
+        if (cover.size.width < 4.0) cover = CGRectMake(66.0, 46.0, art.bounds.size.width, art.bounds.size.height);
+        diISMUpdateDots(cover, dt, YES);
     } else if (gDIISMDotCount > 0 || gDIISMHost) {
         diISMClearDots();
     }
