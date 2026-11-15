@@ -20160,6 +20160,50 @@ static float gDIFxBeatBase = 0.0f;
 static float gDIFxBeatPulse = 0.0f;
 static float gDIFxBeatScale = 1.0f;
 
+/* ===== 3.0.93: 鼓点专用能量 —— 上一版"鼓点没效果"的根因就在这里 =====
+   3.0.92 把"24 段 dB 均值的固定线性标定"当 E 直接喂给 beat 包络。实测不行:
+   本机送来的 24 段是 dB 绝对值映射(没有 AGC), 音乐里长期钉在 0.70~0.78,
+   相邻两包(16~33ms)只差 0.01~0.03。于是
+     excess = E - (基线·1.08 + 0.025) 恒为 0(均值永远追不上自己的 1.08 倍),
+     drive 只剩 (E-0.58)·0.55 ≈ 0.08 → 脉冲 ≈ 0.08 → 缩放 1.008。
+   1% 缩放落在 57pt 封面上是 0.5pt —— 肉眼看就是"完全没动"。
+   FlexMusic 的 E 能顶到 1, 是因为它每段前面有 AGC(§3: 每带维护峰值,
+   上升跟随新值、下降 0.985·old+0.015·value), 归一后每段在 0.2~1.0 大幅摆动。
+   这里补两条"局部归一"链, 把 dB 的小跳变放大回 0~1:
+     底噪: 只允许慢慢爬升(0.003/帧), 下落快(0.30/帧)
+     峰值: 上升快(0.30/帧), 只允许慢慢回落(0.004/帧)
+     n    = (v-底噪) / max(峰值-底噪, 最小量程)  → 静时 0.05~0.25, 底鼓 0.8~1.0
+   低频链(0~4 段 ≈ 60~200Hz)权重 0.72、全带链 0.28 —— 鼓点主要看低频,
+   整体段落强弱也参与一点(参考实现是 72 段等权均值)。最后与统一的低音鼓
+   包络 gDIKick(样本域触发, 和粒子同一个鼓)取大: 那一下"咚"必定推得起来。 */
+static float gDIFxBeatE = 0.0f;          /* 0~1, 只喂鼓点包络; 粒子仍用 gDIFxEnergy */
+static float gDIFxBeatBaseSee = 0.0f;    /* 探针: 当前基线 */
+static float gDIFxBeatExcSee = 0.0f;     /* 探针: 上一次超出量 */
+static float gDIFxBeatDrvSee = 0.0f;     /* 探针: 上一次驱动值 */
+static float gDIFxNormFloor[2] = {0.0f, 0.0f};   /* 0=低频链 1=全带链 */
+static float gDIFxNormPeak[2]  = {0.0f, 0.0f};
+static float gDIFxNormN[2]     = {0.0f, 0.0f};
+
+static float diFxClamp01(float v) {
+    if (v < 0.0f) return 0.0f;
+    if (v > 1.0f) return 1.0f;
+    return v;
+}
+
+static float diFxNormChain(int idx, float v, float step, float minRange) {
+    float f = gDIFxNormFloor[idx], p = gDIFxNormPeak[idx];
+    if (!(p > 0.0f) || p < f) { f = v; p = v + minRange; }
+    float kFast = 1.0f - powf(1.0f - 0.30f, step);
+    float kFUp  = 1.0f - powf(1.0f - 0.003f, step);
+    float kPDn  = 1.0f - powf(1.0f - 0.004f, step);
+    if (v < f) f += (v - f) * kFast; else f += (v - f) * kFUp;
+    if (v > p) p += (v - p) * kFast; else p += (v - p) * kPDn;
+    if (p < f + minRange) p = f + minRange;
+    gDIFxNormFloor[idx] = f;
+    gDIFxNormPeak[idx] = p;
+    return diFxClamp01((v - f) / (p - f));
+}
+
 static void diFxAdvanceEnergy(BOOL active, BOOL real, float dt) {
     float step = dt * 60.0f;
     if (step <= 0.0f) return;
@@ -20191,6 +20235,36 @@ static void diFxAdvanceEnergy(BOOL active, BOOL real, float dt) {
         for (int i = 0; i < DI_AU_BANDS; i++) gDIFxEneCur[i] = 0.0f;
         gDIFxEnergy = 0.0f;
     }
+
+    /* ===== 3.0.93: 鼓点能量 ===== */
+    float lowS = 0.0f, lowW = 0.0f, allS = 0.0f;
+    for (int i = 0; i < DI_AU_BANDS; i++) {
+        float v = active ? (real ? gDIBandRaw[i] : gDIBandSmooth[i]) : 0.0f;
+        if (v < 0.0f) v = 0.0f;
+        if (v > 1.0f) v = 1.0f;
+        allS += v;
+        if (i <= 4) {                        /* 0~4 段 ≈ 60~200Hz, 底鼓主体 */
+            float w = (i == 0) ? 3.0f : ((i == 1) ? 2.5f : ((i == 2) ? 2.0f : 1.0f));
+            lowS += v * w;
+            lowW += w;
+        }
+    }
+    lowS /= MAX(lowW, 1.0f);
+    allS /= (float)DI_AU_BANDS;
+    float nLow = diFxNormChain(0, lowS, step, 0.10f);
+    float nAll = diFxNormChain(1, allS, step, 0.08f);
+    gDIFxNormN[0] = nLow;
+    gDIFxNormN[1] = nAll;
+    float eb = 0.72f * nLow + 0.28f * nAll;
+    if (active) {
+        float kick = gDIKick;                /* 样本域那一下"咚", 0~1 */
+        if (kick < 0.0f) kick = 0.0f;
+        if (kick > 1.0f) kick = 1.0f;
+        if (kick > eb) eb = kick;
+    } else {
+        eb = 0.0f;
+    }
+    gDIFxBeatE = diFxClamp01(eb);
 }
 
 /* ===== 3.0.92: 专辑鼓点包络 —— FlexMusic 的 beatScale 原样还原 =====
@@ -20201,7 +20275,8 @@ static void diFxAdvanceEnergy(BOOL active, BOOL real, float dt) {
      desired = 1 + min(0.22, pulse·0.095·clamp(强度,0.3,2.5))
      scale: 上升 0.58 / 下降 0.20 逼近 desired
    停用: baseline×0.92、pulse×0.72、desired=1; 距 1 小于 0.0005 时精确归位。
-   它是"相对基线的能量瞬态", 不是 BPM/底鼓识别 —— 这正是参考实现的手感来源。 */
+   它是"相对基线的能量瞬态", 不是 BPM/底鼓识别 —— 这正是参考实现的手感来源。
+   3.0.93: 公式一个字没改, 只把输入 E 换成 gDIFxBeatE(见上), 并补探针。 */
 static float diFxAdvanceBeat(BOOL active, float energy, double strengthSlider, float dt) {
     float step = dt * 60.0f;
     if (step <= 0.0f) return gDIFxBeatScale;
@@ -20217,6 +20292,9 @@ static float diFxAdvanceBeat(BOOL active, float energy, double strengthSlider, f
         if (excess < 0.0f) excess = 0.0f;
         float drive = (E > 0.58f ? (E - 0.58f) : 0.0f) * 0.55f + excess * 5.6f;
         if (drive > 1.0f) drive = 1.0f;
+        gDIFxBeatBaseSee = gDIFxBeatBase;
+        gDIFxBeatExcSee = excess;
+        gDIFxBeatDrvSee = drive;
         if (drive > gDIFxBeatPulse) {
             float k = 1.0f - powf(1.0f - 0.72f, step);
             gDIFxBeatPulse += (drive - gDIFxBeatPulse) * k;
@@ -20234,11 +20312,18 @@ static float diFxAdvanceBeat(BOOL active, float energy, double strengthSlider, f
     } else {
         gDIFxBeatBase *= powf(0.92f, step);
         gDIFxBeatPulse *= powf(0.72f, step);
+        /* 3.0.93: 停一会儿之后从干净状态重来 —— 否则再按播放时基线还挂在
+           上回的低位, 第一帧 excess 会顶满, 封面"啪"地放大一下。 */
+        if (gDIFxBeatPulse < 0.004f) { gDIFxBeatPulse = 0.0f; gDIFxBeatBase = 0.0f; }
         desired = 1.0f;
     }
     float rate = (desired > gDIFxBeatScale) ? 0.58f : 0.20f;
     rate = 1.0f - powf(1.0f - rate, step);
     gDIFxBeatScale += (desired - gDIFxBeatScale) * rate;
+    /* 拍与拍之间必须严格回到 1.000(3.0.64 用户"静止时必须是 1.000") ——
+       指数回落永远差一点, 这里在脉冲已经落干净时直接吸住。 */
+    if (gDIFxBeatPulse < 0.0015f && fabsf(gDIFxBeatScale - 1.0f) < 0.004f)
+        gDIFxBeatScale = 1.0f;
     if (!active && fabsf(gDIFxBeatScale - 1.0f) < 0.0005f) gDIFxBeatScale = 1.0f;
     return gDIFxBeatScale;
 }
@@ -21707,8 +21792,10 @@ static void diRhythmTickWithDelta(float dtIn) {
        鼓点: E 的相对基线瞬态(baseline/excess) → pulse → 1+min(0.22, pulse·0.095·强度)。
        岛(MRU)那条链路仍然读 gDIKick/beat.bin, 一行没动。 */
     diFxAdvanceEnergy(active, real, dt);
+    /* 3.0.93: 喂给包络的是 gDIFxBeatE(低频局部归一 + 底鼓包络取大),
+       不再是 24 段均值 —— 均值太平, 包络全流程输出 1.008, 等于没接。 */
     float fxBeatS = diFxAdvanceBeat(active && rhythmOn && rhythmBeatScale > 0.01,
-                                    gDIFxEnergy, rhythmBeatScale, dt);
+                                    gDIFxBeatE, rhythmBeatScale, dt);
 
     if (!gDIFxRealLogged && active && real && gDIBandSeen) {
         gDIFxRealLogged = YES;
@@ -21824,7 +21911,7 @@ static void diRhythmTickWithDelta(float dtIn) {
             for (int i = 0; i < gDIRhythmExtraN; i++)
                 [exs appendFormat:@"%@%.0f ", NSStringFromClass(gDIRhythmExtras[i].class),
                  gDIRhythmExtras[i].bounds.size.width];
-            RLog(@"[探针] 通量=%.3f 低频=%.3f 占=%.2f 拍=%.2f 鼓=%.2f 踢=%.2f 咚=%.2f 串=%u 低R=%.4f 隔=%.2f 缩放=%.3f 实=%.3f 呈=%.3f 尺=%.0f 基尺=%.0f 驱动=%@ 图=%@ 旋=%@ 播=%d 率=%d 粒=%d 强=%.1f 律=%d 基=%d 能=%.2f 律缩=%.3f 脉=%.2f",
+            RLog(@"[探针] 通量=%.3f 低频=%.3f 占=%.2f 拍=%.2f 鼓=%.2f 踢=%.2f 咚=%.2f 串=%u 低R=%.4f 隔=%.2f 缩放=%.3f 实=%.3f 呈=%.3f 尺=%.0f 基尺=%.0f 驱动=%@ 图=%@ 旋=%@ 播=%d 率=%d 粒=%d 强=%.1f 律=%d 基=%d 能=%.2f 鼓能=%.2f 低N=%.2f 全N=%.2f 基线=%.2f 超出=%.2f 驱=%.2f 律缩=%.3f 脉=%.2f",
                  gDIFluxNow, gDILowLevel, gDILowShare, gDIBeatEnv, gDILowN, gDIKick,
                  diKickPunchNow(), (unsigned)gDIPcmKickSerial, gDIPcmLowRms,
                  (float)(gDILastKickT > 0 ? (CACurrentMediaTime() - gDILastKickT) : 0.0),
@@ -21835,7 +21922,9 @@ static void diRhythmTickWithDelta(float dtIn) {
                  ([dv.layer animationForKey:@"di.art.spin"] ? @"CA" : (ownsSpin ? @"我们" : (wantSpin ? @"等" : @"关"))),
                  active ? 1 : 0, (int)gDIPlayRateState, gDIDotCount, rhythmParticleStrength,
                  rhythmOn ? 1 : 0, gDIRhythmBaseValid ? 1 : 0,
-                 gDIFxEnergy, gDIFxBeatScale, gDIFxBeatPulse);
+                 gDIFxEnergy, gDIFxBeatE, gDIFxNormN[0], gDIFxNormN[1],
+                 gDIFxBeatBaseSee, gDIFxBeatExcSee, gDIFxBeatDrvSee,
+                 gDIFxBeatScale, gDIFxBeatPulse);
             /* 3.0.62: 没找到内容层就定期把视图树打出来(20s 一次), 不用等切歌 */
             if (gDIRhythmExtraN == 0 && nowP - gDIDumpAt > 20.0) {
                 gDIDumpAt = nowP;
