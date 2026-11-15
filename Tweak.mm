@@ -22280,7 +22280,7 @@ static BOOL __attribute__((unused)) diISMClips(UIView *v) {
    不再往上爬 —— 往上爬会走到窗体一级, 那正是 3.0.89/90 "粒子数有、屏幕没有"
    和"粒子跑到展开页"的来源。 */
 static UIView *diISMHostParent(UIView *art) {
-    return art.window; /* bypass clipping capsule ancestors without changing them */
+    return art.superview; /* attach inside the visible aperture content branch, not secure-window root */
 }
 
 static void diISMEnsureHost(void) {
@@ -22292,11 +22292,13 @@ static void diISMEnsureHost(void) {
     /* 比 87 的 0.6 倍大一圈: 粒子能飘出小岛, 但宿主仍贴着头像, 不会跑到展开页 */
     CGFloat pad = MAX(box.size.width, box.size.height) * 1.6 + 10.0;
     (void)pad; (void)box;
-    CGRect want = parent.bounds;
+    CGRect want = CGRectInset(box, -MAX(90.0, box.size.width*4.0), -MAX(90.0, box.size.height*4.0));
     if (gDIISMHost && gDIISMHost.superview == parent) {
         if (!CGRectEqualToRect(gDIISMHost.frame, want)) gDIISMHost.frame = want;
         /* 玻璃/系统层随时可能挤到前面: 每帧把粒子层顶回去(只是改 zPosition, 不动布局) */
         if (gDIISMHost.layer.zPosition < 900.0) gDIISMHost.layer.zPosition = 900.0;
+        gDIISMHost.hidden=NO; gDIISMHost.alpha=1;
+        [parent bringSubviewToFront:gDIISMHost];
         return;
     }
     /* 宿主换了(岛重建/换层): 粒子**状态不清**, 只把已经建好的 layer 挪过去 ——
@@ -22370,6 +22372,10 @@ static void diISMSpawnDot(void) {
         L.lineWidth = diFxShapeLine(d->shape)*k*(float)gDIISMDotS;
     }
     L.lineJoin = kCALineJoinRound;
+    L.hidden=NO; L.zPosition=1;
+    L.actions=@{@"position":NSNull.null,@"transform":NSNull.null,@"opacity":NSNull.null,
+        @"path":NSNull.null,@"bounds":NSNull.null};
+    if (gDIISMHost && L.superlayer!=gDIISMHost.layer) [gDIISMHost.layer addSublayer:L];
     gDIISMDotCount++;
 }
 
@@ -22683,8 +22689,20 @@ static void diISMRUFrame(float dtIn) {
 
     if (nowC - gDIISMProbeAt > 3.0) {
         gDIISMProbeAt = nowC;
+        NSMutableString *clipChain=[NSMutableString string];
+        for(UIView *v=art;v;v=v.superview) {
+            [clipChain appendFormat:@"%@:%@ clip=%d hidden=%d alpha=%.2f; ",NSStringFromClass(v.class),NSStringFromCGRect(v.bounds),diISMClips(v),v.hidden,v.alpha];
+            if(v==v.window)break;
+        }
+        for(int i=0;i<DI_IS_DOT_MAX;i++) {
+            CAShapeLayer *l=gDIISMDotLayer[i];
+            if(gDIISMDots[i].life>0 && l) {
+                diMruFileLog([NSString stringWithFormat:@"[岛粒子可见性] host=%@ frame=%@ bounds=%@ 位置=%@ 透明=%.3f 线宽=%.2f 路径=%@ 挂载=%d 链=%@",NSStringFromClass(gDIISMHost.superview.class),NSStringFromCGRect(gDIISMHost.frame),NSStringFromCGRect(gDIISMHost.bounds),NSStringFromCGPoint(l.position),l.opacity,l.lineWidth,NSStringFromCGRect(l.path?CGPathGetBoundingBox(l.path):CGRectZero),l.superlayer==gDIISMHost.layer,clipChain]);
+                break;
+            }
+        }
         diMruFileLog([NSString stringWithFormat:
-            @"岛特效同步探针 窗口外飘=1 头像=%.0fx%.0f 文件=%d 播放=%d 鼓=%.2f 缩放=%.3f 粒子=%d 宿主=%@ 曾在=%@",
+            @"岛特效同步探针 内容分支外飘=1 头像=%.0fx%.0f 文件=%d 播放=%d 鼓=%.2f 缩放=%.3f 粒子=%d 宿主=%@ 曾在=%@",
             art.bounds.size.width, art.bounds.size.height, (int)fromFile,
             (int)playing, kick, gDIISMScaleNow, gDIISMDotCount,
             gDIISMHost ? NSStringFromClass(gDIISMHost.superview.class) : @"无",
