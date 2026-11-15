@@ -22076,13 +22076,6 @@ static void diISMRUFrame(float dtIn) {
 @end
 
 
-@implementation DIISMRUTicker
-- (void)onFrame:(CADisplayLink *)l {
-    double dt = l.targetTimestamp - l.timestamp;
-    if (dt <= 0.0 || dt > 0.12) dt = 1.0 / 30.0;
-    @try { diISMRUFrame((float)dt); } @catch (__unused NSException *e) {}
-}
-@end
 
 static void diRhythmEnsure(void) {
     /* 3.0.79: 巡检时同步刷新播放状态 —— 引擎挂起后, 这就是唯一的"该不该醒"依据 */
