@@ -19187,6 +19187,7 @@ static CALayer *gDIRhythmRingBox = nil;
 static CAGradientLayer *gDIRhythmRingGrad = nil;
 static CAShapeLayer *gDIRhythmRingMask = nil;
 static CAShapeLayer *gDIRhythmRingBack = nil;
+static BOOL gDIBeatStopped = NO;          /* 3.0.79: 暂停/停止后已硬停(粒子清零+层隐藏) */
 static CAGradientLayer *gDIRhythmBarsGrad = nil;
 static CAShapeLayer *gDIRhythmBars = nil;      /* 条形的 mask 形状 */
 static CATransform3D gDIRhythmBase;
@@ -19687,6 +19688,8 @@ static void diFxEnsurePool(UIView *host) {
         gDIDotClipLayer.zPosition = 960.0f;
     }
     if (gDIDotClipLayer.superlayer != hl) [hl addSublayer:gDIDotClipLayer];
+    /* 3.0.79: 暂停时整个容器被设为透明(彻底隐藏), 恢复播放要还原 */
+    if (gDIDotClipLayer.opacity < 0.99f) gDIDotClipLayer.opacity = 1.0f;
     for (int i = 0; i < DI_DOT_CAP; i++) {
         CALayer *l = gDIDotLayer[i];
         if (!l) {
@@ -19896,27 +19899,34 @@ static void diFxUpdateDots(UIView *host, CGRect cover, float dt,
         d->ang += (swayV / MAX(8.0f, d->rad)) * dt;
         d->rot += d->rotSpd * dt;
 
-        /* 该方向到宿主边缘的距离(留 4pt), 再钳在 1.15R~1.55R。
-           3.0.58: 上限从 2.6R 收到 1.55R —— 视频里粒子就贴着封面边缘一圈,
-           不会飘到岛的边角上。 */
+        /* 该方向到宿主边缘的距离(留 4pt), 再钳在 1.15R~2.15R。
+           3.0.58: 曾经收到 1.55R(贴着封面一圈)。
+           3.0.79: 489 之后用户要求"粒子范围再放大一点, 让他飘的远一点" ——
+           上限 1.55R → 2.15R。宿主够大时这就是真的往外多飘 0.6R(57pt 封面上约 17pt),
+           而且边界外再给 0.25R 的余量: 宿主不裁剪时粒子能飘到卡片外沿,
+           裁剪时最多是贴着边停住, 不会比以前更差。 */
+        CGFloat edgePad = Rc * 0.25f;
         CGFloat ca = cosf(d->ang), sa2 = sinf(d->ang);
-        CGFloat tx = (ca > 0.02f) ? (W - 4.0f - cx) / ca : ((ca < -0.02f) ? (4.0f - cx) / ca : 1e9f);
-        CGFloat ty = (sa2 > 0.02f) ? (H - 4.0f - cy) / sa2 : ((sa2 < -0.02f) ? (4.0f - cy) / sa2 : 1e9f);
+        CGFloat tx = (ca > 0.02f) ? (W + edgePad - 4.0f - cx) / ca : ((ca < -0.02f) ? (-edgePad + 4.0f - cx) / ca : 1e9f);
+        CGFloat ty = (sa2 > 0.02f) ? (H + edgePad - 4.0f - cy) / sa2 : ((sa2 < -0.02f) ? (-edgePad + 4.0f - cy) / sa2 : 1e9f);
         CGFloat dirMax = MIN(tx, ty);
-        if (dirMax > Rc * 1.55f) dirMax = Rc * 1.55f;
+        if (dirMax > Rc * 2.15f) dirMax = Rc * 2.15f;
         if (dirMax < Rc * 1.15f) dirMax = Rc * 1.15f;
 
+        /* 3.0.79: 走到最远处不再"啪一下没了"(那等于白放大范围, 用户根本看不到多远)。
+           现在到边先停位、径向速度归零, 再用 0.30s 淡出收尾 —— 是"散到头、慢慢没了"。 */
         if (d->rad > dirMax) {
-            d->life = 0.0f;
-            layer.opacity = 0.0f;
-            if (gDIDotCount > 0) gDIDotCount--;
-            continue;
+            d->rad = dirMax;
+            d->drift = 0.0f;
+            if (d->life > 0.30f) d->life = 0.30f;
         }
 
         float age = d->maxLife - d->life;
         float fadeIn = diFxSmoothStep(0.0f, 0.80f, age);                  /* 出生 0.8s 淡入 */
         float fadeOut = diFxSmoothStep(0.0f, d->maxLife * 0.25f, d->life); /* 末尾 25% 淡出 */
-        float edgeOut = 1.0f - diFxSmoothStep((float)dirMax * 0.82f, (float)dirMax, d->rad);
+        /* 3.0.79: 边缘淡出起点 0.82 → 0.90 —— 粒子要一直亮到很远才开始透明,
+           否则"范围放大了"在视觉上根本看不出来(还没到远处就淡没了)。 */
+        float edgeOut = 1.0f - diFxSmoothStep((float)dirMax * 0.90f, (float)dirMax, d->rad);
         float tw = 0.86f + 0.14f * sinf(d->phase + (float)gDIClock * 0.9f);
         /* 3.0.58: 不再用 alpha 假装"藏在专辑后面"(那样粒子只会在边缘凭空出现)。
            现在图层真的排在封面下面, 被封面挡住, 飘出去才露出来。
@@ -20633,6 +20643,7 @@ static void diRhythmReset(void) {
     diRhythmDetach();
     if (rhythmRoundCover) diCoverUnround();
     for (int i = 0; i < DI_AU_BANDS; i++) { gDIBandRaw[i] = 0; gDIBandSmooth[i] = 0; }
+    gDIBeatStopped = NO;      /* 3.0.79: 引擎重启后允许重新硬停 */
 }
 
 /* 3.0.55: 频谱跟随 + 鼓点检测(重写)
@@ -20884,6 +20895,63 @@ static void diRhythmAdvanceSpectrum(BOOL active, BOOL real, float dt) {
     }
 }
 
+/* ===== 3.0.79: 播放状态 & 暂停即停 =====
+   消 489 反馈: "歌曲暂停了粒子跟音频还是在动"。
+   两个根因:
+     ① active 只看 MRMediaRemoteGetNowPlayingIsPlaying。控制中心点暂停后,
+        这个接口经常延迟 1~2 秒才变 NO(有时干脆不变), 于是 active 一直是 YES
+        —— 粒子继续生成/漂移、频谱条继续画。PlaybackRate 在暂停那一刻就变 0,
+        用它做权威判据, 立刻停。
+     ② 就算 active 变 NO, 以前也只是把粒子寿命压到 0.35s、让它们慢慢淡,
+        引擎还在 120Hz 空转。现在改成硬停: 粒子瞬间清零、所有特效层 opacity=0、
+        displayLink 挂起, 直到真的重新播放才唤醒。 */
+static NSInteger gDIPlayRateState = -1;      /* -1 未知 / 0 暂停或停止 / 1 播放中 */
+static CFTimeInterval gDIPlayRateAt = 0;
+
+static void diPlayRatePoll(void) {
+    CFTimeInterval now = CACurrentMediaTime();
+    if (now - gDIPlayRateAt < 0.40) return;
+    gDIPlayRateAt = now;
+    if (!gMRGetNowPlayingInfo) {
+        diNPLoadMediaRemote();
+        if (!gMRGetNowPlayingInfo) return;
+    }
+    gMRGetNowPlayingInfo(dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^(CFDictionaryRef info) {
+        /* 取不到信息时保持上一次判断 —— 一次查询失败不该把特效灭掉 */
+        if (!info) return;
+        CFStringRef key = (gMRRateKeyPtr && *gMRRateKeyPtr) ? *gMRRateKeyPtr : NULL;
+        if (!key) return;
+        id rv = (__bridge id)CFDictionaryGetValue(info, key);
+        if (![rv isKindOfClass:NSNumber.class]) return;
+        NSInteger st = ([rv doubleValue] > 0.01) ? 1 : 0;
+        dispatch_async(dispatch_get_main_queue(), ^{ gDIPlayRateState = st; });
+    });
+}
+
+/* 暂停/停止时: 粒子全部清空、所有视觉层隐藏。
+   注意粒子层下一帧会重新变可见(opacity 由 diFxUpdateDots 写), 所以清空用的是
+   life=0 + count=0 —— updateDots 对 life<=0 的槽位只写 opacity 0, 不会被"复活"。 */
+static void diFxHardStop(void) {
+    [CATransaction begin];
+    [CATransaction setDisableActions:YES];
+    for (int i = 0; i < DI_DOT_CAP; i++) {
+        gDIDots[i].life = 0.0f;
+        gDIDots[i].push = 0.0f;
+        if (gDIDotLayer[i]) gDIDotLayer[i].opacity = 0.0f;
+    }
+    gDIDotCount = 0;
+    gDISpawnAcc = 0.0f;
+    if (gDIDotClipLayer) gDIDotClipLayer.opacity = 0.0f;
+    if (gDIRhythmRingGrad) gDIRhythmRingGrad.opacity = 0.0f;
+    if (gDIRhythmRingBack) gDIRhythmRingBack.opacity = 0.0f;
+    if (gDIRhythmBarsGrad) gDIRhythmBarsGrad.opacity = 0.0f;
+    [CATransaction commit];
+    /* 包络/频谱全部归零, 免得恢复播放时第一帧带着上一次的尾巴 */
+    gDISteady = 0.0f; gDIBeatEnv = 0.0f; gDIBassPulse = 0.0f;
+    gDIKick = 0.0f; gDIKickTarget = 0.0f;
+    for (int i = 0; i < DI_AU_BANDS; i++) gDIBandSmooth[i] = 0.0f;
+}
+
 static void diRhythmTickWithDelta(float dtIn) {
     BOOL anyFx = (rhythmOn || rhythmRingOn || rhythmParticlesOn || rhythmBarsOn);
     if (!rhythmFxOn || !anyFx) { diRhythmReset(); return; }
@@ -21032,8 +21100,14 @@ static void diRhythmTickWithDelta(float dtIn) {
     }
 
     BOOL hasSong = gDIInfoReady ? gDIHasNowPlaying : YES;
+    /* 3.0.79: 优先级 PlaybackRate(暂停瞬间就变 0) > MRMediaRemoteGetNowPlayingIsPlaying
+       > AVAudioSession。489 反馈"暂停了还在动", 根因就是 IsPlaying 慢半拍甚至不更新。 */
+    diPlayRatePoll();
     BOOL playing = mrQueryOK ? musicPlaying : AVAudioSession.sharedInstance.isOtherAudioPlaying;
+    if (gDIPlayRateState == 0) playing = NO;
+    else if (gDIPlayRateState == 1) playing = YES;
     BOOL active = hasSong && playing;
+    if (active) gDIBeatStopped = NO;
 
     /* 3.0.58(图三): 暂停/停播时把引擎从原生刷新率降到 20Hz。
        图三说的是"原生 layoutSubviews 排完版会休眠, 我们一直改布局它就一直在刷新, 所以发热"。
@@ -21081,6 +21155,15 @@ static void diRhythmTickWithDelta(float dtIn) {
         }
         gDICoverScaleNow = 1.0f;
         sDbg = 1.0;
+        /* 3.0.79: "彻底停止跟隐藏" —— 粒子瞬间清零、频谱/环全部透明,
+           然后把 displayLink 挂起。以前只把粒子寿命压到 0.35s 慢慢淡,
+           用户看到的就是"暂停了还在飘"; 引擎还在 120Hz 空转。 */
+        if (!gDIBeatStopped) {
+            gDIBeatStopped = YES;
+            diFxHardStop();
+            RLog(@"[律动] 暂停/停止 → 粒子与频谱已隐藏, 引擎挂起");
+        }
+        if (gDIRhythmLink && !gDIRhythmLink.paused) gDIRhythmLink.paused = YES;
     } else if (rhythmOn) {
         /* 尺寸变了之后(展开→收起)base 已作废, 用系统现在的 transform 重新记一次 */
         if (!gDIRhythmBaseValid && dv) {
@@ -21158,7 +21241,7 @@ static void diRhythmTickWithDelta(float dtIn) {
             for (int i = 0; i < gDIRhythmExtraN; i++)
                 [exs appendFormat:@"%@%.0f ", NSStringFromClass(gDIRhythmExtras[i].class),
                  gDIRhythmExtras[i].bounds.size.width];
-            RLog(@"[探针] 通量=%.3f 低频=%.3f 占=%.2f 拍=%.2f 鼓=%.2f 踢=%.2f 咚=%.2f 串=%u 低R=%.4f 隔=%.2f 缩放=%.3f 实=%.3f 呈=%.3f 尺=%.0f 基尺=%.0f 驱动=%@ 图=%@ 旋=%@ 播=%d 粒=%d 强=%.1f 律=%d 基=%d",
+            RLog(@"[探针] 通量=%.3f 低频=%.3f 占=%.2f 拍=%.2f 鼓=%.2f 踢=%.2f 咚=%.2f 串=%u 低R=%.4f 隔=%.2f 缩放=%.3f 实=%.3f 呈=%.3f 尺=%.0f 基尺=%.0f 驱动=%@ 图=%@ 旋=%@ 播=%d 率=%d 粒=%d 强=%.1f 律=%d 基=%d",
                  gDIFluxNow, gDILowLevel, gDILowShare, gDIBeatEnv, gDILowN, gDIKick,
                  diKickPunchNow(), (unsigned)gDIPcmKickSerial, gDIPcmLowRms,
                  (float)(gDILastKickT > 0 ? (CACurrentMediaTime() - gDILastKickT) : 0.0),
@@ -21167,7 +21250,7 @@ static void diRhythmTickWithDelta(float dtIn) {
                  NSStringFromClass(dv.class),
                  gDIRhythmExtraN ? exs : @"无",
                  ([dv.layer animationForKey:@"di.art.spin"] ? @"CA" : (ownsSpin ? @"我们" : (wantSpin ? @"等" : @"关"))),
-                 active ? 1 : 0, gDIDotCount, rhythmParticleStrength,
+                 active ? 1 : 0, (int)gDIPlayRateState, gDIDotCount, rhythmParticleStrength,
                  rhythmOn ? 1 : 0, gDIRhythmBaseValid ? 1 : 0);
             /* 3.0.62: 没找到内容层就定期把视图树打出来(20s 一次), 不用等切歌 */
             if (gDIRhythmExtraN == 0 && nowP - gDIDumpAt > 20.0) {
@@ -21185,9 +21268,11 @@ static void diRhythmTickWithDelta(float dtIn) {
         [CATransaction begin];
         [CATransaction setDisableActions:YES];
         diRhythmLayoutRing(cover, gDIBandSmooth, active);
-        float baseA = active ? (0.62f + 0.38f * gDIBeatEnv) : 0.12f;
+        /* 3.0.79: 暂停时环要**全灭**(以前留 0.12/0.05, 屏幕上一直挂着一圈微亮的环,
+           用户说的"还在动"里就有它)。 */
+        float baseA = active ? (0.62f + 0.38f * gDIBeatEnv) : 0.0f;
         gDIRhythmRingGrad.opacity = baseA * (float)rhythmRingFollowAlpha;
-        if (gDIRhythmRingBack) gDIRhythmRingBack.opacity = active ? 0.18f : 0.05f;
+        if (gDIRhythmRingBack) gDIRhythmRingBack.opacity = active ? 0.18f : 0.0f;
         [CATransaction commit];
     }
 
@@ -21224,6 +21309,8 @@ static void diRhythmTickWithDelta(float dtIn) {
 @end
 
 static void diRhythmEnsure(void) {
+    /* 3.0.79: 巡检时同步刷新播放状态 —— 引擎挂起后, 这就是唯一的"该不该醒"依据 */
+    diPlayRatePoll();
     /* 3.0.49: 与保险档位联动 —— 连续崩两次(档位≤1)时律动整体停, 先保系统能开机。
        用户在设置里拨任意开关会重新拉满档位, 律动随之恢复。 */
     BOOL need = (rhythmFxOn && (rhythmOn || rhythmRingOn || rhythmParticlesOn || rhythmBarsOn)
@@ -21241,9 +21328,16 @@ static void diRhythmEnsure(void) {
              rhythmFxOn, rhythmRoundCover, rhythmOn, rhythmRingOn,
              rhythmParticlesOn, rhythmBarsOn);
     } else if (need && gDIRhythmLink && gDIRhythmLink.paused) {
-        /* 3.0.66: 休眠唤醒 —— 播放器重新布局(控制中心打开/换尺寸)或 1Hz 巡检时恢复 */
+        /* 3.0.66: 休眠唤醒 —— 播放器重新布局(控制中心打开/换尺寸)或 1Hz 巡检时恢复。
+           3.0.79: 暂停/停止时不唤醒(否则每秒醒一次、跑一帧又挂起, 白耗电);
+           真的恢复播放(PlaybackRate > 0)才唤醒。 */
+        BOOL playNow = mrQueryOK ? musicPlaying : AVAudioSession.sharedInstance.isOtherAudioPlaying;
+        if (gDIPlayRateState == 0) playNow = NO;
+        else if (gDIPlayRateState == 1) playNow = YES;
+        if (!playNow) return;
+        gDIBeatStopped = NO;
         gDIRhythmLink.paused = NO;
-        RLog(@"[律动] 播放器出现 → 引擎唤醒");
+        RLog(@"[律动] 重新播放 → 引擎唤醒");
     } else if (!need && gDIRhythmLink) {
         [gDIRhythmLink invalidate];
         gDIRhythmLink = nil;

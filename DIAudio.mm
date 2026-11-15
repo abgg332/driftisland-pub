@@ -325,6 +325,15 @@ static void *diAudioServerThread(void *arg) {
         int nb = fcntl(c, F_GETFL, 0);
         if (nb >= 0) fcntl(c, F_SETFL, nb | O_NONBLOCK);
         for (;;) {
+            /* 3.0.79: 暂停/停止时 render 回调根本不会来 —— 以前这里仍然 60Hz 空转
+               (每 16ms: memset + 组包 + send), 纯耗电, 客户端还会一直收到"零包",
+               看着就是"暂停了音频还在动"。现在没声音就 20Hz 轻量巡检、**不发包**;
+               render 一回来(live=YES)立刻恢复 60Hz。 */
+            if (CFAbsoluteTimeGetCurrent() - gDIStamp >= 0.5) {
+                usleep(50000);
+                for (int b = 0; b < DI_BANDS; b++) gDIBandF[b] *= 0.85f;
+                continue;
+            }
             /* 3.0.55: 33ms → 16ms。30Hz 的数据在 120Hz 屏上就是"每四帧才变一次",
                刻度和粒子再怎么平滑也是顿的。60Hz 发包, 32 字节/包, 开销可以忽略。 */
             usleep(16000);
