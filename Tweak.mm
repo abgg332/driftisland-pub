@@ -71,7 +71,7 @@ static BOOL rhythmParticlesOn = YES;           // 封面外圈粒子
 static BOOL rhythmRoundCover = YES;            // 3.0.47: 封面裁成正圆
 static BOOL rhythmBarsOn = YES;                // 3.0.48: 频谱条(进度条上方)
 static int  rhythmBarsCount = 40;              // 3.0.50: 频谱条根数(可调)
-/* 3.0.80: 频谱条样式(0 柱状/1 圆点/2 镜像/3 波形/4 峰值/5 细线) + 峰值帽状态 */
+/* 3.0.82: 频谱条样式 —— 0 柱状 / 1 点阵 / 2 镜像 / 3 阶梯 / 4 峰值 / 5 尖刺 / 6 斜切 / 7 电波 */
 static int gDIBarStyle = 0;
 static float gDIBarPeak[64];
 static CFAbsoluteTime gDIBarPeakT = 0;
@@ -992,13 +992,13 @@ static void diFxLoadPrefs(void) {
     rhythmRoundCover = YES;   /* 3.0.61: 开关已从律动页移除(与「启用遮罩」重复), 恒为圆形 */
     rhythmBarsOn = fxBool(@"AlbumBarsOn", YES);
     {
-        /* 3.0.80: 频谱条样式(0~5, 不分尺寸) */
+        /* 3.0.82: 频谱条样式(0~7, 不分尺寸) */
         {
             id sv = CFBridgingRelease(CFPreferencesCopyAppValue((__bridge CFStringRef)@"SpectrumStyle",
                                                                (__bridge CFStringRef)kDomain));
             int st = sv ? [sv intValue] : 0;
             if (st < 0) st = 0;
-            if (st > 5) st = 5;
+            if (st > 7) st = 7;
             if (st != gDIBarStyle) {
                 gDIBarStyle = st;
                 for (int i = 0; i < 64; i++) gDIBarPeak[i] = 0.0f;   /* 换样式时峰值重新来 */
@@ -20491,15 +20491,21 @@ static void diRhythmUpdateBars(UIView *host, BOOL active) {
     const CGFloat xMidAll = (top + bottom) * 0.5f;   /* 镜像样式的中线 */
 
     switch (gDIBarStyle) {
-        case 1: {   /* 圆点: 每段一个实心圆, 高低靠点往上走 */
-            CGFloat rad = MIN(bw * 0.5f, 2.8f);
-            if (rad < 0.9f) rad = 0.9f;
-            CGFloat span = height - rad * 2.0f;
-            if (span < 0.0f) span = 0.0f;
+        case 1: {   /* 点阵: 每列是一串自下而上的小方块(LED 电平表), 亮的格数随频谱值 */
+            CGFloat cell = 2.2f, cgap = 1.0f, cspan = cell + cgap;
+            int cells = (int)floorf((height + cgap) / cspan);
+            if (cells < 1) cells = 1;
+            if (cells > 16) cells = 16;
             for (int i = 0; i < n; i++) {
-                CGFloat cx = x0 + i * (bw + gap) + bw * 0.5f;
-                CGFloat cy = bottom - rad - span * pow(vArr[i], 0.85);
-                CGPathAddEllipseInRect(p, NULL, CGRectMake(cx - rad, cy - rad, rad * 2.0f, rad * 2.0f));
+                int lit = (int)lroundf((float)vArr[i] * (float)cells);
+                if (lit < 1) lit = 1;
+                if (lit > cells) lit = cells;
+                CGFloat bx = x0 + i * (bw + gap);
+                for (int k = 0; k < lit; k++) {
+                    CGFloat y = bottom - cell - (CGFloat)k * cspan;
+                    CGFloat rr0 = MIN(cell * 0.35f, bw * 0.5f);
+                    CGPathAddRoundedRect(p, NULL, CGRectMake(bx, y, bw, cell), rr0, rr0);
+                }
             }
             break;
         }
@@ -20513,23 +20519,19 @@ static void diRhythmUpdateBars(UIView *host, BOOL active) {
             }
             break;
         }
-        case 3: {   /* 波形: 顶点用 Catmull-Rom 连成一条连续波浪带 */
-            CGPoint pts[64];
-            for (int i = 0; i < n; i++)
-                pts[i] = CGPointMake(x0 + i * (bw + gap) + bw * 0.5f, bottom - hArr[i]);
-            CGPathMoveToPoint(p, NULL, pts[0].x, pts[0].y);
-            for (int i = 0; i < n - 1; i++) {
-                CGPoint p0 = pts[(i > 0) ? (i - 1) : 0];
-                CGPoint p1 = pts[i];
-                CGPoint p2 = pts[i + 1];
-                CGPoint p3 = pts[(i + 2 < n) ? (i + 2) : (n - 1)];
-                CGPoint c1 = CGPointMake(p1.x + (p2.x - p0.x) / 6.0f, p1.y + (p2.y - p0.y) / 6.0f);
-                CGPoint c2 = CGPointMake(p2.x - (p3.x - p1.x) / 6.0f, p2.y - (p3.y - p1.y) / 6.0f);
-                CGPathAddCurveToPoint(p, NULL, c1.x, c1.y, c2.x, c2.y, p2.x, p2.y);
+        case 3: {   /* 阶梯: 相邻列用水平台面连起来, 整条是一块连续的阶梯山脊 */
+            CGFloat step = bw + gap;
+            if (step < 0.5f) step = 0.5f;
+            CGFloat xEnd = x0 + (CGFloat)(n - 1) * step + bw;   /* 最后一根的右边缘 */
+            CGPathMoveToPoint(p, NULL, x0, bottom);
+            for (int i = 0; i < n; i++) {
+                CGFloat xl = x0 + (CGFloat)i * step;
+                CGFloat xr = (i == n - 1) ? xEnd : (xl + step);
+                CGFloat y = bottom - hArr[i];
+                CGPathAddLineToPoint(p, NULL, xl, y);   /* 竖起来 */
+                CGPathAddLineToPoint(p, NULL, xr, y);   /* 平台面 */
             }
-            /* 闭合到底边, 形成一条填充的波浪带 */
-            CGPathAddLineToPoint(p, NULL, pts[n - 1].x + bw * 0.5f, bottom);
-            CGPathAddLineToPoint(p, NULL, pts[0].x - bw * 0.5f, bottom);
+            CGPathAddLineToPoint(p, NULL, xEnd, bottom);
             CGPathCloseSubpath(p);
             break;
         }
@@ -20564,12 +20566,59 @@ static void diRhythmUpdateBars(UIView *host, BOOL active) {
             }
             break;
         }
-        case 5: {   /* 细线: 1pt 极细竖线, 极简 */
-            CGFloat lw = MIN(1.2f, bw);
-            if (lw < 0.6f) lw = 0.6f;
+        case 5: {   /* 尖刺: 底部略宽、顶上收成锐尖的针, 密集时像一排锯齿 */
+            CGFloat baseW = MIN(bw * 1.7f, bw + gap * 1.6f);
+            if (baseW < bw) baseW = bw;
             for (int i = 0; i < n; i++) {
                 CGFloat cx = x0 + i * (bw + gap) + bw * 0.5f;
-                CGPathAddRect(p, NULL, CGRectMake(cx - lw * 0.5f, bottom - hArr[i], lw, hArr[i]));
+                CGFloat tipY = bottom - hArr[i];
+                CGPathMoveToPoint(p, NULL, cx - baseW * 0.5f, bottom);
+                CGPathAddLineToPoint(p, NULL, cx, tipY);
+                CGPathAddLineToPoint(p, NULL, cx + baseW * 0.5f, bottom);
+                CGPathCloseSubpath(p);
+            }
+            break;
+        }
+        case 6: {   /* 斜切: 柱体越高歪得越多, 像被风推住的雨线 */
+            for (int i = 0; i < n; i++) {
+                CGFloat hh = hArr[i];
+                CGFloat sk = hh * 0.30f;
+                CGFloat xl = x0 + i * (bw + gap);
+                CGFloat y = bottom - hh;
+                CGPathMoveToPoint(p, NULL, xl, bottom);
+                CGPathAddLineToPoint(p, NULL, xl + bw, bottom);
+                CGPathAddLineToPoint(p, NULL, xl + bw + sk, y);
+                CGPathAddLineToPoint(p, NULL, xl + sk, y);
+                CGPathCloseSubpath(p);
+            }
+            break;
+        }
+        case 7: {   /* 电波: 一条随频谱起伏的细折线(示波器), 拐点补圆点防缺口 */
+            CGFloat lw = MIN(0.8f, MAX(0.45f, bw * 0.22f));
+            CGFloat step = bw + gap;
+            if (step < 0.5f) step = 0.5f;
+            CGPoint prev = CGPointZero;
+            BOOL has = NO;
+            for (int i = 0; i < n; i++) {
+                CGPoint cur = CGPointMake(x0 + (CGFloat)i * step + bw * 0.5f, bottom - hArr[i]);
+                if (has) {
+                    CGFloat dx = cur.x - prev.x, dy = cur.y - prev.y;
+                    CGFloat len = sqrtf(dx * dx + dy * dy);
+                    if (len < 0.0001f) len = 0.0001f;
+                    CGFloat nx = -dy / len * lw, ny = dx / len * lw;
+                    CGPathMoveToPoint(p, NULL, prev.x + nx, prev.y + ny);
+                    CGPathAddLineToPoint(p, NULL, cur.x + nx, cur.y + ny);
+                    CGPathAddLineToPoint(p, NULL, cur.x - nx, cur.y - ny);
+                    CGPathAddLineToPoint(p, NULL, prev.x - nx, prev.y - ny);
+                    CGPathCloseSubpath(p);
+                }
+                prev = cur;
+                has = YES;
+            }
+            for (int i = 0; i < n; i++) {
+                CGFloat cx = x0 + (CGFloat)i * step + bw * 0.5f;
+                CGFloat cy = bottom - hArr[i];
+                CGPathAddEllipseInRect(p, NULL, CGRectMake(cx - lw, cy - lw, lw * 2.0f, lw * 2.0f));
             }
             break;
         }
