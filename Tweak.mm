@@ -20231,6 +20231,7 @@ static void diFxAdvanceEnergy(BOOL active, BOOL real, float dt) {
         gDIFxEneCur[i] = cur;
         sum += cur;
     }
+    (void)sum;
     /* Reference channel uses its own FFT/AGC, not legacy dB/kick normalization. */
     float referenceSum=0;
     BOOL referenceLive=active && real && gDIReferenceSeen;
