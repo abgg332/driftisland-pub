@@ -135,10 +135,11 @@ static double islandDotStrength = 1.0;   // IslandDotStrength 0~2
 static int    islandColorMode = 0;       // IslandColorMode 0=跟随封面 1=自定义
 static NSString *islandColA = nil, *islandColB = nil;
 static BOOL islandFlowOn = NO;           // IslandFlowOn
-/* 3.0.87: MRU 岛特效正在给玻璃写 transform 时置 YES —— diActivityApply 里那句
-   "glass.frame = box" 必须让路。transform 非单位矩阵时 frame 是"变换后的外框",
-   再写 frame 会让 UIKit 反过来改 bounds(越写越小), 律动看起来就是"缩着不动"。 */
-static BOOL gDIISDrivingFx = NO;
+/* 3.0.88: 3.0.87 那条「律动写 transform 时让 glass.frame 同步让路」的开关已删除。
+   让路的副作用是: 只要律动还在写缩放, 玻璃的尺寸就永远不跟系统走 —— 岛一展开,
+   那块 23pt 的玻璃带着最多 1.22 倍的缩放留在 66pt 的头像里, 压到系统专辑上,
+   用户看到的就是"展开又多出一块蒙版"。现在改成**两个方向都写**:
+   尺寸用 bounds + center(与 transform 无关, 不会被缩放反噬), 缩放用 transform。 */
 static void diISRegisterGlass(UIView *g);   /* 玻璃注册(实现在律动模块里) */
 static void diISHardStop(void);             /* 清粒子 + 复位缩放 */
 /* 3.0.85: 岛专辑特效改到 MRU(真实专辑遮罩)侧 —— 函数定义在律动模块末尾,
@@ -14878,6 +14879,22 @@ static void diMruWriteExpandState(BOOL expanded, CGSize box) {
     @try { [d writeToFile:[dir stringByAppendingPathComponent:@"state.plist"] atomically:YES]; }
     @catch (__unused NSException *e) {}
 }
+/* ===== 3.0.88: 回传展开态要**先问 SpringBoard** =====
+   MRU 里常年躺着两颗头像(小岛 23、展开页 66), 展开页没显示时那颗 66 照样会被
+   layout —— 以前它每次 apply 都往 state.plist 写 expanded=1, SpringBoard 读到就
+   "遮罩退出: MRU 报展开态", 把小岛玻璃整棵收掉露出系统蒙版; 过一会儿 23 那颗
+   又写 0, 玻璃再挂回来。494 日志里"展开一次之后小岛反复冒蒙版"、粒子"一阵一阵"
+   都是这条链(它同时把 MRU 侧的 playing 判据也带偏了)。
+   现在以 diMruFormFromIsland() 播报的宿主尺寸为准: 1=小岛 → 写 0;
+   0=展开 / -1=过渡 → 写 1; 没有播报(-2)才退回头像尺寸兜底(老行为)。
+   这样那颗 66 残影再也不能替小岛"抢话"。 */
+static void diMruWriteExpandSmart(int formNow, BOOL collapsed, CGSize box) {
+    BOOL exp;
+    if (formNow == 1) exp = NO;
+    else if (formNow == 0 || formNow == -1) exp = YES;
+    else exp = !collapsed;
+    diMruWriteExpandState(exp, box);
+}
 /* ===== 2.9.38: 17 上"现在是不是收缩态" =====
    377~379 实锤: iOS17 的 MRUActivityArtworkView 恒 66x66, 收缩态也是这样, 所以
    按 bounds 判形态永远是"展开" → 收缩态也铺 66pt 玻璃 + 告诉 SpringBoard"展开",
@@ -15030,7 +15047,9 @@ static void diActivityApply(UIView *artwork) {
        "展开"就按 66pt 铺玻璃, 读到"收缩"又拆 —— 于是岛收起后大字幕一直闪/留一块
        大玻璃(用户: "缩回去就回不去, 显示比较大")。文件只在"确认收缩"这一个方向上
        采信, 不再用它否决收缩。 */
-    int formNow = ios17 ? diMruFormFromIsland() : -1;
+    /* 3.0.88: 形态播报 16 也要读 —— 16 上回传展开态同样要先问 SpringBoard,
+       否则展开页那颗 66 残影会一直替小岛写 expanded=1(见 diMruWriteExpandSmart)。 */
+    int formNow = diMruFormFromIsland();
     BOOL smallArt = (artSide <= 30.0);
     /* 2.9.59: 文件明确说展开时, "小头像在不在"不可采信(391: 展开前后 23 那颗仍在
        列表里), 否则展开态的 66 会被 sibling 判成收缩拆掉。 */
@@ -15199,7 +15218,9 @@ static void diActivityApply(UIView *artwork) {
            退场 + 1.5 秒迟滞压住(表现为切歌没遮罩)。17 侧已不读这个标志。 */
         diMruWriteExpandState(expWrite74, artwork.bounds.size);
     else
-        diMruWriteExpandState(sized && artwork.bounds.size.width >= 38.0 && artwork.bounds.size.height >= 38.0,
+        /* 3.0.88: 16 也走 "先问 SpringBoard" 那条, 判据仍是老的 "边长 >=38 算展开" */
+        diMruWriteExpandSmart(formNow,
+                              !(artwork.bounds.size.width >= 38.0 && artwork.bounds.size.height >= 38.0),
                               artwork.bounds.size);
     /* 2.8.78: 判定过程必须可观测 —— 否则"没遮上"到底是没注入、没素材、还是
        上下文校验挡掉, 全靠猜(325 日志已经吃过这个亏)。
@@ -15324,7 +15345,7 @@ static void diActivityApply(UIView *artwork) {
         box = artwork.bounds;
     }
     /* 16 保持 2.9.33 的老判据(按 bounds), 不用窗口 */
-    if (ios17) diMruWriteExpandState(!collapsed, box.size);
+    if (ios17) diMruWriteExpandSmart(formNow, collapsed, box.size);
     if (collapsed && MIN(box.size.width, box.size.height) < 12) {
         /* 口子小到没法画(过渡帧) —— 这一帧撤掉, 免得留一条碎边 */
         if (state) diActivityTeardown(artwork, state);
@@ -15407,8 +15428,17 @@ static void diActivityApply(UIView *artwork) {
         diMruFileLog([NSString stringWithFormat:@"glass 创建 bounds=%@ 系统层=%@",
             NSStringFromCGRect(artwork.bounds), state.systemLayer ? @"已找到" : @"无"]);
     }
-    if (!gDIISDrivingFx && !CGRectEqualToRect(state.glass.frame, box)) {
-        state.glass.frame = box;
+    /* 3.0.88: 尺寸改走 bounds + center。
+       以前写 frame: transform 非单位矩阵(岛专辑律动)时 frame 是"变换后的外框",
+       写回去 UIKit 会反过来改 bounds —— 越写越小, 律动像卡住; 3.0.87 于是让路,
+       结果尺寸干脆不跟系统走了(展开时玻璃停在 23pt 又带着放大, 压到 66pt 专辑上,
+       就是 494 说的"展开又多一块蒙版")。bounds/center 与 transform 正交, 两边都能写。 */
+    CGRect wantB = CGRectMake(0, 0, box.size.width, box.size.height);
+    CGPoint wantC = CGPointMake(CGRectGetMidX(box), CGRectGetMidY(box));
+    if (!CGSizeEqualToSize(state.glass.bounds.size, wantB.size)
+        || !CGPointEqualToPoint(state.glass.center, wantC)) {
+        state.glass.bounds = wantB;
+        state.glass.center = wantC;
         state.glass.layer.cornerRadius = 0;
         static CGFloat lastW, lastH; static NSString *lastCN;
         NSString *cn = NSStringFromClass(artwork.superview.class);
@@ -18398,14 +18428,11 @@ static void diNPQueryNowPlaying(void) {
     gMRGetNowPlayingInfo(dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^(CFDictionaryRef info) {
         BOOL has = NO;
         @try {
-            if (info) {
-                if (gMRTitleKeyPtr && *gMRTitleKeyPtr) {
-                    id tv = (__bridge id)CFDictionaryGetValue(info, *gMRTitleKeyPtr);
-                    has = ([tv isKindOfClass:NSString.class] && [(NSString *)tv length] > 0);
-                } else {
-                    has = YES;   /* 没有标题键的旧系统: 有 info 就算有歌 */
-                }
-            }
+            /* 3.0.88: 494 —— 以前只认"有标题", 本地/无标题的源(播客、无元数据的文件)
+               info 里没有 Title 就被判成"没歌", 律动/粒子整套引擎都起不来。
+               现在: info 非空就算有歌(暂停也算), 只有 info 全空才是真的没歌。
+               "到底在不在放"交给 PlaybackRate 那条硬信号, 不靠这里。 */
+            has = (info != NULL);
         } @catch (__unused NSException *e) {}
         dispatch_async(dispatch_get_main_queue(), ^{
             gDIHasNowPlaying = has;
@@ -19334,6 +19361,7 @@ static CAGradientLayer *gDIRhythmRingGrad = nil;
 static CAShapeLayer *gDIRhythmRingMask = nil;
 static CAShapeLayer *gDIRhythmRingBack = nil;
 static BOOL gDIBeatStopped = NO;          /* 3.0.79: 暂停/停止后已硬停(粒子清零+层隐藏) */
+static CFAbsoluteTime gDIBeatStopAt = 0;  /* 3.0.88: 上次硬停的时刻(唤醒节流用) */
 static CAGradientLayer *gDIRhythmBarsGrad = nil;
 static CAShapeLayer *gDIRhythmBars = nil;      /* 条形的 mask 形状 */
 /* ===== 3.0.80: 频谱条样式 =====
@@ -21620,6 +21648,7 @@ static void diRhythmTickWithDelta(float dtIn) {
            用户看到的就是"暂停了还在飘"; 引擎还在 120Hz 空转。 */
         if (!gDIBeatStopped) {
             gDIBeatStopped = YES;
+            gDIBeatStopAt = CFAbsoluteTimeGetCurrent();
             diFxHardStop();
             RLog(@"[律动] 暂停/停止 → 粒子与频谱已隐藏, 引擎挂起");
         }
@@ -21786,6 +21815,8 @@ static void diRhythmTickWithDelta(float dtIn) {
      · 粒子按播放器 diFxSpawnDot/diFxUpdateDots **一比一移植**: 同样的形状(实心圆/
        菱形/方块/三角)、同样的尺寸/漂移/摆动/寿命/淡入淡出曲线, 尺寸按头像半径比例缩放;
      · 律动写 transform 时置 gDIISDrivingFx, diActivityApply 里那句 frame 同步让路;
+       (3.0.88 已撤: 让路会让玻璃尺寸不再跟系统走, 展开时那块 23pt 玻璃带着放大压到
+        66pt 专辑上 = "展开多出一块蒙版"。现在尺寸走 bounds+center, 缩放走 transform)
      · 鼓点优先读 SB 落的 beat.bin(与播放器同一个包络、同一个鼓点), 读不到才用自己
        连 127.0.0.1:41235 的频谱兜底;
      · 30Hz → 60Hz, 岛虽小, 但 30Hz 上"慢飘"会一顿一顿。
@@ -21837,6 +21868,7 @@ typedef struct { double t; float kick, env, bass, playing; } DIBeatSnap;
 static int gDIISMBeatFd = -2;
 static CFAbsoluteTime gDIISMBeatTryAt = 0;
 static DIBeatSnap gDIISMBeatSnap;
+static BOOL gDIISMBeatEver = NO;   /* 3.0.88: beat.bin 成功读到过 —— 之后读不到就算"停了" */
 
 static BOOL diISMRUReadBeat(void) {
     if (gDIISMBeatFd < 0) {
@@ -22129,13 +22161,12 @@ static void diISMUpdateDots(CGRect cover, float dt, BOOL active) {
 /* ---------- 律动: 抓玻璃做缩放 ---------- */
 static void diISMApplyScale(float kick, BOOL on) {
     UIView *g = gDIISMGlass;
-    if (!g) { gDIISDrivingFx = NO; return; }
+    if (!g) { gDIISMScaleNow = 1.0f; return; }
     CGFloat s = on ? (1.0 + 0.20 * gDIISMAmp * kick) : 1.0;
     if (s < 1.0) s = 1.0;
     if (s > 1.22) s = 1.22;
-    if (fabs(s - gDIISMScaleNow) < 0.0004 && (s > 1.0005 || !gDIISDrivingFx)) return;
+    if (fabs(s - gDIISMScaleNow) < 0.0004) return;
     gDIISMScaleNow = (float)s;
-    gDIISDrivingFx = (s > 1.0005);
     [CATransaction begin];
     [CATransaction setDisableActions:YES];
     g.layer.transform = (s > 1.0005) ? CATransform3DMakeScale(s, s, 1.0f) : CATransform3DIdentity;
@@ -22172,7 +22203,6 @@ static void diISMRUAdoptCandidate(void) {
 
 static void diISMRUTeardown(void) {
     diISMClearDots();
-    gDIISDrivingFx = NO;
     gDIISMScaleNow = 1.0f;
     UIView *g = gDIISMGlass;
     if (g) {
@@ -22183,6 +22213,29 @@ static void diISMRUTeardown(void) {
     }
     gDIISMArt = nil;
     gDIISMGlass = nil;
+    gDIISMArtCand = nil;
+    gDIISMGlassCand = nil;
+}
+
+/* ===== 3.0.88: 展开/离场时**硬复位** =====
+   以前 art 一旦无效(展开成 66pt、换岛、下台)这里只是 return: 粒子清了, 但玻璃上的
+   缩放(最多 1.22)留在那儿。岛展开后系统把同一颗头像放大到 66pt, 那块还带着放大的
+   玻璃就压到系统专辑上 —— 493/494 说的"展开又多出一块蒙版/影子"就是它。
+   现在: 拆粒子宿主 + 缩放归 1 + 解绑, 一步做完。 */
+static void diISMRUPark(UIView *glass) {
+    if (gDIISMDotCount > 0 || gDIISMHost) diISMClearDots();
+    UIView *g = glass ?: gDIISMGlass;
+    if (g) {
+        [CATransaction begin];
+        [CATransaction setDisableActions:YES];
+        g.layer.transform = CATransform3DIdentity;
+        [CATransaction commit];
+    }
+    gDIISMScaleNow = 1.0f;
+    gDIISMArt = nil;
+    gDIISMGlass = nil;
+    gDIISMArtCand = nil;
+    gDIISMGlassCand = nil;
 }
 
 static void diISMRUStop(void) {
@@ -22191,6 +22244,13 @@ static void diISMRUStop(void) {
 }
 
 static void diISMRUApply(UIView *artwork, UIView *glass) {
+    /* 3.0.88: 展开(66)/播放器(57)/全屏 —— 只要不是小岛头像就立刻收干净,
+       绝不把上一步的缩放/粒子留在展开态上(493 明确说"我不需要展开")。 */
+    CGFloat side = diISMSide(artwork);
+    if (side < 12.0 || side > 44.0) {
+        if (artwork == gDIISMArt || glass == gDIISMGlass) diISMRUPark(glass);
+        return;
+    }
     diISMRUBind(artwork, glass);
 }
 
@@ -22224,12 +22284,13 @@ static void diISMRUFrame(float dtIn) {
     /* 绑定维护: 当前这块下台了才换候选, 绝不"谁后注册听谁的" */
     if (!gDIISMArt || !gDIISMArt.window || gDIISMArt.hidden || gDIISMArt.alpha < 0.02
         || diISMSide(gDIISMArt) > 44.0) {
+        if (gDIISMArt || gDIISMHost) diISMRUPark(gDIISMGlass);   /* 3.0.88: 缩放/粒子一起收 */
         gDIISMArt = nil; gDIISMGlass = nil;
         diISMRUAdoptCandidate();
     }
     UIView *art = gDIISMArt;
     UIView *glass = gDIISMGlass;
-    if (!art || !glass) { diISMClearDots(); gDIISDrivingFx = NO; return; }
+    if (!art || !glass) { diISMClearDots(); return; }
 
     float dt = dtIn;
     if (dt < 0.002f) dt = 0.002f;
@@ -22241,8 +22302,16 @@ static void diISMRUFrame(float dtIn) {
     float kick = 0.0f;
     BOOL fromFile = diISMRUReadBeat();
     if (fromFile) {
+        gDIISMBeatEver = YES;
         playing = (gDIISMBeatSnap.playing > 0.5f);
         kick = gDIISMBeatSnap.kick;
+    } else if (gDIISMBeatEver) {
+        /* 3.0.88: beat.bin 读到过 = SpringBoard 那份引擎在管播放态; 现在读不到/过期
+           = 它自己停了(暂停、切走、挂了)。**不能**退回"自己连 41235"那条:
+           那条只知道频谱服务活着, 不知道有没有在放, 于是"文件说过期→我算在放→
+           冒粒子; SpringBoard 又写回 0→全清掉", 就是 494 的一闪一灭。 */
+        playing = NO;
+        kick = 0.0f;
     } else {
         diAuPoll();
         BOOL real = diAuAlive();
@@ -22253,14 +22322,28 @@ static void diISMRUFrame(float dtIn) {
     if (kick < 0.0f) kick = 0.0f;
     if (kick > 1.0f) kick = 1.0f;
     if (!playing) kick = 0.0f;
+
+    /* 3.0.88: 播放态去抖 —— 开 0.12s / 关 0.65s。
+       beat.bin 30Hz 落盘、这边 60Hz 读, 中间任何一次读空/一次 playing=0 都不该
+       让满屏粒子当场消失; 只有真的停了半秒以上才清。 */
+    static float sOnT = 0.0f, sOffT = 0.0f;
+    static BOOL sEff = NO;
+    if (playing) {
+        sOnT += dt; sOffT = 0.0f;
+        if (sOnT >= 0.12f) sEff = YES;
+    } else {
+        sOffT += dt; sOnT = 0.0f;
+        if (sOffT >= 0.65f) sEff = NO;
+    }
+    if (!sEff) kick = 0.0f;
     gDIISMKick = kick;
 
     /* 律动 */
-    if (gDIISMBeat) diISMApplyScale(kick, playing);
+    if (gDIISMBeat) diISMApplyScale(kick, sEff);
     else if (gDIISMScaleNow > 1.0005f) diISMApplyScale(0.0f, NO);
 
-    /* 暂停/停止: 粒子立刻清空, 不留悬在半空的 */
-    if (!playing) {
+    /* 暂停/停止: 粒子清空, 不留悬在半空的 */
+    if (!sEff) {
         if (gDIISMDotCount > 0 || gDIISMHost) diISMClearDots();
     } else if (gDIISMPart) {
         diISMEnsureHost();
@@ -22285,9 +22368,11 @@ static void diISMRUFrame(float dtIn) {
     if (nowC - gDIISMProbeAt > 3.0) {
         gDIISMProbeAt = nowC;
         diMruFileLog([NSString stringWithFormat:
-            @"岛特效探针 头像=%.0fx%.0f 文件=%d 播放=%d 鼓=%.2f 缩放=%.3f 粒子=%d",
+            @"岛特效探针 头像=%.0fx%.0f 文件=%d 播放=%d 鼓=%.2f 缩放=%.3f 粒子=%d 宿主=%@ 曾在=%@",
             art.bounds.size.width, art.bounds.size.height, (int)fromFile,
-            (int)playing, kick, gDIISMScaleNow, gDIISMDotCount]);
+            (int)playing, kick, gDIISMScaleNow, gDIISMDotCount,
+            gDIISMHost ? NSStringFromClass(gDIISMHost.superview.class) : @"无",
+            gDIISMBeatEver ? @"是" : @"否"]);
     }
 }
 
@@ -22325,11 +22410,19 @@ static void diRhythmEnsure(void) {
     } else if (need && gDIRhythmLink && gDIRhythmLink.paused) {
         /* 3.0.66: 休眠唤醒 —— 播放器重新布局(控制中心打开/换尺寸)或 1Hz 巡检时恢复。
            3.0.79: 暂停/停止时不唤醒(否则每秒醒一次、跑一帧又挂起, 白耗电);
-           真的恢复播放(PlaybackRate > 0)才唤醒。 */
+           真的恢复播放(PlaybackRate > 0)才唤醒。
+           3.0.88: 494 —— 唤醒条件必须和主循环的 active **同一套判据**, 否则
+           会出现"巡检唤醒 → 主循环算 active=0 → 立刻再挂起"的来回抖(494 日志里
+           一秒两三次), beat.bin 的 playing 跟着 0/1 翻, 岛上的粒子就闪。
+           现在: 没歌(info 空且 Rate 不是 1)不唤醒; 刚停下 2 秒内也不唤醒(熔断)。 */
+        CFAbsoluteTime nowW = CFAbsoluteTimeGetCurrent();
+        if (gDIBeatStopAt > 0 && nowW - gDIBeatStopAt < 2.0) return;
+        BOOL songNow = gDIInfoReady ? gDIHasNowPlaying : YES;
+        if (gDIPlayRateState == 1) songNow = YES;
         BOOL playNow = mrQueryOK ? musicPlaying : AVAudioSession.sharedInstance.isOtherAudioPlaying;
         if (gDIPlayRateState == 0) playNow = NO;
         else if (gDIPlayRateState == 1) playNow = YES;
-        if (!playNow) return;
+        if (!playNow || !songNow) return;
         gDIBeatStopped = NO;
         gDIRhythmLink.paused = NO;
         RLog(@"[律动] 重新播放 → 引擎唤醒");
