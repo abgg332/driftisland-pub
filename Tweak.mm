@@ -22015,20 +22015,11 @@ static void diISMRURefreshColors(BOOL force) {
 static BOOL diISMClips(UIView *v) {
     return v ? (v.layer.masksToBounds || v.clipsToBounds) : NO;
 }
+/* 3.0.91: 就挂在头像的父视图里(3.0.87 的位置, 已验证可见)。
+   不再往上爬 —— 往上爬会走到窗体一级, 那正是 3.0.89/90 "粒子数有、屏幕没有"
+   和"粒子跑到展开页"的来源。 */
 static UIView *diISMHostParent(UIView *art) {
-    UIView *v = art.superview;
-    UIView *best = nil;
-    for (int i = 0; v && i < 8; i++) {
-        if (diISMClips(v)) {
-            /* 这个容器会剪: 挂到它的父视图(与它同级), 就不受它这一刀 */
-            UIView *up = v.superview;
-            if (up) return up;
-            break;
-        }
-        best = v;
-        v = v.superview;
-    }
-    return best ?: art.superview;
+    return art.superview ?: art;
 }
 
 static void diISMEnsureHost(void) {
@@ -22037,8 +22028,9 @@ static void diISMEnsureHost(void) {
     UIView *parent = diISMHostParent(art);
     if (!parent) return;
     CGRect box = art.frame;
-    CGFloat padX = 92.0, padY = 64.0;
-    CGRect want = CGRectInset(box, -padX, -padY);
+    /* 比 87 的 0.6 倍大一圈: 粒子能飘出小岛, 但宿主仍贴着头像, 不会跑到展开页 */
+    CGFloat pad = MAX(box.size.width, box.size.height) * 1.6 + 10.0;
+    CGRect want = CGRectInset(box, -pad, -pad);
     if (gDIISMHost && gDIISMHost.superview == parent) {
         if (!CGRectEqualToRect(gDIISMHost.frame, want)) gDIISMHost.frame = want;
         /* 玻璃/系统层随时可能挤到前面: 每帧把粒子层顶回去(只是改 zPosition, 不动布局) */
@@ -22250,18 +22242,25 @@ static void diISMApplyScale(float kick, BOOL on) {
 }
 
 /* ---------- 绑定 ---------- */
-static CGFloat diISMSide(UIView *v) {
-    if (!v) return 0.0;
-    return MIN(v.bounds.size.width, v.bounds.size.height);
+/* 3.0.91: 辨认"小岛那颗头像"。
+   497 日志: 展开页里除了 66 的大专辑, 还有一颗 **45x22** 的小头像(头部那颗),
+   它 MIN 边长 22, 也能通过"12~44"的老判据 —— 于是粒子跟着它跑到展开页上去了
+   (用户: "你把粒子加到了展开岛")。这里同时卡长短边: 只有近似正方形、边长
+   12~34 的才算小岛头像(实际是 23x23); 45x22 / 66x66 / 播放器 57x57 全挡掉。 */
+static BOOL diISMIsCompactArt(UIView *v) {
+    if (!v || !v.window || v.hidden || v.alpha < 0.02) return NO;
+    CGSize sz = v.bounds.size;
+    if (sz.width < 12.0 || sz.height < 12.0) return NO;
+    if (sz.width > 34.0 || sz.height > 34.0) return NO;
+    return YES;
 }
 
 static void diISMRUBind(UIView *art, UIView *glass) {
     /* 3.0.89: glass 允许为 nil —— 关掉"启用遮罩"时 MRU 不建自绘玻璃,
        但粒子/律动照样该工作(粒子现在挂在窗口层, 本来就不依赖玻璃)。 */
     if (!art) return;
-    CGFloat side = diISMSide(art);
-    /* 只认小岛头像: 展开 66 / 播放器 57 / 全屏都一律不接 —— 493 要的就是"不要展开" */
-    if (side < 12.0 || side > 44.0) return;
+    /* 只认小岛头像: 展开 66 / 展开页小头像 45x22 / 播放器 57 / 全屏都一律不接 */
+    if (!diISMIsCompactArt(art)) return;
     if (gDIISMArt == art) { gDIISMGlass = glass; return; }
     gDIISMArtCand = art;
     gDIISMGlassCand = glass;
@@ -22273,8 +22272,7 @@ static void diISMRUBind(UIView *art, UIView *glass) {
 }
 
 static void diISMRUAdoptCandidate(void) {
-    if (!gDIISMArtCand || !gDIISMArtCand.window || gDIISMArtCand.hidden) return;
-    if (diISMSide(gDIISMArtCand) < 12.0 || diISMSide(gDIISMArtCand) > 44.0) return;
+    if (!diISMIsCompactArt(gDIISMArtCand)) return;
     gDIISMArt = gDIISMArtCand;
     gDIISMGlass = gDIISMGlassCand;
 }
@@ -22324,9 +22322,9 @@ static void diISMRUStop(void) {
 
 static void diISMRUApply(UIView *artwork, UIView *glass) {
     /* 3.0.88: 展开(66)/播放器(57)/全屏 —— 只要不是小岛头像就立刻收干净,
-       绝不把上一步的缩放/粒子留在展开态上(493 明确说"我不需要展开")。 */
-    CGFloat side = diISMSide(artwork);
-    if (side < 12.0 || side > 44.0) {
+       绝不把上一步的缩放/粒子留在展开态上(493 明确说"我不需要展开")。
+       3.0.91: 判据换成 diISMIsCompactArt —— 展开页那颗 45x22 的小头像也挡掉。 */
+    if (!diISMIsCompactArt(artwork)) {
         if (artwork == gDIISMArt || glass == gDIISMGlass) diISMRUPark(glass, NO);
         return;
     }
@@ -22361,10 +22359,12 @@ static void diISMRUFrame(float dtIn) {
     }
 
     /* 绑定维护: 当前这块下台了才换候选, 绝不"谁后注册听谁的" */
-    if (!gDIISMArt || !gDIISMArt.window || gDIISMArt.hidden || gDIISMArt.alpha < 0.02
-        || diISMSide(gDIISMArt) > 44.0) {
+    if (!diISMIsCompactArt(gDIISMArt)) {
         UIView *oldGlass = gDIISMGlass;
-        BOOL wasExpanded = (gDIISMArt != nil && diISMSide(gDIISMArt) > 44.0);
+        /* 展开(66)/展开页小头像(45x22)都算"不该参与": 3.0.91 一并挡掉 */
+        BOOL wasExpanded = (gDIISMArt != nil && gDIISMArt.window
+                            && !gDIISMArt.hidden && gDIISMArt.alpha >= 0.02
+                            && !diISMIsCompactArt(gDIISMArt));
         gDIISMArt = nil; gDIISMGlass = nil;
         if (wasExpanded) {
             /* 展开成 66pt: 律动缩放 + 粒子一起收干净(493: 不需要展开) */
