@@ -118,6 +118,15 @@ static UIColor *gDIParticleColB = nil;
 /* 3.0.56: 粒子颜色/模式变了 → 已存在的粒子立刻换色(定义提前, 偏好读取里就要用到) */
 static BOOL gDIParticleColorDirty = YES;
 static UIColor *diRhythmHexColor(NSString *hex, UIColor *def);
+/* ===== 3.0.84: 岛专辑特效（律动 / 粒子）=====
+   岛上那颗专辑是我们自绘的玻璃视图(DIMaskView 小岛态 / MRU 的 glass 展开态)。
+   这两个开关只给它们单独开"随节拍缩放"和"外圈粒子", 与播放器那套完全独立:
+   开关默认关, 关掉时一个字节的额外行为都没有。 */
+static BOOL islandBeatOn = NO;        // IslandBeatOn: 岛上专辑随节拍缩放
+static BOOL islandParticlesOn = NO;   // IslandParticlesOn: 岛上专辑外圈粒子
+static void diISRegisterGlass(UIView *g);   /* 玻璃注册(实现在律动模块里) */
+static void diISHardStop(void);             /* 清粒子 + 复位缩放 */
+static void diISFrame(float dt, BOOL active);
 /* ===== 2.8.85: 展开定义 —— 展开岛歌词/歌名的自定义位置与大小 =====
    展开岛(407x202 的 Now Playing)整块由 MediaRemoteUI 远程渲染, SpringBoard 只能看到
    一块门户, 拿不到里面的文字视图。所以参数由 SpringBoard 侧写进 MRU 容器的
@@ -1304,6 +1313,9 @@ static void refreshPrefs(void) {
         CFPreferencesAppSynchronize(dom);
     }
     maskRotateOn = pBool(@"maskRotateOn", NO);
+    /* 3.0.84: 岛专辑特效(与播放器那套独立, 默认关) */
+    islandBeatOn = pBool(@"IslandBeatOn", NO);
+    islandParticlesOn = pBool(@"IslandParticlesOn", NO);
     maskRotateReverse = pBool(@"maskRotateReverse", NO);
     maskRotateSpeed = pDouble(@"maskRotateSpeed", 45.0);
     if (maskRotateSpeed < -720) maskRotateSpeed = -720; if (maskRotateSpeed > 720) maskRotateSpeed = 720;
@@ -3750,6 +3762,9 @@ static UIImage *diInvertMaskImage(UIImage *m);
 @property (nonatomic, assign) BOOL rotInstalledRev;
 @property (nonatomic, assign) CGFloat lastGlassSide; /* 上次画玻璃的边长, 用于藏层节流 */
 @property (nonatomic, assign) CGPoint lastGlassCenter;
+/* 3.0.84: 岛专辑律动的缩放倍率 —— diPaintGlassAt 每帧会重置 transform, 不能在外面写,
+   改成由它带着这个倍率一起写(默认 1.0 = 原行为)。 */
+@property (nonatomic, assign) CGFloat fxScale;
 /* 2.9.65: 过渡帧锁定的玻璃边长(0=不锁) —— 见 diPaintGlassAt 里的说明 */
 @property (nonatomic, assign) CGFloat freezeSide;
 /* 2.9.67: 连续"在变大"的帧数 —— 长按展开起手用, 见 isMini/挂载守卫 */
@@ -4412,6 +4427,7 @@ static BOOL diApplyMaskToCover(UIView *cover, UIImage *shape) {
        比例在设置页「遮罩大小(%)」里 50~115 自己调, 不用等改代码。 */
     CALayer *hpl = self.superview.layer.presentationLayer;
     CGSize hs = hpl ? hpl.bounds.size : self.superview.bounds.size;
+    diISRegisterGlass(self);   /* 3.0.84: 让岛特效认识这块玻璃 */
     CGFloat side = MIN(rect.size.width, rect.size.height);
     CGFloat hLimit = hs.height - 10.0;
     if (hLimit < 14.0) hLimit = 14.0;
@@ -4452,7 +4468,13 @@ static BOOL diApplyMaskToCover(UIView *cover, UIImage *shape) {
     if (!CGPointEqualToPoint(self.center, wantC)) self.center = wantC;
     if (self.hidden) self.hidden = NO;
     if (self.alpha != 1.0) self.alpha = 1.0;
-    if (!CGAffineTransformIsIdentity(self.transform)) self.transform = CGAffineTransformIdentity;
+    /* 3.0.84: 以前这里无条件复位成 identity —— 会把「岛专辑律动」每帧抹掉。
+       改成"写进 fxScale 的值"(开关关着就是 1.0, 与旧行为完全一致)。 */
+    {
+        CGFloat fs = (islandBeatOn && self.fxScale > 0.01) ? self.fxScale : 1.0;
+        CGAffineTransform want = CGAffineTransformMakeScale(fs, fs);
+        if (!CGAffineTransformEqualToTransform(self.transform, want)) self.transform = want;
+    }
     if (self.backgroundColor != [UIColor clearColor]) self.backgroundColor = [UIColor clearColor];
 
     /* 2.8.15: 2.8.14 的黑色盖布整条删除 —— 它本身就是用户看到的"多了一个显示"
@@ -15302,6 +15324,7 @@ static void diActivityApply(UIView *artwork) {
             } @catch (__unused NSException *e) {}
         }
         [artwork addSubview:glass];
+        diISRegisterGlass(glass);   /* 3.0.84: 展开态这块玻璃也参与岛特效(只给粒子, 不改 transform) */
         diMruFileLog([NSString stringWithFormat:@"glass 创建 bounds=%@ 系统层=%@",
             NSStringFromCGRect(artwork.bounds), state.systemLayer ? @"已找到" : @"无"]);
     }
@@ -21209,6 +21232,227 @@ static void diPlayRatePoll(void) {
     });
 }
 
+/* ===== 3.0.84: 岛专辑特效（律动 + 粒子）=====
+   为什么不开新定时器: 节拍(gDIBeatEnv / gDIBassPulse)已经在现有 CADisplayLink 里
+   算好了, 这边只是"读同一份数据、画在另一块玻璃上", 所以岛上的动和播放器上的动
+   永远是同一个鼓点, 也不会多一份 CPU。
+   粒子用一个 CAShapeLayer 每帧重建路径(最多 40 个小圆) —— 和频谱条同一个思路,
+   不建 40 个 layer、不加 shadow, 岛这么小的合成层里这个开销可以忽略。
+   两个开关默认关, 关掉时这些函数直接 return。 */
+#define DI_IS_GLASS_MAX 4
+#define DI_IS_DOT_MAX 40
+
+static __weak UIView *gDIISGlasses[DI_IS_GLASS_MAX];
+static int gDIISGlassN = 0;
+static __weak UIView *gDIISDotHost = nil;
+static CAShapeLayer *gDIISDotLayer = nil;
+static UIColor *gDIISDotCol = nil;
+static float gDIISSpawn = 0.0f;
+static BOOL gDIISBeatWasOn = NO;
+static BOOL gDIISParticleWasOn = NO;
+
+typedef struct {
+    float ang;      /* 方位角 */
+    float rad;      /* 当前半径(pt, 从玻璃边缘往外) */
+    float spd;      /* 径向速度 pt/s */
+    float size;     /* 起始半径 pt */
+    float life, maxLife;
+    float spin;     /* 角速度 rad/s(轻微漂移, 不是纯放射) */
+} DIISDot;
+static DIISDot gDIISDots[DI_IS_DOT_MAX];
+
+static void diISRegisterGlass(UIView *g) {
+    if (!g) return;
+    for (int i = 0; i < gDIISGlassN; i++) if (gDIISGlasses[i] == g) return;
+    if (gDIISGlassN < DI_IS_GLASS_MAX) { gDIISGlasses[gDIISGlassN++] = g; return; }
+    for (int i = 1; i < DI_IS_GLASS_MAX; i++) gDIISGlasses[i - 1] = gDIISGlasses[i];
+    gDIISGlasses[DI_IS_GLASS_MAX - 1] = g;
+}
+
+static void diISResetDots(void) {
+    for (int i = 0; i < DI_IS_DOT_MAX; i++) gDIISDots[i].life = 0.0f;
+    gDIISSpawn = 0.0f;
+}
+
+/* 取当前"真在屏上"的那块玻璃: 后注册的更新(SB 小岛 ↔ MRU 展开交接时, 新的覆盖旧的) */
+static UIView *diISLiveGlass(void) {
+    UIView *best = nil;
+    for (int i = 0; i < gDIISGlassN; i++) {
+        UIView *g = gDIISGlasses[i];
+        if (!g || !g.window) continue;
+        if (g.hidden || g.alpha < 0.1) continue;
+        if (g.bounds.size.width < 8.0 || g.bounds.size.height < 8.0) continue;
+        best = g;
+    }
+    return best;
+}
+
+static void diISBeatReset(UIView *g) {
+    if (!g) return;
+    if ([g isKindOfClass:DIMaskView.class]) {
+        ((DIMaskView *)g).fxScale = 1.0;
+    } else {
+        [CATransaction begin];
+        [CATransaction setDisableActions:YES];
+        g.layer.transform = CATransform3DIdentity;
+        [CATransaction commit];
+    }
+}
+
+/* 3.0.84: 岛特效独立跑时用它判"到底有没有在放歌"(与主路径同一套优先级) */
+static BOOL diISPlayActiveNow(void) {
+    BOOL hasSong = gDIInfoReady ? gDIHasNowPlaying : YES;
+    diPlayRatePoll();
+    BOOL playing = mrQueryOK ? musicPlaying : AVAudioSession.sharedInstance.isOtherAudioPlaying;
+    if (gDIPlayRateState == 0) playing = NO;
+    else if (gDIPlayRateState == 1) playing = YES;
+    return hasSong && playing;
+}
+
+static void diISHardStop(void) {
+    diISResetDots();
+    if (gDIISDotLayer) {
+        [CATransaction begin];
+        [CATransaction setDisableActions:YES];
+        gDIISDotLayer.path = NULL;
+        gDIISDotLayer.opacity = 0.0f;
+        [CATransaction commit];
+    }
+    for (int i = 0; i < gDIISGlassN; i++) diISBeatReset(gDIISGlasses[i]);
+}
+
+static void diISFrame(float dtIn, BOOL active) {
+    if (!islandBeatOn && !islandParticlesOn) return;
+
+    UIView *g = diISLiveGlass();
+    if (!g) {
+        diISResetDots();
+        if (gDIISDotLayer) gDIISDotLayer.opacity = 0.0f;
+        return;
+    }
+
+    float dt = dtIn;
+    if (dt < 0.002f) dt = 0.002f;
+    if (dt > 0.05f) dt = 0.05f;
+
+    /* ---- 律动: 只对 SB 小岛那块玻璃做 (MRU 的玻璃用 frame 定位, 带 transform 会飞) ---- */
+    if (islandBeatOn) {
+        gDIISBeatWasOn = YES;
+        for (int i = 0; i < gDIISGlassN; i++) {
+            UIView *v = gDIISGlasses[i];
+            if (!v || !v.window || ![v isKindOfClass:DIMaskView.class]) continue;
+            CGFloat sc = 1.0;
+            if (active) {
+                float env = gDIBeatEnv, pulse = gDIBassPulse;
+                sc = 1.0 + 0.11 * (0.55 * env + 0.45 * pulse);
+                if (sc < 0.90) sc = 0.90;
+                if (sc > 1.13) sc = 1.13;
+            }
+            /* diPaintGlassAt 在稳定态会短路(1s 内画过就不再画), 所以 transform 必须
+               这边每帧自己写; fxScale 只是给"重新绘制那一帧"同步用, 免得它把值写回 1.0 */
+            DIMaskView *mv = (DIMaskView *)v;
+            mv.fxScale = sc;
+            if (fabs(mv.transform.a - sc) > 0.002 || fabs(mv.transform.d - sc) > 0.002) {
+                mv.transform = CGAffineTransformMakeScale(sc, sc);
+            }
+        }
+    } else if (gDIISBeatWasOn) {
+        /* 开关刚关掉: 复位一次, 别把专辑留在放大状态 */
+        gDIISBeatWasOn = NO;
+        for (int i = 0; i < gDIISGlassN; i++) diISBeatReset(gDIISGlasses[i]);
+    }
+
+    /* ---- 粒子 ---- */
+    if (!islandParticlesOn) {
+        if (gDIISParticleWasOn) {
+            gDIISParticleWasOn = NO;
+            diISResetDots();
+            if (gDIISDotLayer) gDIISDotLayer.opacity = 0.0f;
+        }
+        return;
+    }
+    gDIISParticleWasOn = YES;
+
+    if (gDIISDotHost != g || !gDIISDotLayer) {
+        [gDIISDotLayer removeFromSuperlayer];
+        gDIISDotLayer = nil;
+        gDIISDotHost = g;
+        CAShapeLayer *L = [CAShapeLayer layer];
+        L.name = @"DriftIslandFxDots";
+        L.fillColor = UIColor.whiteColor.CGColor;
+        L.strokeColor = UIColor.clearColor.CGColor;
+        L.zPosition = 6.0;
+        L.frame = g.bounds;
+        [g.layer addSublayer:L];
+        gDIISDotLayer = L;
+        diISResetDots();
+    }
+    if (!CGRectEqualToRect(gDIISDotLayer.frame, g.bounds)) gDIISDotLayer.frame = g.bounds;
+
+    CGPoint c = CGPointMake(CGRectGetMidX(g.bounds), CGRectGetMidY(g.bounds));
+    CGFloat R0 = MIN(g.bounds.size.width, g.bounds.size.height) * 0.5f;
+    if (R0 < 6.0) { gDIISDotLayer.opacity = 0.0f; return; }
+
+    /* 颜色跟着粒子那套配色(0.4s 刷一次, 流光模式下也能慢慢变) */
+    static CFAbsoluteTime sColT = 0;
+    CFAbsoluteTime nt = CACurrentMediaTime();
+    if (!gDIISDotCol || nt - sColT > 0.4) {
+        sColT = nt;
+        UIColor *ca = nil, *cb = nil;
+        diColorPalette(particleColorMode, nil, nil, gDIParticleColA, gDIParticleColB,
+                       gDIHuePhase, YES, &ca, &cb);
+        gDIISDotCol = ca;
+        [CATransaction begin];
+        [CATransaction setDisableActions:YES];
+        gDIISDotLayer.fillColor = ca.CGColor;
+        [CATransaction commit];
+    }
+
+    /* 生成: 能量越大冒得越密 */
+    float energy = active ? (0.20f + 0.70f * gDIBeatEnv + 0.95f * gDIBassPulse) : 0.0f;
+    if (energy > 0.02f) {
+        gDIISSpawn += dt * (9.0f + 26.0f * energy);
+        int guard = 0;
+        while (gDIISSpawn >= 1.0f && guard++ < 6) {
+            gDIISSpawn -= 1.0f;
+            int slot = -1;
+            for (int i = 0; i < DI_IS_DOT_MAX; i++) if (gDIISDots[i].life <= 0.0f) { slot = i; break; }
+            if (slot < 0) break;
+            DIISDot *d = &gDIISDots[slot];
+            d->ang = (float)arc4random_uniform(6283) / 1000.0f;
+            d->rad = (float)R0 - 0.5f;
+            d->spd = 3.0f + 7.5f * energy
+                   + (float)arc4random_uniform(400) / 100.0f;
+            d->size = 0.65f + 0.85f * (float)arc4random_uniform(1000) / 1000.0f;
+            d->maxLife = 0.55f + 0.50f * (float)arc4random_uniform(1000) / 1000.0f;
+            d->life = d->maxLife;
+            d->spin = ((float)arc4random_uniform(1000) / 1000.0f - 0.5f) * 2.2f;
+        }
+    }
+
+    CGMutablePathRef p = CGPathCreateMutable();
+    for (int i = 0; i < DI_IS_DOT_MAX; i++) {
+        DIISDot *d = &gDIISDots[i];
+        if (d->life <= 0.0f) continue;
+        d->life -= dt;
+        if (d->life <= 0.0f) continue;
+        d->rad += d->spd * dt;
+        d->ang += d->spin * dt;
+        float tt = d->life / d->maxLife;
+        float r = d->size * (0.25f + 0.75f * sqrtf(tt));
+        if (r < 0.20f) continue;
+        CGFloat x = c.x + cosf(d->ang) * d->rad;
+        CGFloat y = c.y + sinf(d->ang) * d->rad;
+        CGPathAddEllipseInRect(p, NULL, CGRectMake(x - r, y - r, r * 2.0f, r * 2.0f));
+    }
+    [CATransaction begin];
+    [CATransaction setDisableActions:YES];
+    gDIISDotLayer.path = p;
+    gDIISDotLayer.opacity = 1.0f;
+    [CATransaction commit];
+    CGPathRelease(p);
+}
+
 /* 暂停/停止时: 粒子全部清空、所有视觉层隐藏。
    注意粒子层下一帧会重新变可见(opacity 由 diFxUpdateDots 写), 所以清空用的是
    life=0 + count=0 —— updateDots 对 life<=0 的槽位只写 opacity 0, 不会被"复活"。 */
@@ -21227,6 +21471,7 @@ static void diFxHardStop(void) {
     if (gDIRhythmRingBack) gDIRhythmRingBack.opacity = 0.0f;
     if (gDIRhythmBarsGrad) gDIRhythmBarsGrad.opacity = 0.0f;
     [CATransaction commit];
+    diISHardStop();   /* 3.0.84: 岛专辑的粒子与缩放一起停 */
     /* 包络/频谱全部归零, 免得恢复播放时第一帧带着上一次的尾巴 */
     gDISteady = 0.0f; gDIBeatEnv = 0.0f; gDIBassPulse = 0.0f;
     gDIKick = 0.0f; gDIKickTarget = 0.0f;
@@ -21235,7 +21480,9 @@ static void diFxHardStop(void) {
 
 static void diRhythmTickWithDelta(float dtIn) {
     BOOL anyFx = (rhythmOn || rhythmRingOn || rhythmParticlesOn || rhythmBarsOn);
-    if (!rhythmFxOn || !anyFx) { diRhythmReset(); return; }
+    BOOL anyIsland = (islandBeatOn || islandParticlesOn);
+    /* 3.0.84: 只开岛特效(播放器特效全关)时引擎也要跑, 否则岛上永远不动 */
+    if (!(rhythmFxOn && anyFx) && !anyIsland) { diRhythmReset(); return; }
 
     UIView *t = gDIRhythmTarget;
     BOOL stale = (!t || !t.window || t.hidden || t.alpha < 0.1);
@@ -21316,13 +21563,27 @@ static void diRhythmTickWithDelta(float dtIn) {
        现在直接挂起链; 唤醒由 diRhythmEnsure(1Hz) + diArtPlayerPost(每次播放器布局)
        负责, 打开控制中心的第一次 layout 就会恢复, 无感。 */
     if (!t) {
-        if (gDIRhythmLink && !gDIRhythmLink.paused) {
-            gDIRhythmLink.paused = YES;
-            gDISteady = 0; gDIBeatEnv = 0; gDIBassPulse = 0;
-            diRhythmReset();
-            RLog(@"[律动] 播放器不可见 → 引擎挂起(休眠)");
+        /* 3.0.84: 播放器不可见(用户就看着小岛)时, 岛特效照样得动 ——
+           这里用同一条 tick 把频谱推起来, 只是不碰播放器那边的层。 */
+        BOOL isAct = NO;
+        if (anyIsland) {
+            isAct = diISPlayActiveNow();
+            float dt0 = dtIn;
+            if (dt0 < 0.002f) dt0 = 0.002f;
+            if (dt0 > 0.05f) dt0 = 0.05f;
+            diAuPoll();
+            diRhythmAdvanceSpectrum(isAct, diAuAlive(), dt0);
+            diISFrame(dt0, isAct);
         }
-        gDISteady = 0; gDIBeatEnv = 0; gDIBassPulse = 0;
+        if (!isAct) {
+            if (gDIRhythmLink && !gDIRhythmLink.paused) {
+                gDIRhythmLink.paused = YES;
+                gDISteady = 0; gDIBeatEnv = 0; gDIBassPulse = 0;
+                diRhythmReset();
+                RLog(@"[律动] 播放器不可见 → 引擎挂起(休眠)");
+            }
+            gDISteady = 0; gDIBeatEnv = 0; gDIBassPulse = 0;
+        }
         return;
     }
 
@@ -21389,6 +21650,7 @@ static void diRhythmTickWithDelta(float dtIn) {
     else if (gDIPlayRateState == 1) playing = YES;
     BOOL active = hasSong && playing;
     if (active) gDIBeatStopped = NO;
+    if (anyIsland) diISFrame(dt, active);   /* 3.0.84: 岛专辑律动/粒子 */
 
     /* 3.0.58(图三): 暂停/停播时把引擎从原生刷新率降到 20Hz。
        图三说的是"原生 layoutSubviews 排完版会休眠, 我们一直改布局它就一直在刷新, 所以发热"。
@@ -21594,8 +21856,9 @@ static void diRhythmEnsure(void) {
     diPlayRatePoll();
     /* 3.0.49: 与保险档位联动 —— 连续崩两次(档位≤1)时律动整体停, 先保系统能开机。
        用户在设置里拨任意开关会重新拉满档位, 律动随之恢复。 */
-    BOOL need = (rhythmFxOn && (rhythmOn || rhythmRingOn || rhythmParticlesOn || rhythmBarsOn)
-                 && gDIStage >= 2);
+    /* 3.0.84: 只开岛特效时也要把引擎拉起来 */
+    BOOL need = ((rhythmFxOn && (rhythmOn || rhythmRingOn || rhythmParticlesOn || rhythmBarsOn))
+                 || islandBeatOn || islandParticlesOn) && gDIStage >= 2;
     if (need && !gDIRhythmLink) {
         if (!gDIRhythmTicker) gDIRhythmTicker = [DIFxTicker new];
         gDIRhythmLink = [CADisplayLink displayLinkWithTarget:gDIRhythmTicker

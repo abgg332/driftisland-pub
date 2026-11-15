@@ -5367,6 +5367,12 @@ static void diOpenHomeBarPickWindow(void) {
     [specs addObject:[self switchSpec:@"启动旋转" key:@"maskRotateOn" def:@NO]];
     [specs addObject:[self switchSpec:@"反向旋转" key:@"maskRotateReverse" def:@NO]];
     [specs addObject:[self numSlider:@"旋转速度" key:@"maskRotateSpeed" def:45 mn:0 mx:360]];
+    /* 3.0.84: 岛专辑特效 —— 岛上的那张专辑也有粒子和律动。
+       与「播放器 → 律动特效」完全独立: 那边是播放器里的 66pt 头像, 这边是岛上这颗。 */
+    [specs addObject:[self groupSpec:@"岛专辑特效"
+                              footer:@"只作用于岛上的专辑头像，和「播放器 → 律动特效」互不影响。默认关闭。"]];
+    [specs addObject:[self switchSpec:@"专辑律动" key:@"IslandBeatOn" def:@NO]];
+    [specs addObject:[self switchSpec:@"专辑粒子" key:@"IslandParticlesOn" def:@NO]];
     return specs;
 }
 @end
