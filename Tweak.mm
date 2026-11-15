@@ -21253,8 +21253,7 @@ static __weak UIView *gDIISDotHost = nil;
 static CAShapeLayer *gDIISDotLayer = nil;
 static UIColor *gDIISDotCol = nil;
 static float gDIISSpawn = 0.0f;
-static BOOL gDIISBeatWasOn = NO;
-static BOOL gDIISParticleWasOn = NO;
+/* 3.0.85: gDIISBeatWasOn/gDIISParticleWasOn 随 SB 侧岛特效驱动一起移除 */
 
 typedef struct {
     float ang;      /* 方位角 */
