@@ -88,63 +88,6 @@ static int  rhythmParticleCount = 12;          // 3.0.47: 参考视频里只有�
 static double rhythmStrength = 0.90;           // 律动强度(刻度最长值的比例)
 static double rhythmBeatScale = 0.70;          // 专辑律动幅度
 static double rhythmRingWidth = 2.2;           // 3.0.47: 刻度粗细(参考约 2pt)
-/* ===== 3.0.80: 曲风预设 =====
-   用户: "去查找相关音乐的音频类型, 你加入几个音频效果进去, 我可以随时更换风格"。
-   按主流曲风真实的节奏/低频特征做 5 套基调(下面的常量表), 切一下立刻换整体手感:
-     抒情 Ballad   65~80 BPM, 低频少、动态平缓   → 粒子少而慢, 振幅小, 回落长(柔)
-     流行 Pop     100~130 BPM, 中频人声为主      → 3.0.79 基准值(默认)
-     电子 EDM     120~130 BPM, kick 前置、每拍  → 粒子多而快, 振幅大, 回落短(每拍都落)
-     嘻哈 Trap    140 半速(听感 70), 808 重低音  → 粒子少而大, 振幅最大, 回落最长(808 尾)
-     氛围 Ambient  60~90 BPM, 无固定拍、空间大   → 粒子最多最慢, 几乎不振, 扩散最远
-
-   设计原则: **预设只做倍率, 不覆盖用户设置**。设置页的滑杆(数量/大小/强度/振幅)
-   仍是微调旋钮, 最终值 = 滑杆 × 曲风倍率 —— 换风格看得到明显差别, 又不会把用户
-   自己调好的值冲掉。 */
-typedef struct {
-    float countMul, sizeMul, driftMul, swayMul, spreadMul, lifeMul;
-    float ampMul, atk, rel, solidPct, spawnSpeed;
-} DIStylePack;
-
-static int gDIStyle = 1;
-static BOOL gDIStyleDirty = NO;    /* 刚换曲风 → 下一帧清空粒子池, 按新节奏重新长出来 */
-static DIStylePack gDIStylePack = { 1.0f, 1.0f, 1.0f, 1.0f, 1.0f, 1.0f, 1.0f, 0.045f, 0.17f, 0.40f, 0.55f };
-
-/* count 数量 / size 大小 / drift 漂移速度 / sway 摆动 / spread 扩散半径(相对 2.15R) /
-   life 寿命 / amp 专辑振幅 / atk 包络上升(s) / rel 包络回落(s) /
-   solid 实心点占比(其余是几何描边) / spawn 补充速度 */
-static const DIStylePack kDIStyles[5] = {
-    /* 抒情 */ { 0.80f, 1.05f, 0.72f, 0.85f, 0.78f, 1.15f, 0.55f, 0.055f, 0.26f, 0.45f, 0.50f },
-    /* 流行 */ { 1.00f, 1.00f, 1.00f, 1.00f, 1.00f, 1.00f, 1.00f, 0.045f, 0.17f, 0.40f, 0.55f },
-    /* 电子 */ { 1.45f, 0.90f, 1.45f, 1.15f, 1.10f, 0.85f, 1.55f, 0.030f, 0.13f, 0.75f, 0.95f },
-    /* 嘻哈 */ { 0.75f, 1.25f, 0.85f, 0.90f, 0.95f, 1.30f, 1.85f, 0.040f, 0.30f, 0.30f, 0.40f },
-    /* 氛围 */ { 1.55f, 1.10f, 0.55f, 1.30f, 1.15f, 1.60f, 0.35f, 0.090f, 0.38f, 0.55f, 0.35f },
-};
-
-static NSString *diStyleName(int s) {
-    switch (s) {
-        case 0:  return @"抒情";
-        case 1:  return @"流行";
-        case 2:  return @"电子";
-        case 3:  return @"嘻哈";
-        default: return @"氛围";
-    }
-}
-
-/* 读 RhythmStyle(不分尺寸 —— 一个风格对所有尺寸生效) */
-static void diStyleLoad(void) {
-    id v = CFBridgingRelease(CFPreferencesCopyAppValue((__bridge CFStringRef)@"RhythmStyle",
-                                                       (__bridge CFStringRef)kDomain));
-    int s = v ? [v intValue] : 1;
-    if (s < 0) s = 0;
-    if (s > 4) s = 4;
-    if (s != gDIStyle) {
-        RLog(@"[曲风] 切换 → %@", diStyleName(s));
-        gDIStyleDirty = YES;      /* 老粒子是按旧节奏生成的, 换风格要重来一遍 */
-    }
-    gDIStyle = s;
-    gDIStylePack = kDIStyles[s];
-}
-
 static NSString *rhythmColorA = nil;           // 渐变起始色(#E59971)
 static NSString *rhythmColorB = nil;           // 渐变结束色(#948FFF)
 /* 3.0.53: 粒子独立渐变起止色(截图 #FFFFBC / #BFCDF8), 在偏好读取里就要用到,
@@ -314,6 +257,64 @@ static void RLog(NSString *fmt, ...) {
     diLogWrite(out);
 }
 #define DI_STEP(fmt, ...) RLog(fmt, ##__VA_ARGS__)
+
+/* ===== 3.0.80: 曲风预设 =====
+   用户: "去查找相关音乐的音频类型, 你加入几个音频效果进去, 我可以随时更换风格"。
+   按主流曲风真实的节奏/低频特征做 5 套基调(下面的常量表), 切一下立刻换整体手感:
+     抒情 Ballad   65~80 BPM, 低频少、动态平缓   → 粒子少而慢, 振幅小, 回落长(柔)
+     流行 Pop     100~130 BPM, 中频人声为主      → 3.0.79 基准值(默认)
+     电子 EDM     120~130 BPM, kick 前置、每拍  → 粒子多而快, 振幅大, 回落短(每拍都落)
+     嘻哈 Trap    140 半速(听感 70), 808 重低音  → 粒子少而大, 振幅最大, 回落最长(808 尾)
+     氛围 Ambient  60~90 BPM, 无固定拍、空间大   → 粒子最多最慢, 几乎不振, 扩散最远
+
+   设计原则: **预设只做倍率, 不覆盖用户设置**。设置页的滑杆(数量/大小/强度/振幅)
+   仍是微调旋钮, 最终值 = 滑杆 × 曲风倍率 —— 换风格看得到明显差别, 又不会把用户
+   自己调好的值冲掉。 */
+typedef struct {
+    float countMul, sizeMul, driftMul, swayMul, spreadMul, lifeMul;
+    float ampMul, atk, rel, solidPct, spawnSpeed;
+} DIStylePack;
+
+static int gDIStyle = 1;
+static BOOL gDIStyleDirty = NO;    /* 刚换曲风 → 下一帧清空粒子池, 按新节奏重新长出来 */
+static DIStylePack gDIStylePack = { 1.0f, 1.0f, 1.0f, 1.0f, 1.0f, 1.0f, 1.0f, 0.045f, 0.17f, 0.40f, 0.55f };
+
+/* count 数量 / size 大小 / drift 漂移速度 / sway 摆动 / spread 扩散半径(相对 2.15R) /
+   life 寿命 / amp 专辑振幅 / atk 包络上升(s) / rel 包络回落(s) /
+   solid 实心点占比(其余是几何描边) / spawn 补充速度 */
+static const DIStylePack kDIStyles[5] = {
+    /* 抒情 */ { 0.80f, 1.05f, 0.72f, 0.85f, 0.78f, 1.15f, 0.55f, 0.055f, 0.26f, 0.45f, 0.50f },
+    /* 流行 */ { 1.00f, 1.00f, 1.00f, 1.00f, 1.00f, 1.00f, 1.00f, 0.045f, 0.17f, 0.40f, 0.55f },
+    /* 电子 */ { 1.45f, 0.90f, 1.45f, 1.15f, 1.10f, 0.85f, 1.55f, 0.030f, 0.13f, 0.75f, 0.95f },
+    /* 嘻哈 */ { 0.75f, 1.25f, 0.85f, 0.90f, 0.95f, 1.30f, 1.85f, 0.040f, 0.30f, 0.30f, 0.40f },
+    /* 氛围 */ { 1.55f, 1.10f, 0.55f, 1.30f, 1.15f, 1.60f, 0.35f, 0.090f, 0.38f, 0.55f, 0.35f },
+};
+
+static NSString *diStyleName(int s) {
+    switch (s) {
+        case 0:  return @"抒情";
+        case 1:  return @"流行";
+        case 2:  return @"电子";
+        case 3:  return @"嘻哈";
+        default: return @"氛围";
+    }
+}
+
+/* 读 RhythmStyle(不分尺寸 —— 一个风格对所有尺寸生效) */
+static void diStyleLoad(void) {
+    id v = CFBridgingRelease(CFPreferencesCopyAppValue((__bridge CFStringRef)@"RhythmStyle",
+                                                       (__bridge CFStringRef)kDomain));
+    int s = v ? [v intValue] : 1;
+    if (s < 0) s = 0;
+    if (s > 4) s = 4;
+    if (s != gDIStyle) {
+        RLog(@"[曲风] 切换 → %@", diStyleName(s));
+        gDIStyleDirty = YES;      /* 老粒子是按旧节奏生成的, 换风格要重来一遍 */
+    }
+    gDIStyle = s;
+    gDIStylePack = kDIStyles[s];
+}
+
 
 /* ===== 3.0.21: 主线程停摆看门狗 + 阶段面包屑 =====
    iOS17 上"放歌就卡死、然后被 watchdog 注销"一直没有确凿证据(崩溃报告里查不到我们,
