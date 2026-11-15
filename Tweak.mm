@@ -18848,12 +18848,6 @@ static void diArtChanged(CFNotificationCenterRef c, void *obs, CFStringRef name,
     });
 }
 
-/* 3.0.75: 尺寸实时生效方案**整体删除**(用户: "实时布局的实现不了, 相关源码删除了。
-   避免后台耗电")。实测 CCUIModuleCollectionView invalidateLayout+reloadData 并不能
-   让 NativePlayerOriginal 按新尺寸重建模块(尺寸是模块构建时读 ModuleSizes 定死的),
-   3.0.74 的三连排重排只是白扫视图树 + dispatch_after 空转。现在尺寸改动照旧在
-   重启 SpringBoard / 模块重建时生效, 没有任何常驻监听, 不再有后台开销。 */
-
 __attribute__((constructor)) static void init(void) {
     @autoreleasepool {
         /* 2.7.15: 版本标记写死在这里, 不依赖 CFBundleShortVersionString ——
@@ -19233,23 +19227,35 @@ static CGSize gDIRhythmBaseSize;       /* 记 base 时 dv 的尺寸 —— 变�
 static double gDILastAng = 0.0;        /* 3.0.61: 关掉旋转时把角度冻结在这个值上(不跳回 0°) */
 static BOOL gDIRhythmDriving = NO;     /* 上一帧我们是否在写 transform(用于"只还原一次") */
 /* 3.0.62 */
-/* 3.0.77: **只抓鼓点**。488 用户: "现在好像把全部人声的都加进去了, 能不能只要鼓点"。
-   3.0.75 用的是全谱总能量(24 段均值) —— 人声、军鼓、镲片、吉他, 所有起音都会把
-   总能量顶起来, 488 日志里 20% 的帧 总>0.5, 专辑跟着人声一起弹。
-   现在回到"低频鼓点", 但不做 3.0.68 那种五条件 AND(那次大半帧数抓不到拍):
-     · 主信号: 只有 0~2 段(≈60~140Hz, 底鼓基频)的加权能量, 自适应归一;
-     · 人声过滤: 低频起音量 / 全谱起音量的占比(dom) —— 鼓点几乎全涌在低频,
-       人声/镲片主要在中高频; 占比低只把分数压到 35%, 不直接归零(防漏拍);
-     · 前沿: 当前归一值减 0.45s 慢基线 —— 贝斯长音/持续低频不动, 鼓点起音才冲出来;
-     · 包络: 45ms 上 / 170ms 下。粒子**完全不读这个值**(3.0.77 起鼓点只动专辑)。 */
-static float gDIKick = 0.0f;           /* 视觉包络: 鼓点的顺滑包络(45ms 顶/170ms 落) */
-static CFTimeInterval gDILastKickT = 0;   /* 最近一次鼓点冲量时刻(探针 隔=) */
-static float gDITotFloor = 0.0f;       /* 自适应底噪(掉得快/爬得慢 2.2s) */
-static float gDITotPeak = 0.0f;        /* 自适应峰值(跟得快/回落慢 1.6s) */
-static float gDITotSm = 0.0f;          /* 6ms 轻平滑后的低频能量(压单帧毛刺, 不抹前沿) */
-static float gDITotBase = 0.0f;        /* 3.0.77: 0.45s 慢基线 —— 前沿 = n - base */
-static float gDILowN = 0.0f;           /* 3.0.77: 鼓点分数 0~1(探针 分=) */
-static float gDILowShare = 0.0f;       /* 3.0.77: 低频纯度 dom(0~1, 探针 纯=) */
+/* 3.0.63: **统一的低音鼓**。476 用户: "专辑头像跟粒子的鼓点你抓取统一一个低音鼓,
+   这样视觉看起来统一动态"。以前专辑用 gDIBeatEnv(全谱+响度混合), 粒子用
+   gDIBassPulse 的上升沿 —— 两个信号不同步, 看着就是"各动各的"。
+   现在两处都只看这一个 gDIKick: 低频(3.0.68 起只看 60~140Hz 底鼓基频)的**起音前沿**
+   → 跳到 0~1 → 170ms 衰减。 */
+static float gDIKick = 0.0f;           /* 视觉包络: 3.0.74 起由统一顺滑包络推进(45ms 顶/170ms 落) */
+static float gDIKickTarget = 0.0f;     /* 3.0.74: 本次咚的目标强度 */
+static CFTimeInterval gDIKickAtkT = 0; /* 3.0.74: 起音时刻(45ms 趋近窗口) */
+static float gDILowPrevK = 0.0f;       /* 上一帧低频归一值 */
+/* 3.0.64: 低频绝对值不可用 —— 音乐的低频段长期钉在 0.6~0.94(477 日志), 用固定阈值
+   等于每帧都在起音, 于是"一下鼓点头像抖好几下"。改成**自适应归一**:
+     floor = 慢速跟踪的低频"底噪"(只允许慢慢爬升, 下落很快)
+     peak  = 慢速跟踪的低频"峰值"(只允许慢慢回落)
+     n     = (low - floor) / (peak - floor)   → 0(静) ~ 1(满)
+   不管音频多响, n 都在 0~1 之间摆动, 起音那一下才跳得出来。
+   再加 0.17s 不应期 + "必须回落到 0.3 以下才重新上膛", 保证一个鼓点只触发一次。 */
+static float gDILowFloor = 0.0f;
+static float gDILowPeak = 0.0f;
+static float gDILowN = 0.0f;
+static float gDILowNPrev = 0.0f;
+static BOOL  gDIKickArmed = YES;
+static CFTimeInterval gDILastKickT = 0;
+static float gDILowSm = 0.0f;          /* 12ms 平滑后的低频(压掉逐帧噪声) */
+static float gDILowHist[5];            /* 最近 4 帧(~66ms)的平滑值, 用来量"这一下冲了多高" */
+static int   gDILowHistW = 0;
+/* 3.0.68: "咚"的前沿检测 —— 前两帧(32ms)的最高点 + 低频占比 + 本次触发峰值 */
+static float gDILowP1 = 0.0f, gDILowP2 = 0.0f;
+static float gDILowShare = 0.0f;       /* 0~5 段能量 / 全谱能量(0~1) */
+static float gDIKickHoldN = 1.0f;      /* 本次触发的归一峰值, 掉到 72% 以下才重新上膛 */
 
 /* ===== 3.0.71: 视觉上的"咚" =====
    481 用户: "粒子跟专辑头像的鼓点还是差点意思, 没有视频的效果节点"。
@@ -19601,8 +19607,7 @@ static UIColor *diRhythmHexColor(NSString *hex, UIColor *def) {
 #define DI_DOT_CAP 64
 typedef struct {
     float ang, rad;          /* 极坐标位置 */
-    float spin, drift;       /* 角速度 / 向外的漂移速度(px/s) */
-    float driftAcc;          /* 3.0.77: 径向加速度(px/s²) —— 越飘越快, 才像散开 */
+    float spin, drift;       /* 角速度 / 恒定向外速度(px/s) */
     float push;              /* 鼓点冲量(px/s), 指数衰减 */
     float sway, swayAmp, swayPhase;   /* 横向自然摆动 */
     float size, rot, rotSpd;
@@ -19776,21 +19781,12 @@ static void diFxSpawnDot(UIView *host, CGRect cover, float maxRad) {
        时候已经飘到一半了, 看着像"从很里面冒出来"。现在贴着圆边走, 遮罩孔 1.02R
        刚好让它在边缘露出一半, 出门就能看到。 */
     d->rad = (float)R * (1.02f + diFxRand01() * 0.10f);   /* 3.0.60: 再往外一档(用户: 起点还是有点里面/被遮挡) */
-    /* 3.0.77: 角速度 ±0.05 → ±0.14 rad/s。以前角度几乎不动, 每颗都是从圆心
-       笔直射出去的一条线, 所以看着像"气球飘走"。现在轨迹会拐弯、会绕着走。 */
-    d->spin = (diFxRand01() - 0.5f) * 0.28f;
-    /* 3.0.77: 488 用户: "粒子又太慢, 而且看起来也不是飘散的感觉, 就是气球飘走的感觉"。
-       3.0.76 是 1.6~3.4px/s 恒定速度直线外移 —— 整片云以同一个速度平移, 就是"气球飘走"。
-       现在:
-         · 基础速度 2.6~5.2px/s(比上一版快一档, 但远没有 3.0.75 那种"弹射"感);
-         · 每颗自带 0.35~0.95px/s² 的径向加速度(越飘越快) → 轨迹是"散开"而不是"平移";
-         · 速度还随半径再放大(见 diFxUpdateDots) → 内圈慢、外圈快, 层次分得开;
-         · 摆动幅度加大一档 → 轨迹有弧度, 不是一条笔直射线。 */
-    d->drift = 2.6f + diFxRand01() * 2.6f;
-    d->driftAcc = 0.35f + diFxRand01() * 0.60f;
+    d->spin = (diFxRand01() - 0.5f) * 0.05f;
+    /* 外飘 2.5~6px/s: 视频里几乎看不出"在飞", 只是缓缓地、一点点往外挪 */
+    d->drift = 3.5f + diFxRand01() * 3.5f;
     d->push = 0.0f;
     d->sway = 0.30f + diFxRand01() * 0.45f;          /* 摆动角速度 */
-    d->swayAmp = 0.55f + diFxRand01() * 1.25f;       /* 摆动幅度(速度, px/s), 3.0.77 加大 */
+    d->swayAmp = 0.6f + diFxRand01() * 1.4f;         /* 摆动幅度(速度, px/s) */
     d->swayPhase = diFxRand01() * (float)M_PI * 2.0f;
     int sh = arc4random() % 10;
     d->shape = (sh < 4) ? 0 : (sh < 6 ? 1 : (sh < 8 ? 2 : 3));
@@ -19802,10 +19798,7 @@ static void diFxSpawnDot(UIView *host, CGRect cover, float maxRad) {
                                : (4.2f + diFxRand01() * 2.6f)) * sizeMul;
     d->rot = diFxRand01() * (float)M_PI * 2.0f;
     d->rotSpd = (diFxRand01() - 0.5f) * 0.30f;
-    /* 3.0.77: 寿命 12~20s(3.0.76 是 8~14s)。488 用户: "消失太快了" ——
-       8~14s 里有 6 秒都花在路上, 刚散开就淡没了。现在加上放大的扩散半径(2.3R),
-       一颗粒子能在屏上待十几秒, 慢慢飘、慢慢淡, 是"散"不是"过场"。 */
-    d->maxLife = 12.0f + diFxRand01() * 8.0f;
+    d->maxLife = 8.0f + diFxRand01() * 6.0f;   /* 8~14s: 前面有一段藏在专辑后面, 露出来还能飘很久 */
     d->life = d->maxLife;
     d->phase = diFxRand01() * (float)M_PI * 2.0f;
     d->tint = diFxRand01();
@@ -19890,60 +19883,40 @@ static void diFxUpdateDots(UIView *host, CGRect cover, float dt,
             if (gDIDotCount > 0) gDIDotCount--;
             continue;
         }
-        /* 恒定的外飘 + 摆动, 没有冲量、没有拍点位移 —— 位置永远连续
-           3.0.76: d->push 恒为 0(鼓点不再推粒子), 这一行留着只是清掉旧值 */
+        /* 恒定的外飘 + 摆动, 没有冲量、没有拍点位移 —— 位置永远连续 */
         d->push *= expf(-dt / 0.32f);
         d->ang += d->spin * dt;
-        /* 3.0.77: 径向速度 = 基础漂移 × 半径系数 + 一点点自己的加速度。
-           488 用户: "看起来不是飘散, 就是气球飘走" —— 3.0.76 是整片云同速直线外移,
-           看着像一整块在平移。现在内圈慢(0.80x)、外圈快(1.35x), 每颗还有自己的
-           加速度, 于是云是"越散越开", 而不是整体飘走。
-           注意:「粒子强度」仍然不乘在这里 —— 477 用户明确说过"强度调高了粒子就飘的好快"。 */
-        d->drift += d->driftAcc * dt;
-        if (d->drift > 7.5f) d->drift = 7.5f;         /* 巡航上限, 免得飘十几秒后飞起来 */
-        float radK = 0.80f + 0.55f * MIN(1.0f, d->rad / MAX(1.0f, Rc));
-        /* 3.0.77: 阵风 —— 径向速度在 0.35~1.70 倍之间自己起伏(两个不同周期的正弦),
-           粒子走走停停/忽快忽慢, 这是"飘散"和"匀速平移"最直接的区别。 */
-        float gust = 1.0f + 0.45f * sinf((float)gDIClock * 0.37f + d->phase * 1.9f)
-                          + 0.25f * sinf((float)gDIClock * 0.93f + d->swayPhase);
-        if (gust < 0.30f) gust = 0.30f;
-        d->rad += (d->drift * gust + d->push) * radK * dt;
+        /* 3.0.64: 「粒子强度」只管**鼓点响应**, 不再乘外飘速度。
+           477 用户: "强度调高了粒子就飘的好快" —— 3.0.61 起 stg 乘在 drift 上,
+           调强度等于调流速, 完全不是要的东西。现在基础漂移恒定, 强度只放大:
+           鼓点冲量 / 尺寸脉冲 / 亮度脉冲。 */
+        float stg = (float)rhythmParticleStrength;
+        d->rad += (d->drift + d->push) * dt;
         float swayV = sinf((float)gDIClock * d->sway + d->swayPhase) * d->swayAmp;
         d->ang += (swayV / MAX(8.0f, d->rad)) * dt;
         d->rot += d->rotSpd * dt;
 
-        /* 该方向到"可画区域"边缘的距离, 再钳在 1.15R~2.30R。
-           3.0.58: 上限 1.55R —— 贴着封面边缘一圈。 3.0.76: 1.75R。
-           3.0.77: 2.30R(488 用户: "把粒子飘散距离放大")。
-           注意: 粒子层本来就是直接挂在宿主 layer 上的, 不裁剪, 所以这里允许溢出
-           宿主 0.28R —— 不然 57pt 封面 + 155pt 模块, 2.3R(65pt) 早就撞到模块边界了,
-           上限写得再大也散不开(这就是上一版"怎么调都不远"的原因)。
-           溢出量控制在 0.28R(~8pt), 不会盖到隔壁模块上。 */
-        CGFloat pad = (host.layer.masksToBounds || host.clipsToBounds) ? 0.0f : (Rc * 0.28f);
+        /* 该方向到宿主边缘的距离(留 4pt), 再钳在 1.15R~1.55R。
+           3.0.58: 上限从 2.6R 收到 1.55R —— 视频里粒子就贴着封面边缘一圈,
+           不会飘到岛的边角上。 */
         CGFloat ca = cosf(d->ang), sa2 = sinf(d->ang);
-        CGFloat tx = (ca > 0.02f) ? (W + pad - 4.0f - cx) / ca : ((ca < -0.02f) ? (-pad + 4.0f - cx) / ca : 1e9f);
-        CGFloat ty = (sa2 > 0.02f) ? (H + pad - 4.0f - cy) / sa2 : ((sa2 < -0.02f) ? (-pad + 4.0f - cy) / sa2 : 1e9f);
+        CGFloat tx = (ca > 0.02f) ? (W - 4.0f - cx) / ca : ((ca < -0.02f) ? (4.0f - cx) / ca : 1e9f);
+        CGFloat ty = (sa2 > 0.02f) ? (H - 4.0f - cy) / sa2 : ((sa2 < -0.02f) ? (4.0f - cy) / sa2 : 1e9f);
         CGFloat dirMax = MIN(tx, ty);
-        if (dirMax > Rc * 2.30f) dirMax = Rc * 2.30f;
+        if (dirMax > Rc * 1.55f) dirMax = Rc * 1.55f;
         if (dirMax < Rc * 1.15f) dirMax = Rc * 1.15f;
 
-        /* 3.0.77: 飘到边界不再 life=0 直接消失(那就是用户说的"消失太快")。
-           也不强行缩短寿命 —— 就让它**贴着边缘慢慢绕**: 径向速度衰减到 0,
-           角速度接管, 于是粒子沿封面外圈缓缓滑行, 直到自己的寿命走完再淡出。
-           这样"散开→贴边→绕行→淡出"是一整条连续的轨迹, 不是"飞到边上就没了"。 */
-        if (d->rad > dirMax * 0.96f) {
-            d->rad = dirMax * 0.96f;
-            d->drift *= expf(-dt / 0.45f);
-            if (d->drift < 0.35f) d->drift = 0.35f;
-            d->ang += (d->spin >= 0.0f ? 0.10f : -0.10f) * dt;
+        if (d->rad > dirMax) {
+            d->life = 0.0f;
+            layer.opacity = 0.0f;
+            if (gDIDotCount > 0) gDIDotCount--;
+            continue;
         }
 
         float age = d->maxLife - d->life;
         float fadeIn = diFxSmoothStep(0.0f, 0.80f, age);                  /* 出生 0.8s 淡入 */
         float fadeOut = diFxSmoothStep(0.0f, d->maxLife * 0.25f, d->life); /* 末尾 25% 淡出 */
-        /* 3.0.77: 淡出起点 0.90 → 0.985。粒子贴边(0.96dm)滑行时必须仍然是亮的,
-           否则"散到边上"和"消失"在同一秒发生, 看着就是飞到边缘就没了。 */
-        float edgeOut = 1.0f - diFxSmoothStep((float)dirMax * 0.985f, (float)dirMax, d->rad);
+        float edgeOut = 1.0f - diFxSmoothStep((float)dirMax * 0.82f, (float)dirMax, d->rad);
         float tw = 0.86f + 0.14f * sinf(d->phase + (float)gDIClock * 0.9f);
         /* 3.0.58: 不再用 alpha 假装"藏在专辑后面"(那样粒子只会在边缘凭空出现)。
            现在图层真的排在封面下面, 被封面挡住, 飘出去才露出来。
@@ -19951,15 +19924,10 @@ static void diFxUpdateDots(UIView *host, CGRect cover, float dt,
         /* 3.0.61: 亮度只看「粒子强度」—— 跟音乐电平/鼓点**彻底无关**。
            474 用户: "专辑跟随律动怎么会加到粒子上呢? 我要的是专辑, 粒子是单独的"。
            现在粒子的呼吸完全由自己的强度决定, 音频包络一个字都不读。 */
-        /* 3.0.77: **彻底断开鼓点**。488 用户: "看到粒子振一下的时候有加粗, 而不是振了
-           缩回; 不要改变粒子, 就单纯振一下就行" —— 3.0.62 起 kick 会同时放大亮度
-           (0.20×kg)和尺寸(0.45×kg), 鼓点一来粒子变亮变大, 看着就是"加粗了一下"。
-           现在 kg 整个拿掉: 粒子的大小和亮度只由自己的呼吸(tw)+ 强度决定,
-           鼓点只驱动专辑, 两边互不干涉 —— 用户要的"单纯振一下"。 */
-        /* 3.0.77: 「粒子强度」只调**基础亮度**(stg 0.5~1.5 → 亮度 0.71~0.89),
-           而且是一个恒定值, 不含任何鼓点成分。鼓点再也不会让粒子变亮变大。 */
-        float stg = (float)rhythmParticleStrength;
-        float bright = 0.62f + 0.18f * stg;
+        /* 3.0.62: 拍点脉冲 —— 强度越大鼓得越明显, 每颗粒子按自己的 beatGain 有差异 */
+        float kick = gDIKick;
+        float kg = kick * stg * d->beatGain;
+        float bright = 0.78f + 0.20f * kg;
         float alpha = bright * fadeIn * fadeOut * edgeOut * tw;
         alpha *= (float)rhythmParticleAlpha;
         if (alpha < 0.05f) alpha = 0.05f;
@@ -19973,17 +19941,27 @@ static void diFxUpdateDots(UIView *host, CGRect cover, float dt,
         layer.position = CGPointMake(cx + cosf(d->ang) * d->rad + jx,
                                      cy + sinf(d->ang) * d->rad + jy);
         layer.opacity = alpha;
-        float pulse = 1.0f + 0.030f * sinf(d->phase * 1.7f + (float)gDIClock * 0.7f);
+        float pulse = (1.0f + 0.030f * sinf(d->phase * 1.7f + (float)gDIClock * 0.7f))
+                      * (1.0f + 0.45f * kg);
         CATransform3D tr = CATransform3DMakeRotation(d->rot, 0, 0, 1);
         layer.transform = CATransform3DScale(tr, pulse, pulse, 1.0f);
     }
     [CATransaction commit];
 }
 
-/* 3.0.76: 鼓点冲量**不再推粒子**(用户: "鼓点振一下跟粒子扩散不干涉 —— 扩散该怎么扩散
-   还是扩散, 振一下的还是振一下, 不然看起来粒子好快")。
-   487 日志里 隔=0.02~0.22s, 鼓点几乎每一下都往粒子身上灌 26px/s 冲量, 叠在一起
-   就是"粒子在飞"。现在本函数只做频谱条的硬包络(punch), gDIKick 由总强度包络连续推进。 */
+/* 3.0.62: 拍点到了 —— 一次性把冲量注入所有在飞的粒子。
+   只在"上升沿"调用一次(不是每帧), 否则就成了持续的推力, 粒子会一直往外跑。 */
+static void diFxApplyBeat(float kick) {
+    if (kick <= 0.02f) return;
+    for (int i = 0; i < DI_DOT_CAP; i++) {
+        DIDot *d = &gDIDots[i];
+        if (d->life <= 0) continue;
+        /* 24px/s 冲量 × 0.32s 衰减 ≈ 6~9px 的外推 —— 看得见"一跳", 又不会一下冲出边界 */
+        d->push += kick * 26.0f * (float)rhythmParticleStrength * d->beatGain;
+    }
+}
+
+/* 3.0.71: 视觉"咚" —— 服务端(样本域)触发时调一次 */
 static void diKickFire(float amp, CFTimeInterval at) {
     if (amp <= 0.05f) return;
     if (amp > 1.0f) amp = 1.0f;
@@ -19992,7 +19970,15 @@ static void diKickFire(float amp, CFTimeInterval at) {
     if (now - at > 0.30) at = now - 0.30;     /* 年龄补偿上限, 免得一上来就是衰减尾巴 */
     gDIKickPunchAmp = amp;
     gDIKickPunchT = at;
+    /* 3.0.74: 不再一帧冲顶。只记录目标值和起音时刻, 由统一顺滑包络
+       (diRhythmAdvanceSpectrum 末尾)在 ~45ms 内平滑顶到位 —— 68 的"微动态"
+       幅度不变, 但 120Hz 上不再是"啪"一下, 而是同样快的、肉眼连续的弹起。 */
+    if (amp >= gDIKickTarget) { gDIKickTarget = amp; gDIKickAtkT = now; }
     gDILastKickT = now;
+    gDILowNPrev = 1.0f;
+    gDIKickHoldN = 1.0f;
+    gDIKickArmed = NO;
+    diFxApplyBeat(amp);
 }
 
 /* 当前这一下的视觉量: 16ms 顶到位, 95ms 收回, 0.30s 归零 */
@@ -20632,9 +20618,11 @@ static void diRhythmReset(void) {
     gDIOnsetVar = 0;
     for (int i = 0; i < DI_AU_BANDS; i++) gDIBandPrevFlux[i] = 0.0f;
     gDIFluxAvg = 0; gDIFluxNow = 0; gDILowLevel = 0;
-    gDIKick = 0; gDILowN = 0;
-    gDITotFloor = 0; gDITotPeak = 0; gDITotSm = 0; gDITotBase = 0; gDILastKickT = 0;
-    gDILowShare = 0;
+    gDIKick = 0; gDILowN = 0; gDILowNPrev = 0;
+    gDILowFloor = 0; gDILowPeak = 0; gDIKickArmed = YES; gDILastKickT = 0;
+    gDILowSm = 0; gDILowHistW = 0;
+    for (int i = 0; i < 5; i++) gDILowHist[i] = 0.0f;
+    gDILowP1 = 0; gDILowP2 = 0; gDILowShare = 0; gDIKickHoldN = 1.0f;
     gDIKickPunchAmp = 0.0f; gDIKickPunchT = 0.0;
     /* 3.0.57: 把旋转交还给 CA 动画(律动接管期间是我们自己在转) */
     if (gDIArtSpinYield) {
@@ -20654,8 +20642,8 @@ static void diRhythmReset(void) {
      ② 鼓点用"绝对能量 - 缓慢基线", 基线爬升也是每帧常数, 底鼓密集时脉冲被吃掉;
      ③ 阈值写死 0.05, 小音量下完全没有反应。
    现在: ① 全部换成**时间常数** 1-exp(-dt/tau), 60/120Hz 完全一致;
-        ② 3.0.75 起: 专辑/粒子的主包络 = **全谱总强度**自适应归一(见下),
-           谱通量 onset 只负责一次性冲量(频谱条 punch + 粒子外推);
+        ② 低音取 60~250Hz 四段加权, 做"谱通量 + 自适应阈值(局部均值/方差) + 不应期",
+           这是常规的 onset 检测, 跟着底鼓走而不是跟着音量走;
         ③ 脉冲分两层: gDIBassPulse(物理, 快) / gDIBeatEnv(视觉, 40ms 起 260ms 落)。 */
 static void diRhythmAdvanceSpectrum(BOOL active, BOOL real, float dt) {
     if (dt < 0.001f) dt = 0.001f;
@@ -20709,107 +20697,113 @@ static void diRhythmAdvanceSpectrum(BOOL active, BOOL real, float dt) {
              abs = cur - prev        (能量涨了多少)
              rel = abs / (prev+0.10) (相对自己涨了多少倍)
            两者加权求和, 稳态时两者都趋 0, 起音时一起冲高, 对比度比 3.0.58 大一个量级。 */
-        float flux = 0.0f, fluxLow = 0.0f, low = 0.0f, lowAll = 0.0f, wsum = 0.0f;
+        float flux = 0.0f, low = 0.0f, lowAll = 0.0f, wsum = 0.0f;
         for (int i = 0; i < DI_AU_BANDS; i++) {
             float cur = gDIBandRaw[i];
             float prev = gDIBandPrevFlux[i];
             gDIBandPrevFlux[i] = cur;
             float dlt = cur - prev;
             float w = (i < 16) ? 1.0f : 0.70f;
-            if (dlt > 0.0f) {
-                float fv = (dlt * 0.80f + (dlt / (prev + 0.10f)) * 0.55f) * w;
-                flux += fv;
-                if (i <= 5) fluxLow += fv;   /* 3.0.77: 低频(0~5 段 ≤250Hz)的起音量 */
-            }
+            if (dlt > 0.0f) flux += (dlt * 0.80f + (dlt / (prev + 0.10f)) * 0.55f) * w;
             wsum += w;
-            /* 3.0.77: 鼓点主信号用 0~5 段(≤250Hz)。488 日志实测 0~2 段(60~140Hz)
-               这个播放路径下长期是 0.000 —— iOS 那条链上超低频基本被砍掉了,
-               只用 0~2 段等于永远判不到鼓点。0~5 段有真实能量, 而人声的泛音
-               (1k~4k)一个都不在里面, 所以"人声进来"的问题主要就靠这个频段裁掉。 */
             if (i <= 5) lowAll += cur;
+            /* 3.0.68: 底鼓("咚")只看 0~2 段 —— 24 段对数频带里这三段约 60~140Hz,
+               正是底鼓的基频。以前用 0~5 段(到 250Hz), 贝斯/男声低音/军鼓根部
+               都会进来, 鼓点跟着"别的声音"动, 就是用户说的"不是咚"。
+               权重 4/3/2: 越低的段越像底鼓。 */
             if (i == 0)      low += cur * 4.0f;
             else if (i == 1) low += cur * 3.0f;
             else if (i == 2) low += cur * 2.0f;
         }
         flux /= MAX(1.0f, wsum);
-        fluxLow /= MAX(1.0f, wsum);   /* 3.0.77: 和全谱通量同一量纲, 才能算占比 */
         gDIFluxNow = flux;
-        gDILowLevel = MIN(1.0f, low / 9.0f);           /* 探针 低频= 用; 4+3+2 = 9 */
-        float lowCur = lowAll / 6.0f;                  /* 3.0.77: 鼓点主信号(0~5 段均值) */
+        gDILowLevel = MIN(1.0f, low / 9.0f);           /* 4+3+2 = 9 */
         /* 低频占比: 底鼓 0~5 段能量 / 全谱能量。咚的那一下几乎全在低频,
            人声/军鼓/镲片起音时低频占比会掉下去 —— 用它把"不是咚的起音"挡掉。 */
         gDILowShare = lowAll / MAX(0.02f, sum);
-        /* 3.0.77: **只要鼓点** —— 488 用户: "现在好像把全部人声的都加进去了, 能不能只要鼓点"。
-           3.0.75 用的是全谱总能量(24 段均值), 人声/军鼓/镲片/吉他所有起音都会把
-           总能量顶起来, 488 日志里 总 有 20% 的帧 >0.5, 专辑跟着人声一起弹。
-           现在换回"低频鼓点", 但**不做** 3.0.68 那种五条件 AND(那次大半帧数抓不到拍):
-             · 主信号: 只有 0~5 段(≤250Hz, 底鼓/贝斯所在的低频)的平均能量,
-               floor/peak 自适应归一 → n(0~1), 鼓点的密度全在 n 里;
-             · 人声过滤: 用"低频起音量 / 全谱起音量"的占比 dom —— 鼓点那一下能量几乎
-               全涌在低频(dom 高), 人声/镲片起音主要在中高频(dom 低)。占比低只把分数
-               压到 45%, 不直接归零(避免又漏拍);
-             · 前沿: 当前 n 减去 0.45s 慢基线。贝斯长音/持续低频的前沿≈0 → 不振;
-               每个鼓点起音那一下才冲得出来, 所以是"振一下"而不是"一直鼓着"。 */
+        /* 3.0.68: 底鼓("咚")采集 —— 480 用户: "粒子跟专辑鼓点采集用咚(咚咚咚的第一个咚)"。
+           上一版(3.0.65)是"0~5 段电平 + 66ms 涨幅", 三个毛病:
+             ① 0~5 段到 250Hz, 贝斯/男声/军鼓根部都算进来 → 跟着"别的声音"动;
+             ② 66ms 比涨幅 + 12ms 平滑 → 比真正的鼓点晚 50~80ms, "咚"都过去了才动;
+             ③ 只看电平不看"是不是低频主导" → 镲片/人声起音也能凑出一次。
+           现在按底鼓的物理特征抓:
+             · 频段: 只取 0~2 段(≈60~140Hz) 加权 4/3/2 —— 咚的基频;
+             · 起音: 这一帧比**前两帧(32ms)的最高点**还冲出去多少(原始值, 不平滑) —— 抓前沿;
+             · 鼓性强: 低频占比 >0.38 才算, 人声/军鼓/镲片起音占比会掉下去;
+             · 只响一次: 触发后必须等电平掉到峰值的 72% 以下才重新上膛(防鼓身余音二次触发)。 */
         {
-            float lowv = lowCur;
+            float low = gDILowLevel;
             /* 第一帧: 直接用当前电平建立 floor/peak */
-            if (gDITotPeak < 0.02f && lowv > 0.02f) {
-                gDITotPeak = lowv;
-                gDITotFloor = lowv * 0.80f;
-                gDITotSm = lowv;
+            if (gDILowPeak < 0.02f && low > 0.02f) {
+                gDILowPeak = low;
+                gDILowFloor = low * 0.80f;
+                gDILowSm = low;
+                gDILowP1 = low; gDILowP2 = low;
+                for (int i = 0; i < 5; i++) gDILowHist[i] = low;
             }
 
-            /* 6ms 极轻平滑: 只压单帧毛刺, 不抹前沿 */
+            /* 6ms 极轻平滑: 只压单帧毛刺, 不能把前沿抹平(12ms 那个太肉) */
             float kSm = 1.0f - expf(-dt / 0.006f);
-            gDITotSm += (lowv - gDITotSm) * kSm;
-            float lowS = gDITotSm;
+            gDILowSm += (low - gDILowSm) * kSm;
+            float lowS = gDILowSm;
 
-            /* floor: 掉下去立刻跟, 往上只能慢慢爬(2.2s) */
+            /* 起音量: 相对"前两帧的最高点"(≈32ms)冲出去多少 —— 抓的是前沿本身,
+               不是"和 66ms 前比累计涨了多少"(那会晚且钝) */
+            float pastMax = MAX(gDILowP1, gDILowP2);
+            float attack = lowS - pastMax;                       /* 绝对冲高 */
+            float rel = lowS / MAX(0.05f, pastMax);              /* 相对冲高(倍) */
+            gDILowP2 = gDILowP1; gDILowP1 = lowS;
+
+            /* floor: 掉下去立刻跟, 往上只能慢慢爬(2.2s) —— 近似"这一段音乐的底噪" */
             float kUpFloor = 1.0f - expf(-dt / 2.2f);
-            if (lowS < gDITotFloor) gDITotFloor += (lowS - gDITotFloor) * 0.35f;
-            else                    gDITotFloor += (lowS - gDITotFloor) * kUpFloor;
+            if (lowS < gDILowFloor) gDILowFloor += (lowS - gDILowFloor) * 0.35f;
+            else                    gDILowFloor += (lowS - gDILowFloor) * kUpFloor;
             /* peak: 冲上去立刻跟, 回落很慢(1.6s) */
             float kDnPeak = 1.0f - expf(-dt / 1.6f);
-            if (lowS > gDITotPeak) gDITotPeak += (lowS - gDITotPeak) * 0.35f;
-            else                   gDITotPeak += (lowS - gDITotPeak) * kDnPeak;
+            if (lowS > gDILowPeak) gDILowPeak += (lowS - gDILowPeak) * 0.35f;
+            else                   gDILowPeak += (lowS - gDILowPeak) * kDnPeak;
 
-            float span = gDITotPeak - gDITotFloor;
-            if (span < 0.10f) span = 0.10f;
-            float n = (lowS - gDITotFloor) / span;
+            /* span 最小 0.12: 防止音乐很平稳时把噪声放大成满量程 */
+            float span = gDILowPeak - gDILowFloor;
+            if (span < 0.12f) span = 0.12f;
+            float n = (lowS - gDILowFloor) / span;
             if (n < 0.0f) n = 0.0f;
-            if (n > 1.0f) n = 1.0f;
+            if (n > 1.3f) n = 1.3f;
+            gDILowN = n;
 
-            /* 低频纯度: 0~5 段起音量 / 全谱起音量。鼓点高, 人声/镲片低 */
-            float dom = fluxLow / MAX(0.004f, flux);
-            gDILowShare = dom;                  /* 探针 纯= 就是这个值 */
+            CFTimeInterval nowK = CACurrentMediaTime();
+            float riseN = n - gDILowNPrev;
 
-            /* 前沿: 相对 0.45s 慢基线的冲高量, 只用来给"起音那一下"加一点权重 */
-            float kBase = 1.0f - expf(-dt / 0.45f);
-            gDITotBase += (n - gDITotBase) * kBase;
-            float front = n - gDITotBase;
+            /* 上膛: ① 电平掉回很低 ② 掉到这次触发峰值的 72% 以下(鼓身余音不算新鼓点) */
+            if (n < 0.35f) gDIKickArmed = YES;
+            if (riseN < -0.05f && n < gDIKickHoldN * 0.72f) gDIKickArmed = YES;
 
-            /* 占比权重: dom 0.10 以下只给 45%, 0.28 以上全给。
-               下限留 45% 是故意的 —— 宁可鼓点弱一点, 也不要把真鼓点整段漏掉
-               (3.0.68 的五条件检测就是因为一刀切漏了大半)。 */
-            float wd = (dom - 0.10f) / 0.18f;
-            if (wd < 0.0f) wd = 0.0f;
-            if (wd > 1.0f) wd = 1.0f;
-            wd = wd * wd * (3.0f - 2.0f * wd);
-            /* n 本身就是"相对底噪的鼓点强度" —— floor 只慢慢爬(2.2s)、掉下去立刻跟,
-               所以鼓点间隙 n 会自己掉回 0, 天然就是一下一下的, 不需要再乘前沿。
-               只在起音最陡的 0.1s 内轻轻加 15%, 让"咚"的头更明显。 */
-            float score = n * (0.45f + 0.55f * wd);
-            if (front > 0.12f) score *= 1.15f;
-            if (score > 1.0f) score = 1.0f;
-            /* 极小的死区: 前沿几乎没动就当静止(0), 免得平稳段一直抖 */
-            if (score < 0.06f) score = 0.0f;
-            gDILowN = score;    /* 鼓点强度 0~1, gDIKick 的驱动源 */
+            gDILowNPrev = n;
+            gDILowPrevK = low;
+
+            /* 咚的判定(五条同时满足):
+               ① 归一电平够高
+               ② 32ms 内绝对冲高 ≥0.045(前沿陡)
+               ③ 相对冲高 ≥1.15 倍(不是缓慢爬升)
+               ④ 低频占比 ≥0.34(鼓, 不是人声/镲片)
+               ⑤ 距上次 >0.16s
+               3.0.71: 只在拿不到样本域"咚"时兜底(老 DIAudio / 连接断掉),
+               有 v2 包时完全以服务端为准, 免得两套判定互相打架。 */
+            if (!gDIPcmKickSeen && gDIKickArmed && n > 0.55f && attack > 0.045f && rel > 1.15f &&
+                gDILowShare > 0.34f && (nowK - gDILastKickT) > 0.16) {
+                float kv = 0.60f + (n - 0.55f) * 0.75f + MIN(0.25f, attack * 1.20f);
+                if (kv > 1.0f) kv = 1.0f;
+                gDIKickArmed = NO;
+                gDIKickHoldN = n;
+                diKickFire(kv, nowK);
+            }
         }
         gDIMidLevel = sum / (float)DI_AU_BANDS;
 
-        /* 3.0.58: 谱通量 onset(绝对+相对通量 + 自适应阈值 + 0.13s 应期)。
-           3.0.75: 它不再决定专辑缩放(缩放只看总强度), 只负责"一次性鼓点冲量" ——
-           每个起音都 diKickFire 一次: 频谱条硬包络 + 粒子外推, 咚咚咚全都能抓进去。 */
+        /* 3.0.58: 阈值抬高 + 加 0.16s 不应期, 冲量 75ms 快速衰减。
+           3.0.57 是"通量 > 均值的 1.35 倍就算一拍, 强度下限 0.50" —— 密一点的歌里
+           几乎每帧都在起音, 包络被顶在 0.55~0.9 下不来(471 日志实测), 封面就一直卡在
+           最大缩放上, 用户看到的就是"一点效果都没有"。现在两拍之间包络会真的掉下去。 */
         float kAvg = 1.0f - expf(-dt / 1.20f);
         gDIFluxAvg += (flux - gDIFluxAvg) * kAvg;
         float thr = MAX(0.020f, gDIFluxAvg * 1.45f);
@@ -20821,7 +20815,6 @@ static void diRhythmAdvanceSpectrum(BOOL active, BOOL real, float dt) {
             imp = 0.45f + MIN(1.4f, rel) * 0.55f;
             if (imp > 1.0f) imp = 1.0f;
             gDILastOnset = nowS;
-            diKickFire(imp, nowS);
         }
         gDIBeatRaw = MAX(imp, gDIBeatRaw * expf(-dt / 0.060f));
         gDIBassPrev = flux;
@@ -20842,15 +20835,11 @@ static void diRhythmAdvanceSpectrum(BOOL active, BOOL real, float dt) {
         gDIFluxNow = (float)(pulse * 0.5);
         gDIBassPulse = MAX((float)pulse, gDIBassPulse * expf(-dt / 0.18f));
         gDIBassPrev = 0.3f;
-        /* 3.0.75: 没真频谱时合成节拍也喂同一条总强度包络(驱动源, 推进在末尾统一做) */
-        {
-            float tgt = (float)pulse;
-            if (tgt > 1.0f) tgt = 1.0f;
-            gDILowN = tgt;
-        }
+        /* 3.0.64: 没真频谱时合成节拍也走同一个包络(静止 = 0) */
         if (frac < 0.16 && gDIKick < (float)pulse * 0.5f) {
             diKickFire((float)pulse, CACurrentMediaTime());
         }
+        gDILowN = gDIKick;
     } else {
         float k = 1.0f - expf(-dt / 0.12f);
         for (int i = 0; i < DI_AU_BANDS; i++) {
@@ -20865,9 +20854,10 @@ static void diRhythmAdvanceSpectrum(BOOL active, BOOL real, float dt) {
         gDIMidLevel *= expf(-dt / 0.30f);
         gDIFluxNow *= expf(-dt / 0.30f);
         gDIFluxAvg *= expf(-dt / 0.60f);
-        gDITotFloor = 0.0f; gDITotPeak = 0.0f; gDITotSm = 0.0f; gDITotBase = 0.0f;
+        gDILowPrevK = 0.0f;
         gDILowN = 0.0f;
-        gDIKick *= expf(-dt / 0.17f);      /* 停播后专辑顺滑回 1.0 */
+        gDILowNPrev = 0.0f;
+        gDIKickArmed = YES;
     }
     /* 视觉拍点: 上升 25ms / 下降 150ms —— 缩放、透明度都用它, 绝不单帧跳变。
        3.0.58: 回落从 260ms 收到 150ms, 否则密鼓点下包络来不及掉, 看着像"一直很大"。 */
@@ -20875,16 +20865,22 @@ static void diRhythmAdvanceSpectrum(BOOL active, BOOL real, float dt) {
         ? (1.0f - expf(-dt / 0.015f)) : (1.0f - expf(-dt / 0.095f));
     gDIBeatEnv += (gDIBassPulse - gDIBeatEnv) * visK;
 
-    /* 3.0.75: gDIKick = **总强度顺滑包络**(驱动源 gDILowN, 每帧连续推进)。
-       起音: ~45ms 平滑顶到总强度(120Hz 上是肉眼连续的弹起, 不是一帧跳变);
-       回落: 170ms 指数衰减(68 手感)。
-       专辑缩放(0.20*律动幅度)和粒子亮度/脉冲读的都是它 —— 同源同包络, 天然契合。 */
+    /* 3.0.63: 拍点冲量已经在上面的三个分支里按"低音鼓"统一算完了 */
+
+    /* 3.0.74: 统一顺滑包络(68 的微动态 + 更自然的手感)。
+       起音: ~45ms 平滑顶到 gDIKickTarget(以前是"起音那一帧直接冲顶", 120Hz 上
+             就是一帧跳变, 用户觉得硬/别扭; 45ms 仍在鼓点同步的感知范围内);
+       回落: 170ms 指数衰减, 和 3.0.68 完全一致。
+       三条触发路径(样本域咚 / 客户端五条件 / 合成节拍)都只写 gDIKickTarget。 */
     {
-        float kKickDn = 1.0f - expf(-dt / 0.17f);
-        float tgt = gDILowN;
-        if (tgt > 1.0f) tgt = 1.0f;
-        if (tgt > gDIKick) gDIKick += (tgt - gDIKick) * kUp;
-        else               gDIKick += (tgt - gDIKick) * kKickDn;
+        double atkDt = CACurrentMediaTime() - gDIKickAtkT;
+        if (atkDt >= 0.0 && atkDt < 0.045 && gDIKickTarget > gDIKick) {
+            gDIKick += (gDIKickTarget - gDIKick) * (float)fmin(1.0, (double)dt / 0.016);
+            if (gDIKickTarget - gDIKick < 0.01f) gDIKick = gDIKickTarget;
+        } else {
+            gDIKick *= expf(-dt / 0.17f);           /* 170ms 回到 0, 与 3.0.68 相同 */
+            if (gDIKickTarget > 0.0f && atkDt >= 0.045) gDIKickTarget = 0.0f;
+        }
     }
 }
 
@@ -21115,15 +21111,13 @@ static void diRhythmTickWithDelta(float dtIn) {
                低于 0.25, 封面长期缩到 0.95~0.99, 再加 0.4% 的呼吸正弦, 看着就是在"抖",
                不是"跟着鼓点弹"。现在 k∈[0,1] 且静止=0, s 只往上走, 回落就是 1.0。
                同时去掉上下位移 dy —— 缩放 + 位移叠加在一起, 重心在动, 更"别扭"。 */
-            /* 3.0.76: 振幅收小 —— 487 用户: "鼓点振的频率不要那么大"。
-               487 日志实测 缩放 在 1.03~1.19 之间连续跳(峰值 +19%), 看着就是"一直在振"。
-               现在 0.20 → 0.12, 上限 1.22 → 1.14(57pt 上约 7pt 起伏), 配合总强度的
-               死区/宽窗口, 普通伴奏基本静止, 重拍才"振一下"。 */
+            /* 3.0.74: 回到 3.0.68 的微基础动态(用户指定基线): gDIKick 包络 + 0.20 幅度。
+               顺滑化只动了包络的"顶到"过程(45ms 趋近, 见统一顺滑包络), 幅度/衰减不变。 */
             CGFloat k = gDIKick;
-            CGFloat amp = 0.12 * rhythmBeatScale;
+            CGFloat amp = 0.20 * rhythmBeatScale;
             CGFloat s = 1.0 + amp * k;
             if (s < 1.0) s = 1.0;
-            if (s > 1.14) s = 1.14;
+            if (s > 1.22) s = 1.22;
             sDbg = s;
             gDICoverScaleNow = (float)s;      /* 粒子遮罩的孔固定 1.02R, 这里只做记录 */
             CGFloat dy = 0.0;
@@ -21164,8 +21158,7 @@ static void diRhythmTickWithDelta(float dtIn) {
             for (int i = 0; i < gDIRhythmExtraN; i++)
                 [exs appendFormat:@"%@%.0f ", NSStringFromClass(gDIRhythmExtras[i].class),
                  gDIRhythmExtras[i].bounds.size.width];
-            /* 3.0.77 字段: 纯=低频纯度(0~2段起音/全谱起音) 分=鼓点分数 包=包络 条=频谱条punch */
-            RLog(@"[探针] 通量=%.3f 低频=%.3f 纯=%.2f 拍=%.2f 分=%.2f 包=%.2f 条=%.2f 串=%u 低R=%.4f 隔=%.2f 缩放=%.3f 实=%.3f 呈=%.3f 尺=%.0f 基尺=%.0f 驱动=%@ 图=%@ 旋=%@ 播=%d 粒=%d 强=%.1f 律=%d 基=%d",
+            RLog(@"[探针] 通量=%.3f 低频=%.3f 占=%.2f 拍=%.2f 鼓=%.2f 踢=%.2f 咚=%.2f 串=%u 低R=%.4f 隔=%.2f 缩放=%.3f 实=%.3f 呈=%.3f 尺=%.0f 基尺=%.0f 驱动=%@ 图=%@ 旋=%@ 播=%d 粒=%d 强=%.1f 律=%d 基=%d",
                  gDIFluxNow, gDILowLevel, gDILowShare, gDIBeatEnv, gDILowN, gDIKick,
                  diKickPunchNow(), (unsigned)gDIPcmKickSerial, gDIPcmLowRms,
                  (float)(gDILastKickT > 0 ? (CACurrentMediaTime() - gDILastKickT) : 0.0),

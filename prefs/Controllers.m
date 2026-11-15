@@ -5865,8 +5865,6 @@ static void diNPApplySize(NSString *size) {
     diNPWrite(@"ModuleSizes", sizes, kNPDomain);
     diNPWrite(@"PlayerGridVariant", variant, kNPDomain);
     diNPWrite(@"Size", size, kNPDomain);
-    /* 3.0.75: 尺寸实时生效通知已删(用户: 实现不了, 删掉避免后台耗电)。
-       尺寸改动照旧在注销/模块重建后生效。 */
 }
 
 /* 3.0.39: 3×1 档位已整体删除(用户: "3×1 暂时删除, 相关的也删除")。
