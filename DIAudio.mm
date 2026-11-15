@@ -306,24 +306,17 @@ static OSStatus diAudioRenderHook(AudioUnit inUnit,
     return r;
 }
 
-static void *diAudioServerThread(void *arg) {
-    (void)arg;
-    int s = socket(AF_INET, SOCK_STREAM, 0);
-    if (s < 0) return NULL;
-    int one = 1;
-    setsockopt(s, SOL_SOCKET, SO_REUSEADDR, &one, sizeof one);
-    struct sockaddr_in a;
-    memset(&a, 0, sizeof a);
-    a.sin_family = AF_INET;
-    a.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
-    a.sin_port = htons(DI_AU_PORT);
-    if (bind(s, (struct sockaddr *)&a, sizeof a) != 0) { close(s); return NULL; }
-    if (listen(s, 2) != 0) { close(s); return NULL; }
-    for (;;) {
-        int c = accept(s, NULL, NULL);
-        if (c < 0) continue;
-        int nb = fcntl(c, F_GETFL, 0);
-        if (nb >= 0) fcntl(c, F_SETFL, nb | O_NONBLOCK);
+/* 3.0.86: 每个客户端一条线程
+   以前服务端一次只服务一个连接(accept 后就在里面死循环发包), 谁先连上谁独占 ——
+   SpringBoard 连上后 MediaRemoteUI 永远收不到数据, 岛专辑特效(在 MRU 进程里跑)
+   拿不到频谱, 表现就是"开关开了完全没反应"。现在 accept 完就 spawn 一条线程,
+   各客户端各发各的, SB / MRU (以及以后任何进程)可以同时收。 */
+static void *diAudioClientThread(void *arg) {
+    int c = (int)(intptr_t)arg;
+    if (c < 0) return NULL;
+    int nb = fcntl(c, F_GETFL, 0);
+    if (nb >= 0) fcntl(c, F_SETFL, nb | O_NONBLOCK);
+    {
         for (;;) {
             /* 3.0.79: 暂停/停止时 render 回调根本不会来 —— 以前这里仍然 60Hz 空转
                (每 16ms: memset + 组包 + send), 纯耗电, 客户端还会一直收到"零包",
@@ -373,7 +366,30 @@ static void *diAudioServerThread(void *arg) {
             ssize_t n = send(c, pkt, sizeof pkt, MSG_NOSIGNAL);
             if (n != (ssize_t)sizeof pkt) break;
         }
-        close(c);
+    }
+    close(c);
+    return NULL;
+}
+
+static void *diAudioServerThread(void *arg) {
+    (void)arg;
+    int s = socket(AF_INET, SOCK_STREAM, 0);
+    if (s < 0) return NULL;
+    int one = 1;
+    setsockopt(s, SOL_SOCKET, SO_REUSEADDR, &one, sizeof one);
+    struct sockaddr_in a;
+    memset(&a, 0, sizeof a);
+    a.sin_family = AF_INET;
+    a.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    a.sin_port = htons(DI_AU_PORT);
+    if (bind(s, (struct sockaddr *)&a, sizeof a) != 0) { close(s); return NULL; }
+    if (listen(s, 4) != 0) { close(s); return NULL; }
+    for (;;) {
+        int c = accept(s, NULL, NULL);
+        if (c < 0) continue;
+        pthread_t t;
+        if (pthread_create(&t, NULL, diAudioClientThread, (void *)(intptr_t)c) == 0) pthread_detach(t);
+        else close(c);
     }
     return NULL;
 }

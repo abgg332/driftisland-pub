@@ -908,7 +908,7 @@ static Class diStepSliderClass(void) {
 @interface DITextStylePage : DIMiniBaseController @end
 /* 2.8.12: 歌词岛合并页回归(2.8.4/2.8.5 下架后恢复) ——
    上半=左侧专辑帧率, 下半=右侧音频帧率, 下面=专辑遮罩设置(2.2.24 原版形态) */
-@interface DILyricsIslandSettings : DIMiniBaseController @end
+@interface DILyricsIslandSettings : DIMiniBaseController <UIColorPickerViewControllerDelegate> @end
 /* 2.8.41: 控制中心页回归(单素材=浅色键 wpLightAsset, 无深浅色分组) */
 @interface DICCSettings : DIMiniBaseController @end
 /* 2.8.87: 展开定义 —— 遮罩素材下面的二级页(位置/大小/颜色) */
@@ -5327,6 +5327,15 @@ static void diOpenHomeBarPickWindow(void) {
    遮罩素材行 2.8.12 起改链 DIMaskPicker(png 直选, 写 diAlbumMaskAsset) ——
    旧版链的是 DIFrameFoldersMask(文件夹, 写 maskAnimFolder), 与运行时读的键
    对不上, 这就是"遮罩选了却不生效"的根因。 */
+@interface DILyricsIslandSettings ()
+- (PSSpecifier *)diIslandModeSpec;
+- (PSSpecifier *)diIslandColorSpec:(NSString *)title key:(NSString *)key def:(NSString *)def;
+- (void)diCycleIslandMode:(PSSpecifier *)sp;
+- (void)diPickIslandColor:(PSSpecifier *)sp;
+- (int)diIslandColorMode;
+- (id)diIslandVal:(NSString *)key;
+@end
+
 @implementation DILyricsIslandSettings
 - (NSArray *)buildSpecifiers {
     NSMutableArray *specs = [NSMutableArray array];
@@ -5367,15 +5376,90 @@ static void diOpenHomeBarPickWindow(void) {
     [specs addObject:[self switchSpec:@"启动旋转" key:@"maskRotateOn" def:@NO]];
     [specs addObject:[self switchSpec:@"反向旋转" key:@"maskRotateReverse" def:@NO]];
     [specs addObject:[self numSlider:@"旋转速度" key:@"maskRotateSpeed" def:45 mn:0 mx:360]];
-    /* 3.0.84: 岛专辑特效 —— 岛上的那张专辑也有粒子和律动。
-       与「播放器 → 律动特效」完全独立: 那边是播放器里的 66pt 头像, 这边是岛上这颗。 */
-    [specs addObject:[self groupSpec:@"岛专辑特效"
-                              footer:@"只作用于岛上的专辑头像，和「播放器 → 律动特效」互不影响。默认关闭。"]];
-    [specs addObject:[self switchSpec:@"专辑律动" key:@"IslandBeatOn" def:@NO]];
-    [specs addObject:[self numSlider:@"律动幅度(%)" key:@"IslandBeatAmp" def:10 mn:3 mx:25]];
-    [specs addObject:[self switchSpec:@"专辑粒子" key:@"IslandParticlesOn" def:@NO]];
-    [specs addObject:[self numSlider:@"粒子密度(%)" key:@"IslandDotDensity" def:60 mn:20 mx:150]];
+    /* ===== 3.0.86: 岛专辑特效 —— 与「播放器 → 律动特效」一一对应的全套设置项 =====
+       键全部用 Island* 前缀, 与播放器那套(Album*/Particle*)互不影响。
+       参数由 SpringBoard 1Hz 落盘 fx.plist 交给 MediaRemoteUI(它读不到偏好)。 */
+    [specs addObject:[self groupSpec:@"专辑律动"
+                              footer:@"作用于岛上那颗专辑头像，与「播放器 → 律动特效」互不影响。默认关闭。"]];
+    [specs addObject:[self switchSpec:@"启用律动特效" key:@"IslandFxOn" def:@NO]];
+    [specs addObject:[self switchSpec:@"专辑跟随律动" key:@"IslandBeatOn" def:@NO]];
+    [specs addObject:[self numSliderD:@"专辑律动幅度" key:@"IslandBeatScale" def:0.60 mn:0.00 mx:2.00]];
+
+    [specs addObject:[self groupSpec:@"律动粒子" footer:nil]];
+    [specs addObject:[self switchSpec:@"启用律动粒子" key:@"IslandParticlesOn" def:@NO]];
+    [specs addObject:[self numSliderD:@"粒子数量" key:@"IslandDotCount" def:25 mn:0 mx:40]];
+    [specs addObject:[self numSliderD:@"粒子透明" key:@"IslandDotAlpha" def:0.74 mn:0.10 mx:1.50]];
+    [specs addObject:[self numSliderD:@"粒子大小" key:@"IslandDotSize" def:1.0 mn:0.1 mx:2.0]];
+    [specs addObject:[self numSliderD:@"粒子强度" key:@"IslandDotStrength" def:1.0 mn:0.0 mx:2.0]];
+    [specs addObject:[self diIslandModeSpec]];
+    [specs addObject:[self diIslandColorSpec:@"起始颜色" key:@"IslandColA" def:@"#FFFFB4"]];
+    [specs addObject:[self diIslandColorSpec:@"结束颜色" key:@"IslandColB" def:@"#BCCEFC"]];
+    [specs addObject:[self switchSpec:@"流光(颜色缓慢流动)" key:@"IslandFlowOn" def:@NO]];
     return specs;
+}
+
+/* ---- 3.0.86: 颜色来源 / 起止色(岛侧独立键) ---- */
+static NSString *gDIIslandColorKey = nil;
+
+- (id)diIslandVal:(NSString *)key {
+    if (!key.length) return nil;
+    CFPreferencesAppSynchronize((__bridge CFStringRef)kDomain);
+    return CFBridgingRelease(CFPreferencesCopyAppValue((__bridge CFStringRef)key,
+                                                       (__bridge CFStringRef)kDomain));
+}
+- (int)diIslandColorMode {
+    id v = [self diIslandVal:@"IslandColorMode"];
+    return (v && [v intValue] == 1) ? 1 : 0;
+}
+- (PSSpecifier *)diIslandModeSpec {
+    NSString *label = [NSString stringWithFormat:@"颜色来源  ·  %@",
+                       ([self diIslandColorMode] == 1) ? @"自定义" : @"跟随封面"];
+    PSSpecifier *sp = [PSSpecifier preferenceSpecifierNamed:label target:self
+        set:NULL get:NULL detail:nil cell:PSButtonCell edit:nil];
+    sp.buttonAction = @selector(diCycleIslandMode:);
+    return sp;
+}
+- (void)diCycleIslandMode:(PSSpecifier *)sp {
+    int m = ([self diIslandColorMode] + 1) % 2;
+    CFPreferencesSetAppValue(CFSTR("IslandColorMode"), (__bridge CFPropertyListRef)@(m),
+                             (__bridge CFStringRef)kDomain);
+    CFPreferencesAppSynchronize((__bridge CFStringRef)kDomain);
+    [self reloadSpecifiers];
+    diStep(@"颜色来源: %@", m == 1 ? @"自定义" : @"跟随封面");
+}
+- (PSSpecifier *)diIslandColorSpec:(NSString *)title key:(NSString *)key def:(NSString *)def {
+    id v = [self diIslandVal:key];
+    NSString *hex = ([v isKindOfClass:NSString.class] && [(NSString *)v length]) ? v : def;
+    NSString *upper = [hex uppercaseString];
+    if (![upper hasPrefix:@"#"]) upper = [@"#" stringByAppendingString:upper];
+    PSSpecifier *sp = [PSSpecifier preferenceSpecifierNamed:[NSString stringWithFormat:@"%@   %@", title, upper]
+                                                     target:self set:NULL get:NULL detail:nil cell:PSButtonCell edit:nil];
+    [sp setProperty:key forKey:@"key"];
+    [sp setProperty:upper forKey:@"hex"];
+    [sp setProperty:NSClassFromString(@"DIFxColorCell") forKey:@"cellClass"];
+    sp.buttonAction = @selector(diPickIslandColor:);
+    return sp;
+}
+- (void)diPickIslandColor:(PSSpecifier *)sp {
+    gDIIslandColorKey = [sp propertyForKey:@"key"];
+    if (!gDIIslandColorKey.length) return;
+    UIColorPickerViewController *p = [[UIColorPickerViewController alloc] init];
+    p.selectedColor = diColorFromHexStr([sp propertyForKey:@"hex"] ?: @"#FFFFFF", UIColor.whiteColor);
+    p.supportsAlpha = NO;
+    p.delegate = self;
+    [self presentViewController:p animated:YES completion:nil];
+}
+- (void)colorPickerViewControllerDidSelectColor:(UIColorPickerViewController *)vc {
+    if (!gDIIslandColorKey.length) return;
+    CGFloat r = 0, g = 0, b = 0, a = 0;
+    if (![vc.selectedColor getRed:&r green:&g blue:&b alpha:&a]) return;
+    NSString *hex = [NSString stringWithFormat:@"#%02X%02X%02X",
+                     (unsigned)lround(r * 255.0), (unsigned)lround(g * 255.0), (unsigned)lround(b * 255.0)];
+    CFPreferencesSetAppValue((__bridge CFStringRef)gDIIslandColorKey,
+                             (__bridge CFPropertyListRef)hex,
+                             (__bridge CFStringRef)kDomain);
+    CFPreferencesAppSynchronize((__bridge CFStringRef)kDomain);
+    [self reloadSpecifiers];
 }
 @end
 
