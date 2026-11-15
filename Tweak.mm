@@ -127,7 +127,7 @@ static BOOL islandBeatOn = NO;        // IslandBeatOn: 岛上专辑随节拍缩�
 static BOOL islandParticlesOn = NO;   // IslandParticlesOn: 岛上专辑外圈粒子
 /* 3.0.86: 与播放器「律动特效」同一套参数(岛侧独立键 Island*) ——
    MRU 进程读不到偏好, 由这里 1Hz 落盘 fx.plist 交给它 */
-static double islandBeatScale = 0.60;    // IslandBeatScale 0~2
+static double islandBeatScale = 0.70;    // IslandBeatScale 0~2 (与播放器 AlbumBeatScale 同默认)
 static double islandDotCount = 25;       // IslandDotCount 0~40
 static double islandDotAlpha = 0.74;     // IslandDotAlpha 0.1~1.5
 static double islandDotSize = 1.0;       // IslandDotSize 0.1~2
@@ -135,6 +135,10 @@ static double islandDotStrength = 1.0;   // IslandDotStrength 0~2
 static int    islandColorMode = 0;       // IslandColorMode 0=跟随封面 1=自定义
 static NSString *islandColA = nil, *islandColB = nil;
 static BOOL islandFlowOn = NO;           // IslandFlowOn
+/* 3.0.87: MRU 岛特效正在给玻璃写 transform 时置 YES —— diActivityApply 里那句
+   "glass.frame = box" 必须让路。transform 非单位矩阵时 frame 是"变换后的外框",
+   再写 frame 会让 UIKit 反过来改 bounds(越写越小), 律动看起来就是"缩着不动"。 */
+static BOOL gDIISDrivingFx = NO;
 static void diISRegisterGlass(UIView *g);   /* 玻璃注册(实现在律动模块里) */
 static void diISHardStop(void);             /* 清粒子 + 复位缩放 */
 /* 3.0.85: 岛专辑特效改到 MRU(真实专辑遮罩)侧 —— 函数定义在律动模块末尾,
@@ -1332,7 +1336,7 @@ static void refreshPrefs(void) {
     islandBeatOn = pBool(@"IslandBeatOn", NO);
     islandParticlesOn = pBool(@"IslandParticlesOn", NO);
     {
-        double v = pDouble(@"IslandBeatScale", 0.60);
+        double v = pDouble(@"IslandBeatScale", 0.70);
         if (v < 0) v = 0; if (v > 2.0) v = 2.0;
         islandBeatScale = v;
         v = pDouble(@"IslandDotCount", 25);
@@ -15403,7 +15407,7 @@ static void diActivityApply(UIView *artwork) {
         diMruFileLog([NSString stringWithFormat:@"glass 创建 bounds=%@ 系统层=%@",
             NSStringFromCGRect(artwork.bounds), state.systemLayer ? @"已找到" : @"无"]);
     }
-    if (!CGRectEqualToRect(state.glass.frame, box)) {
+    if (!gDIISDrivingFx && !CGRectEqualToRect(state.glass.frame, box)) {
         state.glass.frame = box;
         state.glass.layer.cornerRadius = 0;
         static CGFloat lastW, lastH; static NSString *lastCN;
@@ -15507,6 +15511,9 @@ static void diActivityApply(UIView *artwork) {
         if (state.glass.alpha < 0.999) state.glass.alpha = 1.0;
         if (!smallArt) state.wasMid = NO;
     }
+    /* 3.0.87: 每次都喂一遍绑定 —— 玻璃创建那一刻 bounds 可能还是 0(还没 layout),
+       只在那时绑一次的话小岛永远绑不上, 又是"完全没效果"。 */
+    @try { diISMRUApply(artwork, state.glass); } @catch (__unused NSException *e) {}
     diMruReport(@"apply", [NSString stringWithFormat:@"%@ 旋转=%@", NSStringFromCGRect(box),
         rotOn ? [NSString stringWithFormat:@"%.0f°/s", speed] : @"关"]);
 }
@@ -21308,33 +21315,15 @@ static void diPlayRatePoll(void) {
     });
 }
 
-/* ===== 3.0.84: 岛专辑特效（律动 + 粒子）=====
-   为什么不开新定时器: 节拍(gDIBeatEnv / gDIBassPulse)已经在现有 CADisplayLink 里
-   算好了, 这边只是"读同一份数据、画在另一块玻璃上", 所以岛上的动和播放器上的动
-   永远是同一个鼓点, 也不会多一份 CPU。
-   粒子用一个 CAShapeLayer 每帧重建路径(最多 40 个小圆) —— 和频谱条同一个思路,
-   不建 40 个 layer、不加 shadow, 岛这么小的合成层里这个开销可以忽略。
-   两个开关默认关, 关掉时这些函数直接 return。 */
+/* ===== 3.0.84 → 3.0.87: 岛专辑特效的"复位"半边 =====
+   粒子与律动本体已经在 MRU(MediaRemoteUI) 进程里跑了(见文件末尾那段), 这里只剩
+   一件事: 暂停/停止时把 SpringBoard 侧自绘玻璃(DIMaskView)的 fxScale 复位。
+   SB 侧的粒子层/状态数组在 3.0.87 一起删掉 —— 它们从 3.0.85 起就是死代码。 */
 #define DI_IS_GLASS_MAX 4
 #define DI_IS_DOT_MAX 40
 
 static __weak UIView *gDIISGlasses[DI_IS_GLASS_MAX];
 static int gDIISGlassN = 0;
-static __weak UIView *gDIISDotHost = nil;
-static CAShapeLayer *gDIISDotLayer = nil;
-static UIColor *gDIISDotCol = nil;
-static float gDIISSpawn = 0.0f;
-/* 3.0.85: gDIISBeatWasOn/gDIISParticleWasOn 随 SB 侧岛特效驱动一起移除 */
-
-typedef struct {
-    float ang;      /* 方位角 */
-    float rad;      /* 当前半径(pt, 从玻璃边缘往外) */
-    float spd;      /* 径向速度 pt/s */
-    float size;     /* 起始半径 pt */
-    float life, maxLife;
-    float spin;     /* 角速度 rad/s(轻微漂移, 不是纯放射) */
-} DIISDot;
-static DIISDot gDIISDots[DI_IS_DOT_MAX];
 
 static void diISRegisterGlass(UIView *g) {
     if (!g) return;
@@ -21343,13 +21332,6 @@ static void diISRegisterGlass(UIView *g) {
     for (int i = 1; i < DI_IS_GLASS_MAX; i++) gDIISGlasses[i - 1] = gDIISGlasses[i];
     gDIISGlasses[DI_IS_GLASS_MAX - 1] = g;
 }
-
-static void diISResetDots(void) {
-    for (int i = 0; i < DI_IS_DOT_MAX; i++) gDIISDots[i].life = 0.0f;
-    gDIISSpawn = 0.0f;
-}
-
-/* 取当前"真在屏上"的那块玻璃: 后注册的更新(SB 小岛 ↔ MRU 展开交接时, 新的覆盖旧的) */
 
 static void diISBeatReset(UIView *g) {
     if (!g) return;
@@ -21366,14 +21348,6 @@ static void diISBeatReset(UIView *g) {
 /* 3.0.84: 岛特效独立跑时用它判"到底有没有在放歌"(与主路径同一套优先级) */
 
 static void diISHardStop(void) {
-    diISResetDots();
-    if (gDIISDotLayer) {
-        [CATransaction begin];
-        [CATransaction setDisableActions:YES];
-        gDIISDotLayer.path = NULL;
-        gDIISDotLayer.opacity = 0.0f;
-        [CATransaction commit];
-    }
     for (int i = 0; i < gDIISGlassN; i++) diISBeatReset(gDIISGlasses[i]);
 }
 
@@ -21401,6 +21375,38 @@ static void diFxHardStop(void) {
     gDISteady = 0.0f; gDIBeatEnv = 0.0f; gDIBassPulse = 0.0f;
     gDIKick = 0.0f; gDIKickTarget = 0.0f;
     for (int i = 0; i < DI_AU_BANDS; i++) gDIBandSmooth[i] = 0.0f;
+}
+
+/* ===== 3.0.87: 鼓点快照 —— SB 写 beat.bin, MRU 读它 =====
+   岛专辑特效在 MediaRemoteUI 进程里跑, 它自己连频谱端当然也能算, 但那样就是"另一份
+   包络、另一个鼓点", 和播放器不可能严丝合缝。这里把**已经在算的**这一份(gDIKick/
+   gDIBeatEnv/gDIBassPulse)30Hz 落成 24 字节, MRU 直接读 —— 岛上和播放器永远是同一拍。 */
+typedef struct { double t; float kick, env, bass, playing; } DIBeatSnapOut;
+static void diISPublishBeat(BOOL playing) {
+    static int fd = -2;
+    static CFAbsoluteTime lastTry = 0, lastW = 0;
+    CFAbsoluteTime now = CFAbsoluteTimeGetCurrent();
+    if (fd < 0) {
+        if (fd == -1 && now - lastTry < 2.0) return;
+        lastTry = now;
+        NSString *dir = diMruSharedDir();
+        if (!dir.length) { fd = -1; return; }
+        [[NSFileManager defaultManager] createDirectoryAtPath:dir withIntermediateDirectories:YES
+                                                     attributes:@{NSFilePosixPermissions: @0777} error:NULL];
+        NSString *p = [dir stringByAppendingPathComponent:@"beat.bin"];
+        fd = open([p fileSystemRepresentation], O_RDWR | O_CREAT, 0644);
+        if (fd < 0) { fd = -1; return; }
+    }
+    if (now - lastW < 0.033) return;     /* 30Hz 足够, 别每帧都 write */
+    lastW = now;
+    DIBeatSnapOut sn;
+    memset(&sn, 0, sizeof sn);
+    sn.t = now;
+    sn.kick = playing ? gDIKick : 0.0f;
+    sn.env = playing ? gDIBeatEnv : 0.0f;
+    sn.bass = playing ? gDIBassPulse : 0.0f;
+    sn.playing = playing ? 1.0f : 0.0f;
+    pwrite(fd, &sn, sizeof sn, 0);
 }
 
 static void diRhythmTickWithDelta(float dtIn) {
@@ -21581,6 +21587,7 @@ static void diRhythmTickWithDelta(float dtIn) {
     gDIClock += dt;
 
     diRhythmAdvanceSpectrum(active, real, dt);
+    diISPublishBeat(active);   /* 3.0.87: 同一份鼓点交给 MRU 的岛专辑特效 */
 
     if (!gDIFxRealLogged && active && real && gDIBandSeen) {
         gDIFxRealLogged = YES;
@@ -21762,88 +21769,136 @@ static void diRhythmTickWithDelta(float dtIn) {
 @end
 
 /* =====================================================================
-   3.0.86: 岛专辑特效 —— MRU(真实专辑遮罩)侧实现
-   3.0.84 挂在 SpringBoard 的 DIMaskView 上不生效; 3.0.85 改到 MRU 仍不生效,
-   492 日志定位到两个硬伤:
-     ① 频谱服务端一次只服务一个连接 —— SB 占着连接, MRU 永远收不到数据;
-     ② MRU 读不到 CFPreferences("开关三通道都不可读"), 开关在它眼里恒为关。
-   3.0.86 的解法:
-     · DIAudio 改成"每个客户端一条线程", SB / MRU 可以同时收频谱;
-     · 参数由 SB 1Hz 写成 fx.plist(共享缓存目录), MRU 读它 —— 不再碰偏好;
-     · 律动 = 直接缩放 diActivityApply 的遮罩玻璃;
-     · 粒子 = 宿主视图插在头像**背后**(玻璃内部会被 clipsToBounds 裁光)。
-   设置项与播放器「律动特效」一一对应(总开关/跟随律动/幅度/粒子数量/透明/
-   大小/强度/颜色来源/起止色/流光), 键用 Island* 前缀, 互不影响。
+   3.0.87: 岛专辑特效 —— 只作用于岛上的小头像(23pt), 展开态完全不参与
+   493 反馈四条:
+     ① "显示一阵一阵的" —— 绑定时两条路(小岛 23 / 展开 66)都在往这里注册,
+        后注册的把前一个顶掉: 粒子刚在 23 上冒两颗, 又被挪到 66 上(看不见),
+        再挪回来 → 一茬一茬的;
+     ② "粒子跟播放器的不一样" —— 3.0.85 那套是"从圆心往外射的圆点" (寿命 0.5~1s),
+        播放器是"慢速外飘 + 摆动 + 四种形状 + 8~14s 寿命", 完全两套东西;
+     ③ "律动也没有" —— 除了①绑错玻璃, 还有个更硬的: apply 里每 0.1~0.3 秒会写
+        glass.frame = box。transform 不是单位矩阵时 frame 是"变换后的外框", 再写
+        frame 会让 UIKit 反过来改 bounds(越写越小) → 律动当场被吃掉;
+     ④ "展开也有干扰" —— 就是①的另一半。
+   3.0.87 的做法:
+     · 只用**小岛**的头像(side 12~44pt), 展开 66pt 一律不接; 绑定做成"当前 + 候选",
+       当前那块还在窗口里就不换, 换岛才换绑定 → 不再来回跳;
+     · 粒子按播放器 diFxSpawnDot/diFxUpdateDots **一比一移植**: 同样的形状(实心圆/
+       菱形/方块/三角)、同样的尺寸/漂移/摆动/寿命/淡入淡出曲线, 尺寸按头像半径比例缩放;
+     · 律动写 transform 时置 gDIISDrivingFx, diActivityApply 里那句 frame 同步让路;
+     · 鼓点优先读 SB 落的 beat.bin(与播放器同一个包络、同一个鼓点), 读不到才用自己
+       连 127.0.0.1:41235 的频谱兜底;
+     · 30Hz → 60Hz, 岛虽小, 但 30Hz 上"慢飘"会一顿一顿。
    ===================================================================== */
-static __weak UIView *gDIISMGlass = nil;
-static __weak UIView *gDIISMArt = nil;
-static __weak UIView *gDIISMDotHost = nil;
-static CAShapeLayer *gDIISMDotLayerA = nil;   /* 起始色 */
-static CAShapeLayer *gDIISMDotLayerB = nil;   /* 结束色 */
-static float gDIISMSpawn = 0.0f;
+
+static __weak UIView *gDIISMArt = nil;        /* 当前绑定的小岛头像 */
+static __weak UIView *gDIISMArtCand = nil;    /* 候选(等当前这块下台再换) */
+static UIView *gDIISMGlass = nil;             /* 绑定头像里的那块玻璃 */
+static UIView *gDIISMGlassCand = nil;
+static UIView *gDIISMHost = nil;              /* 粒子宿主: 插在头像**背后** */
+static CAShapeLayer *gDIISMDotLayer[DI_IS_DOT_MAX];
+static float gDIISSpawnAcc = 0.0f;
+static int gDIISMDotCount = 0;
+static float gDIISMKick = 0.0f;
+static float gDIISMScaleNow = 1.0f;
+static float gDIISMClock = 0.0f;
 static CFAbsoluteTime gDIISMParamsAt = 0;
-static UIColor *gDIISMDefA = nil, *gDIISMDefB = nil;   /* 起止色(基色) */
+static CFAbsoluteTime gDIISMProbeAt = 0;
 static double gDIISMHue = 0.0;
 static CFTimeInterval gDIISMColAt = 0;
 static BOOL gDIISMColDirty = YES;
+static UIColor *gDIISMDefA = nil, *gDIISMDefB = nil;
+static UIColor *gDIISMColA = nil, *gDIISMColB = nil;
 
-/* 参数(从 fx.plist 读) */
 static BOOL gDIISMOn = NO, gDIISMBeat = NO, gDIISMPart = NO, gDIISMFlow = NO;
-static double gDIISMAmp = 0.60, gDIISMDotN = 25.0, gDIISMDotA = 0.74,
+static double gDIISMAmp = 0.70, gDIISMDotN = 25.0, gDIISMDotA = 0.74,
               gDIISMDotS = 1.0, gDIISMDotP = 1.0;
 static int gDIISMMode = 0;
 
-#define DI_ISM_DOT_MAX 40
-typedef struct { float ang, rad, spd, size, life, maxLife, spin; } DIISMDot;
-static DIISMDot gDIISMDots[DI_ISM_DOT_MAX];
+typedef struct {
+    float ang, rad, drift, push, sway, swayAmp, swayPhase;
+    float size, rot, rotSpd, life, maxLife, phase, tint, beatGain;
+    int shape;
+} DIISMDot;
+static DIISMDot gDIISMDots[DI_IS_DOT_MAX];
 
 @interface DIISMRUTicker : NSObject
 - (void)onFrame:(CADisplayLink *)l;
 @end
-
 static id gDIISMTicker = nil;
 static CADisplayLink *gDIISMRL = nil;
 
-static void diISMRUResetDots(void) {
-    for (int i = 0; i < DI_ISM_DOT_MAX; i++) gDIISMDots[i].life = 0.0f;
-    gDIISMSpawn = 0.0f;
+static float diISMRand01(void) {
+    return (float)arc4random_uniform(10000) / 10000.0f;
 }
 
-static void diISMRULayersClear(void) {
-    for (CAShapeLayer *L in @[gDIISMDotLayerA ?: [NSNull null], gDIISMDotLayerB ?: [NSNull null]]) {
-        if (![L isKindOfClass:CAShapeLayer.class]) continue;
-        [CATransaction begin];
-        [CATransaction setDisableActions:YES];
-        ((CAShapeLayer *)L).path = NULL;
-        [CATransaction commit];
+/* ---------- 鼓点快照: SB 写 beat.bin, 这里读 ---------- */
+typedef struct { double t; float kick, env, bass, playing; } DIBeatSnap;
+static int gDIISMBeatFd = -2;
+static CFAbsoluteTime gDIISMBeatTryAt = 0;
+static DIBeatSnap gDIISMBeatSnap;
+
+static BOOL diISMRUReadBeat(void) {
+    if (gDIISMBeatFd < 0) {
+        CFAbsoluteTime nt = CFAbsoluteTimeGetCurrent();
+        if (gDIISMBeatFd == -1 && nt - gDIISMBeatTryAt < 2.0) return NO;
+        gDIISMBeatTryAt = nt;
+        NSString *dir = diMruSelfDir();
+        if (!dir.length) { gDIISMBeatFd = -1; return NO; }
+        NSString *p = [dir stringByAppendingPathComponent:@"beat.bin"];
+        gDIISMBeatFd = open(p.fileSystemRepresentation, O_RDONLY);
+        if (gDIISMBeatFd < 0) { gDIISMBeatFd = -1; return NO; }
     }
+    DIBeatSnap s;
+    ssize_t n = pread(gDIISMBeatFd, &s, sizeof s, 0);
+    if (n != (ssize_t)sizeof s) return NO;
+    if (s.t <= 0.0) return NO;
+    if (CFAbsoluteTimeGetCurrent() - s.t > 0.40) return NO;   /* 过期(播放器没在算) → 走自己的频谱 */
+    gDIISMBeatSnap = s;
+    return YES;
 }
 
-static void diISMRUTeardown(void) {
-    diISMRUResetDots();
-    diISMRULayersClear();
-    if (gDIISMDotHost && gDIISMDotHost.superview) [gDIISMDotHost removeFromSuperview];
-    gDIISMDotHost = nil;
-    gDIISMDotLayerA = nil;
-    gDIISMDotLayerB = nil;
-    UIView *g = gDIISMGlass;
-    if (g && g.window) {
-        [CATransaction begin];
-        [CATransaction setDisableActions:YES];
-        g.layer.transform = CATransform3DIdentity;
-        [CATransaction commit];
+/* ---------- 形状(与播放器 diFxShapePath 同款) ---------- */
+static CGPathRef diISMShapePath(int shape, CGFloat s2) {
+    CGMutablePathRef p = CGPathCreateMutable();
+    CGFloat h = s2 * 0.5f;
+    CGFloat in2 = MAX(0.55f, s2 * 0.12f);
+    switch (shape) {
+        case 1: {
+            CGFloat r = h - in2;
+            CGPathMoveToPoint(p, NULL, 0, -r);
+            CGPathAddLineToPoint(p, NULL, r * 0.72f, 0);
+            CGPathAddLineToPoint(p, NULL, 0, r);
+            CGPathAddLineToPoint(p, NULL, -r * 0.72f, 0);
+            CGPathCloseSubpath(p);
+            break;
+        }
+        case 2:
+            CGPathAddRect(p, NULL, CGRectMake(-h + in2, -h + in2, s2 - in2 * 2.0f, s2 - in2 * 2.0f));
+            break;
+        case 3: {
+            CGFloat r = h - in2;
+            CGPathMoveToPoint(p, NULL, 0, -r);
+            CGPathAddLineToPoint(p, NULL, r * 0.88f, r * 0.66f);
+            CGPathAddLineToPoint(p, NULL, -r * 0.88f, r * 0.66f);
+            CGPathCloseSubpath(p);
+            break;
+        }
+        default:
+            CGPathAddEllipseInRect(p, NULL, CGRectMake(-h, -h, s2, s2));
+            break;
     }
+    return p;
 }
 
-static void diISMRUStop(void) {
-    if (gDIISMRL) { [gDIISMRL invalidate]; gDIISMRL = nil; }
-    diISMRUTeardown();
-}
-
-/* 读 SB 写下的 fx.plist —— 这是 MRU 唯一可靠的参数来源 */
+/* ---------- 参数(fx.plist, SB 1Hz 落盘) ---------- */
 static BOOL diISMRULoadParams(void) {
+    /* 3.0.87: 读失败**不清参数** —— SB 用 writeToFile:atomically 落盘(先写临时文件再改名),
+       正好撞上那一瞬间会读不到; 以前读不到就当"关掉", 引擎停 1 秒再起, 表现就是
+       "显示一阵一阵的"。现在只有第一次就从来没读到过才算失败。 */
+    static BOOL sLoaded = NO;
     NSString *dir = diMruSelfDir();
-    if (!dir.length) return NO;
+    if (!dir.length) return sLoaded;
     NSDictionary *d = [NSDictionary dictionaryWithContentsOfFile:
                        [dir stringByAppendingPathComponent:@"fx.plist"]];
     if (![d isKindOfClass:NSDictionary.class]) {
@@ -21852,9 +21907,9 @@ static BOOL diISMRULoadParams(void) {
             sMissT = CFAbsoluteTimeGetCurrent();
             diMruFileLog([NSString stringWithFormat:@"岛特效: fx.plist 读不到 (%@)", dir]);
         }
-        return NO;
+        return sLoaded;
     }
-    /* 3.0.86: 不做"过期"判断 —— SB 只在参数变化时重写 fx.plist, 文件一直在就是有效 */
+    sLoaded = YES;
     gDIISMOn   = [d[@"on"] boolValue];
     gDIISMBeat = [d[@"beat"] boolValue];
     gDIISMPart = [d[@"pOn"] boolValue];
@@ -21879,10 +21934,264 @@ static BOOL diISMRULoadParams(void) {
     return YES;
 }
 
+/* ---------- 颜色(跟随封面 / 自定义 / 流光, 与播放器同一个调色板) ---------- */
+static void diISMRURefreshColors(BOOL force) {
+    CFAbsoluteTime nt = CACurrentMediaTime();
+    if (!force && !gDIISMColDirty && nt - gDIISMColAt < 0.35) return;
+    gDIISMColAt = nt;
+    gDIISMColDirty = NO;
+    UIColor *defA = gDIISMDefA, *defB = gDIISMDefB;
+    if (gDIISMMode != 1) {
+        UIView *imgV = nil;
+        for (UIView *v in gDIISMGlass.subviews)
+            if ([v isKindOfClass:UIImageView.class] && ((UIImageView *)v).image) { imgV = v; break; }
+        UIColor *avg = imgV ? diCoverAverageColor(imgV) : nil;
+        if (avg) defA = avg;   /* 跟随封面: MRU 拿不到播放器目标 → 用岛上的专辑图求平均色 */
+    }
+    if (gDIISMFlow) gDIISMHue = fmod(gDIISMHue + 0.0024, 1.0);   /* ~100s 一圈 */
+    int cm = gDIISMFlow ? 2 : (gDIISMMode == 1 ? 1 : 0);
+    UIColor *ca = nil, *cb = nil;
+    diColorPalette(cm, nil, nil, defA, defB, gDIISMHue, YES, &ca, &cb);
+    gDIISMColA = ca; gDIISMColB = cb;
+}
+
+/* ---------- 粒子池 ---------- */
+static void diISMEnsureHost(void) {
+    UIView *art = gDIISMArt;
+    if (!art) return;
+    UIView *sv = art.superview;
+    if (!sv) return;
+    CGFloat R = MIN(art.bounds.size.width, art.bounds.size.height) * 0.5f;
+    CGFloat pad = R * 1.30f + 4.0f;
+    CGRect want = CGRectInset(art.frame, -pad, -pad);
+    if (gDIISMHost && gDIISMHost.superview == sv) {
+        if (!CGRectEqualToRect(gDIISMHost.frame, want)) gDIISMHost.frame = want;
+        return;
+    }
+    /* 宿主换了(岛重建/换层): 粒子**状态不清**, 只把已经建好的 layer 挪过去 ——
+       否则每重建一次就"呼"地全没, 那正是 493 说的"一阵一阵"。 */
+    [gDIISMHost removeFromSuperview];
+    UIView *h = [UIView new];
+    h.userInteractionEnabled = NO;
+    h.backgroundColor = UIColor.clearColor;
+    h.frame = want;
+    gDIISMHost = h;
+    [sv insertSubview:h belowSubview:art];
+    for (int i = 0; i < DI_IS_DOT_MAX; i++)
+        if (gDIISMDotLayer[i]) [h.layer addSublayer:gDIISMDotLayer[i]];
+}
+
+static void diISMSpawnDot(void) {
+    UIView *art = gDIISMArt;
+    if (!art) return;
+    int slot = -1;
+    for (int i = 0; i < DI_IS_DOT_MAX; i++)
+        if (gDIISMDots[i].life <= 0.0f) { slot = i; break; }
+    if (slot < 0) return;
+    CGFloat R = MIN(art.bounds.size.width, art.bounds.size.height) * 0.5f;
+    if (R < 4.0f) return;
+    /* 播放器的基准是 57pt 封面(R=28.5)。岛上 23pt 就按比例缩, 缩太狠看不见,
+       所以给 0.55 的下限。 */
+    float k = (float)(R / 28.5);
+    if (k < 0.55f) k = 0.55f;
+    if (k > 1.15f) k = 1.15f;
+
+    DIISMDot *d = &gDIISMDots[slot];
+    d->ang = diISMRand01() * 6.2831853f;
+    /* 出生点 1.02~1.12R: 贴着专辑边, 一出门就能看见(和播放器一致) */
+    d->rad = (float)R * (1.02f + diISMRand01() * 0.10f);
+    d->drift = (3.5f + diISMRand01() * 3.5f) * k;
+    d->push = 0.0f;
+    d->sway = 0.30f + diISMRand01() * 0.45f;
+    d->swayAmp = (0.6f + diISMRand01() * 1.4f) * k;
+    d->swayPhase = diISMRand01() * 6.2831853f;
+    int sh = (int)arc4random_uniform(10);
+    d->shape = (sh < 4) ? 0 : (sh < 6 ? 1 : (sh < 8 ? 2 : 3));
+    float base = (d->shape == 0) ? (2.4f + diISMRand01() * 1.8f)
+                                 : (4.2f + diISMRand01() * 2.6f);
+    d->size = base * k * (float)gDIISMDotS;
+    if (d->size < 1.0f) d->size = 1.0f;
+    d->rot = diISMRand01() * 6.2831853f;
+    d->rotSpd = (diISMRand01() - 0.5f) * 0.30f;
+    d->maxLife = 8.0f + diISMRand01() * 6.0f;      /* 8~14s, 和播放器一样慢 */
+    d->life = d->maxLife;
+    d->phase = diISMRand01() * 6.2831853f;
+    d->tint = diISMRand01();
+    d->beatGain = 0.65f + diISMRand01() * 0.70f;
+
+    CAShapeLayer *L = gDIISMDotLayer[slot];
+    if (!L) {
+        L = [CAShapeLayer layer];
+        L.opacity = 0.0f;
+        L.contentsScale = UIScreen.mainScreen.scale;
+        gDIISMDotLayer[slot] = L;
+        if (gDIISMHost) [gDIISMHost.layer addSublayer:L];
+    }
+    CGFloat sz = d->size;
+    L.bounds = CGRectMake(0, 0, sz, sz);
+    CGPathRef path = diISMShapePath(d->shape, sz);
+    L.path = path;
+    CGPathRelease(path);
+    UIColor *tint = diFxParticleColorBetween(gDIISMColA, gDIISMColB, d->tint);
+    if (d->shape == 0) {
+        L.fillColor = tint.CGColor;
+        L.strokeColor = UIColor.clearColor.CGColor;
+        L.lineWidth = 0.0f;
+    } else {
+        L.fillColor = UIColor.clearColor.CGColor;
+        L.strokeColor = tint.CGColor;
+        L.lineWidth = MAX(0.6f, 1.2f * k);
+    }
+    L.lineJoin = kCALineJoinRound;
+    gDIISMDotCount++;
+}
+
+static void diISMClearDots(void) {
+    for (int i = 0; i < DI_IS_DOT_MAX; i++) {
+        gDIISMDots[i].life = 0.0f;
+        if (gDIISMDotLayer[i]) gDIISMDotLayer[i].opacity = 0.0f;
+    }
+    gDIISMDotCount = 0;
+    gDIISSpawnAcc = 0.0f;
+    [gDIISMHost removeFromSuperview];
+    gDIISMHost = nil;
+}
+
+/* 与播放器 diFxUpdateDots 同一套运动/透明度曲线 */
+static void diISMUpdateDots(CGRect cover, float dt, BOOL active) {
+    UIView *host = gDIISMHost;
+    if (!host || gDIISMDotCount <= 0) return;
+    CGFloat cx = CGRectGetMidX(cover);
+    CGFloat cy = CGRectGetMidY(cover);
+    CGFloat Rc = cover.size.width * 0.5f;
+    CGFloat W = host.bounds.size.width, H = host.bounds.size.height;
+    if (Rc < 4.0f) return;
+    float stg = (float)gDIISMDotP;
+    [CATransaction begin];
+    [CATransaction setDisableActions:YES];
+    for (int i = 0; i < DI_IS_DOT_MAX; i++) {
+        DIISMDot *d = &gDIISMDots[i];
+        CAShapeLayer *L = gDIISMDotLayer[i];
+        if (!L) continue;
+        if (d->life <= 0.0f) { if (L.opacity != 0.0f) L.opacity = 0.0f; continue; }
+        d->life -= dt;
+        if (!active && d->life > 0.35f) d->life = 0.35f;
+        if (d->life <= 0.0f) {
+            d->life = 0.0f;
+            L.opacity = 0.0f;
+            if (gDIISMDotCount > 0) gDIISMDotCount--;
+            continue;
+        }
+        d->push *= expf(-dt / 0.32f);
+        d->rad += (d->drift + d->push) * dt;
+        float swayV = sinf(gDIISMClock * d->sway + d->swayPhase) * d->swayAmp;
+        d->ang += (swayV / MAX(8.0f, d->rad)) * dt;
+        d->rot += d->rotSpd * dt;
+
+        CGFloat ca = cosf(d->ang), sa = sinf(d->ang);
+        CGFloat edgePad = Rc * 0.25f;
+        CGFloat tx = (ca > 0.02f) ? (W + edgePad - 4.0f - cx) / ca
+                                  : ((ca < -0.02f) ? (-edgePad + 4.0f - cx) / ca : 1e9f);
+        CGFloat ty = (sa > 0.02f) ? (H + edgePad - 4.0f - cy) / sa
+                                  : ((sa < -0.02f) ? (-edgePad + 4.0f - cy) / sa : 1e9f);
+        CGFloat dirMax = MIN(tx, ty);
+        if (dirMax > Rc * 2.15f) dirMax = Rc * 2.15f;
+        if (dirMax < Rc * 1.15f) dirMax = Rc * 1.15f;
+        if (d->rad > dirMax) {
+            d->rad = dirMax;
+            d->drift = 0.0f;
+            if (d->life > 0.30f) d->life = 0.30f;
+        }
+
+        float age = d->maxLife - d->life;
+        float fadeIn = diFxSmoothStep(0.0f, 0.80f, age);
+        float fadeOut = diFxSmoothStep(0.0f, d->maxLife * 0.25f, d->life);
+        float edgeOut = 1.0f - diFxSmoothStep((float)dirMax * 0.90f, (float)dirMax, d->rad);
+        float tw = 0.86f + 0.14f * sinf(d->phase + gDIISMClock * 0.9f);
+        float kg = gDIISMKick * stg * d->beatGain;
+        float bright = 0.78f + 0.20f * kg;
+        float alpha = bright * fadeIn * fadeOut * edgeOut * tw * (float)gDIISMDotA;
+        if (alpha < 0.05f) alpha = 0.05f;
+        if (alpha > 0.96f) alpha = 0.96f;
+
+        float jx = 1.2f * sinf(d->phase * 3.1f + gDIISMClock * 5.3f);
+        float jy = 1.2f * cosf(d->phase * 2.3f + gDIISMClock * 4.7f);
+        L.position = CGPointMake(cx + ca * d->rad + jx, cy + sa * d->rad + jy);
+        L.opacity = alpha;
+        float pulse = (1.0f + 0.030f * sinf(d->phase * 1.7f + gDIISMClock * 0.7f))
+                      * (1.0f + 0.45f * kg);
+        CATransform3D tr = CATransform3DMakeRotation(d->rot, 0, 0, 1);
+        L.transform = CATransform3DScale(tr, pulse, pulse, 1.0f);
+    }
+    [CATransaction commit];
+}
+
+/* ---------- 律动: 抓玻璃做缩放 ---------- */
+static void diISMApplyScale(float kick, BOOL on) {
+    UIView *g = gDIISMGlass;
+    if (!g) { gDIISDrivingFx = NO; return; }
+    CGFloat s = on ? (1.0 + 0.20 * gDIISMAmp * kick) : 1.0;
+    if (s < 1.0) s = 1.0;
+    if (s > 1.22) s = 1.22;
+    if (fabs(s - gDIISMScaleNow) < 0.0004 && (s > 1.0005 || !gDIISDrivingFx)) return;
+    gDIISMScaleNow = (float)s;
+    gDIISDrivingFx = (s > 1.0005);
+    [CATransaction begin];
+    [CATransaction setDisableActions:YES];
+    g.layer.transform = (s > 1.0005) ? CATransform3DMakeScale(s, s, 1.0f) : CATransform3DIdentity;
+    [CATransaction commit];
+}
+
+/* ---------- 绑定 ---------- */
+static CGFloat diISMSide(UIView *v) {
+    if (!v) return 0.0;
+    return MIN(v.bounds.size.width, v.bounds.size.height);
+}
+
+static void diISMRUBind(UIView *art, UIView *glass) {
+    if (!art || !glass) return;
+    CGFloat side = diISMSide(art);
+    /* 只认小岛头像: 展开 66 / 播放器 57 / 全屏都一律不接 —— 493 要的就是"不要展开" */
+    if (side < 12.0 || side > 44.0) return;
+    if (gDIISMArt == art) { gDIISMGlass = glass; return; }
+    gDIISMArtCand = art;
+    gDIISMGlassCand = glass;
+    BOOL curOK = (gDIISMArt != nil && gDIISMArt.window != nil && !gDIISMArt.hidden);
+    if (!curOK) {
+        gDIISMArt = art;
+        gDIISMGlass = glass;
+    }
+}
+
+static void diISMRUAdoptCandidate(void) {
+    if (!gDIISMArtCand || !gDIISMArtCand.window || gDIISMArtCand.hidden) return;
+    if (diISMSide(gDIISMArtCand) < 12.0 || diISMSide(gDIISMArtCand) > 44.0) return;
+    gDIISMArt = gDIISMArtCand;
+    gDIISMGlass = gDIISMGlassCand;
+}
+
+static void diISMRUTeardown(void) {
+    diISMClearDots();
+    gDIISDrivingFx = NO;
+    gDIISMScaleNow = 1.0f;
+    UIView *g = gDIISMGlass;
+    if (g) {
+        [CATransaction begin];
+        [CATransaction setDisableActions:YES];
+        g.layer.transform = CATransform3DIdentity;
+        [CATransaction commit];
+    }
+    gDIISMArt = nil;
+    gDIISMGlass = nil;
+}
+
+static void diISMRUStop(void) {
+    if (gDIISMRL) { [gDIISMRL invalidate]; gDIISMRL = nil; }
+    diISMRUTeardown();
+}
+
 static void diISMRUApply(UIView *artwork, UIView *glass) {
-    if (!artwork || !glass) return;
-    gDIISMArt = artwork;
-    gDIISMGlass = glass;
+    diISMRUBind(artwork, glass);
 }
 
 static void diISMRUEnsure(void) {
@@ -21892,7 +22201,7 @@ static void diISMRUEnsure(void) {
     if (need && !gDIISMRL) {
         if (!gDIISMTicker) gDIISMTicker = [DIISMRUTicker new];
         gDIISMRL = [CADisplayLink displayLinkWithTarget:gDIISMTicker selector:@selector(onFrame:)];
-        gDIISMRL.preferredFramesPerSecond = 30;   /* 岛头像小, 30Hz 够顺 */
+        gDIISMRL.preferredFramesPerSecond = 60;
         [gDIISMRL addToRunLoop:NSRunLoop.mainRunLoop forMode:NSRunLoopCommonModes];
         diMruFileLog([NSString stringWithFormat:@"岛特效引擎启动 (律动=%d 粒子=%d 幅度=%.2f 数量=%.0f)",
                       (int)gDIISMBeat, (int)gDIISMPart, gDIISMAmp, gDIISMDotN]);
@@ -21912,175 +22221,80 @@ static void diISMRUFrame(float dtIn) {
         }
     }
 
-    UIView *g = gDIISMGlass;
+    /* 绑定维护: 当前这块下台了才换候选, 绝不"谁后注册听谁的" */
+    if (!gDIISMArt || !gDIISMArt.window || gDIISMArt.hidden || gDIISMArt.alpha < 0.02
+        || diISMSide(gDIISMArt) > 44.0) {
+        gDIISMArt = nil; gDIISMGlass = nil;
+        diISMRUAdoptCandidate();
+    }
     UIView *art = gDIISMArt;
-    if (!g || !g.window || !art || !art.window) { diISMRUTeardown(); return; }
+    UIView *glass = gDIISMGlass;
+    if (!art || !glass) { diISMClearDots(); gDIISDrivingFx = NO; return; }
 
     float dt = dtIn;
     if (dt < 0.002f) dt = 0.002f;
     if (dt > 0.05f) dt = 0.05f;
+    gDIISMClock += dt;
 
-    /* 频谱: 3.0.86 起服务端支持多客户端, MRU 自己也能收到 */
-    diAuPoll();
-    BOOL alive = diAuAlive();
-    diRhythmAdvanceSpectrum(alive, alive, dt);
-
-    /* ---- 律动: 抓遮罩缩放(与播放器同一条鼓点包络 gDIKick) ---- */
-    if (gDIISMBeat) {
-        CGFloat s = 1.0 + 0.20 * gDIISMAmp * (alive ? gDIKick : 0.0f);
-        if (s < 1.0) s = 1.0;
-        if (s > 1.22) s = 1.22;
-        [CATransaction begin];
-        [CATransaction setDisableActions:YES];
-        g.layer.transform = CATransform3DMakeScale(s, s, 1.0f);
-        [CATransaction commit];
+    /* 鼓点: 优先 SB 落的 beat.bin(与播放器同一个包络), 读不到再用自己的频谱 */
+    BOOL playing = NO;
+    float kick = 0.0f;
+    BOOL fromFile = diISMRUReadBeat();
+    if (fromFile) {
+        playing = (gDIISMBeatSnap.playing > 0.5f);
+        kick = gDIISMBeatSnap.kick;
     } else {
-        static BOOL wasBeat = NO;
-        if (wasBeat) {
-            wasBeat = NO;
-            [CATransaction begin];
-            [CATransaction setDisableActions:YES];
-            g.layer.transform = CATransform3DIdentity;
-            [CATransaction commit];
-        }
+        diAuPoll();
+        BOOL real = diAuAlive();
+        diRhythmAdvanceSpectrum(real, real, dt);
+        playing = real;
+        kick = real ? gDIKick : 0.0f;
     }
+    if (kick < 0.0f) kick = 0.0f;
+    if (kick > 1.0f) kick = 1.0f;
+    if (!playing) kick = 0.0f;
+    gDIISMKick = kick;
 
-    /* ---- 粒子 ---- */
-    if (!gDIISMPart) {
-        static BOOL wasPart = NO;
-        if (wasPart) { wasPart = NO; diISMRUTeardown(); }
-        return;
-    }
+    /* 律动 */
+    if (gDIISMBeat) diISMApplyScale(kick, playing);
+    else if (gDIISMScaleNow > 1.0005f) diISMApplyScale(0.0f, NO);
 
-    UIView *sv = art.superview;
-    if (!sv) { diISMRUTeardown(); return; }
-    if (!gDIISMDotHost || gDIISMDotHost.superview != sv) {
-        [gDIISMDotHost removeFromSuperview];
-        gDIISMDotHost = nil;
-        gDIISMDotLayerA = nil; gDIISMDotLayerB = nil;
-        UIView *h = [UIView new];
-        h.userInteractionEnabled = NO;
-        h.backgroundColor = UIColor.clearColor;
-        CGRect f = art.frame;
-        CGFloat pad = MAX(f.size.width, f.size.height) * 0.6f + 6.0f;
-        h.frame = CGRectInset(f, -pad, -pad);
-        [sv insertSubview:h belowSubview:art];   /* 头像背后 */
-        gDIISMDotHost = h;
-        for (int k = 0; k < 2; k++) {
-            CAShapeLayer *L = [CAShapeLayer layer];
-            L.name = k ? @"DriftIslandFxDotsB" : @"DriftIslandFxDotsA";
-            L.strokeColor = UIColor.clearColor.CGColor;
-            L.opacity = (float)gDIISMDotA;
-            [h.layer addSublayer:L];
-            if (k == 0) gDIISMDotLayerA = L; else gDIISMDotLayerB = L;
-        }
-        diISMRUResetDots();
-    }
-    {
-        UIView *h = gDIISMDotHost;
-        CGRect f = art.frame;
-        CGFloat pad = MAX(f.size.width, f.size.height) * 0.6f + 6.0f;
-        CGRect want = CGRectInset(f, -pad, -pad);
-        if (!CGRectEqualToRect(h.frame, want)) h.frame = want;
-        if ([sv.subviews indexOfObject:h] > [sv.subviews indexOfObject:art])
-            [sv insertSubview:h belowSubview:art];
-        if (!CGRectEqualToRect(gDIISMDotLayerA.frame, h.bounds)) gDIISMDotLayerA.frame = h.bounds;
-        if (!CGRectEqualToRect(gDIISMDotLayerB.frame, h.bounds)) gDIISMDotLayerB.frame = h.bounds;
-    }
-
-    /* 颜色: 0=跟随封面(MRU 没有播放器目标 → 用玻璃里的专辑图求平均色) / 1=自定义;
-       流光在自定义色上缓慢转色相(与播放器 diColorPalette 的 mode 2 同一套逻辑) */
-    {
-        CFAbsoluteTime nt = CACurrentMediaTime();
-        if (gDIISMColDirty || nt - gDIISMColAt > 0.4) {
-            gDIISMColAt = nt;
-            gDIISMColDirty = NO;
-            UIColor *defA = gDIISMDefA, *defB = gDIISMDefB;
-            if (gDIISMMode != 1) {
-                UIView *imgV = nil;
-                for (UIView *v in g.subviews) {
-                    if ([v isKindOfClass:UIImageView.class] && ((UIImageView *)v).image) { imgV = v; break; }
-                }
-                UIColor *avg = imgV ? diCoverAverageColor(imgV) : nil;
-                if (avg) defA = avg;
+    /* 暂停/停止: 粒子立刻清空, 不留悬在半空的 */
+    if (!playing) {
+        if (gDIISMDotCount > 0 || gDIISMHost) diISMClearDots();
+    } else if (gDIISMPart) {
+        diISMEnsureHost();
+        diISMRURefreshColors(NO);
+        int want = (int)gDIISMDotN;
+        if (want > DI_IS_DOT_MAX) want = DI_IS_DOT_MAX;
+        if (gDIISMDotCount < want) {
+            gDIISSpawnAcc += (float)(want - gDIISMDotCount) * 0.55f * dt;
+            int guard = 0;
+            while (gDIISSpawnAcc >= 1.0f && gDIISMDotCount < want && guard++ < 6) {
+                gDIISSpawnAcc -= 1.0f;
+                diISMSpawnDot();
             }
-            if (gDIISMFlow) gDIISMHue = fmod(gDIISMHue + 0.0024, 1.0);   /* ~100s 一圈 */
-            int cm = gDIISMFlow ? 2 : (gDIISMMode == 1 ? 1 : 0);
-            UIColor *ca = nil, *cb = nil;
-            diColorPalette(cm, nil, nil, defA, defB, gDIISMHue, YES, &ca, &cb);
-            [CATransaction begin];
-            [CATransaction setDisableActions:YES];
-            gDIISMDotLayerA.fillColor = (ca ?: UIColor.whiteColor).CGColor;
-            gDIISMDotLayerB.fillColor = (cb ?: UIColor.whiteColor).CGColor;
-            gDIISMDotLayerA.opacity = (float)gDIISMDotA;
-            gDIISMDotLayerB.opacity = (float)gDIISMDotA;
-            [CATransaction commit];
         }
+        CGFloat R = MIN(art.bounds.size.width, art.bounds.size.height) * 0.5f;
+        CGFloat pad = R * 1.30f + 4.0f;
+        diISMUpdateDots(CGRectMake(pad, pad, art.bounds.size.width, art.bounds.size.height), dt, YES);
+    } else if (gDIISMDotCount > 0 || gDIISMHost) {
+        diISMClearDots();
     }
 
-    CGPoint c = CGPointMake(gDIISMDotHost.bounds.size.width * 0.5f,
-                            gDIISMDotHost.bounds.size.height * 0.5f);
-    CGFloat R0 = MIN(art.bounds.size.width, art.bounds.size.height) * 0.5f;
-    if (R0 < 5.0) { gDIISMDotLayerA.opacity = 0.0f; gDIISMDotLayerB.opacity = 0.0f; return; }
-
-    float energy = alive ? (0.20f + 0.70f * gDIBeatEnv + 0.95f * gDIBassPulse) : 0.0f;
-    if (energy > 0.02f && gDIISMDotN >= 1.0) {
-        gDIISMSpawn += dt * (9.0f + 26.0f * energy) * (float)(gDIISMDotN / 25.0);
-        int guard = 0;
-        int maxN = (int)gDIISMDotN;
-        if (maxN > DI_ISM_DOT_MAX) maxN = DI_ISM_DOT_MAX;
-        while (gDIISMSpawn >= 1.0f && guard++ < 6) {
-            gDIISMSpawn -= 1.0f;
-            int slot = -1;
-            for (int i = 0; i < maxN; i++)
-                if (gDIISMDots[i].life <= 0.0f) { slot = i; break; }
-            if (slot < 0) break;
-            DIISMDot *d = &gDIISMDots[slot];
-            d->ang = (float)arc4random_uniform(6283) / 1000.0f;
-            d->rad = (float)R0 + 0.5f;
-            d->spd = (3.0f + 7.5f * energy) * (float)gDIISMDotP
-                   + (float)arc4random_uniform(400) / 100.0f;
-            d->size = (0.65f + 0.85f * (float)arc4random_uniform(1000) / 1000.0f) * (float)gDIISMDotS;
-            d->maxLife = 0.55f + 0.50f * (float)arc4random_uniform(1000) / 1000.0f;
-            d->life = d->maxLife;
-            d->spin = ((float)arc4random_uniform(1000) / 1000.0f - 0.5f) * 2.2f;
-        }
+    if (nowC - gDIISMProbeAt > 3.0) {
+        gDIISMProbeAt = nowC;
+        diMruFileLog([NSString stringWithFormat:
+            @"岛特效探针 头像=%.0fx%.0f 文件=%d 播放=%d 鼓=%.2f 缩放=%.3f 粒子=%d",
+            art.bounds.size.width, art.bounds.size.height, (int)fromFile,
+            (int)playing, kick, gDIISMScaleNow, gDIISMDotCount]);
     }
-
-    CGMutablePathRef pa = CGPathCreateMutable();
-    CGMutablePathRef pb = CGPathCreateMutable();
-    for (int i = 0; i < DI_ISM_DOT_MAX; i++) {
-        DIISMDot *d = &gDIISMDots[i];
-        if (d->life <= 0.0f) continue;
-        d->life -= dt;
-        if (d->life <= 0.0f) continue;
-        d->rad += d->spd * dt;
-        d->ang += d->spin * dt;
-        float tt = d->life / d->maxLife;
-        float r = d->size * (0.25f + 0.75f * sqrtf(tt));
-        if (r < 0.20f) continue;
-        CGFloat x = c.x + cosf(d->ang) * d->rad;
-        CGFloat y = c.y + sinf(d->ang) * d->rad;
-        CGRect rect = CGRectMake(x - r, y - r, r * 2.0f, r * 2.0f);
-        /* 刚出生的用起始色, 快消失的用结束色 */
-        if (tt > 0.55f) CGPathAddEllipseInRect(pa, NULL, rect);
-        else CGPathAddEllipseInRect(pb, NULL, rect);
-    }
-    [CATransaction begin];
-    [CATransaction setDisableActions:YES];
-    gDIISMDotLayerA.path = pa;
-    gDIISMDotLayerB.path = pb;
-    gDIISMDotLayerA.opacity = (float)gDIISMDotA;
-    gDIISMDotLayerB.opacity = (float)gDIISMDotA;
-    [CATransaction commit];
-    CGPathRelease(pa);
-    CGPathRelease(pb);
 }
 
 @implementation DIISMRUTicker
 - (void)onFrame:(CADisplayLink *)l {
     double dt = l.targetTimestamp - l.timestamp;
-    if (dt <= 0.0 || dt > 0.12) dt = 1.0 / 30.0;
+    if (dt <= 0.0 || dt > 0.12) dt = 1.0 / 60.0;
     @try { diISMRUFrame((float)dt); } @catch (__unused NSException *e) {}
 }
 @end

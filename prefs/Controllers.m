@@ -5383,7 +5383,7 @@ static void diOpenHomeBarPickWindow(void) {
                               footer:@"作用于岛上那颗专辑头像，与「播放器 → 律动特效」互不影响。默认关闭。"]];
     [specs addObject:[self switchSpec:@"启用律动特效" key:@"IslandFxOn" def:@NO]];
     [specs addObject:[self switchSpec:@"专辑跟随律动" key:@"IslandBeatOn" def:@NO]];
-    [specs addObject:[self numSliderD:@"专辑律动幅度" key:@"IslandBeatScale" def:0.60 mn:0.00 mx:2.00]];
+    [specs addObject:[self numSliderD:@"专辑律动幅度" key:@"IslandBeatScale" def:0.70 mn:0.00 mx:2.00]];
 
     [specs addObject:[self groupSpec:@"律动粒子" footer:nil]];
     [specs addObject:[self switchSpec:@"启用律动粒子" key:@"IslandParticlesOn" def:@NO]];
