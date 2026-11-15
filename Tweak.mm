@@ -71,6 +71,7 @@ static BOOL diProgressRingOn = NO;
 static double diProgressRingWidth = 3.0;
 static NSString *diProgressRingColor = nil;
 static BOOL rhythmRingOn = YES;                // 律动环(锥形渐变圆环 + 外圈刻度)
+static BOOL diParticleExtraBeat=NO;
 static BOOL rhythmParticlesOn = YES;           // 封面外圈粒子
 static BOOL rhythmRoundCover = YES;            // 3.0.47: 封面裁成正圆
 static BOOL rhythmBarsOn = YES;                // 3.0.48: 频谱条(进度条上方)
@@ -1030,6 +1031,7 @@ static void diFxLoadPrefs(void) {
     rhythmOn = fxBool(@"AlbumRhythmOn", YES);
     rhythmRingOn = NO; /* retired at user request */
     rhythmParticlesOn = fxBool(@"AlbumParticlesOn", YES);
+    diParticleExtraBeat=fxBool(@"AlbumParticleExtraBeat", NO);
     rhythmStrength = fxDouble(@"AlbumRhythmStrength", 0.90);
     if (rhythmStrength > 3.0) rhythmStrength /= 100.0;   /* 兼容 3.0.43 的百分数 */
     if (rhythmStrength < 0.10) rhythmStrength = 0.10;
@@ -19771,7 +19773,7 @@ static void diRhythmWriteAll(CGFloat s, CGFloat dy, BOOL spin, double ang, BOOL 
     for (int i = 0; i < 1 + gDIRhythmExtraN; i++) {
         UIView *v = (i == 0) ? dv : gDIRhythmExtras[i - 1];
         if (!v) continue;
-        if (i == 0 && gDIRhythmSkipDv) continue;    /* 3.0.62: 由祖先代劳, 避免缩两次 */
+        if (i > 0 && !restored) continue;    /* 3.0.62: 由祖先代劳, 避免缩两次 */
         if (restored) { diRhythmWriteTransform(v, diRhythmBaseOf(v)); continue; }
         CATransform3D tr = diRhythmBaseOf(v);
         if (spin) tr = CATransform3DConcat(tr, CATransform3DMakeRotation((CGFloat)ang, 0, 0, 1));
@@ -20124,7 +20126,7 @@ static void diFxUpdateDots(UIView *host, CGRect cover, float dt,
     if (limit > DI_DOT_CAP) limit = DI_DOT_CAP;
     /* 3.0.95: existing particles follow the measured kick, not just spawn rate.
        Strength affects the transient only; zero preserves natural drift/opacity. */
-    float beat = active ? diSharedVisualPulse : 0.0f;
+    float beat = active && diParticleExtraBeat ? diSharedVisualPulse : 0.0f;
     float strength = fminf(2.0f, fmaxf(0.0f, (float)rhythmParticleStrength));
     float beatTarget = beat * strength;
     float alphaMul = (float)rhythmParticleAlpha;
@@ -21634,7 +21636,7 @@ static void diFxHardStop(void) {
    岛专辑特效在 MediaRemoteUI 进程里跑, 它自己连频谱端当然也能算, 但那样就是"另一份
    包络、另一个鼓点", 和播放器不可能严丝合缝。这里把**已经在算的**这一份(gDIKick/
    gDIBeatEnv/gDIBassPulse)30Hz 落成 24 字节, MRU 直接读 —— 岛上和播放器永远是同一拍。 */
-typedef struct { double t; float kick, env, bass, playing, energy; } DIBeatSnapOut;
+typedef struct { double t; float kick, env, bass, playing, energy, extra; } DIBeatSnapOut;
 static void diISPublishBeat(BOOL playing) {
     static int fd = -2;
     static CFAbsoluteTime lastTry = 0, lastW = 0;
@@ -21660,6 +21662,7 @@ static void diISPublishBeat(BOOL playing) {
     sn.bass = playing ? gDIBassPulse : 0.0f;
     sn.playing = playing ? 1.0f : 0.0f;
     sn.energy = playing ? gDIFxEnergy : 0.0f;
+    sn.extra=diParticleExtraBeat?1:0;
     pwrite(fd, &sn, sizeof sn, 0);
 }
 
@@ -21875,11 +21878,11 @@ static void diRhythmTickWithDelta(float dtIn) {
        鼓点: E 的相对基线瞬态(baseline/excess) → pulse → 1+min(0.22, pulse·0.095·强度)。
        岛(MRU)那条链路仍然读 gDIKick/beat.bin, 一行没动。 */
     diFxAdvanceEnergy(active, real, dt);
-    float pulseTarget=active?fminf(1,fmaxf(0,gDIKick)):0;
-    float pulseTau=pulseTarget>diSharedVisualPulse?0.018f:0.090f;
-    diSharedVisualPulse+=(pulseTarget-diSharedVisualPulse)*(1-expf(-dt/pulseTau));
+    // Reference detector uses spectrum energy, not the legacy PCM kick detector.
+    float referenceScale=diFxAdvanceBeat(active, gDIFxEnergy, 1.0, dt);
+    diSharedVisualPulse=fminf(1,fmaxf(0,(referenceScale-1)/0.095f));
     diISPublishBeat(active);
-    float fxBeatS=1+fminf(0.22f,0.20f*(float)rhythmBeatScale*diSharedVisualPulse);
+    float fxBeatS=1+fminf(0.22f,(float)rhythmBeatScale*0.095f*diSharedVisualPulse);
 
     if (!gDIFxRealLogged && active && real && gDIBandSeen) {
         gDIFxRealLogged = YES;
@@ -22141,7 +22144,7 @@ static float diISMRand01(void) {
 }
 
 /* ---------- 鼓点快照: SB 写 beat.bin, 这里读 ---------- */
-typedef struct { double t; float kick, env, bass, playing, energy; } DIBeatSnap;
+typedef struct { double t; float kick, env, bass, playing, energy, extra; } DIBeatSnap;
 static int gDIISMBeatFd = -2;
 static CFAbsoluteTime gDIISMBeatTryAt = 0;
 static DIBeatSnap gDIISMBeatSnap;
@@ -22418,7 +22421,7 @@ static void diISMUpdateDots(CGRect cover, float dt, BOOL active) {
         d->rad+=d->drift*dt;
         d->rot+=d->rotSpd*dt;
         float progress=fminf(1,fmaxf(0,1-d->life/MAX(d->maxLife,0.16f)));
-        float pulseGain=active?gDIISMKick*fminf(2,fmaxf(0,stg)):0;
+        float pulseGain=active && diParticleExtraBeat?gDIISMKick*fminf(2,fmaxf(0,stg)):0;
         d->beatGain=pulseGain;
         float fade=fminf(progress/0.001f,1)*fminf(d->life/0.72f,1);
         L.opacity=fminf(1,fmaxf(0,(float)gDIISMDotA*fade*(1+0.22f*pulseGain)));
@@ -22442,7 +22445,7 @@ static void diISMApplyScale(float kick, BOOL on) {
        布局、frame、形态判定一行都不用改。 */
     UIView *v = gDIISMArt;
     if (!v) { gDIISMScaleNow = 1.0f; return; }
-    CGFloat s=on ? 1+fminf(0.22f,0.20f*(float)gDIISMAmp*kick) : 1;
+    CGFloat s=on ? 1+fminf(0.22f,0.095f*(float)gDIISMAmp*kick) : 1;
     if (s <= 1.0015) {
         gDIISMScaleNow = 1.0f;
         if ([v.layer animationForKey:@"di.isl.beat"]) {
@@ -22626,6 +22629,7 @@ static void diISMRUFrame(float dtIn) {
         playing = (gDIISMBeatSnap.playing > 0.5f);
         kick = gDIISMBeatSnap.kick;
         diIslandEnergy=gDIISMBeatSnap.energy;
+        diParticleExtraBeat=gDIISMBeatSnap.extra>0.5f;
     } else if (gDIISMBeatEver) {
         /* 3.0.88: beat.bin 读到过 = SpringBoard 那份引擎在管播放态; 现在读不到/过期
            = 它自己停了(暂停、切走、挂了)。**不能**退回"自己连 41235"那条:

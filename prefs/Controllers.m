@@ -6741,6 +6741,7 @@ static NSString *diBarStyleLabel(int s) {
 
     [specs addObject:[self groupSpec:@"律动粒子" footer:nil]];
     [specs addObject:[self switchSpec:@"启用律动粒子" key:diFxSizedKey(@"AlbumParticlesOn") def:@YES]];
+    [specs addObject:[self switchSpec:@"额外粒子鼓点弹跳（非原版）" key:diFxSizedKey(@"AlbumParticleExtraBeat") def:@NO]];
     [specs addObject:[self npSlider:@"粒子数量" key:diFxSizedKey(@"AlbumParticleCount2") def:25 mn:0 mx:40]];
     [specs addObject:[self npSlider:@"粒子透明" key:diFxSizedKey(@"RhythmParticleAlpha") def:0.74 mn:0.10 mx:1.50]];
     /* 3.0.61: 粒子大小/强度都走 0.1 步进, 由 numStepForKey: 决定, 这里不再挂 diStep
