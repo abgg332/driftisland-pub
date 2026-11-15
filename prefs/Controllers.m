@@ -5377,7 +5377,7 @@ static void diOpenHomeBarPickWindow(void) {
     [specs addObject:[self switchSpec:@"反向旋转" key:@"maskRotateReverse" def:@NO]];
     [specs addObject:[self numSlider:@"旋转速度" key:@"maskRotateSpeed" def:45 mn:0 mx:360]];
     /* ===== 3.0.86: 岛专辑特效 —— 与「播放器 → 律动特效」一一对应的全套设置项 =====
-       键全部用 Island* 前缀, 与播放器那套(Album*/Particle*)互不影响。
+       键全部用 Island 前缀, 与播放器那套(Album/Particle)互不影响。
        参数由 SpringBoard 1Hz 落盘 fx.plist 交给 MediaRemoteUI(它读不到偏好)。 */
     [specs addObject:[self groupSpec:@"专辑律动"
                               footer:@"作用于岛上那颗专辑头像，与「播放器 → 律动特效」互不影响。默认关闭。"]];
