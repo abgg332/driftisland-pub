@@ -14664,6 +14664,22 @@ static BOOL diMruPrefOn(void) {
         diMruFileLog([NSString stringWithFormat:@"CFPreferences 不可读, 改读 plist 文件: enabled=%d maskOn=%d", fe, fm]);
         return fe && fm;
     }
+    /* ===== 3.0.90: 第四条通道 —— SpringBoard 导出的 params.plist(active) =====
+       496 日志: 用户在设置里关掉「启用遮罩」, SpringBoard 侧「遮罩导出 开关=0」
+       写得很清楚, 但 MRU 里 reload 依旧是 开关=1 —— 因为 MRU 读不到偏好域,
+       前三条通道全空, 于是走到最后"按开启处理", 永远当遮罩开着。
+       params.plist 就在 MRU 自己的容器里(旋转参数、pmOn 都从这里读, 一直可读),
+       SB 每次导出都会把 active 写进去, 这里优先用它。 */
+    {
+        NSString *p = [diMruSelfDir() stringByAppendingPathComponent:@"params.plist"];
+        NSDictionary *d = [NSDictionary dictionaryWithContentsOfFile:p];
+        id av = d[@"active"];
+        if (av) {
+            BOOL a = [av respondsToSelector:@selector(boolValue)] ? [av boolValue] : NO;
+            diMruFileLog([NSString stringWithFormat:@"偏好域不可读, 走 params.plist active=%d", a]);
+            return a;
+        }
+    }
     CFStringRef dom2 = CFSTR("com.abgg332.driftisland.mrumask");
     CFPreferencesAppSynchronize(dom2);
     id v = CFBridgingRelease(CFPreferencesCopyAppValue(CFSTR("diMruActive"), dom2));
@@ -21988,21 +22004,45 @@ static void diISMRURefreshColors(BOOL force) {
 }
 
 /* ---------- 粒子池 ---------- */
+/* 3.0.90: 粒子宿主的落点。
+   496 反馈"没有粒子了" —— 3.0.89 把宿主挂到了 art.window 上, 而 MRU 的窗口是
+   SBUISystemApertureSecureWindow(安全窗), 岛是把它里面的内容经门户层投到
+   SpringBoard 上显示; 直接挂在窗口上的视图不在被投递的那棵子树里, 于是
+   "粒子数一直 16~20、屏幕上什么都没有"。
+   现在退回头像所在的子树, 只挑一个**不裁剪**的祖先(通常就是 MRUActivityAccessoryView):
+   宿主自己的框比它大很多, 粒子就能画到岛外去; 裁剪由祖先决定, 挑不裁剪的那个容器
+   等于把"裁在胶囊里"这条也去掉了。 */
+static BOOL diISMClips(UIView *v) {
+    return v ? (v.layer.masksToBounds || v.clipsToBounds) : NO;
+}
+static UIView *diISMHostParent(UIView *art) {
+    UIView *v = art.superview;
+    UIView *best = nil;
+    for (int i = 0; v && i < 8; i++) {
+        if (diISMClips(v)) {
+            /* 这个容器会剪: 挂到它的父视图(与它同级), 就不受它这一刀 */
+            UIView *up = v.superview;
+            if (up) return up;
+            break;
+        }
+        best = v;
+        v = v.superview;
+    }
+    return best ?: art.superview;
+}
+
 static void diISMEnsureHost(void) {
     UIView *art = gDIISMArt;
-    UIView *win = art.window;
-    if (!art || !win) return;
-    /* ===== 3.0.89: 粒子宿主搬到**窗口层** =====
-       以前挂在 art.superview(岛容器)上, 岛是胶囊裁剪的, 粒子一出生就被裁在岛里,
-       而且那块自绘玻璃(遮罩)就在 art 上面 —— 玻璃每次布局重建, 粒子层就被压下去
-       一次, 看着就是"一闪一闪"。关掉遮罩后玻璃不存在, 所以粒子"正常"了。
-       现在宿主是窗口上的一个透明层, 以专辑为中心铺一块 260x150 左右的区域:
-       粒子能飘出岛外, 也不受玻璃/系统专辑的任何遮挡。 */
-    CGRect inWin = [art convertRect:art.bounds toView:win];
-    CGFloat padX = 66.0, padY = 46.0;
-    CGRect want = CGRectInset(inWin, -padX, -padY);
-    if (gDIISMHost && gDIISMHost.superview == win) {
+    if (!art) return;
+    UIView *parent = diISMHostParent(art);
+    if (!parent) return;
+    CGRect box = art.frame;
+    CGFloat padX = 92.0, padY = 64.0;
+    CGRect want = CGRectInset(box, -padX, -padY);
+    if (gDIISMHost && gDIISMHost.superview == parent) {
         if (!CGRectEqualToRect(gDIISMHost.frame, want)) gDIISMHost.frame = want;
+        /* 玻璃/系统层随时可能挤到前面: 每帧把粒子层顶回去(只是改 zPosition, 不动布局) */
+        if (gDIISMHost.layer.zPosition < 900.0) gDIISMHost.layer.zPosition = 900.0;
         return;
     }
     /* 宿主换了(岛重建/换层): 粒子**状态不清**, 只把已经建好的 layer 挪过去 ——
@@ -22011,11 +22051,19 @@ static void diISMEnsureHost(void) {
     UIView *h = [UIView new];
     h.userInteractionEnabled = NO;
     h.backgroundColor = UIColor.clearColor;
+    h.clipsToBounds = NO;
     h.frame = want;
+    h.layer.zPosition = 900.0;
     gDIISMHost = h;
-    [win addSubview:h];
+    [parent addSubview:h];
+    [parent bringSubviewToFront:h];
     for (int i = 0; i < DI_IS_DOT_MAX; i++)
         if (gDIISMDotLayer[i]) [h.layer addSublayer:gDIISMDotLayer[i]];
+    diMruFileLog([NSString stringWithFormat:@"岛特效 粒子宿主=%@ %.0fx%.0f 父=%@ %.0fx%.0f 裁剪=%d 头像=%.0fx%.0f",
+                  NSStringFromClass(h.class), want.size.width, want.size.height,
+                  NSStringFromClass(parent.class), parent.bounds.size.width, parent.bounds.size.height,
+                  (int)diISMClips(parent),
+                  art.bounds.size.width, art.bounds.size.height]);
 }
 
 static void diISMSpawnDot(void) {
@@ -22132,7 +22180,9 @@ static void diISMUpdateDots(CGRect cover, float dt, BOOL active) {
         CGFloat ty = (sa > 0.02f) ? (H + edgePad - 4.0f - cy) / sa
                                   : ((sa < -0.02f) ? (-edgePad + 4.0f - cy) / sa : 1e9f);
         CGFloat dirMax = MIN(tx, ty);
-        if (dirMax > Rc * 2.15f) dirMax = Rc * 2.15f;
+        /* 3.0.90: 2.15R → 4.60R —— 用户要求粒子能飘到岛外面去。
+           23pt 头像 R=11.5, 4.6R≈53pt, 已经越过小岛胶囊(高 52)的边界。 */
+        if (dirMax > Rc * 4.60f) dirMax = Rc * 4.60f;
         if (dirMax < Rc * 1.15f) dirMax = Rc * 1.15f;
         if (d->rad > dirMax) {
             d->rad = dirMax;
