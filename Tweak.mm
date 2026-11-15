@@ -12946,6 +12946,9 @@ static void diISPublishFxParams(void) {
     lastCore = core;
     NSMutableDictionary *d = [core mutableCopy];
     d[@"t"] = @(now);
+    /* 目录可能还没建(MRU 容器里的 Caches 子目录) —— 不建目录 writeToFile 会静默失败 */
+    [[NSFileManager defaultManager] createDirectoryAtPath:dir withIntermediateDirectories:YES
+                                                 attributes:@{NSFilePosixPermissions: @0777} error:NULL];
     @try { [d writeToFile:[dir stringByAppendingPathComponent:@"fx.plist"] atomically:YES]; }
     @catch (__unused NSException *e) {}
 }
@@ -21843,7 +21846,14 @@ static BOOL diISMRULoadParams(void) {
     if (!dir.length) return NO;
     NSDictionary *d = [NSDictionary dictionaryWithContentsOfFile:
                        [dir stringByAppendingPathComponent:@"fx.plist"]];
-    if (![d isKindOfClass:NSDictionary.class]) return NO;
+    if (![d isKindOfClass:NSDictionary.class]) {
+        static CFAbsoluteTime sMissT;
+        if (CFAbsoluteTimeGetCurrent() - sMissT > 10.0) {
+            sMissT = CFAbsoluteTimeGetCurrent();
+            diMruFileLog([NSString stringWithFormat:@"岛特效: fx.plist 读不到 (%@)", dir]);
+        }
+        return NO;
+    }
     /* 3.0.86: 不做"过期"判断 —— SB 只在参数变化时重写 fx.plist, 文件一直在就是有效 */
     gDIISMOn   = [d[@"on"] boolValue];
     gDIISMBeat = [d[@"beat"] boolValue];
