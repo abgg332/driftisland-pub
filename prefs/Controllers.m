@@ -424,11 +424,12 @@ static double diStepForKeyOverride(NSString *key) {
     if ([key isEqualToString:@"AlbumParticleStrength"]) return 0.1;
     if ([key isEqualToString:@"AlbumBeatScale"]) return 0.05;
     if ([key isEqualToString:@"RhythmParticleAlpha"]) return 0.05;
-    /* 3.0.89: 岛特效 —— 和播放器那几行同一套步进, 不再被系统量化成 0.5 一档 */
+    /* 3.0.89: 岛特效 —— 和播放器那几行同一套步进, 不再被系统量化成 0.5 一档
+       3.0.90: 幅度/透明也统一成 0.1(用户: "每次增加减少 0.1, 跟播放器的粒子一样") */
     if ([key isEqualToString:@"IslandDotSize"]) return 0.1;
     if ([key isEqualToString:@"IslandDotStrength"]) return 0.1;
-    if ([key isEqualToString:@"IslandBeatScale"]) return 0.05;
-    if ([key isEqualToString:@"IslandDotAlpha"]) return 0.05;
+    if ([key isEqualToString:@"IslandBeatScale"]) return 0.1;
+    if ([key isEqualToString:@"IslandDotAlpha"]) return 0.1;
     return 0.0;
 }
 
@@ -4684,6 +4685,13 @@ static void diOpenHomeBarPickWindow(void) {
     if ([key isEqualToString:@"AlbumParticleStrength"]) return 0.1;
     if ([key isEqualToString:@"RhythmParticleAlpha"]) return 0.1;
     if ([key isEqualToString:@"AlbumBeatScale"]) return 0.1;
+    /* 3.0.91: 岛特效页(专辑律动 / 律动粒子)也是 DIMiniBaseController 画的,
+       ± 走的就是本方法 —— 之前没列这几个键, 于是回落 0.5: "1 一按就 1.5"。
+       这里补上, 和播放器那几行完全一样(0.1 一档)。 */
+    if ([key isEqualToString:@"IslandDotSize"]) return 0.1;
+    if ([key isEqualToString:@"IslandDotStrength"]) return 0.1;
+    if ([key isEqualToString:@"IslandDotAlpha"]) return 0.1;
+    if ([key isEqualToString:@"IslandBeatScale"]) return 0.1;
     /* 计数类给 1，避免出现 30.5 根频谱条 */
     if ([key containsString:@"Count"] || [key isEqualToString:@"AlbumBarsCount"]) return 1.0;
     return 0.5;
@@ -4754,6 +4762,22 @@ static void diOpenHomeBarPickWindow(void) {
 - (void)setPreferenceValue:(id)value specifier:(PSSpecifier *)spec {
     NSString *key = [spec propertyForKey:@"key"];
     if (!key.length) return;
+    /* 3.0.90: 落盘前按步进吸附。
+       以前只在自绘滑杆里吸附, 只要那次拖动走了系统的滑杆路径(或旧值本来就是
+       0.5 的整数倍), 存进去的就是 1 / 1.5 —— 用户看到的就是"1 一下跳到 1.5"。
+       这里统一按 diStepForKeyOverride 收口: 0.1 的键永远不会存出 1.45 这种值。 */
+    {
+        double stp = diStepForKeyOverride(key);
+        if (stp > 0.0 && [value respondsToSelector:@selector(doubleValue)]) {
+            double v = [value doubleValue];
+            double mn = [[spec propertyForKey:@"min"] doubleValue];
+            double mx = [[spec propertyForKey:@"max"] doubleValue];
+            if ([spec propertyForKey:@"min"] && v < mn) v = mn;
+            if ([spec propertyForKey:@"max"] && v > mx) v = mx;
+            v = round(v / stp) * stp;
+            value = @(round(v * 1000.0) / 1000.0);
+        }
+    }
     CFPreferencesSetAppValue((__bridge CFStringRef)key, (__bridge CFPropertyListRef)value, (__bridge CFStringRef)kDomain);
     /* 2.8.93: 拖滑杆时这里每秒被调几十次 —— 以前每次都 synchronize + 直发通知,
        写盘互锁 + SpringBoard 全量刷新叠在一起, 拖快就崩。SetAppValue 本身已经
