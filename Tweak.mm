@@ -19776,11 +19776,13 @@ static void diFxSpawnDot(UIView *host, CGRect cover, float maxRad) {
        刚好让它在边缘露出一半, 出门就能看到。 */
     d->rad = (float)R * (1.02f + diFxRand01() * 0.10f);   /* 3.0.60: 再往外一档(用户: 起点还是有点里面/被遮挡) */
     d->spin = (diFxRand01() - 0.5f) * 0.05f;
-    /* 外飘 2.5~6px/s: 视频里几乎看不出"在飞", 只是缓缓地、一点点往外挪 */
-    d->drift = 3.5f + diFxRand01() * 3.5f;
+    /* 3.0.76: 外飘放慢 —— 487 用户: "粒子的外推看起来速度好快, 把粒子速度放慢"。
+       以前 3.5~7px/s, 现在 1.6~3.4px/s(原来的一半左右); 摆动也收一档。
+       粒子现在**完全不接收鼓点冲量**, 速度只剩这一条恒定漂移, 永远匀速缓缓外移。 */
+    d->drift = 1.6f + diFxRand01() * 1.8f;
     d->push = 0.0f;
     d->sway = 0.30f + diFxRand01() * 0.45f;          /* 摆动角速度 */
-    d->swayAmp = 0.6f + diFxRand01() * 1.4f;         /* 摆动幅度(速度, px/s) */
+    d->swayAmp = 0.35f + diFxRand01() * 0.85f;       /* 摆动幅度(速度, px/s), 3.0.76 收一档 */
     d->swayPhase = diFxRand01() * (float)M_PI * 2.0f;
     int sh = arc4random() % 10;
     d->shape = (sh < 4) ? 0 : (sh < 6 ? 1 : (sh < 8 ? 2 : 3));
@@ -19877,27 +19879,30 @@ static void diFxUpdateDots(UIView *host, CGRect cover, float dt,
             if (gDIDotCount > 0) gDIDotCount--;
             continue;
         }
-        /* 恒定的外飘 + 摆动, 没有冲量、没有拍点位移 —— 位置永远连续 */
+        /* 恒定的外飘 + 摆动, 没有冲量、没有拍点位移 —— 位置永远连续
+           3.0.76: d->push 恒为 0(鼓点不再推粒子), 这一行留着只是清掉旧值 */
         d->push *= expf(-dt / 0.32f);
         d->ang += d->spin * dt;
         /* 3.0.64: 「粒子强度」只管**鼓点响应**, 不再乘外飘速度。
            477 用户: "强度调高了粒子就飘的好快" —— 3.0.61 起 stg 乘在 drift 上,
            调强度等于调流速, 完全不是要的东西。现在基础漂移恒定, 强度只放大:
-           鼓点冲量 / 尺寸脉冲 / 亮度脉冲。 */
+           尺寸脉冲 / 亮度脉冲。 */
         float stg = (float)rhythmParticleStrength;
         d->rad += (d->drift + d->push) * dt;
         float swayV = sinf((float)gDIClock * d->sway + d->swayPhase) * d->swayAmp;
         d->ang += (swayV / MAX(8.0f, d->rad)) * dt;
         d->rot += d->rotSpd * dt;
 
-        /* 该方向到宿主边缘的距离(留 4pt), 再钳在 1.15R~1.55R。
+        /* 该方向到宿主边缘的距离(留 4pt), 再钳在 1.15R~1.75R。
            3.0.58: 上限从 2.6R 收到 1.55R —— 视频里粒子就贴着封面边缘一圈,
-           不会飘到岛的边角上。 */
+           不会飘到岛的边角上。
+           3.0.76: 487 用户: "扩散范围加大一点点" → 上限 1.55R → 1.75R,
+           配合放慢的漂移, 粒子会散得更开、走得更慢。 */
         CGFloat ca = cosf(d->ang), sa2 = sinf(d->ang);
         CGFloat tx = (ca > 0.02f) ? (W - 4.0f - cx) / ca : ((ca < -0.02f) ? (4.0f - cx) / ca : 1e9f);
         CGFloat ty = (sa2 > 0.02f) ? (H - 4.0f - cy) / sa2 : ((sa2 < -0.02f) ? (4.0f - cy) / sa2 : 1e9f);
         CGFloat dirMax = MIN(tx, ty);
-        if (dirMax > Rc * 1.55f) dirMax = Rc * 1.55f;
+        if (dirMax > Rc * 1.75f) dirMax = Rc * 1.75f;
         if (dirMax < Rc * 1.15f) dirMax = Rc * 1.15f;
 
         if (d->rad > dirMax) {
@@ -19943,21 +19948,10 @@ static void diFxUpdateDots(UIView *host, CGRect cover, float dt,
     [CATransaction commit];
 }
 
-/* 3.0.62: 拍点到了 —— 一次性把冲量注入所有在飞的粒子。
-   只在"上升沿"调用一次(不是每帧), 否则就成了持续的推力, 粒子会一直往外跑。 */
-static void diFxApplyBeat(float kick) {
-    if (kick <= 0.02f) return;
-    for (int i = 0; i < DI_DOT_CAP; i++) {
-        DIDot *d = &gDIDots[i];
-        if (d->life <= 0) continue;
-        /* 24px/s 冲量 × 0.32s 衰减 ≈ 6~9px 的外推 —— 看得见"一跳", 又不会一下冲出边界 */
-        d->push += kick * 26.0f * (float)rhythmParticleStrength * d->beatGain;
-    }
-}
-
-/* 3.0.75: 一次性鼓点冲量 —— 只做两件事: 频谱条的硬包络(punch) + 粒子外推。
-   gDIKick 本体不再由这里写(总强度包络每帧连续推进, 见 diRhythmAdvanceSpectrum),
-   这样专辑缩放和粒子亮度始终跟着"总强度"走, 不会因为触发路径不同而各动各的。 */
+/* 3.0.76: 鼓点冲量**不再推粒子**(用户: "鼓点振一下跟粒子扩散不干涉 —— 扩散该怎么扩散
+   还是扩散, 振一下的还是振一下, 不然看起来粒子好快")。
+   487 日志里 隔=0.02~0.22s, 鼓点几乎每一下都往粒子身上灌 26px/s 冲量, 叠在一起
+   就是"粒子在飞"。现在本函数只做频谱条的硬包络(punch), gDIKick 由总强度包络连续推进。 */
 static void diKickFire(float amp, CFTimeInterval at) {
     if (amp <= 0.05f) return;
     if (amp > 1.0f) amp = 1.0f;
@@ -19967,7 +19961,6 @@ static void diKickFire(float amp, CFTimeInterval at) {
     gDIKickPunchAmp = amp;
     gDIKickPunchT = at;
     gDILastKickT = now;
-    diFxApplyBeat(amp);
 }
 
 /* 当前这一下的视觉量: 16ms 顶到位, 95ms 收回, 0.30s 归零 */
@@ -20742,13 +20735,20 @@ static void diRhythmAdvanceSpectrum(BOOL active, BOOL real, float dt) {
             if (totS > gDITotPeak) gDITotPeak += (totS - gDITotPeak) * 0.35f;
             else                   gDITotPeak += (totS - gDITotPeak) * kDnPeak;
 
-            /* span 最小 0.10: 防止音乐很平稳时把噪声放大成满量程 */
+            /* span 最小 0.16: 防止音乐很平稳时把噪声放大成满量程
+               3.0.76: 0.10 → 0.16。487 日志里 总 在 0.00↔1.00 之间每两秒来回跳,
+               那是底噪窗口太小把毛刺放大成了"拍" —— 专辑就一直高频地弹, 用户说的
+               "鼓点振的频率不要那么大"。窗口放大后只有真正的重拍才顶得起来。 */
             float span = gDITotPeak - gDITotFloor;
-            if (span < 0.10f) span = 0.10f;
+            if (span < 0.16f) span = 0.16f;
             float n = (totS - gDITotFloor) / span;
             if (n < 0.0f) n = 0.0f;
-            if (n > 1.2f) n = 1.2f;
-            gDILowN = n;    /* 归一总强度 0~1.2, gDIKick 的驱动源 */
+            if (n > 1.0f) n = 1.0f;
+            /* 3.0.76: 死区 —— 低于 0.15 一律当静止(0), 普通伴奏不再让专辑轻轻抖;
+               只有明显冲起来的重拍才在 0~1 里给出真正的"振一下"。 */
+            n = (n - 0.15f) / 0.85f;
+            if (n < 0.0f) n = 0.0f;
+            gDILowN = n;    /* 归一总强度 0~1, gDIKick 的驱动源 */
         }
         gDIMidLevel = sum / (float)DI_AU_BANDS;
 
@@ -21060,15 +21060,15 @@ static void diRhythmTickWithDelta(float dtIn) {
                低于 0.25, 封面长期缩到 0.95~0.99, 再加 0.4% 的呼吸正弦, 看着就是在"抖",
                不是"跟着鼓点弹"。现在 k∈[0,1] 且静止=0, s 只往上走, 回落就是 1.0。
                同时去掉上下位移 dy —— 缩放 + 位移叠加在一起, 重心在动, 更"别扭"。 */
-            /* 3.0.75: 专辑缩放 = 1 + 0.20*律动幅度*gDIKick(总强度顺滑包络)。
-               gDIKick 由全谱总能量归一后 45ms 顶/170ms 落连续推进, 每一拍都会顶起来
-               (486 实测五条件检测大半帧数缩放=1.000, 总强度不会再漏拍);
-               粒子亮度/脉冲读同一个值, 专辑和粒子天然契合。 */
+            /* 3.0.76: 振幅收小 —— 487 用户: "鼓点振的频率不要那么大"。
+               487 日志实测 缩放 在 1.03~1.19 之间连续跳(峰值 +19%), 看着就是"一直在振"。
+               现在 0.20 → 0.12, 上限 1.22 → 1.14(57pt 上约 7pt 起伏), 配合总强度的
+               死区/宽窗口, 普通伴奏基本静止, 重拍才"振一下"。 */
             CGFloat k = gDIKick;
-            CGFloat amp = 0.20 * rhythmBeatScale;
+            CGFloat amp = 0.12 * rhythmBeatScale;
             CGFloat s = 1.0 + amp * k;
             if (s < 1.0) s = 1.0;
-            if (s > 1.22) s = 1.22;
+            if (s > 1.14) s = 1.14;
             sDbg = s;
             gDICoverScaleNow = (float)s;      /* 粒子遮罩的孔固定 1.02R, 这里只做记录 */
             CGFloat dy = 0.0;
