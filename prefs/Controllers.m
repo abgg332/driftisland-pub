@@ -6360,6 +6360,44 @@ static NSString *diModeName(int m) {
     diStep(@"颜色来源: %@", diModeName(m));
 }
 
+/* ===== 3.0.80: 曲风预设 =====
+   5 套基调(抒情/流行/电子/嘻哈/氛围), 点一下换下一个, 写 pref 后立刻 fxtune 生效。
+   键用**不分尺寸的原键 RhythmStyle** —— 按尺寸分键会出现"3x2 是电子、4x2 是抒情"
+   的错乱; 曲风是全局手感, 应该对所有尺寸一致。 */
+static NSString *diStyleLabel(int s) {
+    switch (s) {
+        case 0:  return @"抒情";
+        case 1:  return @"流行";
+        case 2:  return @"电子";
+        case 3:  return @"嘻哈";
+        default: return @"氛围";
+    }
+}
+- (int)diStyleIndex {
+    id v = diFxReadSized(@"RhythmStyle");
+    int s = v ? [v intValue] : 1;
+    if (s < 0) s = 0;
+    if (s > 4) s = 4;
+    return s;
+}
+- (PSSpecifier *)styleSpec {
+    NSString *label = [NSString stringWithFormat:@"曲风预设  ·  %@", diStyleLabel([self diStyleIndex])];
+    PSSpecifier *sp = [PSSpecifier preferenceSpecifierNamed:label target:self
+        set:NULL get:NULL detail:nil cell:PSButtonCell edit:nil];
+    sp.buttonAction = @selector(diCycleStyle:);
+    return sp;
+}
+- (void)diCycleStyle:(PSSpecifier *)sp {
+    int m = ([self diStyleIndex] + 1) % 5;
+    CFPreferencesSetAppValue((__bridge CFStringRef)@"RhythmStyle",
+                             (__bridge CFPropertyListRef)@(m),
+                             (__bridge CFStringRef)kDomain);
+    CFPreferencesAppSynchronize((__bridge CFStringRef)kDomain);
+    diPostFxTune();
+    [self reloadSpecifiers];
+    diStep(@"曲风：%@", diStyleLabel(m));
+}
+
 /* 3.0.57: 当前色值(供行标题显示) */
 - (NSString *)fxHexForKey:(NSString *)key def:(NSString *)def {
     if (!key.length) return def;
@@ -6560,6 +6598,8 @@ static NSString *diModeName(int m) {
     NSMutableArray *specs = [NSMutableArray array];
     [specs addObject:[self groupSpec:@"专辑律动" footer:nil]];
     [specs addObject:[self switchSpec:@"启用律动特效" key:diFxSizedKey(@"AlbumEffectsOn") def:@YES]];
+    /* 3.0.80: 曲风预设 —— 一键换整套手感(粒子疏密/快慢/扩散 + 专辑振幅 + 鼓点包络) */
+    [specs addObject:[self styleSpec]];
     /* 3.0.61: 删掉「圆形封面」—— 它和「原生播放 → 启用遮罩」抢同一件事(封面的形状),
        用户 474 原话"功能里有个旋转、律动里又有个圆形封面, 专辑都冲突了"。
        专辑形状统一由「启用遮罩」管; 这里恒为圆形(与历史默认一致, 不改观感)。 */

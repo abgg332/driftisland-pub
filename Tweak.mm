@@ -88,6 +88,63 @@ static int  rhythmParticleCount = 12;          // 3.0.47: 参考视频里只有�
 static double rhythmStrength = 0.90;           // 律动强度(刻度最长值的比例)
 static double rhythmBeatScale = 0.70;          // 专辑律动幅度
 static double rhythmRingWidth = 2.2;           // 3.0.47: 刻度粗细(参考约 2pt)
+/* ===== 3.0.80: 曲风预设 =====
+   用户: "去查找相关音乐的音频类型, 你加入几个音频效果进去, 我可以随时更换风格"。
+   按主流曲风真实的节奏/低频特征做 5 套基调(下面的常量表), 切一下立刻换整体手感:
+     抒情 Ballad   65~80 BPM, 低频少、动态平缓   → 粒子少而慢, 振幅小, 回落长(柔)
+     流行 Pop     100~130 BPM, 中频人声为主      → 3.0.79 基准值(默认)
+     电子 EDM     120~130 BPM, kick 前置、每拍  → 粒子多而快, 振幅大, 回落短(每拍都落)
+     嘻哈 Trap    140 半速(听感 70), 808 重低音  → 粒子少而大, 振幅最大, 回落最长(808 尾)
+     氛围 Ambient  60~90 BPM, 无固定拍、空间大   → 粒子最多最慢, 几乎不振, 扩散最远
+
+   设计原则: **预设只做倍率, 不覆盖用户设置**。设置页的滑杆(数量/大小/强度/振幅)
+   仍是微调旋钮, 最终值 = 滑杆 × 曲风倍率 —— 换风格看得到明显差别, 又不会把用户
+   自己调好的值冲掉。 */
+typedef struct {
+    float countMul, sizeMul, driftMul, swayMul, spreadMul, lifeMul;
+    float ampMul, atk, rel, solidPct, spawnSpeed;
+} DIStylePack;
+
+static int gDIStyle = 1;
+static BOOL gDIStyleDirty = NO;    /* 刚换曲风 → 下一帧清空粒子池, 按新节奏重新长出来 */
+static DIStylePack gDIStylePack = { 1.0f, 1.0f, 1.0f, 1.0f, 1.0f, 1.0f, 1.0f, 0.045f, 0.17f, 0.40f, 0.55f };
+
+/* count 数量 / size 大小 / drift 漂移速度 / sway 摆动 / spread 扩散半径(相对 2.15R) /
+   life 寿命 / amp 专辑振幅 / atk 包络上升(s) / rel 包络回落(s) /
+   solid 实心点占比(其余是几何描边) / spawn 补充速度 */
+static const DIStylePack kDIStyles[5] = {
+    /* 抒情 */ { 0.80f, 1.05f, 0.72f, 0.85f, 0.78f, 1.15f, 0.55f, 0.055f, 0.26f, 0.45f, 0.50f },
+    /* 流行 */ { 1.00f, 1.00f, 1.00f, 1.00f, 1.00f, 1.00f, 1.00f, 0.045f, 0.17f, 0.40f, 0.55f },
+    /* 电子 */ { 1.45f, 0.90f, 1.45f, 1.15f, 1.10f, 0.85f, 1.55f, 0.030f, 0.13f, 0.75f, 0.95f },
+    /* 嘻哈 */ { 0.75f, 1.25f, 0.85f, 0.90f, 0.95f, 1.30f, 1.85f, 0.040f, 0.30f, 0.30f, 0.40f },
+    /* 氛围 */ { 1.55f, 1.10f, 0.55f, 1.30f, 1.15f, 1.60f, 0.35f, 0.090f, 0.38f, 0.55f, 0.35f },
+};
+
+static NSString *diStyleName(int s) {
+    switch (s) {
+        case 0:  return @"抒情";
+        case 1:  return @"流行";
+        case 2:  return @"电子";
+        case 3:  return @"嘻哈";
+        default: return @"氛围";
+    }
+}
+
+/* 读 RhythmStyle(不分尺寸 —— 一个风格对所有尺寸生效) */
+static void diStyleLoad(void) {
+    id v = CFBridgingRelease(CFPreferencesCopyAppValue((__bridge CFStringRef)@"RhythmStyle",
+                                                       (__bridge CFStringRef)kDomain));
+    int s = v ? [v intValue] : 1;
+    if (s < 0) s = 0;
+    if (s > 4) s = 4;
+    if (s != gDIStyle) {
+        RLog(@"[曲风] 切换 → %@", diStyleName(s));
+        gDIStyleDirty = YES;      /* 老粒子是按旧节奏生成的, 换风格要重来一遍 */
+    }
+    gDIStyle = s;
+    gDIStylePack = kDIStyles[s];
+}
+
 static NSString *rhythmColorA = nil;           // 渐变起始色(#E59971)
 static NSString *rhythmColorB = nil;           // 渐变结束色(#948FFF)
 /* 3.0.53: 粒子独立渐变起止色(截图 #FFFFBC / #BFCDF8), 在偏好读取里就要用到,
@@ -1061,6 +1118,8 @@ static void diFxLoadPrefs(void) {
     /* 3.0.56: 「律动专辑环」整块下线 —— 设置项与参数都已删除, 这里强制不建环。
        (环的代码保留但不执行, 以后想恢复只要放开这两行。) */
     rhythmRingOn = NO;
+    /* 3.0.80: 曲风预设(倍率表) —— 必须放在所有滑杆值读完以后, 它只乘不覆盖 */
+    diStyleLoad();
 
     /* 粒子颜色/模式变了 → 现有粒子也要立刻换色(以前只影响新生的, 看着像"改了没用") */
     {
@@ -19785,23 +19844,32 @@ static void diFxSpawnDot(UIView *host, CGRect cover, float maxRad) {
        刚好让它在边缘露出一半, 出门就能看到。 */
     d->rad = (float)R * (1.02f + diFxRand01() * 0.10f);   /* 3.0.60: 再往外一档(用户: 起点还是有点里面/被遮挡) */
     d->spin = (diFxRand01() - 0.5f) * 0.05f;
-    /* 外飘 2.5~6px/s: 视频里几乎看不出"在飞", 只是缓缓地、一点点往外挪 */
-    d->drift = 3.5f + diFxRand01() * 3.5f;
+    /* 外飘 2.5~6px/s: 视频里几乎看不出"在飞", 只是缓缓地、一点点往外挪
+       3.0.80: 乘曲风倍率(氛围 0.55x 最慢, 电子 1.45x 最快) */
+    const DIStylePack *sp = &gDIStylePack;
+    d->drift = (3.5f + diFxRand01() * 3.5f) * sp->driftMul;
     d->push = 0.0f;
     d->sway = 0.30f + diFxRand01() * 0.45f;          /* 摆动角速度 */
-    d->swayAmp = 0.6f + diFxRand01() * 1.4f;         /* 摆动幅度(速度, px/s) */
+    d->swayAmp = (0.6f + diFxRand01() * 1.4f) * sp->swayMul;   /* 摆动幅度(速度, px/s) */
     d->swayPhase = diFxRand01() * (float)M_PI * 2.0f;
-    int sh = arc4random() % 10;
-    d->shape = (sh < 4) ? 0 : (sh < 6 ? 1 : (sh < 8 ? 2 : 3));
+    /* 3.0.80: 形态分布按曲风调 —— 电子偏实心点(亮、密), 嘻哈偏几何描边(疏、型) */
+    {
+        float solid = sp->solidPct;
+        if (solid < 0.05f) solid = 0.05f;
+        if (solid > 0.95f) solid = 0.95f;
+        int sh = arc4random() % 100;
+        int th = (int)(solid * 100.0f);
+        d->shape = (sh < th) ? 0 : (1 + (sh % 3));
+    }
     /* 3.0.57: 滑杆值直接就是倍率 —— 1.0 = 基准大小, 1.1 / 1.2 每档 10%。
        3.0.58: 基准再抬一点, 让 1.0 档在 57pt 的封面上看得清(以前 1pt 描边 + 2px 的点,
        缩到小尺寸就糊成一团灰)。 */
-    float sizeMul = (float)rhythmParticleSize;
+    float sizeMul = (float)rhythmParticleSize * sp->sizeMul;   /* 3.0.80: × 曲风 */
     d->size = ((d->shape == 0) ? (2.4f + diFxRand01() * 1.8f)
                                : (4.2f + diFxRand01() * 2.6f)) * sizeMul;
     d->rot = diFxRand01() * (float)M_PI * 2.0f;
     d->rotSpd = (diFxRand01() - 0.5f) * 0.30f;
-    d->maxLife = 8.0f + diFxRand01() * 6.0f;   /* 8~14s: 前面有一段藏在专辑后面, 露出来还能飘很久 */
+    d->maxLife = (8.0f + diFxRand01() * 6.0f) * sp->lifeMul;   /* 8~14s × 曲风(氛围 1.6x 最长) */
     d->life = d->maxLife;
     d->phase = diFxRand01() * (float)M_PI * 2.0f;
     d->tint = diFxRand01();
@@ -19910,7 +19978,10 @@ static void diFxUpdateDots(UIView *host, CGRect cover, float dt,
         CGFloat tx = (ca > 0.02f) ? (W + edgePad - 4.0f - cx) / ca : ((ca < -0.02f) ? (-edgePad + 4.0f - cx) / ca : 1e9f);
         CGFloat ty = (sa2 > 0.02f) ? (H + edgePad - 4.0f - cy) / sa2 : ((sa2 < -0.02f) ? (-edgePad + 4.0f - cy) / sa2 : 1e9f);
         CGFloat dirMax = MIN(tx, ty);
-        if (dirMax > Rc * 2.15f) dirMax = Rc * 2.15f;
+        /* 3.0.80: 扩散上限再乘曲风倍率 —— 氛围 1.15x(最远), 抒情 0.78x(收一点) */
+        CGFloat spreadCap = Rc * 2.15f * (CGFloat)gDIStylePack.spreadMul;
+        if (spreadCap < Rc * 1.20f) spreadCap = Rc * 1.20f;
+        if (dirMax > spreadCap) dirMax = spreadCap;
         if (dirMax < Rc * 1.15f) dirMax = Rc * 1.15f;
 
         /* 3.0.79: 走到最远处不再"啪一下没了"(那等于白放大范围, 用户根本看不到多远)。
@@ -20884,13 +20955,19 @@ static void diRhythmAdvanceSpectrum(BOOL active, BOOL real, float dt) {
        回落: 170ms 指数衰减, 和 3.0.68 完全一致。
        三条触发路径(样本域咚 / 客户端五条件 / 合成节拍)都只写 gDIKickTarget。 */
     {
+        /* 3.0.80: 上升/回落时间改为曲风参数 ——
+           电子 30ms 顶 / 130ms 落(128BPM 每拍 469ms, 每拍都能掉干净再起);
+           嘻哈 300ms 落(808 低音余振的长尾, 慢慢化开);
+           氛围 90ms 顶 / 380ms 落(几乎不振, 像缓慢呼吸)。 */
+        const float atkT = (gDIStylePack.atk > 0.010f) ? gDIStylePack.atk : 0.010f;
+        const float relT = (gDIStylePack.rel > 0.05f) ? gDIStylePack.rel : 0.05f;
         double atkDt = CACurrentMediaTime() - gDIKickAtkT;
-        if (atkDt >= 0.0 && atkDt < 0.045 && gDIKickTarget > gDIKick) {
+        if (atkDt >= 0.0 && atkDt < atkT && gDIKickTarget > gDIKick) {
             gDIKick += (gDIKickTarget - gDIKick) * (float)fmin(1.0, (double)dt / 0.016);
             if (gDIKickTarget - gDIKick < 0.01f) gDIKick = gDIKickTarget;
         } else {
-            gDIKick *= expf(-dt / 0.17f);           /* 170ms 回到 0, 与 3.0.68 相同 */
-            if (gDIKickTarget > 0.0f && atkDt >= 0.045) gDIKickTarget = 0.0f;
+            gDIKick *= expf(-dt / relT);
+            if (gDIKickTarget > 0.0f && atkDt >= atkT) gDIKickTarget = 0.0f;
         }
     }
 }
@@ -21197,7 +21274,8 @@ static void diRhythmTickWithDelta(float dtIn) {
             /* 3.0.74: 回到 3.0.68 的微基础动态(用户指定基线): gDIKick 包络 + 0.20 幅度。
                顺滑化只动了包络的"顶到"过程(45ms 趋近, 见统一顺滑包络), 幅度/衰减不变。 */
             CGFloat k = gDIKick;
-            CGFloat amp = 0.20 * rhythmBeatScale;
+            /* 3.0.80: 再乘曲风振幅倍率(嘻哈 1.85x 最重, 氛围 0.35x 几乎不振) */
+            CGFloat amp = 0.20 * rhythmBeatScale * (CGFloat)gDIStylePack.ampMul;
             CGFloat s = 1.0 + amp * k;
             if (s < 1.0) s = 1.0;
             if (s > 1.22) s = 1.22;
@@ -21241,7 +21319,7 @@ static void diRhythmTickWithDelta(float dtIn) {
             for (int i = 0; i < gDIRhythmExtraN; i++)
                 [exs appendFormat:@"%@%.0f ", NSStringFromClass(gDIRhythmExtras[i].class),
                  gDIRhythmExtras[i].bounds.size.width];
-            RLog(@"[探针] 通量=%.3f 低频=%.3f 占=%.2f 拍=%.2f 鼓=%.2f 踢=%.2f 咚=%.2f 串=%u 低R=%.4f 隔=%.2f 缩放=%.3f 实=%.3f 呈=%.3f 尺=%.0f 基尺=%.0f 驱动=%@ 图=%@ 旋=%@ 播=%d 率=%d 粒=%d 强=%.1f 律=%d 基=%d",
+            RLog(@"[探针] 通量=%.3f 低频=%.3f 占=%.2f 拍=%.2f 鼓=%.2f 踢=%.2f 咚=%.2f 串=%u 低R=%.4f 隔=%.2f 缩放=%.3f 实=%.3f 呈=%.3f 尺=%.0f 基尺=%.0f 驱动=%@ 图=%@ 旋=%@ 播=%d 率=%d 风=%@ 粒=%d 强=%.1f 律=%d 基=%d",
                  gDIFluxNow, gDILowLevel, gDILowShare, gDIBeatEnv, gDILowN, gDIKick,
                  diKickPunchNow(), (unsigned)gDIPcmKickSerial, gDIPcmLowRms,
                  (float)(gDILastKickT > 0 ? (CACurrentMediaTime() - gDILastKickT) : 0.0),
@@ -21250,7 +21328,7 @@ static void diRhythmTickWithDelta(float dtIn) {
                  NSStringFromClass(dv.class),
                  gDIRhythmExtraN ? exs : @"无",
                  ([dv.layer animationForKey:@"di.art.spin"] ? @"CA" : (ownsSpin ? @"我们" : (wantSpin ? @"等" : @"关"))),
-                 active ? 1 : 0, (int)gDIPlayRateState, gDIDotCount, rhythmParticleStrength,
+                 active ? 1 : 0, (int)gDIPlayRateState, diStyleName(gDIStyle), gDIDotCount, rhythmParticleStrength,
                  rhythmOn ? 1 : 0, gDIRhythmBaseValid ? 1 : 0);
             /* 3.0.62: 没找到内容层就定期把视图树打出来(20s 一次), 不用等切歌 */
             if (gDIRhythmExtraN == 0 && nowP - gDIDumpAt > 20.0) {
@@ -21281,10 +21359,28 @@ static void diRhythmTickWithDelta(float dtIn) {
         gDIParticleColorDirty = NO;
         diFxRefreshColors();
     }
+    /* 3.0.80: 刚换曲风 —— 现有粒子是按旧风格的速度/大小/寿命生成的, 直接清空,
+       下一帧按新数量重新长满。否则要等 8~14 秒才全部换过来, 用户会以为"没生效"。 */
+    if (gDIStyleDirty) {
+        gDIStyleDirty = NO;
+        [CATransaction begin];
+        [CATransaction setDisableActions:YES];
+        for (int i = 0; i < DI_DOT_CAP; i++) {
+            gDIDots[i].life = 0.0f;
+            gDIDots[i].push = 0.0f;
+            if (gDIDotLayer[i]) gDIDotLayer[i].opacity = 0.0f;
+        }
+        gDIDotCount = 0;
+        gDISpawnAcc = 0.0f;
+        [CATransaction commit];
+    }
     if (rhythmParticlesOn && active) {
-        int want = rhythmParticleCount;
+        /* 3.0.80: 数量与补充速度都乘曲风(电子/氛围更密更快, 嘻哈/抒情更疏) */
+        int want = (int)lround((double)rhythmParticleCount * gDIStylePack.countMul);
+        if (want < 0) want = 0;
+        if (want > 56) want = 56;      /* DI_DOT_CAP 64 留余量 */
         if (gDIDotCount < want) {
-            gDISpawnAcc += (float)(want - gDIDotCount) * 0.55f * dt;
+            gDISpawnAcc += (float)(want - gDIDotCount) * 0.55f * gDIStylePack.spawnSpeed * dt;
             while (gDISpawnAcc >= 1.0f && gDIDotCount < want) {
                 gDISpawnAcc -= 1.0f;
                 diFxSpawnDot(host, cover, 0.0f);
