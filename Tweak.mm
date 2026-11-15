@@ -20714,8 +20714,11 @@ static void diRhythmUpdateBars(UIView *host, BOOL active) {
                 b->swayPh += 2.6f * dtb;
                 b->x += sinf(b->swayPh) * b->swayAmp * dtb;
                 float tt = b->life / b->maxLife;
-                float rr = b->r0 * (0.30f + 0.70f * sqrtf(tt));
-                if (b->y < yLimit || rr < 0.22f) { b->alive = 0; continue; }
+                /* 前 75% 寿命基本保持大小(0.55~1.0 倍), 最后 25% 快速缩小 —— 像泡泡破掉,
+                   而不是一直缩成针尖再消失 */
+                float keep = (tt > 0.25f) ? (0.55f + 0.45f * sqrtf(tt)) : (0.55f * (tt / 0.25f));
+                float rr = b->r0 * keep;
+                if (b->y < yLimit || rr < 0.20f) { b->alive = 0; continue; }
                 CGPathAddEllipseInRect(p, NULL,
                     CGRectMake(b->x - rr, b->y - rr, rr * 2.0f, rr * 2.0f));
             }
