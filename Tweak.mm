@@ -11,6 +11,7 @@
 #include <execinfo.h>
 #include <dlfcn.h>
 #include <string.h>
+#include <stdlib.h>   /* 3.0.83: arc4random_uniform(气泡随机) */
 #include <notify.h>
 #include <fcntl.h>
 #include <unistd.h>
@@ -71,10 +72,26 @@ static BOOL rhythmParticlesOn = YES;           // 封面外圈粒子
 static BOOL rhythmRoundCover = YES;            // 3.0.47: 封面裁成正圆
 static BOOL rhythmBarsOn = YES;                // 3.0.48: 频谱条(进度条上方)
 static int  rhythmBarsCount = 40;              // 3.0.50: 频谱条根数(可调)
-/* 3.0.82: 频谱条样式 —— 0 柱状 / 1 点阵 / 2 镜像 / 3 阶梯 / 4 峰值 / 5 尖刺 / 6 斜切 / 7 电波 */
+/* 3.0.83: 频谱条样式 —— 0 柱状 / 1 点阵 / 2 镜像 / 3 阶梯 / 4 峰值 / 5 尖刺 / 6 斜切 / 7 电波 / 8 气泡 */
 static int gDIBarStyle = 0;
 static float gDIBarPeak[64];
 static CFAbsoluteTime gDIBarPeakT = 0;
+/* 3.0.83: 气泡样式 —— 每根柱子顶上吐小泡泡往上飘(鱼吐泡泡)。
+   泡泡是纯状态 + 每帧重画路径, 不新增图层: 依然挂在同一个渐变遮罩里,
+   所以颜色照旧跟随封面/固定色/流光。 */
+#define DI_BUBBLE_MAX 120
+typedef struct {
+    float x, y;         /* 当前圆心(bars 坐标系) */
+    float vy;           /* 上升速度 pt/s, 会随寿命略微加速 */
+    float r0;           /* 初始半径 */
+    float life, maxLife;
+    float swayPh, swayAmp;   /* 横向摆动的相位与幅度 */
+    int alive;
+} DIBubble;
+static DIBubble gDIBubbles[DI_BUBBLE_MAX];
+static float gDIBubbleLastV[64];    /* 上一帧各柱的频谱值, 用来抓"起音" */
+static double gDIBubbleNextAt[64];  /* 各柱下次允许冒泡的时间(持续冒泡节流) */
+static float gDIBubbleT = 0.0f;     /* 上一帧时间戳, 用来算 dt */
 static double rhythmBarsHeight = 13.0;         // 3.0.50: 频谱条长度(可调)
 static double rhythmBarsWidth = 3.0;           // 3.0.51: 频谱条单根最大宽度(可调)
 static double rhythmBarsOffset = 0.0;          // 3.0.52: 频谱条水平位移(可调, 负=左 正=右)
@@ -992,16 +1009,23 @@ static void diFxLoadPrefs(void) {
     rhythmRoundCover = YES;   /* 3.0.61: 开关已从律动页移除(与「启用遮罩」重复), 恒为圆形 */
     rhythmBarsOn = fxBool(@"AlbumBarsOn", YES);
     {
-        /* 3.0.82: 频谱条样式(0~7, 不分尺寸) */
+        /* 3.0.83: 频谱条样式(0~8, 不分尺寸) */
         {
             id sv = CFBridgingRelease(CFPreferencesCopyAppValue((__bridge CFStringRef)@"SpectrumStyle",
                                                                (__bridge CFStringRef)kDomain));
             int st = sv ? [sv intValue] : 0;
             if (st < 0) st = 0;
-            if (st > 7) st = 7;
+            if (st > 8) st = 8;
             if (st != gDIBarStyle) {
                 gDIBarStyle = st;
                 for (int i = 0; i < 64; i++) gDIBarPeak[i] = 0.0f;   /* 换样式时峰值重新来 */
+                /* 3.0.83: 换样式时泡泡一起清掉, 免得切走再切回来还剩半空的老泡泡 */
+                for (int i = 0; i < DI_BUBBLE_MAX; i++) gDIBubbles[i].alive = 0;
+                for (int i = 0; i < 64; i++) {
+                    gDIBubbleLastV[i] = 0.0f;
+                    gDIBubbleNextAt[i] = 0.0;
+                }
+                gDIBubbleT = 0.0f;
             }
         }
         int c = (int)fxInt(@"AlbumBarsCount", 40);
@@ -20371,6 +20395,15 @@ static void diRhythmUpdateBars(UIView *host, BOOL active) {
     /* 3.0.59: 没音乐时整条频谱隐藏。以前 active=NO 仍然画 40 根 1.5pt 的短杠、opacity 0.25,
        屏幕上就是"一条杠"(用户 472 明确点名)。暂停时它就该彻底消失。 */
     if (!active) {
+        /* 3.0.83: 暂停/停止时泡泡也一起清掉, 恢复播放不该有旧泡泡悬在半空 */
+        if (gDIBarStyle == 8) {
+            for (int i = 0; i < DI_BUBBLE_MAX; i++) gDIBubbles[i].alive = 0;
+            for (int i = 0; i < 64; i++) {
+                gDIBubbleLastV[i] = 0.0f;
+                gDIBubbleNextAt[i] = 0.0;
+            }
+            gDIBubbleT = 0.0f;
+        }
         if (gDIRhythmBarsGrad) {
             [CATransaction begin];
             [CATransaction setDisableActions:YES];
@@ -20622,6 +20655,72 @@ static void diRhythmUpdateBars(UIView *host, BOOL active) {
             }
             break;
         }
+        case 8: {   /* 气泡: 柱子照常在, 柱顶随机吐泡泡往上飘(鱼吐泡泡) */
+            CFAbsoluteTime nowB = CACurrentMediaTime();
+            float dtb = (gDIBubbleT > 0.0f) ? (float)(nowB - gDIBubbleT) : 0.016f;
+            if (dtb < 0.0f) dtb = 0.0f;
+            if (dtb > 0.10f) dtb = 0.10f;
+            gDIBubbleT = (float)nowB;
+
+            /* 柱子当"嘴", 画法与柱状一致 */
+            for (int i = 0; i < n; i++) {
+                CGRect r = CGRectMake(x0 + i * (bw + gap), bottom - hArr[i], bw, hArr[i]);
+                CGFloat rr = MIN(bw * 0.5f, MIN(hArr[i] * 0.45f, 1.6f));
+                if (rr < 0.0f) rr = 0.0f;
+                CGPathAddRoundedRect(p, NULL, r, rr, rr);
+            }
+
+            /* 吐泡: 起音(值突然跳起来)必吐; 高能量柱持续吐(按柱子各自节流) */
+            for (int i = 0; i < n; i++) {
+                float v = (float)vArr[i];
+                float dv = v - gDIBubbleLastV[i];
+                gDIBubbleLastV[i] = v;
+                BOOL pop = (v > 0.18f && dv > 0.10f)
+                        || (v > 0.42f && nowB >= gDIBubbleNextAt[i]);
+                if (!pop) continue;
+                int slot = -1;
+                for (int k = 0; k < DI_BUBBLE_MAX; k++)
+                    if (!gDIBubbles[k].alive) { slot = k; break; }
+                if (slot < 0) { gDIBubbleNextAt[i] = nowB + 0.30; continue; }
+                float r1 = (float)arc4random_uniform(1000) / 1000.0f;
+                float r2 = (float)arc4random_uniform(1000) / 1000.0f;
+                float r3 = (float)arc4random_uniform(1000) / 1000.0f;
+                DIBubble *b = &gDIBubbles[slot];
+                CGFloat cx = x0 + (CGFloat)i * (bw + gap) + bw * 0.5f;
+                b->x = (float)(cx + ((CGFloat)r1 - 0.5f) * 1.8f);
+                b->y = (float)(bottom - hArr[i] - 1.2f);
+                b->r0 = 0.85f + 1.25f * v + r2 * 0.45f;
+                b->vy = 7.0f + 7.0f * r3;
+                b->swayPh = r2 * 6.283f;
+                b->swayAmp = 3.0f + r3 * 5.0f;
+                b->maxLife = 0.85f + v * 1.05f;
+                b->life = b->maxLife;
+                b->alive = 1;
+                gDIBubbleNextAt[i] = nowB + 0.26 + (double)r1 * 0.34;
+            }
+
+            /* 更新 + 画圆: 泡泡一律画实心小圆 —— 真机上直径只有 2~5pt,
+               空心环在 1x 屏看不出层次, 反而会和柱子重叠时把柱子挖出洞。
+               大小随寿命收一下、横向轻微摆动, 就够了。 */
+            float yLimit = (float)top - 34.0f;
+            if (yLimit < 4.0f) yLimit = 4.0f;
+            for (int k = 0; k < DI_BUBBLE_MAX; k++) {
+                DIBubble *b = &gDIBubbles[k];
+                if (!b->alive) continue;
+                b->life -= dtb;
+                if (b->life <= 0.0f) { b->alive = 0; continue; }
+                b->vy += 2.5f * dtb;
+                b->y -= b->vy * dtb;
+                b->swayPh += 2.6f * dtb;
+                b->x += sinf(b->swayPh) * b->swayAmp * dtb;
+                float tt = b->life / b->maxLife;
+                float rr = b->r0 * (0.30f + 0.70f * sqrtf(tt));
+                if (b->y < yLimit || rr < 0.22f) { b->alive = 0; continue; }
+                CGPathAddEllipseInRect(p, NULL,
+                    CGRectMake(b->x - rr, b->y - rr, rr * 2.0f, rr * 2.0f));
+            }
+            break;
+        }
         default: {  /* 0: 柱状(默认) —— 圆角长条, 中间高两边低 */
             for (int i = 0; i < n; i++) {
                 CGRect r = CGRectMake(x0 + i * (bw + gap), bottom - hArr[i], bw, hArr[i]);
@@ -20818,6 +20917,10 @@ static void diRhythmReset(void) {
     diRhythmDetach();
     if (rhythmRoundCover) diCoverUnround();
     for (int i = 0; i < DI_AU_BANDS; i++) { gDIBandRaw[i] = 0; gDIBandSmooth[i] = 0; }
+    /* 3.0.83: 引擎停/重启时把气泡一起清空 */
+    for (int i = 0; i < DI_BUBBLE_MAX; i++) gDIBubbles[i].alive = 0;
+    for (int i = 0; i < 64; i++) { gDIBubbleLastV[i] = 0.0f; gDIBubbleNextAt[i] = 0.0; }
+    gDIBubbleT = 0.0f;
     gDIBeatStopped = NO;      /* 3.0.79: 引擎重启后允许重新硬停 */
 }
 

@@ -6360,8 +6360,8 @@ static NSString *diModeName(int m) {
     diStep(@"颜色来源: %@", diModeName(m));
 }
 
-/* ===== 3.0.82: 频谱条样式 =====
-   8 种画法(柱状/点阵/镜像/阶梯/峰值/尖刺/斜切/电波), 点一下换下一个, 写 SpectrumStyle 后
+/* ===== 3.0.83: 频谱条样式 =====
+   9 种画法(柱状/点阵/镜像/阶梯/峰值/尖刺/斜切/电波/气泡), 点一下换下一个, 写 SpectrumStyle 后
    fxtune 即时生效。用**不分尺寸的原键** —— 样式对每个播放器尺寸都该一致。 */
 static NSString *diBarStyleLabel(int s) {
     switch (s) {
@@ -6372,14 +6372,15 @@ static NSString *diBarStyleLabel(int s) {
         case 4:  return @"峰值";
         case 5:  return @"尖刺";
         case 6:  return @"斜切";
-        default: return @"电波";
+        case 7:  return @"电波";
+        default: return @"气泡";
     }
 }
 - (int)diBarStyleIndex {
     id v = diFxReadSized(@"SpectrumStyle");
     int s = v ? [v intValue] : 0;
     if (s < 0) s = 0;
-    if (s > 7) s = 7;
+    if (s > 8) s = 8;
     return s;
 }
 - (PSSpecifier *)barStyleSpec {
@@ -6390,7 +6391,7 @@ static NSString *diBarStyleLabel(int s) {
     return sp;
 }
 - (void)diCycleBarStyle:(PSSpecifier *)sp {
-    int m = ([self diBarStyleIndex] + 1) % 8;
+    int m = ([self diBarStyleIndex] + 1) % 9;
     CFPreferencesSetAppValue((__bridge CFStringRef)@"SpectrumStyle",
                              (__bridge CFPropertyListRef)@(m),
                              (__bridge CFStringRef)kDomain);
@@ -6622,7 +6623,7 @@ static NSString *diBarStyleLabel(int s) {
 
     [specs addObject:[self groupSpec:@"频谱条" footer:nil]];
     [specs addObject:[self switchSpec:@"启用频谱条" key:diFxSizedKey(@"AlbumBarsOn") def:@YES]];
-    /* 3.0.82: 频谱条样式 —— 8 种画法一键循环切换(柱状/点阵/镜像/阶梯/峰值/尖刺/斜切/电波) */
+    /* 3.0.83: 频谱条样式 —— 9 种画法一键循环切换(柱状/点阵/镜像/阶梯/峰值/尖刺/斜切/电波/气泡) */
     [specs addObject:[self barStyleSpec]];
     [specs addObject:[self npSlider:@"根数" key:diFxSizedKey(@"AlbumBarsCount") def:40 mn:8 mx:64]];
     [specs addObject:[self npSlider:@"频谱条高度" key:diFxSizedKey(@"AlbumBarsHeight") def:13.0 mn:4.0 mx:40.0]];
