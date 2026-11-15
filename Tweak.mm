@@ -22449,7 +22449,9 @@ static void diISMApplyScale(float kick, BOOL on) {
        布局、frame、形态判定一行都不用改。 */
     UIView *v = gDIISMArt;
     if (!v) { gDIISMScaleNow = 1.0f; return; }
-    CGFloat s=on ? 1+fminf(0.22f,0.095f*(float)gDIISMAmp*kick) : 1;
+    /* 3.0.102: 23pt island artwork needs its own amplitude calibration.
+       Same phase and final scale are consumed by island particles below. */
+    CGFloat s=on ? 1+fminf(0.22f,0.20f*(float)gDIISMAmp*kick) : 1;
     if (s <= 1.0015) {
         gDIISMScaleNow = 1.0f;
         if ([v.layer animationForKey:@"di.isl.beat"]) {
@@ -22460,7 +22462,12 @@ static void diISMApplyScale(float kick, BOOL on) {
         }
         return;
     }
-    if (fabs(s - gDIISMScaleNow) < 0.0015) return;
+    /* Reassert when the system removes our presentation animation during layout.
+       Cached target alone cannot establish that the visible artwork is scaled. */
+    CAAnimation *currentBeat=[v.layer animationForKey:@"di.isl.beat"];
+    CALayer *visibleLayer=(CALayer *)v.layer.presentationLayer;
+    CGFloat actual=visibleLayer?sqrt(visibleLayer.transform.m11*visibleLayer.transform.m11+visibleLayer.transform.m12*visibleLayer.transform.m12):1;
+    if (currentBeat && fabs(s-gDIISMScaleNow)<0.0005 && fabs(actual-s)<0.003) return;
     gDIISMScaleNow = (float)s;
     CABasicAnimation *a = [CABasicAnimation animationWithKeyPath:@"transform.scale"];
     /* Hold the exact shared pulse on presentation scale without a second easing stage. */
@@ -22698,6 +22705,9 @@ static void diISMRUFrame(float dtIn) {
 
     if (nowC - gDIISMProbeAt > 3.0) {
         gDIISMProbeAt = nowC;
+        CALayer *present=(CALayer *)art.layer.presentationLayer;
+        CGFloat shown=present?sqrt(present.transform.m11*present.transform.m11+present.transform.m12*present.transform.m12):1;
+        diMruFileLog([NSString stringWithFormat:@"[岛律动输出] 开=%d 幅度=%.2f 同步脉冲=%.3f 目标=%.4f 呈现=%.4f 动画=%d 粒子组=%.4f",gDIISMBeat,gDIISMAmp,kick,gDIISMScaleNow,shown,[art.layer animationForKey:@"di.isl.beat"]!=nil,gDIISMBeat?gDIISMScaleNow:1]);
         NSMutableString *clipChain=[NSMutableString string];
         for(UIView *v=art;v;v=v.superview) {
             [clipChain appendFormat:@"%@:%@ clip=%d hidden=%d alpha=%.2f; ",NSStringFromClass(v.class),NSStringFromCGRect(v.bounds),diISMClips(v),v.hidden,v.alpha];
