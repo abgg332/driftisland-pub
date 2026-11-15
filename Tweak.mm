@@ -67,6 +67,9 @@ static NSString *playerMaskAsset;   // 相对 kMaskDir 的文件名
 /* 3.0.45: 控制中心播放器专辑的「律动特效」(真音频驱动, 见文件末尾模块注释) */
 static BOOL rhythmFxOn = YES;                  // 特效总开关(AlbumEffectsOn)
 static BOOL rhythmOn = YES;                    // 封面律动: 随节拍缩放
+static BOOL diProgressRingOn = NO;
+static double diProgressRingWidth = 3.0;
+static NSString *diProgressRingColor = nil;
 static BOOL rhythmRingOn = YES;                // 律动环(锥形渐变圆环 + 外圈刻度)
 static BOOL rhythmParticlesOn = YES;           // 封面外圈粒子
 static BOOL rhythmRoundCover = YES;            // 3.0.47: 封面裁成正圆
@@ -1030,7 +1033,7 @@ static void diFxLoadPrefs(void) {
     rhythmStrength = fxDouble(@"AlbumRhythmStrength", 0.90);
     if (rhythmStrength > 3.0) rhythmStrength /= 100.0;   /* 兼容 3.0.43 的百分数 */
     if (rhythmStrength < 0.10) rhythmStrength = 0.10;
-    if (rhythmStrength > 2.00) rhythmStrength = 2.00;
+    if (rhythmStrength > 2.50) rhythmStrength = 2.50;
     rhythmBeatScale = fxDouble(@"AlbumBeatScale", 0.70);
     if (rhythmBeatScale < 0.0) rhythmBeatScale = 0.0;
     if (rhythmBeatScale > 2.0) rhythmBeatScale = 2.0;
@@ -1126,9 +1129,9 @@ static void diFxLoadPrefs(void) {
         spectrumColorA = fxString(@"SpectrumColorA");
         spectrumColorB = fxString(@"SpectrumColorB");
     }
-    /* 3.0.56: 「律动专辑环」整块下线 —— 设置项与参数都已删除, 这里强制不建环。
-       (环的代码保留但不执行, 以后想恢复只要放开这两行。) */
-    rhythmRingOn = NO;
+    diProgressRingOn = fxBool(@"ArtworkProgressRingEnabled", NO);
+    diProgressRingWidth = fmax(0.5, fmin(10.0, fxDouble(@"ArtworkRingWidth", 3.0)));
+    diProgressRingColor = fxString(@"ArtworkRingColor");
 
     /* 粒子颜色/模式变了 → 现有粒子也要立刻换色(以前只影响新生的, 看着像"改了没用") */
     {
@@ -18432,6 +18435,8 @@ static void diNPApplyHideForRoot(UIView *root) {
    有 info 且有标题 = 有歌(暂停也算, 暂停时系统仍显示时间和进度);
    info 为空/没有标题 = 真的没歌, 这才是用户说的"没播放"。
    1 秒最多问一次, 回调在后台队列, 结果回主线程。符号缺失时退回文案判定。 */
+static double diRingElapsed=0, diRingDuration=0, diRingRate=0;
+static CFAbsoluteTime diRingStamp=0;
 static BOOL gDIHasNowPlaying = NO;
 static BOOL gDIInfoReady = NO;
 static void diNPQueryNowPlaying(void) {
@@ -18450,7 +18455,15 @@ static void diNPQueryNowPlaying(void) {
                "到底在不在放"交给 PlaybackRate 那条硬信号, 不靠这里。 */
             has = (info != NULL);
         } @catch (__unused NSException *e) {}
+        NSDictionary *meta = info ? [(__bridge NSDictionary *)info copy] : @{};
+        double elapsed=[meta[@"kMRMediaRemoteNowPlayingInfoElapsedTime"] doubleValue];
+        double duration=[meta[@"kMRMediaRemoteNowPlayingInfoDuration"] doubleValue];
+        double rate=[meta[@"kMRMediaRemoteNowPlayingInfoPlaybackRate"] doubleValue];
         dispatch_async(dispatch_get_main_queue(), ^{
+            diRingElapsed=isfinite(elapsed)?fmax(0,elapsed):0;
+            diRingDuration=isfinite(duration)?fmax(0,duration):0;
+            diRingRate=isfinite(rate)?rate:0;
+            diRingStamp=CFAbsoluteTimeGetCurrent();
             gDIHasNowPlaying = has;
             gDIInfoReady = YES;
         });
@@ -19381,6 +19394,7 @@ static CADisplayLink *gDIRhythmLink = nil;
 static id gDIRhythmTicker = nil;
 static __weak UIView *gDIRhythmTarget = nil;
 static __weak UIView *gDIRhythmHost = nil;
+static CAShapeLayer *diProgressBack=nil, *diProgressFront=nil;
 static CALayer *gDIRhythmRingBox = nil;
 static CAGradientLayer *gDIRhythmRingGrad = nil;
 static CAShapeLayer *gDIRhythmRingMask = nil;
@@ -20524,6 +20538,8 @@ static void diCoverUnround(void) {
 
 /* ---------- 刻度环 ---------- */
 static void diRhythmDetach(void) {
+    [diProgressBack removeFromSuperlayer]; [diProgressFront removeFromSuperlayer];
+    diProgressBack=nil; diProgressFront=nil;
     if (gDIRhythmRingBox) {
         [gDIRhythmRingBox removeFromSuperlayer];
         gDIRhythmRingBox = nil;
@@ -20630,11 +20646,11 @@ static void diRhythmBuildRing(UIView *host, UIColor *ca, UIColor *cb) {
 static void diRhythmLayoutRing(CGRect cover, const float *bands, BOOL active) {
     if (!gDIRhythmRingBox) return;
     CGFloat R = cover.size.width * 0.5f;
-    CGFloat gap = R * DI_TICK_GAP;
-    CGFloat maxLen = R * DI_TICK_LEN * (CGFloat)rhythmStrength;
+    CGFloat gap = 1.25 * (cover.size.width / 57.0);
+    CGFloat maxLen = 8.5 * (cover.size.width / 57.0) * MAX(0.3, rhythmStrength);
     if (maxLen < 2.5) maxLen = 2.5;
     CGFloat tickW = MAX(1.4, R * DI_TICK_W) * (CGFloat)(rhythmRingWidth / 2.2);
-    tickW *= (0.94 + 0.22 * gDIBeatEnv);
+    /* Reference keeps stroke width stable; energy changes length, not thickness. */
     gDIRhythmRingMask.lineWidth = tickW;
     if (gDIRhythmRingBack) gDIRhythmRingBack.lineWidth = tickW * 1.25;
 
@@ -20651,7 +20667,7 @@ static void diRhythmLayoutRing(CGRect cover, const float *bands, BOOL active) {
 
     CGPoint c = CGPointMake(gDIRhythmRingBox.bounds.size.width / 2,
                             gDIRhythmRingBox.bounds.size.height / 2);
-    CGFloat r0 = R + gap;
+    CGFloat r0 = R - 0.25 * (cover.size.width / 57.0);
     /* 3.0.55: 取消 30Hz 降频 —— 120Hz 屏上 30Hz 更新就是"每四帧才动一下"的顿感。
        80 段直线路径的构建开销很小, 每帧重建肉眼才连得上。 */
     CGMutablePathRef tp = CGPathCreateMutable();
@@ -20674,13 +20690,46 @@ static void diRhythmLayoutRing(CGRect cover, const float *bands, BOOL active) {
         }
         if (band < 0) band = 0;
         if (band > 1) band = 1;
-        CGFloat len = active ? (1.2 + maxLen * pow(band, 0.80)) : 1.2;
+        CGFloat len = active ? (gap + 0.25*(cover.size.width/57.0) + maxLen*band) : 0;
         CGPathMoveToPoint(tp, NULL, c.x + cos(a) * r0, c.y + sin(a) * r0);
         CGPathAddLineToPoint(tp, NULL, c.x + cos(a) * (r0 + len), c.y + sin(a) * (r0 + len));
     }
     gDIRhythmRingMask.path = tp;
     if (gDIRhythmRingBack) gDIRhythmRingBack.path = tp;
     CGPathRelease(tp);
+}
+
+/* Progress is song time / duration, never audio energy or a synthetic loop. */
+static void diUpdateProgressRing(UIView *host, CGRect cover, BOOL visible) {
+    if (!diProgressRingOn || !host || !visible || diRingDuration <= 0) {
+        diProgressBack.hidden=YES; diProgressFront.hidden=YES; return;
+    }
+    if (!diProgressFront) {
+        diProgressBack=[CAShapeLayer layer]; diProgressFront=[CAShapeLayer layer];
+        for (CAShapeLayer *l in @[diProgressBack,diProgressFront]) {
+            l.fillColor=UIColor.clearColor.CGColor; l.lineCap=kCALineCapRound;
+            l.zPosition=945; l.actions=@{@"path":NSNull.null,@"position":NSNull.null,
+                @"bounds":NSNull.null,@"strokeEnd":NSNull.null,@"hidden":NSNull.null};
+            [host.layer addSublayer:l];
+        }
+    }
+    [CATransaction begin]; [CATransaction setDisableActions:YES];
+    diProgressBack.hidden=NO; diProgressFront.hidden=NO;
+    CGFloat w=diProgressRingWidth;
+    CGFloat r=MAX(1,MIN(cover.size.width,cover.size.height)*0.5+w*0.5+1.0);
+    CGPoint center=CGPointMake(CGRectGetMidX(cover),CGRectGetMidY(cover));
+    UIBezierPath *path=[UIBezierPath bezierPathWithArcCenter:center radius:r
+        startAngle:-M_PI_2 endAngle:3*M_PI_2 clockwise:YES];
+    UIColor *color=diRhythmHexColor(diProgressRingColor,
+        [UIColor colorWithRed:191.0/255 green:205.0/255 blue:186.0/255 alpha:1]);
+    diProgressBack.path=path.CGPath; diProgressFront.path=path.CGPath;
+    diProgressBack.lineWidth=w; diProgressFront.lineWidth=w;
+    diProgressBack.strokeColor=[UIColor colorWithWhite:1 alpha:0.18].CGColor;
+    diProgressFront.strokeColor=color.CGColor;
+    double elapsed=diRingElapsed;
+    if (musicPlaying && diRingRate>0) elapsed+=MAX(0,CFAbsoluteTimeGetCurrent()-diRingStamp)*diRingRate;
+    diProgressFront.strokeEnd=MIN(1,MAX(0,elapsed/diRingDuration));
+    [CATransaction commit];
 }
 
 /* ---------- 频谱条(进度条上方的小竖条) ---------- */
@@ -21570,7 +21619,8 @@ static void diFxHardStop(void) {
     gDIDotCount = 0;
     gDISpawnAcc = 0.0f;
     if (gDIDotClipLayer) gDIDotClipLayer.opacity = 0.0f;
-    if (gDIRhythmRingGrad) gDIRhythmRingGrad.opacity = 0.0f;
+    diProgressBack.hidden=YES; diProgressFront.hidden=YES;
+        if (gDIRhythmRingGrad) gDIRhythmRingGrad.opacity = 0.0f;
     if (gDIRhythmRingBack) gDIRhythmRingBack.opacity = 0.0f;
     if (gDIRhythmBarsGrad) gDIRhythmBarsGrad.opacity = 0.0f;
     [CATransaction commit];
@@ -21614,7 +21664,7 @@ static void diISPublishBeat(BOOL playing) {
 }
 
 static void diRhythmTickWithDelta(float dtIn) {
-    BOOL anyFx = (rhythmOn || rhythmRingOn || rhythmParticlesOn || rhythmBarsOn);
+    BOOL anyFx = (rhythmOn || rhythmRingOn || diProgressRingOn || rhythmParticlesOn || rhythmBarsOn);
     /* 3.0.85: 岛专辑特效改走 MRU(真实专辑遮罩)进程, SB 引擎不再为它启动 */
     if (!rhythmFxOn || !anyFx) { diRhythmReset(); return; }
 
@@ -21733,6 +21783,7 @@ static void diRhythmTickWithDelta(float dtIn) {
     if (expanded) {
         [CATransaction begin];
         [CATransaction setDisableActions:YES];
+        diProgressBack.hidden=YES; diProgressFront.hidden=YES;
         if (gDIRhythmRingGrad) gDIRhythmRingGrad.opacity = 0.0f;
         if (gDIRhythmRingBack) gDIRhythmRingBack.opacity = 0.0f;
         if (gDIRhythmBarsGrad) gDIRhythmBarsGrad.opacity = 0.0f;
@@ -21942,6 +21993,8 @@ static void diRhythmTickWithDelta(float dtIn) {
     UIView *host = gDIRhythmHost;
     if (!host) return;
     CGRect cover = diRhythmCoverRect(t, host);
+    diNPQueryNowPlaying();
+    diUpdateProgressRing(host, cover, hasSong);
 
     if (gDIRhythmRingBox) {
         [CATransaction begin];
@@ -22662,7 +22715,7 @@ static void diRhythmEnsure(void) {
        用户在设置里拨任意开关会重新拉满档位, 律动随之恢复。 */
     /* 3.0.84: 只开岛特效时也要把引擎拉起来 */
     /* 3.0.85: 岛特效不再由 SB 引擎带跑(改走 MRU), need 恢复原判据 */
-    BOOL need = (rhythmFxOn && (rhythmOn || rhythmRingOn || rhythmParticlesOn || rhythmBarsOn))
+    BOOL need = (rhythmFxOn && (rhythmOn || rhythmRingOn || diProgressRingOn || rhythmParticlesOn || rhythmBarsOn))
                 && gDIStage >= 2;
     if (need && !gDIRhythmLink) {
         if (!gDIRhythmTicker) gDIRhythmTicker = [DIFxTicker new];

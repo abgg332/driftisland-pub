@@ -245,7 +245,7 @@ static BOOL diIsFxKey(NSString *key) {
     static NSArray<NSString *> *pfx;
     static dispatch_once_t once;
     dispatch_once(&once, ^{
-        pfx = @[@"Album", @"Rhythm", @"Particle", @"Spectrum", @"Ring"];
+        pfx = @[@"Album", @"Rhythm", @"Particle", @"Spectrum", @"Ring", @"ArtworkProgress", @"ArtworkRing", @"ProgressRing"];
     });
     for (NSString *p in pfx) if ([key hasPrefix:p]) return YES;
     return NO;
@@ -6730,9 +6730,24 @@ static NSString *diBarStyleLabel(int s) {
     /* 3.0.61: 删掉「圆形封面」—— 它和「原生播放 → 启用遮罩」抢同一件事(封面的形状),
        用户 474 原话"功能里有个旋转、律动里又有个圆形封面, 专辑都冲突了"。
        专辑形状统一由「启用遮罩」管; 这里恒为圆形(与历史默认一致, 不改观感)。 */
-    [specs addObject:[self switchSpec:@"启用律动专辑环" key:diFxSizedKey(@"AlbumRingOn") def:@YES]];
+
     [specs addObject:[self switchSpec:@"专辑跟随律动" key:diFxSizedKey(@"AlbumRhythmOn") def:@YES]];
     [specs addObject:[self npSlider:@"专辑律动幅度" key:diFxSizedKey(@"AlbumBeatScale") def:0.70 mn:0.00 mx:2.00]];
+
+    [specs addObject:[self groupSpec:@"专辑进度环" footer:@"根据歌曲实际播放进度绘制，暂停保留位置；没有时长的直播不显示。"]];
+    [specs addObject:[self switchSpec:@"启用专辑进度环" key:diFxSizedKey(@"ArtworkProgressRingEnabled") def:@NO]];
+    [specs addObject:[self npSlider:@"进度环宽度" key:diFxSizedKey(@"ArtworkRingWidth") def:3.0 mn:0.5 mx:10.0]];
+    [specs addObject:[self fxColorSpec:@"进度环颜色" key:diFxSizedKey(@"ArtworkRingColor") def:@"#BFCDBA" modeKey:diFxSizedKey(@"ProgressRingColorMode")]];
+
+    [specs addObject:[self groupSpec:@"律动专辑环" footer:@"72段真实音频频谱控制刻度长度；颜色与粒子独立。"]];
+    [specs addObject:[self switchSpec:@"启用律动专辑环" key:diFxSizedKey(@"AlbumRingOn") def:@YES]];
+    [specs addObject:[self npSlider:@"律动强度" key:diFxSizedKey(@"AlbumRhythmStrength") def:0.90 mn:0.30 mx:2.50]];
+    [specs addObject:[self npSlider:@"刻度粗细" key:diFxSizedKey(@"AlbumRingWidth2") def:2.20 mn:0.80 mx:8.00]];
+    [specs addObject:[self npSlider:@"环透明度" key:diFxSizedKey(@"RhythmRingFollowAlpha") def:1.0 mn:0.1 mx:1.0]];
+    [specs addObject:[self modeSpec:@"颜色来源" key:diFxSizedKey(@"RingColorMode")]];
+    [specs addObject:[self fxColorSpec:@"渐变起始色" key:diFxSizedKey(@"AlbumColorA") def:@"#E59971" modeKey:diFxSizedKey(@"RingColorMode")]];
+    [specs addObject:[self fxColorSpec:@"渐变结束色" key:diFxSizedKey(@"AlbumColorB") def:@"#948FFF" modeKey:diFxSizedKey(@"RingColorMode")]];
+    [specs addObject:[self fxFlowSpec:@"环流光" key:diFxSizedKey(@"RingFlowOn")]];
 
     [specs addObject:[self groupSpec:@"律动粒子" footer:nil]];
     [specs addObject:[self switchSpec:@"启用律动粒子" key:diFxSizedKey(@"AlbumParticlesOn") def:@YES]];
