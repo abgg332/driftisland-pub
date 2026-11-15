@@ -22221,9 +22221,10 @@ static void diISMRUTeardown(void) {
    以前 art 一旦无效(展开成 66pt、换岛、下台)这里只是 return: 粒子清了, 但玻璃上的
    缩放(最多 1.22)留在那儿。岛展开后系统把同一颗头像放大到 66pt, 那块还带着放大的
    玻璃就压到系统专辑上 —— 493/494 说的"展开又多出一块蒙版/影子"就是它。
-   现在: 拆粒子宿主 + 缩放归 1 + 解绑, 一步做完。 */
-static void diISMRUPark(UIView *glass) {
-    if (gDIISMDotCount > 0 || gDIISMHost) diISMClearDots();
+   现在: 缩放归 1 + 解绑; keepDots=NO 时连粒子宿主一起拆(展开/停止),
+   keepDots=YES 时只归缩放 —— 系统换了一颗同尺寸的头像, 粒子该接着飞。 */
+static void diISMRUPark(UIView *glass, BOOL keepDots) {
+    if (!keepDots && (gDIISMDotCount > 0 || gDIISMHost)) diISMClearDots();
     UIView *g = glass ?: gDIISMGlass;
     if (g) {
         [CATransaction begin];
@@ -22248,7 +22249,7 @@ static void diISMRUApply(UIView *artwork, UIView *glass) {
        绝不把上一步的缩放/粒子留在展开态上(493 明确说"我不需要展开")。 */
     CGFloat side = diISMSide(artwork);
     if (side < 12.0 || side > 44.0) {
-        if (artwork == gDIISMArt || glass == gDIISMGlass) diISMRUPark(glass);
+        if (artwork == gDIISMArt || glass == gDIISMGlass) diISMRUPark(glass, NO);
         return;
     }
     diISMRUBind(artwork, glass);
@@ -22284,9 +22285,27 @@ static void diISMRUFrame(float dtIn) {
     /* 绑定维护: 当前这块下台了才换候选, 绝不"谁后注册听谁的" */
     if (!gDIISMArt || !gDIISMArt.window || gDIISMArt.hidden || gDIISMArt.alpha < 0.02
         || diISMSide(gDIISMArt) > 44.0) {
-        if (gDIISMArt || gDIISMHost) diISMRUPark(gDIISMGlass);   /* 3.0.88: 缩放/粒子一起收 */
+        UIView *oldGlass = gDIISMGlass;
+        BOOL wasExpanded = (gDIISMArt != nil && diISMSide(gDIISMArt) > 44.0);
         gDIISMArt = nil; gDIISMGlass = nil;
-        diISMRUAdoptCandidate();
+        if (wasExpanded) {
+            /* 展开成 66pt: 律动缩放 + 粒子一起收干净(493: 不需要展开) */
+            diISMRUPark(oldGlass, NO);
+        } else {
+            /* 3.0.88: 先认下一块 —— 系统每次重建岛容器都会换一颗**大小一样**的头像,
+               以前这里直接全清, 25 颗粒子要重新一颗颗吐出来(1~2 秒),
+               看着就是"一下全没、再一下又出来"。换头像时粒子状态保留, 只把缩放归 1。 */
+            diISMRUAdoptCandidate();
+            if (!gDIISMArt) {
+                diISMRUPark(oldGlass, YES);
+            } else if (oldGlass && oldGlass != gDIISMGlass) {
+                [CATransaction begin];
+                [CATransaction setDisableActions:YES];
+                oldGlass.layer.transform = CATransform3DIdentity;
+                [CATransaction commit];
+                gDIISMScaleNow = 1.0f;
+            }
+        }
     }
     UIView *art = gDIISMArt;
     UIView *glass = gDIISMGlass;
