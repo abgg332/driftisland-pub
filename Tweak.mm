@@ -21650,7 +21650,7 @@ static void diRhythmTickWithDelta(float dtIn) {
     else if (gDIPlayRateState == 1) playing = YES;
     BOOL active = hasSong && playing;
     if (active) gDIBeatStopped = NO;
-    if (anyIsland) diISFrame(dt, active);   /* 3.0.84: 岛专辑律动/粒子 */
+    if (anyIsland) diISFrame(dtIn, active);   /* 3.0.84: 岛专辑律动/粒子(dt 的 clamp 在 diISFrame 里做) */
 
     /* 3.0.58(图三): 暂停/停播时把引擎从原生刷新率降到 20Hz。
        图三说的是"原生 layoutSubviews 排完版会休眠, 我们一直改布局它就一直在刷新, 所以发热"。
