@@ -5968,6 +5968,13 @@ static void diNPApplySize(NSString *size) {
     if ([size isEqualToString:@"3x2b"]) {   /* 布局 B: 模块按 4x2 放, 变体交给 PlayerGridVariant */
         moduleSize = @"4x2";
         variant = @"3x2b";
+    } else if ([size isEqualToString:@"3x1"]) {
+        /* 3.0.111: 3×1 —— 系统只认 2x2/2x3/3x2/4x1/4x2/4x3(写 3x1 会被退化成 2×2),
+           所以模块仍按 4×1 占位, 真正的收窄由 dylib 里的 setFrame 钩子做:
+           宽度改成满宽的 0.75、居中, 高度保持 1 格。
+           Size 写 "3x1" 是给运行时看的开关, 不写进 ModuleSizes。 */
+        moduleSize = @"4x1";
+        variant = nil;
     }
     sizes[kNPModuleID] = moduleSize;
     diNPWrite(@"ModuleSizes", sizes, kNPDomain);
@@ -5975,20 +5982,21 @@ static void diNPApplySize(NSString *size) {
     diNPWrite(@"Size", size, kNPDomain);
 }
 
-/* 3.0.39: 3×1 档位已整体删除(用户: "3×1 暂时删除, 相关的也删除")。
-   域里若还留着它(Size / PlayerGridVariant), 这里一次性改回 4×1 —— 高度和排版本来
-   就是 4×1 的, 只是很宽; 不改的话播放器会拿一个已经不存在的档位去挑布局。
-   只在设置页打开时做, 不碰运行期。 */
+/* 3.0.111: 3×1 档位回来了 —— 原来"把遗留 3x1 改回 4x1"的自愈必须撤掉,
+   否则用户刚选完 3×1, 下次进设置页就被这段改回 4×1。
+   现在只做一件事: 把历史遗留的**非法模块尺寸** 3x1 修正成 4x1(模块占位永远是 4x1,
+   收窄由运行时钩子做), Size 键保持 3x1 不动。 */
 static void diNPMigrateRetiredSizes(void) {
     static BOOL done = NO;
     if (done) return;
     done = YES;
-    id variant = diNPRead(@"PlayerGridVariant", kNPDomain);
-    id sz = diNPRead(@"Size", kNPDomain);
-    BOOL v31 = [variant isKindOfClass:NSString.class] && [variant isEqualToString:@"3x1"];
-    BOOL s31 = [sz isKindOfClass:NSString.class] && [sz isEqualToString:@"3x1"];
-    if (!v31 && !s31) return;
-    diNPApplySize(@"4x1");
+    id dict = diNPRead(@"ModuleSizes", kNPDomain);
+    if (![dict isKindOfClass:NSDictionary.class]) return;
+    id v = ((NSDictionary *)dict)[kNPModuleID];
+    if (![v isKindOfClass:NSString.class] || ![v isEqualToString:@"3x1"]) return;
+    NSMutableDictionary *m = [dict mutableCopy];
+    m[kNPModuleID] = @"4x1";
+    diNPWrite(@"ModuleSizes", m, kNPDomain);
 }
 
 /* 3.0.3: 播放器构造器有两道门槛 —— Enabled 必须是 true, 且 ActivationVersion 必须等于 "0.3.1"。
@@ -6211,10 +6219,10 @@ static void diNPEnsureActivation(void) {
     [size setProperty:@"Size" forKey:@"key"];
     [size setProperty:kNPDomain forKey:@"defaults"];
     [size setProperty:@"2x2" forKey:@"default"];
-    [size setProperty:@[ @"2x2", @"2x3", @"3x2", @"3x2b", @"4x1", @"4x2", @"4x2b", @"4x3" ]
+    [size setProperty:@[ @"2x2", @"2x3", @"3x2", @"3x2b", @"4x1", @"3x1", @"4x2", @"4x2b", @"4x3" ]
                forKey:@"validValues"];
     [size setProperty:@[ @"2 × 2", @"2 × 3", @"3 × 2", @"3 × 2（布局 B）",
-                         @"4 × 1", @"4 × 2", @"4 × 2（布局 B）", @"4 × 3" ]
+                         @"4 × 1", @"3 × 1", @"4 × 2", @"4 × 2（布局 B）", @"4 × 3" ]
                forKey:@"validTitles"];
     [specs addObject:size];
 
@@ -6267,9 +6275,9 @@ static void diNPEnsureActivation(void) {
     NSMutableArray *specs = [NSMutableArray array];
     [specs addObject:[self groupSpec:@"播放器尺寸" footer:nil]];
 
-    NSArray<NSString *> *vals = @[ @"2x2", @"2x3", @"3x2", @"3x2b", @"4x1", @"4x2", @"4x2b", @"4x3" ];
+    NSArray<NSString *> *vals = @[ @"2x2", @"2x3", @"3x2", @"3x2b", @"4x1", @"3x1", @"4x2", @"4x2b", @"4x3" ];
     NSArray<NSString *> *titles = @[ @"2 × 2", @"2 × 3", @"3 × 2", @"3 × 2（布局 B）",
-                                     @"4 × 1", @"4 × 2", @"4 × 2（布局 B）", @"4 × 3" ];
+                                     @"4 × 1", @"3 × 1（窄岛）", @"4 × 2", @"4 × 2（布局 B）", @"4 × 3" ];
     NSString *cur = diNPCurrentSize();
 
     for (NSUInteger i = 0; i < vals.count && i < titles.count; i++) {
@@ -6476,8 +6484,9 @@ static NSString *diModeName(int m) {
 }
 
 /* ===== 3.0.83: 频谱条样式 =====
-   9 种画法(柱状/点阵/镜像/阶梯/峰值/尖刺/斜切/电波/气泡), 点一下换下一个, 写 SpectrumStyle 后
-   fxtune 即时生效。用**不分尺寸的原键** —— 样式对每个播放器尺寸都该一致。 */
+   3.0.111: 从 6 种扩到 12 种 —— 原有 柱状/点阵/镜像/峰值/尖刺/斜切,
+   新增 绸带/萤火/山峦/脉冲/阶梯/星轨。点一下换下一个, 写 SpectrumStyle 后 fxtune 即时生效。
+   用**不分尺寸的原键** —— 样式对每个播放器尺寸都该一致。 */
 static NSString *diBarStyleLabel(int s) {
     switch (s) {
         case 0:  return @"柱状";
@@ -6486,14 +6495,27 @@ static NSString *diBarStyleLabel(int s) {
         case 4:  return @"峰值";
         case 5:  return @"尖刺";
         case 6:  return @"斜切";
+        case 9:  return @"绸带";
+        case 10: return @"萤火";
+        case 11: return @"山峦";
+        case 12: return @"脉冲";
+        case 13: return @"阶梯";
+        case 14: return @"星轨";
         default:return @"柱状";
+    }
+}
+static BOOL diBarStyleOK(int s) {
+    switch (s) {
+        case 0: case 1: case 2: case 4: case 5: case 6:
+        case 9: case 10: case 11: case 12: case 13: case 14: return YES;
+        default: return NO;
     }
 }
 - (int)diBarStyleIndex {
     id v = diFxReadSized(@"SpectrumStyle");
     int s = v ? [v intValue] : 0;
     if (s < 0) s = 0;
-    if (!(s==0||s==1||s==2||s==4||s==5||s==6)) s=0;
+    if (!diBarStyleOK(s)) s = 0;
     return s;
 }
 - (PSSpecifier *)barStyleSpec {

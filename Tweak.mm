@@ -918,6 +918,17 @@ static NSString *diFxSizeId(void) {
     if (cacheGen != gDISizeGen) { cache = nil; ts = 0; cacheGen = gDISizeGen; }
     CFTimeInterval now = CFAbsoluteTimeGetCurrent();
     if (cache && now - ts < 2.0) return cache;
+    /* 3.0.111: 3×1 的模块占位写的是 4x1(系统只认这几档), 但它的特效参数要独立一套,
+       不能被 4×1 直接复用 —— 所以先看 Size 键认一下 3×1。 */
+    {
+        id s31 = CFBridgingRelease(CFPreferencesCopyAppValue(CFSTR("Size"),
+                                                            CFSTR("com.local.playerexact")));
+        if ([s31 isKindOfClass:NSString.class] && [(NSString *)s31 isEqualToString:@"3x1"]) {
+            cache = @"3x1";
+            ts = now;
+            return cache;
+        }
+    }
     NSString *cur = nil;
     id v = CFBridgingRelease(CFPreferencesCopyAppValue(CFSTR("PlayerGridVariant"),
                                                       CFSTR("com.local.playerexact")));
@@ -1043,13 +1054,15 @@ static void diFxLoadPrefs(void) {
     rhythmRoundCover = YES;   /* 3.0.61: 开关已从律动页移除(与「启用遮罩」重复), 恒为圆形 */
     rhythmBarsOn = fxBool(@"AlbumBarsOn", YES);
     {
-        /* 3.0.83: 频谱条样式(0~8, 不分尺寸) */
+        /* 3.0.111: 频谱条样式 —— 0/1/2/4/5/6 是原有六种, 9~14 是这一版新增的六种;
+           3/7/8 是历史预留位(没有实现), 选到一律回落到柱状。 */
         {
             id sv = CFBridgingRelease(CFPreferencesCopyAppValue((__bridge CFStringRef)@"SpectrumStyle",
                                                                (__bridge CFStringRef)kDomain));
             int st = sv ? [sv intValue] : 0;
             if (st < 0) st = 0;
-            if (!(st==0||st==1||st==2||st==4||st==5||st==6)) st=0;
+            if (!(st==0||st==1||st==2||st==4||st==5||st==6
+                  ||st==9||st==10||st==11||st==12||st==13||st==14)) st=0;
             if (st != gDIBarStyle) {
                 gDIBarStyle = st;
                 for (int i = 0; i < 64; i++) gDIBarPeak[i] = 0.0f;   /* 换样式时峰值重新来 */
@@ -15775,6 +15788,32 @@ static void diRouteHideHalo(UIView *hit) {
     }
 }
 
+/* 3.0.111: 播放控制键绝不能被当成"投送"藏掉。
+   480 之后一直有"点了下一首, 有几率按钮就不见了, 再点一下又出来"的反馈。
+   根因: 位置兜底的判据是"右下角(x>73%宽, y>52%高) + 20~80pt 按钮",
+   而 4×1 / 3×2 的传送栏里, **下一首正好落在 70%~80% 宽度、下半区**, 完全符合;
+   名字判据一旦没命中(布局重排、动画中间帧、label 还没写), 兜底就把下一首
+   当投送藏了 —— 还会被 diRouteHideHalo 连带藏掉周围那颗圆底。
+   现在两道路障: ① 播放控制语义直接排除; ② 位置阈值收紧到"贴右边"。 */
+static BOOL diRouteIsPlaybackControl(UIView *v) {
+    if (!v) return NO;
+    NSString *cn = NSStringFromClass(v.class).lowercaseString;
+    if ([cn containsString:@"transport"]) return YES;
+    NSString *lab = v.accessibilityLabel.lowercaseString ?: @"";
+    NSString *ident = @"";
+    @try {
+        id o = [v valueForKey:@"accessibilityIdentifier"];
+        if ([o isKindOfClass:NSString.class]) ident = [(NSString *)o lowercaseString];
+    } @catch (__unused NSException *e) {}
+    NSArray<NSString *> *bad = @[ @"next", @"previous", @"prev", @"play", @"pause",
+                                 @"forward", @"backward", @"skip",
+                                 @"下一首", @"上一首", @"下一个", @"上一个", @"播放", @"暂停" ];
+    for (NSString *w in bad) {
+        if ([lab containsString:w] || [ident containsString:w]) return YES;
+    }
+    return NO;
+}
+
 static void diActivityHideRoute(UIView *root) {
     if (!NSThread.isMainThread || !root || !root.window) return;
     DIExpTextParams p; diMruExpandTextParams(&p);
@@ -15793,7 +15832,13 @@ static void diActivityHideRoute(UIView *root) {
     /* 已经藏好了就别每帧重扫(展开动画里 layout 会连续触发) */
     if (gDIRouteViews.count) {
         BOOL alive = YES;
-        for (UIView *v in gDIRouteViews.allObjects) if (!v.window) { alive = NO; break; }
+        for (UIView *v in gDIRouteViews.allObjects) {
+            if (!v.window) { alive = NO; break; }
+            /* 3.0.111: 系统每次重排都会把 hidden 放出来 —— 以前这里"活着就 return",
+               于是按钮闪一下又回来了(用户说的"再点一下又显示")。这里只补写一次
+               hidden, 很便宜, 也不会打断系统布局。 */
+            if (!v.hidden) v.hidden = YES;
+        }
         if (alive) return;
         for (UIView *v in gDIRouteViews.allObjects) v.hidden = NO;
         [gDIRouteViews removeAllObjects];
@@ -15815,10 +15860,14 @@ static void diActivityHideRoute(UIView *root) {
                     sz.width, sz.height, c.x, c.y];
                 break;
             }
-            /* 兜底: 右下角那颗 20~80pt 的按钮(实测投送在 78%~88% 宽度上, 下一首在 ~70%) */
-            if (!hit && c.x > W * 0.73 && c.y > H * 0.52
+            /* 兜底: 右下角那颗 20~80pt 的按钮。
+               3.0.111: 阈值从 73% 收到 80%, 并且必须"贴着右边缘"(离右边 ≤16% 宽);
+               播放控制键(上一首/播放/下一首)直接排除 —— 见 diRouteIsPlaybackControl。
+               实测投送在 78%~88% 宽度上, 下一首在 ~70%, 收窄后两者彻底分开。 */
+            if (!hit && c.x > W * 0.80 && (W - c.x) < W * 0.16
+                && c.y > H * 0.52
                 && sz.width >= 20 && sz.height >= 20 && sz.width <= 80 && sz.height <= 80
-                && diRouteIsButtonish(v)) {
+                && diRouteIsButtonish(v) && !diRouteIsPlaybackControl(v)) {
                 hit = v;
                 [dump appendFormat:@"位 %@(%.0fx%.0f@%.0f,%.0f) ", NSStringFromClass(v.class),
                     sz.width, sz.height, c.x, c.y];
@@ -18656,6 +18705,139 @@ static void diNPApplyHideTime(void) {
 /* ---------- 模块容器钩子 ---------- */
 static void (*gDIOrigModuleLayout)(id, SEL) = NULL;
 
+/* ===== 3.0.111: 3×1 档位（重建） =====
+   和 3.0.39 之前那版最大的区别 —— 这次只做**一件事**:
+   系统给"播放器模块容器 / 内容容器"设 frame 的那一刻, 把宽度改成 3 格并居中。
+   不装 layoutSubviews 钩子、不装 200ms 巡检、**不手动挪任何一颗按钮**。
+
+   旧版为什么问题多: 它同时改了容器和卡片两处、又挂了 layoutSubviews 事后纠正、
+   再加一个 watchdog 每 200ms 抢写, 三处互相打架; 按钮因为在 4 格宽下排好的,
+   只能靠 diNP31ShiftButtons 一颗颗硬挪 —— 挪出来的坐标和系统真实布局对不上,
+   偶尔直接挪出可视区, 用户看到的就是"下一首不见了 / 再点又出现"。
+   现在宽度只改一次(在 setFrame 里, 同一调用栈、CA 提交前), 里面那排按钮交给
+   播放器自己的布局按新宽度排, 一个坐标都不猜。
+
+   目标宽 = 满宽 × 0.75 − 4（4 格 → 3 格, 扣掉格间距）; 居中摆放(旧版是左对齐,
+   所以内容整体偏左)。只处理折叠态(高 40~130), 展开态一个像素都不动。 */
+static char kDI31FullW;      /* 用不到, 占位保留 */
+static char kDI31NegTS;
+static CGFloat gDI31FullW = 0.0;   /* 全局满宽(同一时刻只有一个播放器模块) */
+static BOOL gDI31Hooked = NO;
+static void (*gDI31OrigBoxSetFrame)(id, SEL, CGRect) = NULL;
+static void (*gDI31OrigCardSetFrame)(id, SEL, CGRect) = NULL;
+
+static BOOL di31KeyOn(void) {
+    static NSString *cache = nil;
+    static CFTimeInterval ts = 0;
+    CFTimeInterval now = CFAbsoluteTimeGetCurrent();
+    if (cache && now - ts < 2.0) return [cache isEqualToString:@"3x1"];
+    NSString *cur = nil;
+    id sz = CFBridgingRelease(CFPreferencesCopyAppValue(CFSTR("Size"),
+                                                       CFSTR("com.local.playerexact")));
+    if ([sz isKindOfClass:NSString.class] && [(NSString *)sz length]) cur = sz;
+    if (!cur.length) {
+        id d = CFBridgingRelease(CFPreferencesCopyAppValue(CFSTR("ModuleSizes"),
+                                                          CFSTR("com.local.playerexact")));
+        if ([d isKindOfClass:NSDictionary.class]) {
+            id s = ((NSDictionary *)d)[@"com.apple.mediaremote.controlcenter.nowplaying"];
+            if ([s isKindOfClass:NSString.class]) cur = s;
+        }
+    }
+    if (!cur.length) {
+        id v = CFBridgingRelease(CFPreferencesCopyAppValue(CFSTR("PlayerGridVariant"),
+                                                          CFSTR("com.local.playerexact")));
+        if ([v isKindOfClass:NSString.class] && [(NSString *)v length]) cur = v;
+    }
+    cache = cur ?: @"";
+    ts = now;
+    return [cache isEqualToString:@"3x1"];
+}
+
+static BOOL di31HasNP(UIView *v, int depth, int *budget) {
+    if (!v || depth > 7 || !budget || *budget <= 0) return NO;
+    (*budget)--;
+    NSString *cn = NSStringFromClass(v.class);
+    if ([cn containsString:@"NowPlaying"] || [cn containsString:@"MediaControls"]
+        || [cn containsString:@"Transport"]) return YES;
+    for (UIView *c in v.subviews) if (di31HasNP(c, depth + 1, budget)) return YES;
+    return NO;
+}
+
+static BOOL di31IsPlayer(UIView *v) {
+    if (!v) return NO;
+    NSNumber *neg = objc_getAssociatedObject(v, &kDI31NegTS);
+    CFAbsoluteTime now = CFAbsoluteTimeGetCurrent();
+    if (neg && now - neg.doubleValue < 3.0) return NO;
+    BOOL yes = NO;
+    @try {
+        id ident = [v valueForKey:@"moduleIdentifier"];
+        if ([ident isKindOfClass:NSString.class]
+            && [(NSString *)ident containsString:@"nowplaying"]) yes = YES;
+    } @catch (__unused NSException *e) {}
+    if (!yes) {
+        @try {
+            UIResponder *r = [v nextResponder];
+            if ([r isKindOfClass:UIViewController.class]) {
+                id ident = [r valueForKey:@"moduleIdentifier"];
+                if ([ident isKindOfClass:NSString.class]
+                    && [(NSString *)ident containsString:@"nowplaying"]) yes = YES;
+            }
+        } @catch (__unused NSException *e) {}
+    }
+    if (!yes) { int b = 90; yes = di31HasNP(v, 0, &b); }
+    if (!yes) objc_setAssociatedObject(v, &kDI31NegTS, @(now), OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    return yes;
+}
+
+static CGRect di31Adjust(UIView *v, CGRect f) {
+    if (!di31KeyOn()) return f;
+    if (f.size.height < 40.0 || f.size.height > 130.0) return f;   /* 只要折叠态 */
+    if (f.size.width < 200.0) return f;                            /* 占位/已经窄了 */
+    /* 先按"满宽"筛一道: 只有全宽模块才可能是 4×1 播放器, 手电/计时器这类窄块
+       连识别都不用做(识别里有 KVC 和子树遍历, CC 打开动画里每帧几十次, 很贵)。 */
+    if (f.size.width >= 300.0) {
+        if (f.size.width > gDI31FullW + 0.5) gDI31FullW = f.size.width;
+    }
+    if (gDI31FullW < 300.0) return f;
+    if (!di31IsPlayer(v)) return f;
+    CGFloat target = gDI31FullW * 0.75 - 4.0;
+    if (target < 150.0) return f;
+    if (fabs(f.size.width - target) < 0.6) return f;
+    CGFloat cx = f.origin.x + f.size.width * 0.5;
+    f.size.width = target;
+    f.origin.x = cx - target * 0.5;      /* 居中, 而不是把左边钉死 */
+    return f;
+}
+
+static void di31BoxSetFrame(id self, SEL cmd, CGRect f) {
+    @try { f = di31Adjust((UIView *)self, f); } @catch (__unused NSException *e) {}
+    if (gDI31OrigBoxSetFrame) gDI31OrigBoxSetFrame(self, cmd, f);
+}
+static void di31CardSetFrame(id self, SEL cmd, CGRect f) {
+    @try { f = di31Adjust((UIView *)self, f); } @catch (__unused NSException *e) {}
+    if (gDI31OrigCardSetFrame) gDI31OrigCardSetFrame(self, cmd, f);
+}
+
+static void di31Install(void) {
+    if (gDI31Hooked) return;
+    gDI31Hooked = YES;
+    Class box = NSClassFromString(@"CCUIContentModuleContainerView");
+    Class card = NSClassFromString(@"CCUIContentModuleContentContainerView");
+    if (box) {
+        @try {
+            MSHookMessageEx(box, @selector(setFrame:), (IMP)di31BoxSetFrame,
+                            (IMP *)&gDI31OrigBoxSetFrame);
+        } @catch (__unused NSException *e) {}
+    }
+    if (card) {
+        @try {
+            MSHookMessageEx(card, @selector(setFrame:), (IMP)di31CardSetFrame,
+                            (IMP *)&gDI31OrigCardSetFrame);
+        } @catch (__unused NSException *e) {}
+    }
+    RLog(@"[3x1] 安装 %@ / %@", box ? @"容器 OK" : @"容器 nil", card ? @"卡片 OK" : @"卡片 nil");
+}
+
 static void diNPHandleModuleVC(id vc) {
     if (gDIStage < 1) return;
     NSString *ident = nil;
@@ -19139,6 +19321,7 @@ __attribute__((constructor)) static void init(void) {
                     diNPImages();
                     diArtInstall();   /* 3.0.6: 封面圆角/3×2 抖动 */
                     diArtInstallGated();   /* 3.0.13: 档位门控的高危钩子(满8秒才装) */
+                    @try { di31Install(); } @catch (__unused NSException *e) {}   /* 3.0.111: 3×1 收窄 */
                     if (npSec >= 8) {
                         int hk = diNPHookCheck();
                         diNPDumpDomain();
@@ -21013,6 +21196,106 @@ static void diRhythmUpdateBars(UIView *host, BOOL active) {
                 CGPathAddLineToPoint(p, NULL, xl + bw + sk, y);
                 CGPathAddLineToPoint(p, NULL, xl + sk, y);
                 CGPathCloseSubpath(p);
+            }
+            break;
+        }
+        case 9: {   /* 绸带: 顶点连成一条平滑曲线, 下沿加厚 —— 像一条随音乐起伏的丝带 */
+            CGFloat thick = MAX(1.8f, bw * 1.05f);
+            CGFloat xs[64], ys[64];
+            for (int i = 0; i < n; i++) {
+                xs[i] = x0 + i * (bw + gap) + bw * 0.5f;
+                ys[i] = bottom - hArr[i];
+            }
+            CGPathMoveToPoint(p, NULL, xs[0], ys[0]);
+            for (int i = 1; i < n; i++) {
+                CGFloat mx = (xs[i - 1] + xs[i]) * 0.5f;
+                CGFloat my = (ys[i - 1] + ys[i]) * 0.5f;
+                CGPathAddQuadCurveToPoint(p, NULL, xs[i - 1], ys[i - 1], mx, my);
+            }
+            if (n > 1) CGPathAddQuadCurveToPoint(p, NULL, xs[n - 1], ys[n - 1],
+                                                 xs[n - 1], ys[n - 1]);
+            CGPathAddLineToPoint(p, NULL, xs[n - 1], ys[n - 1] + thick);
+            for (int i = n - 1; i >= 1; i--) {
+                CGFloat mx = (xs[i - 1] + xs[i]) * 0.5f;
+                CGFloat my = (ys[i - 1] + ys[i]) * 0.5f + thick;
+                CGPathAddQuadCurveToPoint(p, NULL, xs[i] + 0.01f, ys[i] + thick, mx, my);
+            }
+            CGPathAddLineToPoint(p, NULL, xs[0], ys[0] + thick);
+            CGPathCloseSubpath(p);
+            break;
+        }
+        case 10: {  /* 萤火: 一根极细的光柱 + 顶端一颗随音量变大的光点 */
+            for (int i = 0; i < n; i++) {
+                CGFloat cx = x0 + i * (bw + gap) + bw * 0.5f;
+                CGFloat topY = bottom - hArr[i];
+                CGPathAddRect(p, NULL, CGRectMake(cx - 0.35f, topY, 0.7f, hArr[i]));
+                CGFloat r = 0.8f + 2.4f * (CGFloat)vArr[i];
+                CGPathAddEllipseInRect(p, NULL, CGRectMake(cx - r, topY - r, r * 2.0f, r * 2.0f));
+            }
+            break;
+        }
+        case 11: {  /* 山峦: 每根一个尖三角, 底边相连成连绵山脉 */
+            CGFloat halfW = (bw + gap) * 0.5f;
+            for (int i = 0; i < n; i++) {
+                CGFloat cx = x0 + i * (bw + gap) + bw * 0.5f;
+                CGFloat tipY = bottom - hArr[i];
+                CGPathMoveToPoint(p, NULL, cx - halfW, bottom);
+                CGPathAddLineToPoint(p, NULL, cx, tipY);
+                CGPathAddLineToPoint(p, NULL, cx + halfW, bottom);
+                CGPathCloseSubpath(p);
+            }
+            break;
+        }
+        case 12: {  /* 脉冲: 每根一段从底部圆心向上张开的半圆环, 半径随频谱 */
+            CGFloat stk = MAX(1.2f, bw * 0.85f);
+            const int seg = 10;
+            for (int i = 0; i < n; i++) {
+                CGFloat cx = x0 + i * (bw + gap) + bw * 0.5f;
+                CGFloat rOut = MAX(stk * 1.15f, hArr[i]);
+                CGFloat rIn = MAX(0.2f, rOut - stk);
+                CGFloat px = 0, py = 0;
+                for (int k = 0; k <= seg; k++) {
+                    CGFloat a = (CGFloat)M_PI * (CGFloat)k / (CGFloat)seg;
+                    CGFloat X = cx + cos(a) * rOut;
+                    CGFloat Y = bottom - sin(a) * rOut;
+                    if (k == 0) CGPathMoveToPoint(p, NULL, X, Y);
+                    else CGPathAddLineToPoint(p, NULL, X, Y);
+                    px = X; py = Y;
+                }
+                (void)px; (void)py;
+                for (int k = seg; k >= 0; k--) {
+                    CGFloat a = (CGFloat)M_PI * (CGFloat)k / (CGFloat)seg;
+                    CGFloat X = cx + cos(a) * rIn;
+                    CGFloat Y = bottom - sin(a) * rIn;
+                    CGPathAddLineToPoint(p, NULL, X, Y);
+                }
+                CGPathCloseSubpath(p);
+            }
+            break;
+        }
+        case 13: {  /* 阶梯: 每 4 根并成一格, 取组内最大值 —— 一段一段的台阶 */
+            const int step = 4;
+            for (int i = 0; i < n; i += step) {
+                int e = MIN(i + step, n);
+                CGFloat gv = 0.0f;
+                for (int k = i; k < e; k++) gv = MAX(gv, vArr[k]);
+                CGFloat gx = x0 + i * (bw + gap);
+                CGFloat gw = (CGFloat)(e - i) * bw + (CGFloat)(e - i - 1) * gap;
+                CGFloat gh = 1.5f + (height - 1.5f) * pow(gv, 0.85f);
+                CGFloat rr = MIN(2.0f, gh * 0.30f);
+                diSafeSpectrumRoundedRect(p, NULL, CGRectMake(gx, bottom - gh, gw, gh), rr, rr);
+            }
+            break;
+        }
+        case 14: {  /* 星轨: 一根细光柱顶上挂一颗十字星, 星的大小跟着频谱走 */
+            for (int i = 0; i < n; i++) {
+                CGFloat cx = x0 + i * (bw + gap) + bw * 0.5f;
+                CGFloat topY = bottom - hArr[i];
+                CGFloat r = 1.0f + 3.0f * (CGFloat)vArr[i];
+                CGFloat t = MAX(0.55f, bw * 0.24f);
+                CGPathAddRect(p, NULL, CGRectMake(cx - t * 0.5f, topY - r, t, r * 2.0f));
+                CGPathAddRect(p, NULL, CGRectMake(cx - r, topY - t * 0.5f, r * 2.0f, t));
+                CGPathAddEllipseInRect(p, NULL, CGRectMake(cx - 0.9f, topY - 0.9f, 1.8f, 1.8f));
             }
             break;
         }
