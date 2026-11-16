@@ -6493,7 +6493,8 @@ static NSString *diModeName(int m) {
 }
 
 /* ===== 3.0.83: 频谱条样式 =====
-   3.0.114: 共 14 种 —— 原有 柱状/点阵/镜像/峰值/尖刺/斜切 + 萤火/星轨/胶囊/霓虹/双子/声呐/波浪/雨帘。
+   3.0.115: 共 11 种 —— 原有 柱状/点阵/镜像/峰值/尖刺/斜切 + 萤火/星轨/胶囊/霓虹/双子。
+   3.0.114 新增的 声呐/波浪/雨帘 已按用户要求删除, 域里留着也回落柱状。
    3.0.111 里新增的 绸带/山峦/脉冲/阶梯 已按用户要求删除, 域里留着也回落柱状。
    用**不分尺寸的原键** —— 样式对每个播放器尺寸都该一致。 */
 static NSString *diBarStyleLabel(int s) {
@@ -6509,17 +6510,13 @@ static NSString *diBarStyleLabel(int s) {
         case 15: return @"胶囊";
         case 16: return @"霓虹";
         case 17: return @"双子";
-        case 18: return @"声呐";
-        case 19: return @"波浪";
-        case 20: return @"雨帘";
         default:return @"柱状";
     }
 }
 static BOOL diBarStyleOK(int s) {
     switch (s) {
         case 0: case 1: case 2: case 4: case 5: case 6:
-        case 10: case 14: case 15: case 16: case 17:
-        case 18: case 19: case 20: return YES;
+        case 10: case 14: case 15: case 16: case 17: return YES;
         default: return NO;
     }
 }

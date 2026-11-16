@@ -77,7 +77,8 @@ static BOOL rhythmRoundCover = YES;            // 3.0.47: 封面裁成正圆
 static BOOL rhythmBarsOn = YES;                // 3.0.48: 频谱条(进度条上方)
 static int  rhythmBarsCount = 40;              // 3.0.50: 频谱条根数(可调)
 /* 3.0.83: 频谱条样式 —— 0 柱状 / 1 点阵 / 2 镜像 / 4 峰值 / 5 尖刺 / 6 斜切
-   / 10 萤火 / 14 星轨 / 15 胶囊 / 16 霓虹 / 17 双子 / 18 声呐 / 19 波浪 / 20 雨帘
+   / 10 萤火 / 14 星轨 / 15 胶囊 / 16 霓虹 / 17 双子
+   (18/19/20 声呐/波浪/雨帘已在 3.0.115 删除)
    (3/7/8 历史预留位; 9/11/12/13 已在 3.0.112 按用户要求删除) */
 static int gDIBarStyle = 0;
 static float gDIBarPeak[64];
@@ -1057,7 +1058,8 @@ static void diFxLoadPrefs(void) {
     rhythmBarsOn = fxBool(@"AlbumBarsOn", YES);
     {
         /* 3.0.113: 频谱条样式 —— 0/1/2/4/5/6 原有六种 + 10 萤火 + 14 星轨
-           + 15 胶囊 + 16 霓虹 + 17 双子 + 18 声呐 + 19 波浪 + 20 雨帘, 共十四种。
+           + 15 胶囊 + 16 霓虹 + 17 双子, 共十一种。
+           18 声呐 / 19 波浪 / 20 雨帘 已在 3.0.115 按用户要求删除, 旧值回落柱状。
            3/7/8 是历史预留位; 9/11/12/13(绸带/山峦/脉冲/阶梯)已按用户要求删除,
            域里若还留着这四个值, 一律回落到柱状。 */
         {
@@ -1066,7 +1068,7 @@ static void diFxLoadPrefs(void) {
             int st = sv ? [sv intValue] : 0;
             if (st < 0) st = 0;
             if (!(st==0||st==1||st==2||st==4||st==5||st==6
-                  ||st==10||st==14||st==15||st==16||st==17||st==18||st==19||st==20)) st=0;
+                  ||st==10||st==14||st==15||st==16||st==17)) st=0;
             if (st != gDIBarStyle) {
                 gDIBarStyle = st;
                 for (int i = 0; i < 64; i++) gDIBarPeak[i] = 0.0f;   /* 换样式时峰值重新来 */
@@ -18709,7 +18711,7 @@ static void diNPApplyHideTime(void) {
 /* ---------- 模块容器钩子 ---------- */
 static void (*gDIOrigModuleLayout)(id, SEL) = NULL;
 
-/* ===== 3.0.112: 3×1 档位（左对齐 + 位置钉死） =====
+/* ===== 3.0.115: 3×1 档位（延时静置收窄 + 按钮右移生效） =====
    3.0.111 收窄后把容器**居中**放, 而系统每帧重设全宽 frame 时给的 x 并不固定
    (展开收起动画、旋转、重排都会变), 每次居中算出来的位置都不一样 ——
    用户看到的就是"位置会变"。这一版改成**左对齐**: 记住该视图满宽时的 x,
@@ -18728,7 +18730,8 @@ static void (*gDIOrigModuleLayout)(id, SEL) = NULL;
 static char kDI31NegTS;
 static char kDI31BaseW;    /* 该视图自己的"满宽"(4 格时的宽度) */
 static char kDI31BaseX;    /* 该视图满宽时的左边距 —— 收窄后钉在这个 x 上 */
-static char kDI31BaseY;    /* 该视图满宽时的 y —— 判断"是否还在原位" */
+static char kDI31Pend;     /* 延时收窄的去重标记 */
+static char kDI31OK;       /* 该视图已确认是播放器模块(正向缓存) */
 static BOOL gDI31Hooked = NO;
 static void (*gDI31OrigBoxSetFrame)(id, SEL, CGRect) = NULL;
 static void (*gDI31OrigCardSetFrame)(id, SEL, CGRect) = NULL;
@@ -18770,8 +18773,24 @@ static BOOL di31HasNP(UIView *v, int depth, int *budget) {
     return NO;
 }
 
-static BOOL di31IsPlayer(UIView *v) {
-    if (!v) return NO;
+/* 播放器模块判定。内容容器(CCUIContentModuleContentContainerView)自己的子树里
+   往往找不到 NowPlaying 类名(3.0.113/114 的按钮右移因此一次都没执行过),
+   这里先向上爬到模块容器再判定。 */
+static BOOL di31IsPlayer(UIView *v, BOOL isCard) {
+    if (isCard) {
+        UIView *box = v.superview;
+        for (int i = 0; box && i < 6; i++) {
+            if ([NSStringFromClass(box.class) containsString:@"CCUIContentModuleContainerView"]) break;
+            box = box.superview;
+        }
+        if (!box) return NO;
+        v = box;
+        NSNumber *ok = objc_getAssociatedObject(v, &kDI31OK);
+        if (ok) return ok.boolValue;
+    } else {
+        NSNumber *ok = objc_getAssociatedObject(v, &kDI31OK);
+        if (ok) return ok.boolValue;
+    }
     NSNumber *neg = objc_getAssociatedObject(v, &kDI31NegTS);
     CFAbsoluteTime now = CFAbsoluteTimeGetCurrent();
     if (neg && now - neg.doubleValue < 3.0) return NO;
@@ -18791,75 +18810,113 @@ static BOOL di31IsPlayer(UIView *v) {
             }
         } @catch (__unused NSException *e) {}
     }
-    if (!yes) { int b = 90; yes = di31HasNP(v, 0, &b); }
-    if (!yes) objc_setAssociatedObject(v, &kDI31NegTS, @(now), OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    if (!yes) { int b = 260; yes = di31HasNP(v, 0, &b); }
+    if (yes) {
+        objc_setAssociatedObject(v, &kDI31OK, @YES, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    } else {
+        objc_setAssociatedObject(v, &kDI31NegTS, @(now), OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    }
     return yes;
 }
 
-/* 唯一改 frame 的地方。isCard: 内容容器在父容器坐标系里, 左边距恒为 0。
-   3.0.114 三条放行判据(都是为了"收回时不再偏移"):
-   ① 视图身上挂着动画(展开/收起/转场) → 一帧都不碰;
-   ② 宽度不在目标附近、x/y 也不在原位 → 过渡帧, 放行;
-   ③ 宽度已经等于目标 → 只把左边距摆正(幂等, 不会引起宽度跳)。
-   只有"系统安静后给的满宽"才会被真正收窄。 */
-static CGRect di31Adjust(UIView *v, CGRect f, BOOL isCard) {
-    if (!di31KeyOn()) return f;
-    if (f.size.height < 40.0 || f.size.height > 130.0) return f;   /* 只要折叠态 */
-    if (f.size.width < 200.0) return f;                            /* 占位/已经窄了 */
-    if (v.layer.animationKeys.count > 0) return f;                 /* 动画中完全不介入 */
+/* ===== 3.0.115: 收窄改为"延时静置后直接应用", setFrame 里一个像素都不改 =====
+   3.0.114 的教训:
+   ① 在 setFrame 里套"动画键就放行"判据 —— 内容容器挂着常驻动画时,
+      收窄被永久拦住, 重开控制中心模块停在 4×1 全宽;
+   ② 内容容器的子树里识别不到播放器类名, di31IsPlayer 恒为 NO,
+      按钮右移(inset)从头到尾没执行过 —— 504 日志里"收窄 卡片"一条都没有。
+   现在的流程:
+   · hook 只做两件事: 记基准(宽度真的换了才刷) + 排一次 80ms 后的延时任务, frame 原样放行;
+   · 延时任务里看当前 frame: 还在动画/不在窗口就再等 80ms, 静置了才直接用原函数
+     写入收窄 frame —— 展开收起动画全程不碰, 也不会再出现"停在全宽不缩"。 */
 
+static void di31ApplyDeferred(UIView *v, BOOL isCard);
+
+static void di31Schedule(UIView *v, BOOL isCard) {
+    if (objc_getAssociatedObject(v, &kDI31Pend)) return;
+    objc_setAssociatedObject(v, &kDI31Pend, @YES, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.08 * NSEC_PER_SEC)),
+                   dispatch_get_main_queue(), ^{
+        objc_setAssociatedObject(v, &kDI31Pend, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        di31ApplyDeferred(v, isCard);
+    });
+}
+
+static void di31ApplyDeferred(UIView *v, BOOL isCard) {
+    if (!di31KeyOn() || !v.window) return;
+    if (v.layer.animationKeys.count > 0) { di31Schedule(v, isCard); return; }  /* 还在动画, 再等 */
+    CGRect f = v.frame;
+    if (f.size.height < 40.0 || f.size.height > 130.0) return;
     NSNumber *bwN = objc_getAssociatedObject(v, &kDI31BaseW);
     NSNumber *bxN = objc_getAssociatedObject(v, &kDI31BaseX);
-    NSNumber *byN = objc_getAssociatedObject(v, &kDI31BaseY);
     CGFloat baseW = bwN ? bwN.doubleValue : 0.0;
-    CGFloat baseX = bxN ? bxN.doubleValue : f.origin.x;
-    CGFloat baseY = byN ? byN.doubleValue : f.origin.y;
-
-    /* 基准只在"宽度真的换了"(首次 / 旋转 / 换档)时刷新 */
-    if (f.size.width >= 300.0 && (baseW < 300.0 || fabs(f.size.width - baseW) > 8.0)) {
-        baseW = f.size.width;
-        baseX = isCard ? 0.0 : f.origin.x;
-        baseY = f.origin.y;
-        objc_setAssociatedObject(v, &kDI31BaseW, @(baseW), OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-        objc_setAssociatedObject(v, &kDI31BaseX, @(baseX), OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-        objc_setAssociatedObject(v, &kDI31BaseY, @(baseY), OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-        static int sLog = 0;
-        if (sLog < 8) { sLog++; RLog(@"[3x1] 基准 %@ %.0f x=%.0f y=%.0f", isCard ? @"卡片" : @"容器", baseW, baseX, baseY); }
-    }
-    if (baseW < 300.0) return f;              /* 不是全宽模块, 连识别都不用做 */
-    if (!di31IsPlayer(v)) return f;
+    CGFloat baseX = bxN ? bxN.doubleValue : 0.0;
+    if (baseW < 300.0) return;
+    if (!di31IsPlayer(v, isCard)) return;
 
     CGFloat target = baseW * 0.75 - 4.0;
-    if (target < 150.0) return f;
-    CGFloat wantW = isCard ? (target - DI31_CARD_INSET) : target;
-    CGFloat wantX = isCard ? DI31_CARD_INSET : baseX;
+    if (target < 150.0) return;
+    CGFloat wantW, wantX;
+    if (isCard) { wantW = target - DI31_CARD_INSET; wantX = DI31_CARD_INSET; }
+    else        { wantW = target;                   wantX = baseX; }
 
-    BOOL atTarget = (fabs(f.size.width - wantW) <= 3.0);
-    BOOL stable = (fabs(f.origin.x - baseX) <= 2.0) && (fabs(f.origin.y - baseY) <= 2.0);
-
-    if (atTarget) {                     /* 宽度已经对了: 只把位置摆正 */
-        f.size.width = wantW;
-        f.origin.x = wantX;
-        return f;
+    CGRect nf = f;
+    if (isCard) {
+        /* 卡片宽度跟容器走: 容器收窄后是 target, 满宽时是 baseW —— 两种都认 */
+        BOOL nearTarget = (fabs(f.size.width - target) <= 3.0);
+        BOOL fullish    = (f.size.width >= baseW - 0.5);
+        if (!nearTarget && !fullish) return;
+        nf.size.width = wantW;
+        nf.origin.x   = wantX;
+    } else {
+        if (f.size.width < baseW - 0.5) return;          /* 不是满宽, 不碰 */
+        nf.size.width = wantW;
+        nf.origin.x   = wantX;
     }
-    if (!stable) return f;              /* 过渡帧(宽度/位置都在变) → 放行 */
-    if (f.size.width < wantW - 3.0) return f;   /* 比目标还窄, 别撑大 */
-    CGFloat oldW = f.size.width;
-    f.size.width = wantW;
-    f.origin.x = wantX;
-    {
-        static int sLogN = 0;
-        if (sLogN < 12) { sLogN++; RLog(@"[3x1] 收窄 %@ %.0f→%.0f x=%.0f", isCard ? @"卡片" : @"容器", oldW, wantW, wantX); }
+    if (fabs(nf.size.width - f.size.width) < 0.6 && fabs(nf.origin.x - f.origin.x) < 0.6) return;
+    if (isCard) {
+        if (gDI31OrigCardSetFrame) gDI31OrigCardSetFrame(v, @selector(setFrame:), nf);
+    } else {
+        if (gDI31OrigBoxSetFrame) gDI31OrigBoxSetFrame(v, @selector(setFrame:), nf);
     }
-    return f;
+    static int sLogN = 0;
+    if (sLogN < 16) {
+        sLogN++;
+        RLog(@"[3x1] 收窄 %@ %.0f→%.0f x=%.0f→%.0f", isCard ? @"卡片" : @"容器",
+             f.size.width, nf.size.width, f.origin.x, nf.origin.x);
+    }
 }
 
 static void di31BoxSetFrame(id self, SEL cmd, CGRect f) {
-    @try { f = di31Adjust((UIView *)self, f, NO); } @catch (__unused NSException *e) {}
+    @try {
+        UIView *v = (UIView *)self;
+        NSNumber *bwN = objc_getAssociatedObject(v, &kDI31BaseW);
+        CGFloat baseW = bwN ? bwN.doubleValue : 0.0;
+        if (f.size.height >= 40.0 && f.size.height <= 130.0 && f.size.width >= 300.0
+            && (baseW < 300.0 || fabs(f.size.width - baseW) > 8.0)) {
+            objc_setAssociatedObject(v, &kDI31BaseW, @(f.size.width), OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+            objc_setAssociatedObject(v, &kDI31BaseX, @(f.origin.x), OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+            static int sLog = 0;
+            if (sLog < 8) { sLog++; RLog(@"[3x1] 基准 容器 %.0f x=%.0f", f.size.width, f.origin.x); }
+        }
+        di31Schedule(v, NO);
+    } @catch (__unused NSException *e) {}
     if (gDI31OrigBoxSetFrame) gDI31OrigBoxSetFrame(self, cmd, f);
 }
 static void di31CardSetFrame(id self, SEL cmd, CGRect f) {
-    @try { f = di31Adjust((UIView *)self, f, YES); } @catch (__unused NSException *e) {}
+    @try {
+        UIView *v = (UIView *)self;
+        NSNumber *bwN = objc_getAssociatedObject(v, &kDI31BaseW);
+        CGFloat baseW = bwN ? bwN.doubleValue : 0.0;
+        if (f.size.height >= 40.0 && f.size.height <= 130.0 && f.size.width >= 300.0
+            && (baseW < 300.0 || fabs(f.size.width - baseW) > 8.0)) {
+            objc_setAssociatedObject(v, &kDI31BaseW, @(f.size.width), OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+            objc_setAssociatedObject(v, &kDI31BaseX, @(0.0), OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+            static int sLog = 0;
+            if (sLog < 8) { sLog++; RLog(@"[3x1] 基准 卡片 %.0f x=0", f.size.width); }
+        }
+        di31Schedule(v, YES);
+    } @catch (__unused NSException *e) {}
     if (gDI31OrigCardSetFrame) gDI31OrigCardSetFrame(self, cmd, f);
 }
 
@@ -21251,67 +21308,6 @@ static void diRhythmUpdateBars(UIView *host, BOOL active) {
                 CGPathAddRect(p, NULL, CGRectMake(cx - 0.35f, topY, 0.7f, hArr[i]));
                 CGFloat r = 0.8f + 2.4f * (CGFloat)vArr[i];
                 CGPathAddEllipseInRect(p, NULL, CGRectMake(cx - r, topY - r, r * 2.0f, r * 2.0f));
-            }
-            break;
-        }
-        case 18: {  /* 声呐: 24 段绕成一整圈, 每段向外的长度随频谱 —— 像雷达扫描 */
-            CGFloat cx = (x0 + x1) * 0.5f;
-            CGFloat cy = (top + bottom) * 0.5f;
-            CGFloat baseR = MIN(avail, height) * 0.33f;
-            CGFloat stepA = (CGFloat)(M_PI * 2.0) / (CGFloat)n;
-            for (int i = 0; i < n; i++) {
-                CGFloat a0 = (CGFloat)(-M_PI_2) + (CGFloat)i * stepA + stepA * 0.10f;
-                CGFloat a1 = a0 + stepA * 0.78f;
-                CGFloat r1 = baseR * (1.10f + 0.80f * (CGFloat)vArr[i]);
-                const int seg = 5;
-                CGPathMoveToPoint(p, NULL, cx + cosf(a0) * baseR, cy + sinf(a0) * baseR);
-                for (int k = 1; k <= seg; k++) {
-                    CGFloat a = a0 + (a1 - a0) * (CGFloat)k / (CGFloat)seg;
-                    CGPathAddLineToPoint(p, NULL, cx + cosf(a) * baseR, cy + sinf(a) * baseR);
-                }
-                for (int k = seg; k >= 0; k--) {
-                    CGFloat a = a0 + (a1 - a0) * (CGFloat)k / (CGFloat)seg;
-                    CGPathAddLineToPoint(p, NULL, cx + cosf(a) * r1, cy + sinf(a) * r1);
-                }
-                CGPathCloseSubpath(p);
-            }
-            break;
-        }
-        case 19: {  /* 波浪: 一整条横向波带, 没有柱子 —— 起伏最连贯 */
-            CGFloat thick = MAX(2.4f, (CGFloat)height * 0.22f);
-            CGFloat amp = (CGFloat)height * 0.52f;
-            CGFloat baseY = bottom - (CGFloat)height * 0.24f;
-            int nn = n > 64 ? 64 : n;
-            if (nn < 2) break;
-            CGFloat stepX = avail / (CGFloat)(nn - 1);
-            CGFloat xs[64], ys[64];
-            for (int i = 0; i < nn; i++) {
-                xs[i] = x0 + (CGFloat)i * stepX;
-                ys[i] = baseY - (CGFloat)vArr[i] * amp;
-            }
-            CGPathMoveToPoint(p, NULL, xs[0], ys[0]);
-            for (int i = 1; i < nn; i++) {
-                CGFloat mx = (xs[i - 1] + xs[i]) * 0.5f;
-                CGFloat my = (ys[i - 1] + ys[i]) * 0.5f;
-                CGPathAddQuadCurveToPoint(p, NULL, xs[i - 1], ys[i - 1], mx, my);
-            }
-            CGPathAddLineToPoint(p, NULL, xs[nn - 1], ys[nn - 1]);
-            CGPathAddLineToPoint(p, NULL, xs[nn - 1], ys[nn - 1] + thick);
-            for (int i = nn - 1; i >= 1; i--) {
-                CGFloat mx = (xs[i - 1] + xs[i]) * 0.5f;
-                CGFloat my = (ys[i - 1] + ys[i]) * 0.5f + thick;
-                CGPathAddQuadCurveToPoint(p, NULL, xs[i] + 0.01f, ys[i] + thick, mx, my);
-            }
-            CGPathAddLineToPoint(p, NULL, xs[0], ys[0] + thick);
-            CGPathCloseSubpath(p);
-            break;
-        }
-        case 20: {  /* 雨帘: 从顶部垂下的雨丝, 越长越响 —— 跟柱状正好反过来 */
-            for (int i = 0; i < n; i++) {
-                CGFloat cx = x0 + (CGFloat)i * (bw + gap) + bw * 0.5f;
-                CGFloat ww = MAX(0.8f, bw * 0.42f);
-                CGFloat len = MIN((CGFloat)height, MAX(3.0f, hArr[i] * 1.05f));
-                diSafeSpectrumRoundedRect(p, NULL, CGRectMake(cx - ww * 0.5f, top, ww, len), ww * 0.5f, ww * 0.5f);
             }
             break;
         }

@@ -10,12 +10,12 @@
 @interface DISpectrumStaticController : PSListController
 @end
 
-/* 3.0.114: 14 种 —— 原有六种 + 萤火/星轨/胶囊/霓虹/双子 + 声呐/波浪/雨帘。
+/* 3.0.115: 11 种 —— 原有六种 + 萤火/星轨/胶囊/霓虹/双子(3.0.114 的声呐/波浪/雨帘已删)。
    3.0.111 新增的 绸带/山峦/脉冲/阶梯 已按用户要求删除。 */
-static const NSInteger diStyleIDs[14] = { 0, 1, 2, 4, 5, 6, 10, 14, 15, 16, 17, 18, 19, 20 };
+static const NSInteger diStyleIDs[11] = { 0, 1, 2, 4, 5, 6, 10, 14, 15, 16, 17 };
 
 static BOOL diStyleKnown(NSInteger s) {
-    for (int i = 0; i < 14; i++) if (diStyleIDs[i] == s) return YES;
+    for (int i = 0; i < 11; i++) if (diStyleIDs[i] == s) return YES;
     return NO;
 }
 
@@ -80,44 +80,7 @@ static UIImage *diStaticShape(NSInteger style){
                 diPrevRound(ctx,CGRectMake(cx2-cw-0.35f,38-hh,cw,hh),MIN(cw*0.5f,1.2f));
                 diPrevRound(ctx,CGRectMake(cx2+0.35f,38-hh*0.55f,cw,MAX(1.4f,hh*0.55f)),MIN(cw*0.5f,1.0f));
             }
-            else if(style==18){                  /* 声呐: 绕圈扇段 */
-                CGFloat cx2=x+w*0.5f, cy=27, baseR=16.0f;
-                CGFloat stepA=(CGFloat)(M_PI*2.0)/24.0f;
-                CGFloat a0=(CGFloat)(-M_PI_2)+i*stepA+stepA*0.10f;
-                CGFloat a1=a0+stepA*0.78f;
-                CGFloat r1=baseR*(1.10f+0.80f*v[i]);
-                const int seg=4;
-                CGContextMoveToPoint(ctx,cx2+cosf(a0)*baseR,cy+sinf(a0)*baseR);
-                for(int k=1;k<=seg;k++){CGFloat a=a0+(a1-a0)*k/seg;CGContextAddLineToPoint(ctx,cx2+cosf(a)*baseR,cy+sinf(a)*baseR);}
-                for(int k=seg;k>=0;k--){CGFloat a=a0+(a1-a0)*k/seg;CGContextAddLineToPoint(ctx,cx2+cosf(a)*r1,cy+sinf(a)*r1);}
-                CGContextClosePath(ctx);CGContextFillPath(ctx);
-            }
-            else if(style==19){ /* 波浪: 循环后整条画, 这里跳过 */ }
-            else if(style==20){                  /* 雨帘: 从顶垂下 */
-                diPrevRound(ctx,CGRectMake(x,4,w,MAX(3.0f,h)),w*0.5f);
-            }
             else {CGContextFillRect(ctx,CGRectMake(x,y,w,h));}
-        }
-        if(style==19){                       /* 波浪: 整条平滑波带 */
-            CGFloat thick=6.0f, amp=22.0f, baseY=32.0f;
-            CGFloat px=3.0f, py=baseY-v[0]*amp;
-            CGContextMoveToPoint(ctx,px,py);
-            for(int i=1;i<24;i++){
-                CGFloat x2=3+i*dx, y2=baseY-v[i]*amp;
-                CGFloat mx2=(px+x2)*0.5f, my2=(py+y2)*0.5f;
-                CGContextAddQuadCurveToPoint(ctx,px,py,mx2,my2);
-                px=x2; py=y2;
-            }
-            CGContextAddLineToPoint(ctx,px,py);
-            CGContextAddLineToPoint(ctx,px,py+thick);
-            for(int i=23;i>=1;i--){
-                CGFloat x1=3+(i-1)*dx, y1=baseY-v[i-1]*amp+thick;
-                CGFloat mx2=(3+i*dx+x1)*0.5f, my2=(baseY-v[i]*amp+thick+y1)*0.5f;
-                CGContextAddQuadCurveToPoint(ctx,3+i*dx+0.01f,baseY-v[i]*amp+thick,mx2,my2);
-            }
-            CGContextAddLineToPoint(ctx,3.0f,baseY-v[0]*amp+thick);
-            CGContextClosePath(ctx);
-            CGContextFillPath(ctx);
         }
     }
     UIImage *image=UIGraphicsGetImageFromCurrentImageContext();UIGraphicsEndImageContext();return image;
@@ -126,8 +89,7 @@ static UIImage *diStaticShape(NSInteger style){
 - (NSArray *)specifiers {
     if(!_specifiers){
         NSArray *names=@[@"柱状",@"点阵",@"镜像",@"峰值",@"尖刺",@"斜切",
-                         @"萤火",@"星轨",@"胶囊",@"霓虹",@"双子",
-                         @"声呐",@"波浪",@"雨帘"];
+                         @"萤火",@"星轨",@"胶囊",@"霓虹",@"双子"];
         NSMutableArray *rows=[NSMutableArray array];
         PSSpecifier *group=[PSSpecifier preferenceSpecifierNamed:@"静态形状图 · 点选应用" target:nil set:NULL get:NULL detail:nil cell:PSGroupCell edit:nil];
         [group setProperty:@"图示为固定信号下的形状示意，不播放动画、不采集音频。选中后到播放器查看实际音乐效果。" forKey:@"footerText"];[rows addObject:group];
