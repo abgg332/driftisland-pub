@@ -5978,10 +5978,9 @@ static void diNPApplySize(NSString *size) {
         moduleSize = @"4x2";
         variant = @"3x2b";
     } else if ([size isEqualToString:@"3x1"]) {
-        /* 3.0.111: 3×1 —— 系统只认 2x2/2x3/3x2/4x1/4x2/4x3(写 3x1 会被退化成 2×2),
-           所以模块仍按 4×1 占位, 真正的收窄由 dylib 里的 setFrame 钩子做:
-           宽度改成满宽的 0.75、居中, 高度保持 1 格。
-           Size 写 "3x1" 是给运行时看的开关, 不写进 ModuleSizes。 */
+        /* 3.0.120: bundled renderer uses 4x1 as one-row CONTENT template only.
+           Tweak overrides CCUIModuleSettings and collection layout values to 3x1.
+           Never equate this template string with the physical module footprint. */
         moduleSize = @"4x1";
         variant = nil;
     }

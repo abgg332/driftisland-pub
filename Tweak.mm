@@ -18729,13 +18729,6 @@ static void (*gDIOrigModuleLayout)(id, SEL) = NULL;
 
    目标宽 = 满宽 × 0.75 − 4（4 格 → 3 格, 扣掉格间距）; 左对齐, 只缩右边界。 */
 
-static char kDI31NegTS;
-static char kDI31BaseW;    /* 该视图自己的"满宽"(4 格时的宽度) */
-static char kDI31BaseX;    /* 该视图满宽时的左边距 —— 收窄后钉在这个 x 上 */
-static BOOL gDI31Hooked = NO;
-static void (*gDI31OrigBoxSetFrame)(id, SEL, CGRect) = NULL;
-static void (*gDI31OrigCardSetFrame)(id, SEL, CGRect) = NULL;
-
 static BOOL di31KeyOn(void) {
     static NSString *cache = nil;
     static CFTimeInterval ts = 0;
@@ -18763,246 +18756,77 @@ static BOOL di31KeyOn(void) {
     return [cache isEqualToString:@"3x1"];
 }
 
-static BOOL di31HasNP(UIView *v, int depth, int *budget) {
-    if (!v || depth > 7 || !budget || *budget <= 0) return NO;
-    (*budget)--;
-    NSString *cn = NSStringFromClass(v.class);
-    if ([cn containsString:@"NowPlaying"] || [cn containsString:@"MediaControls"]
-        || [cn containsString:@"Transport"]) return YES;
-    for (UIView *c in v.subviews) if (di31HasNP(c, depth + 1, budget)) return YES;
-    return NO;
-}
-
-static BOOL di31IsPlayer(UIView *v);
-
-/* 卡片自己身上查不到 moduleIdentifier / NowPlaying 类名时, 向上找模块容器再判定。 */
-static BOOL di31IsPlayerViaAncestor(UIView *v) {
-    UIView *p = v.superview;
-    for (int i = 0; p && i < 6; i++) {
-        if ([NSStringFromClass(p.class) containsString:@"CCUIContentModuleContainerView"])
-            return di31IsPlayer(p);
-        p = p.superview;
+/* 3.0.120: NP runtime verified at 0xa974/0xa99c/0xa9c4 (arm64).
+   Layout is allocated as three columns, not a late setFrame visual crop. */
+typedef struct { NSUInteger width,height; } DI31LayoutSize;
+static id (*di31SettingsOrig)(id,SEL,NSString *,DI31LayoutSize);
+static id (*di31SizesOrig)(id,SEL,id,id,NSInteger);
+static id (*di31InstanceOrig)(id,SEL,id,id,DI31LayoutSize);
+static BOOL di31SettingsInstalled=NO,di31SizesInstalled=NO,di31InstanceInstalled=NO;
+static NSString *const di31ModuleID=@"com.apple.mediaremote.controlcenter.nowplaying";
+static BOOL di31SizeABI(Method m,unsigned argument) {
+    if(!m)return NO;
+    char *type=method_copyArgumentType(m,argument);
+    BOOL ok=NO;
+    if(type && type[0]=='{' && strstr(type,"=QQ}")){
+        NSUInteger size=0;NSGetSizeAndAlignment(type,&size,NULL);ok=size==sizeof(DI31LayoutSize);
     }
-    return NO;
+    if(type)free(type);return ok;
 }
-
-static BOOL di31IsPlayer(UIView *v) {
-    if (!v) return NO;
-    NSNumber *neg = objc_getAssociatedObject(v, &kDI31NegTS);
-    CFAbsoluteTime now = CFAbsoluteTimeGetCurrent();
-    if (neg && now - neg.doubleValue < 3.0) return NO;
-    BOOL yes = NO;
-    @try {
-        id ident = [v valueForKey:@"moduleIdentifier"];
-        if ([ident isKindOfClass:NSString.class]
-            && [(NSString *)ident containsString:@"nowplaying"]) yes = YES;
-    } @catch (__unused NSException *e) {}
-    if (!yes) {
-        @try {
-            UIResponder *r = [v nextResponder];
-            if ([r isKindOfClass:UIViewController.class]) {
-                id ident = [r valueForKey:@"moduleIdentifier"];
-                if ([ident isKindOfClass:NSString.class]
-                    && [(NSString *)ident containsString:@"nowplaying"]) yes = YES;
-            }
-        } @catch (__unused NSException *e) {}
+static id di31Settings(id self,SEL cmd,NSString *identifier,DI31LayoutSize prototype){
+    if(!di31KeyOn() || ![identifier isEqualToString:di31ModuleID])return di31SettingsOrig(self,cmd,identifier,prototype);
+    Class cls=NSClassFromString(@"CCUIModuleSettings");SEL init=NSSelectorFromString(@"initWithPortraitLayoutSize:landscapeLayoutSize:");
+    Method method=class_getInstanceMethod(cls,init);
+    if(di31SizeABI(method,2)&&di31SizeABI(method,3)){
+        DI31LayoutSize size={3,1};
+        id value=((id(*)(id,SEL,DI31LayoutSize,DI31LayoutSize))objc_msgSend)([cls alloc],init,size,size);
+        if(value){static int logs=0;if(logs++<4)RLog(@"[3x1][真实占位] settings portrait=3x1 landscape=3x1");return value;}
     }
-    if (!yes) { int b = 90; yes = di31HasNP(v, 0, &b); }
-    if (!yes) objc_setAssociatedObject(v, &kDI31NegTS, @(now), OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-    return yes;
+    RLog(@"[3x1][真实占位] settings ABI不匹配，保留系统返回");
+    return di31SettingsOrig(self,cmd,identifier,prototype);
 }
-
-/* 唯一改 frame 的地方。只认"系统给的满宽帧", 中间帧一律放行。
-   isCard: 内容容器 —— 只收窄到与模块容器同宽, 左边距恒为 0, 不挪按钮。 */
-static CGRect di31Adjust(UIView *v, CGRect f, BOOL isCard) {
-    if (!di31KeyOn()) return f;
-    if (f.size.height < 40.0 || f.size.height > 130.0) return f;   /* 只要折叠态 */
-    if (f.size.width < 200.0) return f;                            /* 占位/已经窄了 */
-
-    NSNumber *bwN = objc_getAssociatedObject(v, &kDI31BaseW);
-    NSNumber *bxN = objc_getAssociatedObject(v, &kDI31BaseX);
-    CGFloat baseW = bwN ? bwN.doubleValue : 0.0;
-    CGFloat baseX = bxN ? bxN.doubleValue : f.origin.x;
-
-    /* 基准只在宽度真的换了时刷新(首次 / 旋转 / 换档):
-       收起动画里系统一边滑一边给 356, 每帧都刷会把左边距带跑。 */
-    if (f.size.width >= 300.0 && (baseW < 300.0 || fabs(f.size.width - baseW) > 8.0)) {
-        baseW = f.size.width;
-        baseX = isCard ? 0.0 : f.origin.x;
-        objc_setAssociatedObject(v, &kDI31BaseW, @(baseW), OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-        objc_setAssociatedObject(v, &kDI31BaseX, @(baseX), OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-        static int sLog = 0;
-        if (sLog < 10) { sLog++; RLog(@"[3x1] 基准 %@ %.0f x=%.0f", isCard ? @"卡片" : @"容器", baseW, baseX); }
+static id di31Sizes(id self,SEL cmd,id identifiers,id instances,NSInteger orientation){
+    id original=di31SizesOrig(self,cmd,identifiers,instances,orientation);
+    if(!di31KeyOn() || ![identifiers isKindOfClass:NSArray.class] || ![original isKindOfClass:NSArray.class])return original;
+    NSUInteger index=[identifiers indexOfObject:di31ModuleID];
+    if(index==NSNotFound || index>=[original count])return original;
+    SEL factory=NSSelectorFromString(@"ccui_valueWithLayoutSize:");
+    Method method=class_getClassMethod(NSValue.class,factory);
+    if(!di31SizeABI(method,2))return original;
+    DI31LayoutSize size={3,1};
+    id value=((id(*)(id,SEL,DI31LayoutSize))objc_msgSend)(NSValue.class,factory,size);
+    if(!value)return original;
+    NSMutableArray *result=[original mutableCopy];result[index]=value;
+    static int logs=0;if(logs++<8)RLog(@"[3x1][真实占位] collection index=%lu orientation=%ld →3x1",(unsigned long)index,(long)orientation);
+    return result;
+}
+static id di31Instance(id self,SEL cmd,id metadata,id module,DI31LayoutSize prototype){
+    SEL selector=NSSelectorFromString(@"moduleIdentifier");
+    id identifier=[metadata respondsToSelector:selector]?((id(*)(id,SEL))objc_msgSend)(metadata,selector):nil;
+    if(di31KeyOn() && [identifier isEqual:di31ModuleID])prototype=(DI31LayoutSize){3,1};
+    return di31InstanceOrig(self,cmd,metadata,module,prototype);
+}
+static void di31Install(void){
+    Class manager=NSClassFromString(@"CCUIModuleSettingsManager");
+    SEL settings=NSSelectorFromString(@"moduleSettingsForModuleIdentifier:prototypeSize:");
+    if(!di31SettingsInstalled && di31SizeABI(class_getInstanceMethod(manager,settings),3)){
+        MSHookMessageEx(manager,settings,(IMP)di31Settings,(IMP *)&di31SettingsOrig);di31SettingsInstalled=YES;
     }
-    if (baseW < 300.0) return f;              /* 不是全宽模块, 连识别都不用做 */
-
-    if (isCard ? !di31IsPlayerViaAncestor(v) : !di31IsPlayer(v)) return f;
-
-    CGFloat target = baseW * 0.75 - 4.0;
-    if (target < 150.0) return f;
-
-    /* 3.0.118: 比 3 格宽就压回, 不留"先撑宽一帧"。收起展开播放器时卡片会先
-       变成 ~340×90 的宽扁帧, 这一帧正是用户看到的 4×1 闪一下。窄于 3 格的
-       帧(收起动画末尾从 263→0)仍然放行, 否则卡片会卡在半路。 */
-    if (f.size.width < target - 0.5) return f;
-    CGFloat oldW = f.size.width;
-    if (fabs(f.size.width - target) >= 0.6) f.size.width = target;
-    f.origin.x = baseX;                       /* 左对齐: 只缩右边; 卡片 x 恒 0 */
-    {
-        static int sLogN = 0;
-        if (sLogN < 14) { sLogN++; RLog(@"[3x1] 收窄 %@ %.0f→%.0f x=%.0f", isCard ? @"卡片" : @"容器", oldW, target, baseX); }
-    }
-    return f;
-}
-
-static void di31BoxSetFrame(id self, SEL cmd, CGRect f) {
-    @try { f = di31Adjust((UIView *)self, f, NO); } @catch (__unused NSException *e) {}
-    if (gDI31OrigBoxSetFrame) gDI31OrigBoxSetFrame(self, cmd, f);
-}
-static void di31CardSetFrame(id self, SEL cmd, CGRect f) {
-    @try { f = di31Adjust((UIView *)self, f, YES); } @catch (__unused NSException *e) {}
-    if (gDI31OrigCardSetFrame) gDI31OrigCardSetFrame(self, cmd, f);
-}
-
-/* ===== 3.0.119: 真 3×1 —— 改模块"占位", 不只是压显示宽度 =====
-   用户 508 号日志的结论: 3.0.118 的收窄是生效的(容器/卡片 356→263), 但网格布局
-   仍然把这一行当成 4 格: 第 4 格一直空着, 别的控件也塞不进来 —— 这就是用户说的
-   "假的 3×1"。宽度只是画出来的, 占位由模块自己的 gridSize 决定, 必须把 gridSize
-   从 {4,1} 改成 {3,1}, 布局引擎才会真的只分配 3 格, 第 4 格回到公共池。 */
-typedef union {
-    struct { uint64_t a, b; } u64;
-    struct { uint32_t a, b, c, d; } u32;
-    uint64_t raw[2];
-} DI31GridVal;
-
-static BOOL gDI31GridHooked = NO;
-static int  gDI31GridHit = 0;
-static BOOL gDI31GridByArg = NO;      /* 方法带模块标识参数(manager 形态) */
-static char gDI31GridEnc[32] = {0};   /* 返回类型编码, 日志里能看到 */
-static DI31GridVal (*gDI31OrigGridFn)(id, SEL, id, id) = NULL;
-
-static BOOL di31IdentIsNP(id obj) {
-    if (!obj) return NO;
-    @try {
-        id x = [obj valueForKey:@"moduleIdentifier"];
-        if ([x isKindOfClass:NSString.class]) return [(NSString *)x containsString:@"nowplaying"];
-    } @catch (__unused NSException *e) {}
-    @try {
-        id y = [obj valueForKey:@"controlIdentifier"];
-        if ([y isKindOfClass:NSString.class]) return [(NSString *)y containsString:@"nowplaying"];
-    } @catch (__unused NSException *e) {}
-    return NO;
-}
-
-static DI31GridVal di31GridSizeHook(id self, SEL cmd, id a1, id a2) {
-    DI31GridVal v;
-    memset(&v, 0, sizeof(v));
-    if (gDI31OrigGridFn) v = gDI31OrigGridFn(self, cmd, a1, a2);
-    if (!di31KeyOn()) return v;
-    BOOL np = di31IdentIsNP(self);
-    if (!np && gDI31GridByArg && [a1 isKindOfClass:NSString.class])
-        np = [(NSString *)a1 containsString:@"nowplaying"];
-    if (!np) return v;
-
-    BOOL changed = NO;
-    if (strstr(gDI31GridEnc, "QQ")) {          /* {CCUIModuleGridSize=QQ} 列,行 */
-        if (v.u64.a == 4 && v.u64.b == 1) { v.u64.a = 3; changed = YES; }
-        else if (v.u64.a == 1 && v.u64.b == 4) { v.u64.b = 3; changed = YES; }
-    } else if (strstr(gDI31GridEnc, "II")) {   /* 32 位字段 */
-        if (v.u32.a == 4 && v.u32.b == 1) { v.u32.a = 3; changed = YES; }
-        else if (v.u32.a == 1 && v.u32.b == 4) { v.u32.b = 3; changed = YES; }
-    }
-    if (changed) {
-        gDI31GridHit++;
-        if (gDI31GridHit <= 8) RLog(@"[3x1][网格] 占位 4x1→3x1 (第 %d 次)", gDI31GridHit);
-    }
-    return v;
-}
-
-static void di31HookGridSel(Class c, NSString *selName, BOOL byArg) {
-    if (!c || gDI31OrigGridFn) return;
-    SEL sel = NSSelectorFromString(selName);
-    Method m = sel ? class_getInstanceMethod(c, sel) : NULL;
-    if (!m) return;
-    const char *enc = method_getTypeEncoding(m);
-    if (!enc) return;
-    size_t sz = 0;
-    NSGetSizeAndAlignment(enc, &sz, NULL);
-    BOOL integral = (strstr(enc, "QQ") != NULL) || (strstr(enc, "II") != NULL);
-    RLog(@"[3x1][网格] 探测 %@ -%@ 编码=%s 大小=%zu", NSStringFromClass(c), selName, enc, sz);
-    if (enc[0] != '{' || !integral || sz < 8 || sz > 16) return;
-    strncpy(gDI31GridEnc, enc, sizeof(gDI31GridEnc) - 1);
-    gDI31GridEnc[sizeof(gDI31GridEnc) - 1] = 0;
-    gDI31GridByArg = byArg;
-    @try {
-        MSHookMessageEx(c, sel, (IMP)di31GridSizeHook, (IMP *)&gDI31OrigGridFn);
-    } @catch (__unused NSException *e) {}
-    RLog(@"[3x1][网格] hook %@ -%@", gDI31OrigGridFn ? @"装上" : @"失败",
-         NSStringFromSelector(sel));
-}
-
-static void di31ScanGridClasses(void) {
-    int n = objc_getClassList(NULL, 0);
-    if (n <= 0) return;
-    Class *list = (Class *)malloc(sizeof(Class) * (size_t)n);
-    if (!list) return;
-    n = objc_getClassList(list, n);
-    NSMutableString *sb = [NSMutableString string];
-    int shown = 0;
-    for (int i = 0; i < n && shown < 40; i++) {
-        const char *nm = class_getName(list[i]);
-        if (!nm) continue;
-        if (strstr(nm, "ModuleInstance") || strstr(nm, "ModuleLayout")
-            || strstr(nm, "PageGrid") || strstr(nm, "CCUIModule")) {
-            [sb appendFormat:@"%s ", nm];
-            shown++;
+    Class collection=NSClassFromString(@"CCUIModuleCollectionViewController");
+    SEL sizes=NSSelectorFromString(@"_sizesForModuleIdentifiers:moduleInstanceByIdentifier:interfaceOrientation:");
+    Method method=class_getInstanceMethod(collection,sizes);
+    if(!di31SizesInstalled && method && method_getNumberOfArguments(method)==5){
+        char ret[64]={},orient[64]={};method_getReturnType(method,ret,sizeof(ret));method_getArgumentType(method,4,orient,sizeof(orient));
+        if(ret[0]=='@' && (orient[0]=='q'||orient[0]=='Q')){
+            MSHookMessageEx(collection,sizes,(IMP)di31Sizes,(IMP *)&di31SizesOrig);di31SizesInstalled=YES;
         }
     }
-    free(list);
-    RLog(@"[3x1][网格] 相关类: %@", sb.length ? sb : @"(无)");
-}
-
-static void di31InstallGrid(void) {
-    if (gDI31GridHooked) return;
-    gDI31GridHooked = YES;
-    /* 候选: 模块实例自己报尺寸 → 最直接; 其次是 manager 按标识查表。 */
-    NSArray<NSArray *> *cands = @[
-        @[@"CCUIModuleInstance", @"gridSize", @NO],
-        @[@"CCUIModuleInstance", @"gridSizeForOrientation:", @YES],
-        @[@"CCUIModuleInstance", @"size", @NO],
-        @[@"CCUIModuleInstanceManager", @"gridSizeForModuleIdentifier:", @YES],
-        @[@"CCUIModuleInstanceManager", @"gridSizeForModuleIdentifier:orientation:", @YES],
-    ];
-    for (NSArray *c in cands) {
-        Class cls = NSClassFromString(c[0]);
-        if (!cls) { RLog(@"[3x1][网格] 类不存在 %@", c[0]); continue; }
-        di31HookGridSel(cls, c[1], [c[2] boolValue]);
-        if (gDI31OrigGridFn) break;
+    Class instance=NSClassFromString(@"CCUIModuleInstance");
+    SEL init=NSSelectorFromString(@"initWithMetadata:module:prototypeModuleSize:");
+    if(!di31InstanceInstalled && di31SizeABI(class_getInstanceMethod(instance,init),4)){
+        MSHookMessageEx(instance,init,(IMP)di31Instance,(IMP *)&di31InstanceOrig);di31InstanceInstalled=YES;
     }
-    if (!gDI31OrigGridFn) di31ScanGridClasses();
-    RLog(@"[3x1][网格] 结果 %@", gDI31OrigGridFn ? @"已接管占位" : @"没找到入口(见上面的类列表)");
-}
-
-static void di31Install(void) {
-    if (gDI31Hooked) return;
-    gDI31Hooked = YES;
-    @try { di31InstallGrid(); } @catch (__unused NSException *e) {}
-    Class box = NSClassFromString(@"CCUIContentModuleContainerView");
-    Class card = NSClassFromString(@"CCUIContentModuleContentContainerView");
-    if (box) {
-        @try {
-            MSHookMessageEx(box, @selector(setFrame:), (IMP)di31BoxSetFrame,
-                            (IMP *)&gDI31OrigBoxSetFrame);
-        } @catch (__unused NSException *e) {}
-    }
-    if (card) {
-        @try {
-            MSHookMessageEx(card, @selector(setFrame:), (IMP)di31CardSetFrame,
-                            (IMP *)&gDI31OrigCardSetFrame);
-        } @catch (__unused NSException *e) {}
-    }
-    RLog(@"[3x1] 安装 容器 %@ / 卡片 %@ (卡片只收窄同宽, 不挪按钮)",
-         box ? @"OK" : @"nil", card ? @"OK" : @"nil");
+    static int logs=0;if(logs++<5)RLog(@"[3x1][真实占位] hooks settings=%d collection=%d instance=%d；无setFrame裁窄",di31SettingsInstalled,di31SizesInstalled,di31InstanceInstalled);
 }
 
 static void diNPHandleModuleVC(id vc) {
