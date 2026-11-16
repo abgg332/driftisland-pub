@@ -9,13 +9,13 @@
 @interface DISpectrumStaticController : PSListController
 @end
 static UIImage *diStaticShape(NSInteger style){
-    CGSize size=CGSizeMake(88,42);
+    CGSize size=CGSizeMake(132,54);
     UIGraphicsBeginImageContextWithOptions(size,NO,0);
     CGContextRef ctx=UIGraphicsGetCurrentContext();
     if(!ctx){UIGraphicsEndImageContext();return nil;}
     CGFloat v[24];for(int i=0;i<24;i++)v[i]=.15+.78*fabs(sin(i*.61))*MAX(.3,1-fabs(i-11.5)/16);
     [[UIColor colorWithRed:.61 green:.47 blue:.95 alpha:1] setFill];
-    CGRect b=CGRectMake(3,4,82,34);
+    CGRect b=CGRectMake(3,4,126,46);
     if(style>=9){CGPathRef p=diExtraSpectrumPath((int)style,v,24,b);CGContextAddPath(ctx,p);CGContextFillPath(ctx);CGPathRelease(p);}
     else {
         CGFloat dx=b.size.width/24;
@@ -35,7 +35,7 @@ static UIImage *diStaticShape(NSInteger style){
 @implementation DISpectrumStaticController
 - (NSArray *)specifiers {
     if(!_specifiers){
-        NSArray *names=@[@"柱状",@"点阵",@"镜像",@"阶梯",@"峰值",@"尖刺",@"斜切",@"电波",@"气泡",@"居中胶囊",@"流动山峦",@"对称声纹",@"星点矩阵",@"环形能量",@"双轨脉冲"];
+        NSArray *names=@[@"柱状",@"点阵",@"镜像",@"阶梯",@"峰值",@"尖刺",@"斜切",@"电波",@"气泡",@"流体声带",@"平滑山峦",@"镜像丝带",@"悬浮星阵",@"放射光环",@"不对称声纹",@"层叠流体",@"干涉波带",@"轨道星环",@"双向喷流",@"等高线波纹"];
         NSMutableArray *rows=[NSMutableArray array];
         PSSpecifier *group=[PSSpecifier preferenceSpecifierNamed:@"静态形状图 · 点选应用" target:nil set:NULL get:NULL detail:nil cell:PSGroupCell edit:nil];
         [group setProperty:@"图示为固定信号下的形状示意，不播放动画、不采集音频。选中后到播放器查看实际音乐效果。" forKey:@"footerText"];[rows addObject:group];
@@ -53,7 +53,7 @@ static UIImage *diStaticShape(NSInteger style){
 }
 - (void)selectStyle:(PSSpecifier *)sp {
     NSNumber *n=[sp propertyForKey:@"diStyle"];
-    if(!n || n.integerValue<0 || n.integerValue>14)return;
+    if(!n || n.integerValue<0 || n.integerValue>19)return;
     CFPreferencesSetAppValue(CFSTR("SpectrumStyle"),(__bridge CFPropertyListRef)n,CFSTR("com.abgg332.driftisland"));
     CFPreferencesAppSynchronize(CFSTR("com.abgg332.driftisland"));notify_post("com.abgg332.driftisland.fxtune");
     _specifiers=nil;[self reloadSpecifiers];

@@ -6482,19 +6482,24 @@ static NSString *diBarStyleLabel(int s) {
         case 6:  return @"斜切";
         case 7:  return @"电波";
         case 8:return @"气泡";
-        case 9:return @"居中胶囊";
-        case 10:return @"流动山峦";
-        case 11:return @"对称声纹";
-        case 12:return @"星点矩阵";
-        case 13:return @"环形能量";
-        default:return @"双轨脉冲";
+        case 9:return @"流体声带";
+        case 10:return @"平滑山峦";
+        case 11:return @"镜像丝带";
+        case 12:return @"悬浮星阵";
+        case 13:return @"放射光环";
+        case 14:return @"不对称声纹";
+        case 15:return @"层叠流体";
+        case 16:return @"干涉波带";
+        case 17:return @"轨道星环";
+        case 18:return @"双向喷流";
+        default:return @"等高线波纹";
     }
 }
 - (int)diBarStyleIndex {
     id v = diFxReadSized(@"SpectrumStyle");
     int s = v ? [v intValue] : 0;
     if (s < 0) s = 0;
-    if (s > 14) s = 14;
+    if (s > 19) s = 19;
     return s;
 }
 - (PSSpecifier *)barStyleSpec {
@@ -6721,7 +6726,7 @@ static NSString *diBarStyleLabel(int s) {
 
     [specs addObject:[self groupSpec:@"律动粒子" footer:nil]];
     [specs addObject:[self switchSpec:@"启用律动粒子" key:diFxSizedKey(@"AlbumParticlesOn") def:@YES]];
-    [specs addObject:[self switchSpec:@"额外粒子鼓点弹跳（非原版）" key:diFxSizedKey(@"AlbumParticleExtraBeat") def:@NO]];
+
     [specs addObject:[self npSlider:@"粒子数量" key:diFxSizedKey(@"AlbumParticleCount2") def:25 mn:0 mx:40]];
     [specs addObject:[self npSlider:@"粒子透明" key:diFxSizedKey(@"RhythmParticleAlpha") def:0.74 mn:0.10 mx:1.50]];
     /* 3.0.61: 粒子大小/强度都走 0.1 步进, 由 numStepForKey: 决定, 这里不再挂 diStep

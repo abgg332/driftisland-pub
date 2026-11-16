@@ -1033,7 +1033,7 @@ static void diFxLoadPrefs(void) {
     rhythmOn = fxBool(@"AlbumRhythmOn", YES);
     rhythmRingOn = NO; /* retired at user request */
     rhythmParticlesOn = fxBool(@"AlbumParticlesOn", YES);
-    diParticleExtraBeat=fxBool(@"AlbumParticleExtraBeat", NO);
+    diParticleExtraBeat=NO; // retired: preserve only common album/particle affine scale
     rhythmStrength = fxDouble(@"AlbumRhythmStrength", 0.90);
     if (rhythmStrength > 3.0) rhythmStrength /= 100.0;   /* 兼容 3.0.43 的百分数 */
     if (rhythmStrength < 0.10) rhythmStrength = 0.10;
@@ -1050,7 +1050,7 @@ static void diFxLoadPrefs(void) {
                                                                (__bridge CFStringRef)kDomain));
             int st = sv ? [sv intValue] : 0;
             if (st < 0) st = 0;
-            if (st > 14) st = 14;
+            if (st > 19) st = 19;
             if (st != gDIBarStyle) {
                 gDIBarStyle = st;
                 for (int i = 0; i < 64; i++) gDIBarPeak[i] = 0.0f;   /* 换样式时峰值重新来 */
@@ -7265,6 +7265,9 @@ static void diDumpApertureTree(UIView *root) {
    遍历所有窗口才找到 platter 301x76。 */
 /* 3.0.25: 文件级定义(前向声明在文件头) —— 这里不再重复初始化 */
 static void diGainScanAperture(void) {
+    static BOOL scanning=NO;
+    if(scanning)return;
+    struct DIScanScope {BOOL *flag;DIScanScope(BOOL *f):flag(f){*flag=YES;}~DIScanScope(){*flag=NO;}} scope(&scanning);
     diPhase("scan");
     if (![NSThread isMainThread] || !(enabled && hideBlackPillOn)) return;
     /* 3.0.25(iOS17 首开卡死): 439 日志里首开那一串 [卡死] 阶段=scan, 一次扫描
@@ -17401,6 +17404,25 @@ static void diNPDumpCrashEvidence(void) {
             RLog(@"[崩溃回放] 最近报告: %@ (%.0f 秒前)", bestName, age);
             NSString *txt = [NSString stringWithContentsOfFile:best encoding:NSUTF8StringEncoding error:NULL];
             if (txt.length) {
+                NSData *jsonData=[txt dataUsingEncoding:NSUTF8StringEncoding];
+                NSDictionary *report=[NSJSONSerialization JSONObjectWithData:jsonData options:0 error:NULL];
+                if(![report isKindOfClass:NSDictionary.class]){
+                    NSRange newline=[txt rangeOfString:@"\n"];
+                    if(newline.location!=NSNotFound){NSData *body=[[txt substringFromIndex:newline.location+1] dataUsingEncoding:NSUTF8StringEncoding];report=[NSJSONSerialization JSONObjectWithData:body options:0 error:NULL];}
+                }
+                if([report isKindOfClass:NSDictionary.class]){
+                    RLog(@"[崩溃结构] exception=%@ termination=%@ faultingThread=%@",report[@"exception"],report[@"termination"],report[@"faultingThread"]);
+                    NSArray *threads=report[@"threads"],*images=report[@"usedImages"];
+                    NSInteger index=[report[@"faultingThread"] integerValue];
+                    if([threads isKindOfClass:NSArray.class]&&index>=0&&index<(NSInteger)threads.count){
+                        NSArray *frames=threads[index][@"frames"];
+                        for(NSUInteger k=0;k<MIN((NSUInteger)12,frames.count);k++){
+                            NSDictionary *frame=frames[k];NSInteger im=[frame[@"imageIndex"] integerValue];
+                            NSDictionary *image=([images isKindOfClass:NSArray.class]&&im>=0&&im<(NSInteger)images.count)?images[im]:@{};
+                            RLog(@"[崩溃栈] #%lu %@ symbol=%@ offset=%@ uuid=%@",(unsigned long)k,image[@"name"],frame[@"symbol"],frame[@"imageOffset"],image[@"uuid"]);
+                        }
+                    }
+                }
                 /* .ips: 第一行是元数据 JSON, 后面是正文。抽出关键行 + 含 DriftIsland 的帧 */
                 NSArray *lines = [txt componentsSeparatedByCharactersInSet:
                                   [NSCharacterSet newlineCharacterSet]];
@@ -18231,6 +18253,9 @@ static int gDIBgSlowCount = 0;
 static BOOL gDIBgStopped = NO;      /* 3.0.21: 本进程内停用专辑背景(连续超时保护) */
 static void diNPApplyBackgroundTo(UIView *host, BOOL on) {
     if (gDIBgStopped && on) return;
+    static BOOL writing=NO;
+    if(writing)return;
+    struct DIBgScope {BOOL *flag;DIBgScope(BOOL *f):flag(f){*flag=YES;}~DIBgScope(){*flag=NO;}} scope(&writing);
     diPhase("bgwrite");
     CFTimeInterval tBG = CFAbsoluteTimeGetCurrent();
     @try {
@@ -18292,10 +18317,10 @@ static void diNPApplyBackgroundTo(UIView *host, BOOL on) {
             [host.layer insertSublayer:dim above:bg];
             objc_setAssociatedObject(host, kDIBgDimKey, dim, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
         }
-        bg.hidden = NO;
-        dim.hidden = NO;
-        bg.cornerRadius = r;
-        dim.cornerRadius = r;
+        if(bg.hidden)bg.hidden=NO;
+        if(dim.hidden)dim.hidden=NO;
+        if(fabs(bg.cornerRadius-r)>.01)bg.cornerRadius=r;
+        if(fabs(dim.cornerRadius-r)>.01)dim.cornerRadius=r;
         if (!CGRectEqualToRect(bg.frame, rect)) {
             bg.frame = rect;
             dim.frame = rect;
@@ -19255,6 +19280,12 @@ __attribute__((constructor)) static void init(void) {
 #include <sys/errno.h>
 #include <math.h>
 
+static void diSafeSpectrumRoundedRect(CGMutablePathRef path,const CGAffineTransform *transform,CGRect rect,CGFloat rx,CGFloat ry){
+    if(!isfinite(rect.origin.x)||!isfinite(rect.origin.y)||!isfinite(rect.size.width)||!isfinite(rect.size.height)||rect.size.width<=0||rect.size.height<=0)return;
+    rx=isfinite(rx)?MAX(0,MIN(rx,rect.size.width*.5)):0;
+    ry=isfinite(ry)?MAX(0,MIN(ry,rect.size.height*.5)):0;
+    CGPathAddRoundedRect(path,transform,rect,rx,ry);
+}
 #define DI_AU_PORT   41235
 #define DI_AU_BANDS  24
 #define DI_AU_PKT    36          /* v1: 4 头 + 4 fast + 4 slow + 24 bands */
@@ -20796,6 +20827,7 @@ static void diRhythmUpdateBars(UIView *host, BOOL active) {
     CGRect sf = [sl convertRect:sl.bounds toView:host];
     CGFloat bottom = CGRectGetMinY(sf) - 5.0 - (CGFloat)rhythmBarsOffsetY;
     CGFloat height = (CGFloat)rhythmBarsHeight;
+    if(!isfinite(bottom)||!isfinite(height)||height<=0 || !isfinite(host.bounds.size.width))return;
     CGFloat top = bottom - height;
     /* 3.0.56: 上下位移放大到 ±150 后, 条可能被推到岛外。以前这里直接 return,
        上一次画的路径会留在屏幕上(看着像"卡住")。现在明确隐藏。 */
@@ -20878,6 +20910,7 @@ static void diRhythmUpdateBars(UIView *host, BOOL active) {
         int b0 = (int)bp % DI_AU_BANDS, b1 = MIN(b0 + 1, DI_AU_BANDS - 1);
         CGFloat bf = bp - floor(bp);
         float v = active ? (gDIBandSmooth[b0] * (1.0f - bf) + gDIBandSmooth[b1] * bf) : 0.0f;
+        if(!isfinite(v))v=0;
         v *= kb;
         if (v < 0.0f) v = 0.0f;
         if (v > 1.0f) v = 1.0f;
@@ -20907,7 +20940,7 @@ static void diRhythmUpdateBars(UIView *host, BOOL active) {
                 for (int k = 0; k < lit; k++) {
                     CGFloat y = bottom - cell - (CGFloat)k * cspan;
                     CGFloat rr0 = MIN(cell * 0.35f, bw * 0.5f);
-                    CGPathAddRoundedRect(p, NULL, CGRectMake(bx, y, bw, cell), rr0, rr0);
+                    diSafeSpectrumRoundedRect(p, NULL, CGRectMake(bx, y, bw, cell), rr0, rr0);
                 }
             }
             break;
@@ -20918,7 +20951,7 @@ static void diRhythmUpdateBars(UIView *host, BOOL active) {
                 CGRect r = CGRectMake(x0 + i * (bw + gap), xMidAll - hh, bw, hh * 2.0f);
                 CGFloat rr = MIN(bw * 0.5f, MIN(hh * 0.9f, 1.6f));
                 if (rr < 0.0f) rr = 0.0f;
-                CGPathAddRoundedRect(p, NULL, r, rr, rr);
+                diSafeSpectrumRoundedRect(p, NULL, r, rr, rr);
             }
             break;
         }
@@ -20957,13 +20990,13 @@ static void diRhythmUpdateBars(UIView *host, BOOL active) {
                 CGRect r = CGRectMake(x0 + i * (bw + gap), bottom - hArr[i], bw, hArr[i]);
                 CGFloat rr = MIN(bw * 0.5f, MIN(hArr[i] * 0.45f, 1.6f));
                 if (rr < 0.0f) rr = 0.0f;
-                CGPathAddRoundedRect(p, NULL, r, rr, rr);
+                diSafeSpectrumRoundedRect(p, NULL, r, rr, rr);
                 /* 峰值帽: 1.6pt 高的横条, 悬在峰值位置 */
                 if (pk > 0.02f) {
                     CGFloat ph = 1.5 + (height - 1.5) * pow(pk, 0.85);
                     CGFloat capY = bottom - ph - 2.2f;
                     if (capY > top - 2.0f)
-                        CGPathAddRoundedRect(p, NULL, CGRectMake(x0 + i * (bw + gap),
+                        diSafeSpectrumRoundedRect(p, NULL, CGRectMake(x0 + i * (bw + gap),
                                                                  capY, bw, 1.6f), 0.8f, 0.8f);
                 }
             }
@@ -21037,7 +21070,7 @@ static void diRhythmUpdateBars(UIView *host, BOOL active) {
                 CGRect r = CGRectMake(x0 + i * (bw + gap), bottom - hArr[i], bw, hArr[i]);
                 CGFloat rr = MIN(bw * 0.5f, MIN(hArr[i] * 0.45f, 1.6f));
                 if (rr < 0.0f) rr = 0.0f;
-                CGPathAddRoundedRect(p, NULL, r, rr, rr);
+                diSafeSpectrumRoundedRect(p, NULL, r, rr, rr);
             }
 
             /* 吐泡: 起音(值突然跳起来)必吐; 高能量柱持续吐(按柱子各自节流) */
@@ -21099,7 +21132,7 @@ static void diRhythmUpdateBars(UIView *host, BOOL active) {
                 CGRect r = CGRectMake(x0 + i * (bw + gap), bottom - hArr[i], bw, hArr[i]);
                 CGFloat rr = MIN(bw * 0.5f, MIN(hArr[i] * 0.45f, 1.6f));
                 if (rr < 0.0f) rr = 0.0f;
-                CGPathAddRoundedRect(p, NULL, r, rr, rr);
+                diSafeSpectrumRoundedRect(p, NULL, r, rr, rr);
             }
             break;
         }
