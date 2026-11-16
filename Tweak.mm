@@ -76,7 +76,8 @@ static BOOL rhythmParticlesOn = YES;           // 封面外圈粒子
 static BOOL rhythmRoundCover = YES;            // 3.0.47: 封面裁成正圆
 static BOOL rhythmBarsOn = YES;                // 3.0.48: 频谱条(进度条上方)
 static int  rhythmBarsCount = 40;              // 3.0.50: 频谱条根数(可调)
-/* 3.0.83: 频谱条样式 —— 0 柱状 / 1 点阵 / 2 镜像 / 3 阶梯 / 4 峰值 / 5 尖刺 / 6 斜切 / 7 电波 / 8 气泡 */
+/* 3.0.83: 频谱条样式 —— 0 柱状 / 1 点阵 / 2 镜像 / 4 峰值 / 5 尖刺 / 6 斜切 / 10 萤火 / 14 星轨
+   (3/7/8 历史预留位; 9/11/12/13 已在 3.0.112 按用户要求删除) */
 static int gDIBarStyle = 0;
 static float gDIBarPeak[64];
 static CFAbsoluteTime gDIBarPeakT = 0;
@@ -1054,15 +1055,16 @@ static void diFxLoadPrefs(void) {
     rhythmRoundCover = YES;   /* 3.0.61: 开关已从律动页移除(与「启用遮罩」重复), 恒为圆形 */
     rhythmBarsOn = fxBool(@"AlbumBarsOn", YES);
     {
-        /* 3.0.111: 频谱条样式 —— 0/1/2/4/5/6 是原有六种, 9~14 是这一版新增的六种;
-           3/7/8 是历史预留位(没有实现), 选到一律回落到柱状。 */
+        /* 3.0.112: 频谱条样式 —— 0/1/2/4/5/6 原有六种 + 10 萤火 + 14 星轨, 共八种。
+           3/7/8 是历史预留位; 9/11/12/13(绸带/山峦/脉冲/阶梯)已按用户要求删除,
+           域里若还留着这四个值, 一律回落到柱状。 */
         {
             id sv = CFBridgingRelease(CFPreferencesCopyAppValue((__bridge CFStringRef)@"SpectrumStyle",
                                                                (__bridge CFStringRef)kDomain));
             int st = sv ? [sv intValue] : 0;
             if (st < 0) st = 0;
             if (!(st==0||st==1||st==2||st==4||st==5||st==6
-                  ||st==9||st==10||st==11||st==12||st==13||st==14)) st=0;
+                  ||st==10||st==14)) st=0;
             if (st != gDIBarStyle) {
                 gDIBarStyle = st;
                 for (int i = 0; i < 64; i++) gDIBarPeak[i] = 0.0f;   /* 换样式时峰值重新来 */
@@ -18705,22 +18707,22 @@ static void diNPApplyHideTime(void) {
 /* ---------- 模块容器钩子 ---------- */
 static void (*gDIOrigModuleLayout)(id, SEL) = NULL;
 
-/* ===== 3.0.111: 3×1 档位（重建） =====
-   和 3.0.39 之前那版最大的区别 —— 这次只做**一件事**:
-   系统给"播放器模块容器 / 内容容器"设 frame 的那一刻, 把宽度改成 3 格并居中。
-   不装 layoutSubviews 钩子、不装 200ms 巡检、**不手动挪任何一颗按钮**。
+/* ===== 3.0.112: 3×1 档位（左对齐 + 位置钉死） =====
+   3.0.111 收窄后把容器**居中**放, 而系统每帧重设全宽 frame 时给的 x 并不固定
+   (展开收起动画、旋转、重排都会变), 每次居中算出来的位置都不一样 ——
+   用户看到的就是"位置会变"。这一版改成**左对齐**: 记住该视图满宽时的 x,
+   收窄后仍钉在同一个 x 上, 只缩右边界, 位置一次都不动。
 
-   旧版为什么问题多: 它同时改了容器和卡片两处、又挂了 layoutSubviews 事后纠正、
-   再加一个 watchdog 每 200ms 抢写, 三处互相打架; 按钮因为在 4 格宽下排好的,
-   只能靠 diNP31ShiftButtons 一颗颗硬挪 —— 挪出来的坐标和系统真实布局对不上,
-   偶尔直接挪出可视区, 用户看到的就是"下一首不见了 / 再点又出现"。
-   现在宽度只改一次(在 setFrame 里, 同一调用栈、CA 提交前), 里面那排按钮交给
-   播放器自己的布局按新宽度排, 一个坐标都不猜。
+   基准值(满宽/左边距)改成**每个视图各存一份**(关联对象), 不再用全局最大值 ——
+   全局值会被另一个尺寸的模块改掉, 宽度和位置会互相打架。
 
-   目标宽 = 满宽 × 0.75 − 4（4 格 → 3 格, 扣掉格间距）; 居中摆放(旧版是左对齐,
-   所以内容整体偏左)。只处理折叠态(高 40~130), 展开态一个像素都不动。 */
+   目标宽 = 满宽 × 0.75 − 4（4 格 → 3 格, 扣掉格间距）。
+   只 hook 系统的 setFrame, 不装 layoutSubviews / watchdog, 也不手动挪任何按钮
+   (那排按钮交给播放器自己按新宽度排, 一个坐标都不猜)。只处理折叠态(高 40~130),
+   展开态一个像素都不动。 */
 static char kDI31NegTS;
-static CGFloat gDI31FullW = 0.0;   /* 全局满宽(同一时刻只有一个播放器模块) */
+static char kDI31BaseW;    /* 该视图自己的"满宽"(4 格时的宽度) */
+static char kDI31BaseX;    /* 该视图满宽时的左边距 —— 收窄后钉在这个 x 上 */
 static BOOL gDI31Hooked = NO;
 static void (*gDI31OrigBoxSetFrame)(id, SEL, CGRect) = NULL;
 static void (*gDI31OrigCardSetFrame)(id, SEL, CGRect) = NULL;
@@ -18788,32 +18790,44 @@ static BOOL di31IsPlayer(UIView *v) {
     return yes;
 }
 
-static CGRect di31Adjust(UIView *v, CGRect f) {
+/* 唯一改 frame 的地方。isCard: 内容容器在父容器坐标系里, 左边距恒为 0。 */
+static CGRect di31Adjust(UIView *v, CGRect f, BOOL isCard) {
     if (!di31KeyOn()) return f;
     if (f.size.height < 40.0 || f.size.height > 130.0) return f;   /* 只要折叠态 */
     if (f.size.width < 200.0) return f;                            /* 占位/已经窄了 */
-    /* 先按"满宽"筛一道: 只有全宽模块才可能是 4×1 播放器, 手电/计时器这类窄块
-       连识别都不用做(识别里有 KVC 和子树遍历, CC 打开动画里每帧几十次, 很贵)。 */
-    if (f.size.width >= 300.0) {
-        if (f.size.width > gDI31FullW + 0.5) gDI31FullW = f.size.width;
+
+    NSNumber *bwN = objc_getAssociatedObject(v, &kDI31BaseW);
+    NSNumber *bxN = objc_getAssociatedObject(v, &kDI31BaseX);
+    CGFloat baseW = bwN ? bwN.doubleValue : 0.0;
+    CGFloat baseX = bxN ? bxN.doubleValue : f.origin.x;
+
+    /* 系统正在给"满宽": 刷新这个视图自己的基准(宽度和左边距一起)
+       —— 旋转/重排后左边距变了, 这里跟着更新, 收窄后位置才不会漂。 */
+    if (f.size.width >= 300.0 && f.size.width >= baseW - 0.5) {
+        baseW = f.size.width;
+        baseX = isCard ? 0.0 : f.origin.x;
+        objc_setAssociatedObject(v, &kDI31BaseW, @(baseW), OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        objc_setAssociatedObject(v, &kDI31BaseX, @(baseX), OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        static int sLog = 0;
+        if (sLog < 12) { sLog++; RLog(@"[3x1] 基准 %@ %.0f x=%.0f", isCard ? @"卡片" : @"容器", baseW, baseX); }
     }
-    if (gDI31FullW < 300.0) return f;
+    if (baseW < 300.0) return f;              /* 不是全宽模块, 连识别都不用做 */
     if (!di31IsPlayer(v)) return f;
-    CGFloat target = gDI31FullW * 0.75 - 4.0;
+
+    CGFloat target = baseW * 0.75 - 4.0;
     if (target < 150.0) return f;
-    if (fabs(f.size.width - target) < 0.6) return f;
-    CGFloat cx = f.origin.x + f.size.width * 0.5;
-    f.size.width = target;
-    f.origin.x = cx - target * 0.5;      /* 居中, 而不是把左边钉死 */
+    if (f.size.width < target - 0.5) return f;   /* 动画中间帧比目标还窄, 别撑大 */
+    if (fabs(f.size.width - target) >= 0.6) f.size.width = target;
+    f.origin.x = isCard ? 0.0 : baseX;        /* 左对齐: 只缩右边 */
     return f;
 }
 
 static void di31BoxSetFrame(id self, SEL cmd, CGRect f) {
-    @try { f = di31Adjust((UIView *)self, f); } @catch (__unused NSException *e) {}
+    @try { f = di31Adjust((UIView *)self, f, NO); } @catch (__unused NSException *e) {}
     if (gDI31OrigBoxSetFrame) gDI31OrigBoxSetFrame(self, cmd, f);
 }
 static void di31CardSetFrame(id self, SEL cmd, CGRect f) {
-    @try { f = di31Adjust((UIView *)self, f); } @catch (__unused NSException *e) {}
+    @try { f = di31Adjust((UIView *)self, f, YES); } @catch (__unused NSException *e) {}
     if (gDI31OrigCardSetFrame) gDI31OrigCardSetFrame(self, cmd, f);
 }
 
@@ -21198,31 +21212,6 @@ static void diRhythmUpdateBars(UIView *host, BOOL active) {
             }
             break;
         }
-        case 9: {   /* 绸带: 顶点连成一条平滑曲线, 下沿加厚 —— 像一条随音乐起伏的丝带 */
-            CGFloat thick = MAX(1.8f, bw * 1.05f);
-            CGFloat xs[64], ys[64];
-            for (int i = 0; i < n; i++) {
-                xs[i] = x0 + i * (bw + gap) + bw * 0.5f;
-                ys[i] = bottom - hArr[i];
-            }
-            CGPathMoveToPoint(p, NULL, xs[0], ys[0]);
-            for (int i = 1; i < n; i++) {
-                CGFloat mx = (xs[i - 1] + xs[i]) * 0.5f;
-                CGFloat my = (ys[i - 1] + ys[i]) * 0.5f;
-                CGPathAddQuadCurveToPoint(p, NULL, xs[i - 1], ys[i - 1], mx, my);
-            }
-            if (n > 1) CGPathAddQuadCurveToPoint(p, NULL, xs[n - 1], ys[n - 1],
-                                                 xs[n - 1], ys[n - 1]);
-            CGPathAddLineToPoint(p, NULL, xs[n - 1], ys[n - 1] + thick);
-            for (int i = n - 1; i >= 1; i--) {
-                CGFloat mx = (xs[i - 1] + xs[i]) * 0.5f;
-                CGFloat my = (ys[i - 1] + ys[i]) * 0.5f + thick;
-                CGPathAddQuadCurveToPoint(p, NULL, xs[i] + 0.01f, ys[i] + thick, mx, my);
-            }
-            CGPathAddLineToPoint(p, NULL, xs[0], ys[0] + thick);
-            CGPathCloseSubpath(p);
-            break;
-        }
         case 10: {  /* 萤火: 一根极细的光柱 + 顶端一颗随音量变大的光点 */
             for (int i = 0; i < n; i++) {
                 CGFloat cx = x0 + i * (bw + gap) + bw * 0.5f;
@@ -21230,59 +21219,6 @@ static void diRhythmUpdateBars(UIView *host, BOOL active) {
                 CGPathAddRect(p, NULL, CGRectMake(cx - 0.35f, topY, 0.7f, hArr[i]));
                 CGFloat r = 0.8f + 2.4f * (CGFloat)vArr[i];
                 CGPathAddEllipseInRect(p, NULL, CGRectMake(cx - r, topY - r, r * 2.0f, r * 2.0f));
-            }
-            break;
-        }
-        case 11: {  /* 山峦: 每根一个尖三角, 底边相连成连绵山脉 */
-            CGFloat halfW = (bw + gap) * 0.5f;
-            for (int i = 0; i < n; i++) {
-                CGFloat cx = x0 + i * (bw + gap) + bw * 0.5f;
-                CGFloat tipY = bottom - hArr[i];
-                CGPathMoveToPoint(p, NULL, cx - halfW, bottom);
-                CGPathAddLineToPoint(p, NULL, cx, tipY);
-                CGPathAddLineToPoint(p, NULL, cx + halfW, bottom);
-                CGPathCloseSubpath(p);
-            }
-            break;
-        }
-        case 12: {  /* 脉冲: 每根一段从底部圆心向上张开的半圆环, 半径随频谱 */
-            CGFloat stk = MAX(1.2f, bw * 0.85f);
-            const int seg = 10;
-            for (int i = 0; i < n; i++) {
-                CGFloat cx = x0 + i * (bw + gap) + bw * 0.5f;
-                CGFloat rOut = MAX(stk * 1.15f, hArr[i]);
-                CGFloat rIn = MAX(0.2f, rOut - stk);
-                CGFloat px = 0, py = 0;
-                for (int k = 0; k <= seg; k++) {
-                    CGFloat a = (CGFloat)M_PI * (CGFloat)k / (CGFloat)seg;
-                    CGFloat X = cx + cos(a) * rOut;
-                    CGFloat Y = bottom - sin(a) * rOut;
-                    if (k == 0) CGPathMoveToPoint(p, NULL, X, Y);
-                    else CGPathAddLineToPoint(p, NULL, X, Y);
-                    px = X; py = Y;
-                }
-                (void)px; (void)py;
-                for (int k = seg; k >= 0; k--) {
-                    CGFloat a = (CGFloat)M_PI * (CGFloat)k / (CGFloat)seg;
-                    CGFloat X = cx + cos(a) * rIn;
-                    CGFloat Y = bottom - sin(a) * rIn;
-                    CGPathAddLineToPoint(p, NULL, X, Y);
-                }
-                CGPathCloseSubpath(p);
-            }
-            break;
-        }
-        case 13: {  /* 阶梯: 每 4 根并成一格, 取组内最大值 —— 一段一段的台阶 */
-            const int step = 4;
-            for (int i = 0; i < n; i += step) {
-                int e = MIN(i + step, n);
-                CGFloat gv = 0.0f;
-                for (int k = i; k < e; k++) gv = MAX(gv, vArr[k]);
-                CGFloat gx = x0 + i * (bw + gap);
-                CGFloat gw = (CGFloat)(e - i) * bw + (CGFloat)(e - i - 1) * gap;
-                CGFloat gh = 1.5f + (height - 1.5f) * pow(gv, 0.85f);
-                CGFloat rr = MIN(2.0f, gh * 0.30f);
-                diSafeSpectrumRoundedRect(p, NULL, CGRectMake(gx, bottom - gh, gw, gh), rr, rr);
             }
             break;
         }

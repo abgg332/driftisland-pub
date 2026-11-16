@@ -6484,8 +6484,8 @@ static NSString *diModeName(int m) {
 }
 
 /* ===== 3.0.83: 频谱条样式 =====
-   3.0.111: 从 6 种扩到 12 种 —— 原有 柱状/点阵/镜像/峰值/尖刺/斜切,
-   新增 绸带/萤火/山峦/脉冲/阶梯/星轨。点一下换下一个, 写 SpectrumStyle 后 fxtune 即时生效。
+   3.0.112: 共 8 种 —— 原有 柱状/点阵/镜像/峰值/尖刺/斜切 + 萤火/星轨。
+   3.0.111 里新增的 绸带/山峦/脉冲/阶梯 已按用户要求删除, 域里留着也回落柱状。
    用**不分尺寸的原键** —— 样式对每个播放器尺寸都该一致。 */
 static NSString *diBarStyleLabel(int s) {
     switch (s) {
@@ -6495,11 +6495,7 @@ static NSString *diBarStyleLabel(int s) {
         case 4:  return @"峰值";
         case 5:  return @"尖刺";
         case 6:  return @"斜切";
-        case 9:  return @"绸带";
         case 10: return @"萤火";
-        case 11: return @"山峦";
-        case 12: return @"脉冲";
-        case 13: return @"阶梯";
         case 14: return @"星轨";
         default:return @"柱状";
     }
@@ -6507,7 +6503,7 @@ static NSString *diBarStyleLabel(int s) {
 static BOOL diBarStyleOK(int s) {
     switch (s) {
         case 0: case 1: case 2: case 4: case 5: case 6:
-        case 9: case 10: case 11: case 12: case 13: case 14: return YES;
+        case 10: case 14: return YES;
         default: return NO;
     }
 }
@@ -6758,7 +6754,7 @@ static BOOL diBarStyleOK(int s) {
 
     [specs addObject:[self groupSpec:@"频谱条" footer:nil]];
     [specs addObject:[self switchSpec:@"启用频谱条" key:diFxSizedKey(@"AlbumBarsOn") def:@YES]];
-    /* 3.0.83: 频谱条样式 —— 9 种画法一键循环切换(柱状/点阵/镜像/阶梯/峰值/尖刺/斜切/电波/气泡) */
+    /* 3.0.112: 频谱条样式 —— 8 种画法点选(柱状/点阵/镜像/峰值/尖刺/斜切/萤火/星轨) */
     [specs addObject:[self barStyleSpec]];
     [specs addObject:[self npSlider:@"根数" key:diFxSizedKey(@"AlbumBarsCount") def:40 mn:8 mx:64]];
     [specs addObject:[self npSlider:@"频谱条高度" key:diFxSizedKey(@"AlbumBarsHeight") def:13.0 mn:4.0 mx:40.0]];
