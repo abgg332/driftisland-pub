@@ -5410,25 +5410,7 @@ static void diOpenHomeBarPickWindow(void) {
     [specs addObject:[self switchSpec:@"启动旋转" key:@"maskRotateOn" def:@NO]];
     [specs addObject:[self switchSpec:@"反向旋转" key:@"maskRotateReverse" def:@NO]];
     [specs addObject:[self numSlider:@"旋转速度" key:@"maskRotateSpeed" def:45 mn:0 mx:360]];
-    /* ===== 3.0.86: 岛专辑特效 —— 与「播放器 → 律动特效」一一对应的全套设置项 =====
-       键全部用 Island 前缀, 与播放器那套(Album/Particle)互不影响。
-       参数由 SpringBoard 1Hz 落盘 fx.plist 交给 MediaRemoteUI(它读不到偏好)。 */
-    [specs addObject:[self groupSpec:@"专辑律动"
-                              footer:@"作用于岛上专辑头像；粒子与头像使用同一鼓点相位，幅度分别可调。粒子挂载窗口层，可飘出岛外。默认关闭。"]];
-    [specs addObject:[self switchSpec:@"启用律动特效" key:@"IslandFxOn" def:@NO]];
-    [specs addObject:[self switchSpec:@"专辑跟随律动" key:@"IslandBeatOn" def:@NO]];
-    [specs addObject:[self numSliderD:@"专辑律动幅度" key:@"IslandBeatScale" def:0.70 mn:0.00 mx:2.00]];
-
-    [specs addObject:[self groupSpec:@"律动粒子" footer:nil]];
-    [specs addObject:[self switchSpec:@"启用律动粒子" key:@"IslandParticlesOn" def:@NO]];
-    [specs addObject:[self numSliderD:@"粒子数量" key:@"IslandDotCount" def:25 mn:0 mx:40]];
-    [specs addObject:[self numSliderD:@"粒子透明" key:@"IslandDotAlpha" def:0.74 mn:0.10 mx:1.50]];
-    [specs addObject:[self numSliderD:@"粒子大小" key:@"IslandDotSize" def:1.0 mn:0.1 mx:2.0]];
-    [specs addObject:[self numSliderD:@"粒子强度" key:@"IslandDotStrength" def:1.0 mn:0.0 mx:2.0]];
-    [specs addObject:[self diIslandModeSpec]];
-    [specs addObject:[self diIslandColorSpec:@"起始颜色" key:@"IslandColA" def:@"#FFFFB4"]];
-    [specs addObject:[self diIslandColorSpec:@"结束颜色" key:@"IslandColB" def:@"#BCCEFC"]];
-    [specs addObject:[self switchSpec:@"流光(颜色缓慢流动)" key:@"IslandFlowOn" def:@NO]];
+    /* Island beat/particle controls retired in 3.0.108; original mask controls above remain. */
     return specs;
 }
 
@@ -6516,12 +6498,12 @@ static NSString *diBarStyleLabel(int s) {
     return s;
 }
 - (PSSpecifier *)barStyleSpec {
-    NSString *label=[NSString stringWithFormat:@"样式预览 · %@",diBarStyleLabel([self diBarStyleIndex])];
+    NSString *label=[NSString stringWithFormat:@"样式图示 · %@",diBarStyleLabel([self diBarStyleIndex])];
     PSSpecifier *sp=[PSSpecifier preferenceSpecifierNamed:label target:self set:NULL get:NULL detail:nil cell:PSButtonCell edit:nil];
     sp.buttonAction=@selector(diOpenSpectrumPreview:);return sp;
 }
 - (void)diOpenSpectrumPreview:(PSSpecifier *)sp {
-    (void)sp;Class c=NSClassFromString(@"DISpectrumStylePreviewController");
+    (void)sp;Class c=NSClassFromString(@"DISpectrumStaticController");
     if(c)[self.navigationController pushViewController:[[c alloc]init] animated:YES];
 }
 

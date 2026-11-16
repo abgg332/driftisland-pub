@@ -127,6 +127,7 @@ static UIColor *diRhythmHexColor(NSString *hex, UIColor *def);
    岛上那颗专辑是我们自绘的玻璃视图(DIMaskView 小岛态 / MRU 的 glass 展开态)。
    这两个开关只给它们单独开"随节拍缩放"和"外圈粒子", 与播放器那套完全独立:
    开关默认关, 关掉时一个字节的额外行为都没有。 */
+static const BOOL diIslandEffectsAvailable = NO; // source archived; original mask/rotation remain
 static BOOL islandFxOn = NO;          // IslandFxOn: 岛专辑特效总开关(3.0.86)
 static BOOL islandBeatOn = NO;        // IslandBeatOn: 岛上专辑随节拍缩放
 static BOOL islandParticlesOn = NO;   // IslandParticlesOn: 岛上专辑外圈粒子
@@ -1339,9 +1340,9 @@ static void refreshPrefs(void) {
     }
     maskRotateOn = pBool(@"maskRotateOn", NO);
     /* 3.0.84: 岛专辑特效(与播放器那套独立, 默认关) */
-    islandFxOn = pBool(@"IslandFxOn", NO);
-    islandBeatOn = pBool(@"IslandBeatOn", NO);
-    islandParticlesOn = pBool(@"IslandParticlesOn", NO);
+    islandFxOn = NO;
+    islandBeatOn = NO;
+    islandParticlesOn = NO;
     {
         double v = pDouble(@"IslandBeatScale", 0.70);
         if (v < 0) v = 0; if (v > 2.0) v = 2.0;
@@ -21647,6 +21648,8 @@ static void diFxHardStop(void) {
    gDIBeatEnv/gDIBassPulse)30Hz 落成 24 字节, MRU 直接读 —— 岛上和播放器永远是同一拍。 */
 typedef struct { double t; float kick, env, bass, playing, energy, extra; } DIBeatSnapOut;
 static void diISPublishBeat(BOOL playing) {
+    if(!diIslandEffectsAvailable)return; // no retired island IPC writes
+
     static int fd = -2;
     static CFAbsoluteTime lastTry = 0, lastW = 0;
     CFAbsoluteTime now = CFAbsoluteTimeGetCurrent();
@@ -22569,6 +22572,11 @@ static void diISMRUStop(void) {
 }
 
 static void diISMRUApply(UIView *artwork, UIView *glass) {
+    if(!diIslandEffectsAvailable){
+        if([artwork.layer animationForKey:@"di.isl.beat"]) [artwork.layer removeAnimationForKey:@"di.isl.beat"];
+        if(gDIISMRL || gDIISMHost || gDIISMArt)diISMRUStop();
+        return;
+    }
     /* 3.0.88: 展开(66)/播放器(57)/全屏 —— 只要不是小岛头像就立刻收干净,
        绝不把上一步的缩放/粒子留在展开态上(493 明确说"我不需要展开")。
        3.0.91: 判据换成 diISMIsCompactArt —— 展开页那颗 45x22 的小头像也挡掉。 */
@@ -22580,6 +22588,11 @@ static void diISMRUApply(UIView *artwork, UIView *glass) {
 }
 
 static void diISMRUEnsure(void) {
+    if(!diIslandEffectsAvailable){
+        gDIISMOn=NO;gDIISMBeat=NO;gDIISMPart=NO;
+        if(gDIISMRL || gDIISMHost || gDIISMArt)diISMRUStop();
+        return;
+    }
     BOOL has = diISMRULoadParams();
     BOOL need = has && gDIISMOn && (gDIISMBeat || gDIISMPart);
     gDIISMParamsAt = CFAbsoluteTimeGetCurrent();

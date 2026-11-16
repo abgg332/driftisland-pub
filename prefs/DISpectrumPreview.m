@@ -1,55 +1,61 @@
 #import <UIKit/UIKit.h>
+#import <Preferences/PSListController.h>
+#import <Preferences/PSSpecifier.h>
 #import <CoreFoundation/CoreFoundation.h>
 #import <notify.h>
 #import "../DIExtraSpectrum.h"
-static NSArray *diPreviewNames(void){return @[@"柱状",@"点阵",@"镜像",@"阶梯",@"峰值",@"尖刺",@"斜切",@"电波",@"气泡",@"居中胶囊",@"流动山峦",@"对称声纹",@"星点矩阵",@"环形能量",@"双轨脉冲"];}
-@interface DISpectrumPreviewCanvas:UIView
-@property(nonatomic) NSInteger style;
-@property(nonatomic) CGFloat phase;
+
+/* Static thumbnails only: no CADisplayLink, NSTimer, audio input or live canvas. */
+@interface DISpectrumStaticController : PSListController
 @end
-@implementation DISpectrumPreviewCanvas
-- (void)drawRect:(CGRect)rect {
- CGContextRef ctx=UIGraphicsGetCurrentContext();if(!ctx)return;
- CGRect b=CGRectInset(self.bounds,10,9);CGFloat values[32];
- for(int i=0;i<32;i++)values[i]=.08+.92*fabs(sin(self.phase*1.5+i*.36))*pow(MAX(.1,1-fabs(i-15.5)/19),.7);
- UIColor *color=[UIColor colorWithRed:.64 green:.55 blue:1 alpha:1];[color setFill];[color setStroke];
- if(self.style>=9){CGPathRef path=diExtraSpectrumPath((int)self.style,values,32,b);CGContextAddPath(ctx,path);CGContextDrawPath(ctx,self.style==13?kCGPathFillStroke:kCGPathFill);CGPathRelease(path);return;}
- CGFloat dx=b.size.width/32;
- for(int i=0;i<32;i++){
-  CGFloat h=values[i]*b.size.height,w=MAX(1,dx*.6),x=b.origin.x+i*dx,y=CGRectGetMaxY(b)-h;
-  if(self.style==1){for(int j=0;j<h/5;j++)CGContextFillRect(ctx,CGRectMake(x,CGRectGetMaxY(b)-j*5-3,w,3));}
-  else if(self.style==2)CGContextFillRect(ctx,CGRectMake(x,CGRectGetMidY(b)-h/2,w,h));
-  else if(self.style==5){CGContextMoveToPoint(ctx,x,CGRectGetMaxY(b));CGContextAddLineToPoint(ctx,x+w/2,y);CGContextAddLineToPoint(ctx,x+w,CGRectGetMaxY(b));CGContextFillPath(ctx);}
-  else if(self.style==7){if(i==0)CGContextMoveToPoint(ctx,x,y);else CGContextAddLineToPoint(ctx,x,y);}
-  else {CGFloat skew=self.style==6?h*.12:0;CGContextFillRect(ctx,CGRectMake(x+skew,y,w,h));if(self.style==4)CGContextFillRect(ctx,CGRectMake(x,y-5,w,2));if(self.style==8)CGContextFillEllipseInRect(ctx,CGRectMake(x,y-8-fmod(self.phase*10+i,14),3,3));}
- }
- if(self.style==7){CGContextSetLineWidth(ctx,1.5);CGContextStrokePath(ctx);}
+static UIImage *diStaticShape(NSInteger style){
+    CGSize size=CGSizeMake(88,42);
+    UIGraphicsBeginImageContextWithOptions(size,NO,0);
+    CGContextRef ctx=UIGraphicsGetCurrentContext();
+    if(!ctx){UIGraphicsEndImageContext();return nil;}
+    CGFloat v[24];for(int i=0;i<24;i++)v[i]=.15+.78*fabs(sin(i*.61))*MAX(.3,1-fabs(i-11.5)/16);
+    [[UIColor colorWithRed:.61 green:.47 blue:.95 alpha:1] setFill];
+    CGRect b=CGRectMake(3,4,82,34);
+    if(style>=9){CGPathRef p=diExtraSpectrumPath((int)style,v,24,b);CGContextAddPath(ctx,p);CGContextFillPath(ctx);CGPathRelease(p);}
+    else {
+        CGFloat dx=b.size.width/24;
+        if(style==3){CGContextMoveToPoint(ctx,3,38);for(int i=0;i<24;i++){CGFloat x=3+i*dx,y=38-v[i]*30;CGContextAddLineToPoint(ctx,x,y);CGContextAddLineToPoint(ctx,x+dx,y);}CGContextAddLineToPoint(ctx,85,38);CGContextClosePath(ctx);CGContextFillPath(ctx);}
+        else if(style==7){[[UIColor systemPurpleColor]setStroke];for(int i=0;i<24;i++){CGFloat x=3+i*dx,y=38-v[i]*30;if(i)CGContextAddLineToPoint(ctx,x,y);else CGContextMoveToPoint(ctx,x,y);}CGContextSetLineWidth(ctx,1.5);CGContextStrokePath(ctx);}
+        else for(int i=0;i<24;i++){
+            CGFloat x=3+i*dx,h=v[i]*30,y=38-h,w=2;
+            if(style==1){for(int j=0;j<(int)(h/4);j++)CGContextFillRect(ctx,CGRectMake(x,35-j*4,w,2));}
+            else if(style==2)CGContextFillRect(ctx,CGRectMake(x,21-h/2,w,h));
+            else if(style==5){CGContextMoveToPoint(ctx,x,38);CGContextAddLineToPoint(ctx,x+w/2,y);CGContextAddLineToPoint(ctx,x+w,38);CGContextClosePath(ctx);CGContextFillPath(ctx);}
+            else if(style==6){CGContextMoveToPoint(ctx,x,38);CGContextAddLineToPoint(ctx,x+h*.14,y);CGContextAddLineToPoint(ctx,x+h*.14+w,y);CGContextAddLineToPoint(ctx,x+w,38);CGContextClosePath(ctx);CGContextFillPath(ctx);}
+            else {CGContextFillRect(ctx,CGRectMake(x,y,w,h));if(style==4)CGContextFillRect(ctx,CGRectMake(x,y-4,w,1));if(style==8)CGContextFillEllipseInRect(ctx,CGRectMake(x,y-6,2,2));}
+        }
+    }
+    UIImage *image=UIGraphicsGetImageFromCurrentImageContext();UIGraphicsEndImageContext();return image;
 }
-@end
-@interface DISpectrumStylePreviewController:UITableViewController
-@property(nonatomic,strong) CADisplayLink *displayLink;
-@property(nonatomic,assign) NSInteger selected;
-@property(nonatomic,assign) CFTimeInterval previous;
-@end
-@implementation DISpectrumStylePreviewController
-- (instancetype)init {return [super initWithStyle:UITableViewStyleInsetGrouped];}
-- (void)viewDidLoad{[super viewDidLoad];self.title=@"频谱样式预览";self.tableView.rowHeight=110;self.tableView.backgroundColor=UIColor.systemGroupedBackgroundColor;[self readSelected];}
-- (void)readSelected {id n=CFBridgingRelease(CFPreferencesCopyAppValue(CFSTR("SpectrumStyle"),CFSTR("com.abgg332.driftisland")));self.selected=n?[n integerValue]:0;}
-- (void)viewDidAppear:(BOOL)animated{[super viewDidAppear:animated];self.displayLink=[CADisplayLink displayLinkWithTarget:self selector:@selector(tick:)];self.displayLink.preferredFramesPerSecond=20;[self.displayLink addToRunLoop:NSRunLoop.mainRunLoop forMode:NSRunLoopCommonModes];}
-- (void)viewWillDisappear:(BOOL)animated{[super viewWillDisappear:animated];[self.displayLink invalidate];self.displayLink=nil;self.previous=0;}
-- (void)dealloc{[_displayLink invalidate];}
-- (void)tick:(CADisplayLink *)link {CGFloat delta=self.previous?MIN(.1,link.timestamp-self.previous):.05;self.previous=link.timestamp;for(UITableViewCell *c in self.tableView.visibleCells){DISpectrumPreviewCanvas *v=(DISpectrumPreviewCanvas *)[c.contentView viewWithTag:1071];v.phase+=delta;[v setNeedsDisplay];}}
-- (NSInteger)tableView:(UITableView *)table numberOfRowsInSection:(NSInteger)section{(void)table;(void)section;return diPreviewNames().count;}
-- (NSString *)tableView:(UITableView *)table titleForHeaderInSection:(NSInteger)section{(void)table;(void)section;return @"点选即应用 · 模拟音频动画预览";}
-- (NSString *)tableView:(UITableView *)table titleForFooterInSection:(NSInteger)section{(void)table;(void)section;return @"预览使用模拟信号，不读取麦克风。旧样式为示意预览；新增样式与实播共用路径算法。实际效果受歌曲频谱、颜色和高度设置影响，并非特定音乐 App 的官方复刻。";}
-- (UITableViewCell *)tableView:(UITableView *)table cellForRowAtIndexPath:(NSIndexPath *)index {
- UITableViewCell *c=[table dequeueReusableCellWithIdentifier:@"spectrum"];
- if(!c){c=[[UITableViewCell alloc]initWithStyle:UITableViewCellStyleDefault reuseIdentifier:@"spectrum"];UILabel *title=[[UILabel alloc]initWithFrame:CGRectZero];title.tag=1070;title.font=[UIFont systemFontOfSize:16 weight:UIFontWeightSemibold];title.textColor=UIColor.labelColor;[c.contentView addSubview:title];DISpectrumPreviewCanvas *v=[DISpectrumPreviewCanvas new];v.tag=1071;v.backgroundColor=UIColor.clearColor;[c.contentView addSubview:v];}
- UILabel *label=(UILabel *)[c.contentView viewWithTag:1070];label.text=diPreviewNames()[index.row];label.frame=CGRectMake(16,6,240,25);label.autoresizingMask=UIViewAutoresizingFlexibleWidth;
- DISpectrumPreviewCanvas *v=(DISpectrumPreviewCanvas *)[c.contentView viewWithTag:1071];v.style=index.row;v.frame=CGRectMake(12,33,MAX(100,table.bounds.size.width-90),68);v.autoresizingMask=UIViewAutoresizingFlexibleWidth;[v setNeedsDisplay];
- c.accessoryType=self.selected==index.row?UITableViewCellAccessoryCheckmark:UITableViewCellAccessoryNone;return c;
+@implementation DISpectrumStaticController
+- (NSArray *)specifiers {
+    if(!_specifiers){
+        NSArray *names=@[@"柱状",@"点阵",@"镜像",@"阶梯",@"峰值",@"尖刺",@"斜切",@"电波",@"气泡",@"居中胶囊",@"流动山峦",@"对称声纹",@"星点矩阵",@"环形能量",@"双轨脉冲"];
+        NSMutableArray *rows=[NSMutableArray array];
+        PSSpecifier *group=[PSSpecifier preferenceSpecifierNamed:@"静态形状图 · 点选应用" target:nil set:NULL get:NULL detail:nil cell:PSGroupCell edit:nil];
+        [group setProperty:@"图示为固定信号下的形状示意，不播放动画、不采集音频。选中后到播放器查看实际音乐效果。" forKey:@"footerText"];[rows addObject:group];
+        id saved=CFBridgingRelease(CFPreferencesCopyAppValue(CFSTR("SpectrumStyle"),CFSTR("com.abgg332.driftisland")));
+        NSInteger selected=saved?[saved integerValue]:0;
+        for(NSUInteger i=0;i<names.count;i++){
+            NSString *title=[NSString stringWithFormat:@"%@%@",i==selected?@"✓  ":@"",names[i]];
+            PSSpecifier *sp=[PSSpecifier preferenceSpecifierNamed:title target:self set:NULL get:NULL detail:nil cell:PSButtonCell edit:nil];
+            [sp setProperty:@(i) forKey:@"diStyle"];
+            UIImage *icon=diStaticShape(i);if(icon)[sp setProperty:icon forKey:@"iconImage"];
+            [sp setButtonAction:@selector(selectStyle:)];[rows addObject:sp];
+        }
+        _specifiers=rows;
+    }return _specifiers;
 }
-- (void)tableView:(UITableView *)table didSelectRowAtIndexPath:(NSIndexPath *)index {
- self.selected=index.row;NSNumber *value=@(index.row);CFPreferencesSetAppValue(CFSTR("SpectrumStyle"),(__bridge CFPropertyListRef)value,CFSTR("com.abgg332.driftisland"));CFPreferencesAppSynchronize(CFSTR("com.abgg332.driftisland"));notify_post("com.abgg332.driftisland.fxtune");[table deselectRowAtIndexPath:index animated:YES];[table reloadData];
+- (void)selectStyle:(PSSpecifier *)sp {
+    NSNumber *n=[sp propertyForKey:@"diStyle"];
+    if(!n || n.integerValue<0 || n.integerValue>14)return;
+    CFPreferencesSetAppValue(CFSTR("SpectrumStyle"),(__bridge CFPropertyListRef)n,CFSTR("com.abgg332.driftisland"));
+    CFPreferencesAppSynchronize(CFSTR("com.abgg332.driftisland"));notify_post("com.abgg332.driftisland.fxtune");
+    _specifiers=nil;[self reloadSpecifiers];
 }
 @end
