@@ -47,11 +47,16 @@ static void diriLog(NSString *s){NSLog(@"[DI录屏岛] %@",s);}
     self.bounds=CGRectMake(0,0,size*scale,size*scale);
     self.center=CGPointMake(CGRectGetMidX(v.bounds)+diriNumber([self key:@"OffsetX"],0),CGRectGetMidY(v.bounds)+diriNumber([self key:@"OffsetY"],0));
     self.image.frame=self.bounds;
-    NSString *name=diriPrefs[[self key:@"Asset"]];if(![name isKindOfClass:NSString.class]||!name.length)name=@"default";
+    NSString *name=diriPrefs[[self key:@"Asset"]];
+    if(![name isKindOfClass:NSString.class]||!name.length||[name isEqualToString:@"default"]){
+        name=diriPrefs[self.left?@"miniAlbumFolder":@"miniAudioFolder"];
+        if(![name isKindOfClass:NSString.class]||!name.length)name=diriPrefs[@"animFolder"];
+        if(![name isKindOfClass:NSString.class])name=@"";
+    }
     // A material is a directory of ordered PNG/JPEG frames, not arbitrary code or a video overlay.
     if([name containsString:@"/"]||[name containsString:@".."]){self.hidden=YES;return;}
-    NSString *base=@"/var/mobile/灵动岛/录屏岛";
-    NSString *path=[[base stringByAppendingPathComponent:self.left?@"Mini":@"Trailing"] stringByAppendingPathComponent:name];
+    NSString *base=@"/var/mobile/灵动岛/帧率素材";
+    NSString *path=name.length?[base stringByAppendingPathComponent:name]:base;
     if(![self.loaded isEqualToString:path]){
         self.loaded=path;self.generation++;NSUInteger generation=self.generation;
         [self.image stopAnimating];self.image.animationImages=nil;self.image.image=nil;

@@ -6780,7 +6780,7 @@ static NSString *diBarStyleLabel(int s) {
     [specs addObject:[self switchSpec:@"启用录屏岛" key:@"RecordingIslandEnabled" def:@NO]];
     for(NSString *side in @[@"Mini",@"Trailing"]){
         NSString *prefix=[@"RecordingIsland" stringByAppendingString:side];
-        [specs addObject:[self groupSpec:[side isEqualToString:@"Mini"]?@"左侧（Mini）":@"右侧" footer:@"素材文件夹名可输入 default；文件夹内放按数字命名的 PNG/JPEG。旋转速度为本插件的适配单位，不承诺与参考包数值等价。"]];
+        [specs addObject:[self groupSpec:[side isEqualToString:@"Mini"]?@"左侧（Mini）":@"右侧" footer:@"填写原有「帧率素材」下的文件夹名；default 沿用左右帧率素材设置，未配置则读根目录。文件夹内按数字命名 PNG/JPEG。旋转速度为本插件的适配单位，不承诺与参考包数值等价。"]];
         [specs addObject:[self switchSpec:@"启用动画" key:[prefix stringByAppendingString:@"Enabled"] def:@YES]];
         [specs addObject:[self numSlider:@"动画帧率" key:[prefix stringByAppendingString:@"FPS"] def:60 mn:0 mx:1000]];
         [specs addObject:[self switchSpec:@"启用素材旋转" key:[prefix stringByAppendingString:@"Rotation"] def:@NO]];
@@ -6793,7 +6793,7 @@ static NSString *diBarStyleLabel(int s) {
         [asset setProperty:[prefix stringByAppendingString:@"Asset"] forKey:@"key"];[asset setProperty:kDomain forKey:@"defaults"];[asset setProperty:@"default" forKey:@"default"];
         [specs addObject:asset];
     }
-    [specs addObject:[self groupSpec:nil footer:@"素材路径：/var/mobile/灵动岛/录屏岛/Mini/文件夹名 和 /var/mobile/灵动岛/录屏岛/Trailing/文件夹名。包内不包含参考插件未提供的动画素材。"]];
+    [specs addObject:[self groupSpec:nil footer:@"素材路径：/var/mobile/灵动岛/帧率素材/文件夹名。左右共用原有素材库，各自选择，不需要移动或复制素材。"]];
     return specs;
 }
 @end
