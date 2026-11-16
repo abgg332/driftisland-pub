@@ -4,7 +4,7 @@ TARGET = iphone:clang:16.5:16.0
 include $(THEOS)/makefiles/common.mk
 
 BUNDLE_NAME = DriftIslandPrefs
-DriftIslandPrefs_FILES = Controllers.m
+DriftIslandPrefs_FILES = Controllers.m DISpectrumPreview.m
 DriftIslandPrefs_CFLAGS = -fobjc-arc -I..
 DriftIslandPrefs_FRAMEWORKS = UIKit Foundation CoreFoundation
 DriftIslandPrefs_PRIVATE_FRAMEWORKS = Preferences

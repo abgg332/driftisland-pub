@@ -6499,32 +6499,30 @@ static NSString *diBarStyleLabel(int s) {
         case 5:  return @"尖刺";
         case 6:  return @"斜切";
         case 7:  return @"电波";
-        default: return @"气泡";
+        case 8:return @"气泡";
+        case 9:return @"居中胶囊";
+        case 10:return @"流动山峦";
+        case 11:return @"对称声纹";
+        case 12:return @"星点矩阵";
+        case 13:return @"环形能量";
+        default:return @"双轨脉冲";
     }
 }
 - (int)diBarStyleIndex {
     id v = diFxReadSized(@"SpectrumStyle");
     int s = v ? [v intValue] : 0;
     if (s < 0) s = 0;
-    if (s > 8) s = 8;
+    if (s > 14) s = 14;
     return s;
 }
 - (PSSpecifier *)barStyleSpec {
-    NSString *label = [NSString stringWithFormat:@"样式  ·  %@", diBarStyleLabel([self diBarStyleIndex])];
-    PSSpecifier *sp = [PSSpecifier preferenceSpecifierNamed:label target:self
-        set:NULL get:NULL detail:nil cell:PSButtonCell edit:nil];
-    sp.buttonAction = @selector(diCycleBarStyle:);
-    return sp;
+    NSString *label=[NSString stringWithFormat:@"样式预览 · %@",diBarStyleLabel([self diBarStyleIndex])];
+    PSSpecifier *sp=[PSSpecifier preferenceSpecifierNamed:label target:self set:NULL get:NULL detail:nil cell:PSButtonCell edit:nil];
+    sp.buttonAction=@selector(diOpenSpectrumPreview:);return sp;
 }
-- (void)diCycleBarStyle:(PSSpecifier *)sp {
-    int m = ([self diBarStyleIndex] + 1) % 9;
-    CFPreferencesSetAppValue((__bridge CFStringRef)@"SpectrumStyle",
-                             (__bridge CFPropertyListRef)@(m),
-                             (__bridge CFStringRef)kDomain);
-    CFPreferencesAppSynchronize((__bridge CFStringRef)kDomain);
-    diPostFxTune();
-    [self reloadSpecifiers];
-    diStep(@"频谱条样式：%@", diBarStyleLabel(m));
+- (void)diOpenSpectrumPreview:(PSSpecifier *)sp {
+    (void)sp;Class c=NSClassFromString(@"DISpectrumStylePreviewController");
+    if(c)[self.navigationController pushViewController:[[c alloc]init] animated:YES];
 }
 
 /* 3.0.57: 当前色值(供行标题显示) */

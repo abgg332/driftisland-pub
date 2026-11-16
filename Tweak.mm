@@ -1,3 +1,4 @@
+#import "DIExtraSpectrum.h"
 // 漂流岛 Drift Island —— 灵动岛视频背景
 // 素材目录: /var/mobile/灵动岛 (mp4/mov/m4v, 按文件名排序, 设置里按序号选用)
 #import <UIKit/UIKit.h>
@@ -1048,7 +1049,7 @@ static void diFxLoadPrefs(void) {
                                                                (__bridge CFStringRef)kDomain));
             int st = sv ? [sv intValue] : 0;
             if (st < 0) st = 0;
-            if (st > 8) st = 8;
+            if (st > 14) st = 14;
             if (st != gDIBarStyle) {
                 gDIBarStyle = st;
                 for (int i = 0; i < 64; i++) gDIBarPeak[i] = 0.0f;   /* 换样式时峰值重新来 */
@@ -20886,7 +20887,12 @@ static void diRhythmUpdateBars(UIView *host, BOOL active) {
     CGMutablePathRef p = CGPathCreateMutable();
     const CGFloat xMidAll = (top + bottom) * 0.5f;   /* 镜像样式的中线 */
 
-    switch (gDIBarStyle) {
+    if(gDIBarStyle>=9){
+        CGFloat values[64];for(int i=0;i<n;i++)values[i]=vArr[i];
+        CGRect box=CGRectMake(x0,top,bw*n+gap*(n-1),height);
+        CGPathRef extra=diExtraSpectrumPath(gDIBarStyle,values,n,box);
+        CGPathAddPath(p,NULL,extra);CGPathRelease(extra);
+    } else switch (gDIBarStyle) {
         case 1: {   /* 点阵: 每列是一串自下而上的小方块(LED 电平表), 亮的格数随频谱值 */
             CGFloat cell = 2.2f, cgap = 1.0f, cspan = cell + cgap;
             int cells = (int)floorf((height + cgap) / cspan);
@@ -22286,24 +22292,7 @@ static BOOL __attribute__((unused)) diISMClips(UIView *v) {
    不再往上爬 —— 往上爬会走到窗体一级, 那正是 3.0.89/90 "粒子数有、屏幕没有"
    和"粒子跑到展开页"的来源。 */
 static UIView *diISMHostParent(UIView *art) {
-    // Stay INSIDE the aperture's visible content tree. Never attach to UIWindow.
-    // Accessory-local particles can be cropped by a portal even with clipsToBounds=NO.
-    UIView *fallback=art.superview;
-    for(UIView *v=fallback;v && v!=art.window;v=v.superview){
-        NSString *name=NSStringFromClass(v.class);
-        if([name containsString:@"MRUActivityNowPlayingView"]){
-            UIView *content=v.superview;
-            NSString *parentName=NSStringFromClass(content.class);
-            if(content && content!=art.window && content.window==art.window
-                && ![parentName containsString:@"Transition"]
-                && ![parentName containsString:@"DropShadow"]
-                && content.bounds.size.width>=v.bounds.size.width
-                && content.bounds.size.height>=v.bounds.size.height)
-                return content;
-            return v;
-        }
-    }
-    return fallback;
+    return art.superview; // 102 device-confirmed visible portal content branch
 }
 
 static void diISMEnsureHost(void) {
@@ -22742,7 +22731,7 @@ static void diISMRUFrame(float dtIn) {
             }
         }
         diMruFileLog([NSString stringWithFormat:
-            @"岛特效同步探针 102基线外扩=2 内容分支外飘=1 头像=%.0fx%.0f 文件=%d 播放=%d 鼓=%.2f 缩放=%.3f 粒子=%d 宿主=%@ 曾在=%@",
+            @"岛特效同步探针 102可见宿主恢复 外扩=2 内容分支外飘=1 头像=%.0fx%.0f 文件=%d 播放=%d 鼓=%.2f 缩放=%.3f 粒子=%d 宿主=%@ 曾在=%@",
             art.bounds.size.width, art.bounds.size.height, (int)fromFile,
             (int)playing, kick, gDIISMScaleNow, gDIISMDotCount,
             gDIISMHost ? NSStringFromClass(gDIISMHost.superview.class) : @"无",
