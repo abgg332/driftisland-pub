@@ -11,13 +11,17 @@ static NSString *const DIRIIdentifier=@"systemApertureElementIdentifierScreenRec
 static NSDictionary *diriPrefs;
 static NSHashTable *diriViews;
 static BOOL diriHooked=NO;
+static NSHashTable *diriScenes;
+static char diriSceneKey;
+static BOOL diriApplying=NO;
+extern "C" void DIRecordingIslandLog(NSString *message);
 static id diriCall(id o,NSString *s) {
     SEL a=NSSelectorFromString(s);
     return o && [o respondsToSelector:a]?((id(*)(id,SEL))objc_msgSend)(o,a):nil;
 }
 static BOOL diriBool(NSString *k,BOOL d){id v=diriPrefs[k];return v?[v boolValue]:d;}
 static double diriNumber(NSString *k,double d){id v=diriPrefs[k];double n=v?[v doubleValue]:d;return isfinite(n)?n:d;}
-static void diriLog(NSString *s){NSLog(@"[DI录屏岛] %@",s);}
+static void diriLog(NSString *s){DIRecordingIslandLog(s);}
 @interface DIRecordingIslandView : UIView
 @property(nonatomic,strong) UIImageView *image;
 @property(nonatomic,weak) UIView *source;
@@ -119,12 +123,20 @@ static void __attribute__((unused)) diriAttach(UIView *v,BOOL left){
     if(overlay.superview!=v)[v addSubview:overlay];
     [v bringSubviewToFront:overlay];[overlay refresh];
 }
-static BOOL diriRecording(id e){id ident=diriCall(e,@"elementIdentifier");return [ident isKindOfClass:NSString.class]&&[ident isEqualToString:DIRIIdentifier];}
+static BOOL diriRecording(id e){
+    id ident=diriCall(e,@"elementIdentifier");
+    if(![ident isKindOfClass:NSString.class])return NO;
+    // The exported constant name is not necessarily its NSString value on iOS16.
+    return [ident isEqualToString:@"screenRecording"] || [ident isEqualToString:DIRIIdentifier];
+}
 static void diriApply(id e){
     if(!diriRecording(e))return;
+    [diriScenes addObject:e];
     id host=diriCall(e,@"elementHost");
     id controller=[host isKindOfClass:NSClassFromString(@"SAUIElementViewController")]?host:nil;
     UIView *element=diriView(controller,@"_elementView");
+    if(!element && [host isKindOfClass:UIView.class])element=(UIView *)host;
+    if(element)objc_setAssociatedObject(element,&diriSceneKey,@YES,OBJC_ASSOCIATION_RETAIN_NONATOMIC);
     if(!element){diriLog(@"录屏活动已识别，但 elementHost/_elementView 尚未就绪");return;}
     // Two distinct overlays in the confirmed element view. Layout is our adaptation,
     // not an assumption that playback getters exist on a recording scene element.
@@ -137,23 +149,45 @@ static void diriApply(id e){
         }
         views=created;objc_setAssociatedObject(element,&diriKey,views,OBJC_ASSOCIATION_RETAIN_NONATOMIC);
     }
+    if(element.bounds.size.width<2 || element.bounds.size.height<2)return;
     CGFloat side=MIN(22.0,element.bounds.size.height);
     for(NSUInteger i=0;i<views.count;i++){
         DIRecordingIslandView *v=views[i];UIView *slot=v.source;
         slot.frame=CGRectMake(i==0?CGRectGetMinX(element.bounds):CGRectGetMaxX(element.bounds)-side,CGRectGetMidY(element.bounds)-side/2,side,side);
         [v refresh];
     }
-    diriLog([NSString stringWithFormat:@"录屏挂载 host=%@ element=%@ bounds=%@",NSStringFromClass([host class]),NSStringFromClass(element.class),NSStringFromCGRect(element.bounds)]);
+    static CFAbsoluteTime lastLayoutLog=0;
+    if(CFAbsoluteTimeGetCurrent()-lastLayoutLog>2){
+        lastLayoutLog=CFAbsoluteTimeGetCurrent();
+        diriLog([NSString stringWithFormat:@"录屏挂载 host=%@ element=%@ bounds=%@ 开=%d",NSStringFromClass([host class]),NSStringFromClass(element.class),NSStringFromCGRect(element.bounds),diriBool(@"RecordingIslandEnabled",NO)]);
+    }
 }
 static void(*diriTransitionOrig)(id,SEL,CGSize,id,id);
 static void diriTransition(id self,SEL cmd,CGSize size,id container,id coordinator){
     diriTransitionOrig(self,cmd,size,container,coordinator);
+    id ident=diriCall(self,@"elementIdentifier");
+    static NSUInteger observed=0;
+    if(observed++<12)diriLog([NSString stringWithFormat:@"transition 标识=%@ 类型=%@ host=%@ 容器=%@ size=%@",ident,NSStringFromClass([ident class]),NSStringFromClass([diriCall(self,@"elementHost") class]),NSStringFromClass([container class]),NSStringFromCGSize(size)]);
     diriApply(self);
+    if(diriRecording(self)){
+        __weak id weak=self;
+        dispatch_async(dispatch_get_main_queue(),^{id scene=weak;if(scene)diriApply(scene);});
+    }
 }
 static void diriReload(int token){
     (void)token;CFPreferencesAppSynchronize((__bridge CFStringRef)DIRIDomain);
     diriPrefs=CFBridgingRelease(CFPreferencesCopyMultiple(NULL,(__bridge CFStringRef)DIRIDomain,kCFPreferencesCurrentUser,kCFPreferencesAnyHost))?:@{};
+    diriLog([NSString stringWithFormat:@"配置 总=%d 左=%@ 右=%@ scenes=%lu",diriBool(@"RecordingIslandEnabled",NO),diriPrefs[@"RecordingIslandMiniAsset"],diriPrefs[@"RecordingIslandTrailingAsset"],(unsigned long)diriScenes.count]);
     for(DIRecordingIslandView *v in diriViews.allObjects){v.loaded=nil;[v refresh];}
+    for(id scene in diriScenes.allObjects)diriApply(scene);
+}
+static void(*diriLayoutOrig)(id,SEL);
+static void diriLayout(id self,SEL cmd){
+    diriLayoutOrig(self,cmd);
+    if(diriApplying || !objc_getAssociatedObject(self,&diriSceneKey))return;
+    diriApplying=YES;
+    for(id scene in diriScenes.allObjects)diriApply(scene);
+    diriApplying=NO;
 }
 static void diriInstall(void){
     if(diriHooked)return;
@@ -162,12 +196,14 @@ static void diriInstall(void){
     if(!c||!class_getInstanceMethod(c,t))return;
     MSHookMessageEx(c,t,(IMP)diriTransition,(IMP *)&diriTransitionOrig);
 
+    Class view=NSClassFromString(@"SAUIElementView");
+    if(view && class_getInstanceMethod(view,@selector(layoutSubviews)))MSHookMessageEx(view,@selector(layoutSubviews),(IMP)diriLayout,(IMP *)&diriLayoutOrig);
     diriHooked=YES;diriLog(@"已挂 SBSystemApertureSceneElement transition / elementIdentifier / elementHost / _elementView");
 }
 __attribute__((constructor))static void diriStart(void){
     if(![NSProcessInfo.processInfo.processName isEqualToString:@"SpringBoard"])return;
     dispatch_async(dispatch_get_main_queue(),^{
-        diriViews=[NSHashTable weakObjectsHashTable];diriReload(0);diriInstall();
+        diriViews=[NSHashTable weakObjectsHashTable];diriScenes=[NSHashTable weakObjectsHashTable];diriReload(0);diriInstall();
         int token;notify_register_dispatch("com.abgg332.driftisland.reload",&token,dispatch_get_main_queue(),^(int t){diriReload(t);});
         for(int delay=1;delay<=15;delay+=7)dispatch_after(dispatch_time(DISPATCH_TIME_NOW,delay*NSEC_PER_SEC),dispatch_get_main_queue(),^{diriInstall();});
     });

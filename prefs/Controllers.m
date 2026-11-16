@@ -890,6 +890,8 @@ static Class diStepSliderClass(void) {
 @interface DIMaterialsSmall : DIMaterialsController @end
 @interface DIMaterialsExpand : DIMaterialsController @end
 @interface DIFrameFolders : PSListController @end
+@interface DIRecordingMiniFolders : DIFrameFolders @end
+@interface DIRecordingTrailingFolders : DIFrameFolders @end
 
 @interface DIPrefsController : PSListController {
     NSInteger _smallRow; /* 小岛素材选择 行号 */
@@ -6773,6 +6775,15 @@ static NSString *diBarStyleLabel(int s) {
 }
 @end
 
+@implementation DIRecordingMiniFolders
+- (NSString *)prefKey { return @"RecordingIslandMiniAsset"; }
+- (void)saveFolder:(NSString *)name { [super saveFolder:name ?: @"."]; }
+@end
+@implementation DIRecordingTrailingFolders
+- (NSString *)prefKey { return @"RecordingIslandTrailingAsset"; }
+- (void)saveFolder:(NSString *)name { [super saveFolder:name ?: @"."]; }
+@end
+
 @implementation DIRecordingIslandPage
 - (NSArray *)buildSpecifiers {
     NSMutableArray *specs=[NSMutableArray array];
@@ -6780,7 +6791,7 @@ static NSString *diBarStyleLabel(int s) {
     [specs addObject:[self switchSpec:@"启用录屏岛" key:@"RecordingIslandEnabled" def:@NO]];
     for(NSString *side in @[@"Mini",@"Trailing"]){
         NSString *prefix=[@"RecordingIsland" stringByAppendingString:side];
-        [specs addObject:[self groupSpec:[side isEqualToString:@"Mini"]?@"左侧（Mini）":@"右侧" footer:@"填写原有「帧率素材」下的文件夹名；default 沿用左右帧率素材设置，未配置则读根目录。文件夹内按数字命名 PNG/JPEG。旋转速度为本插件的适配单位，不承诺与参考包数值等价。"]];
+        [specs addObject:[self groupSpec:[side isEqualToString:@"Mini"]?@"左侧（Mini）":@"右侧" footer:@"点击「选择帧率素材」选择原有文件夹；未选择时继承原有左右素材。文件夹内按数字命名 PNG/JPEG。旋转速度为本插件的适配单位，不承诺与参考包数值等价。"]];
         [specs addObject:[self switchSpec:@"启用动画" key:[prefix stringByAppendingString:@"Enabled"] def:@YES]];
         [specs addObject:[self numSlider:@"动画帧率" key:[prefix stringByAppendingString:@"FPS"] def:60 mn:0 mx:1000]];
         [specs addObject:[self switchSpec:@"启用素材旋转" key:[prefix stringByAppendingString:@"Rotation"] def:@NO]];
@@ -6789,7 +6800,7 @@ static NSString *diBarStyleLabel(int s) {
         [specs addObject:[self numSlider:@"缩放百分比" key:[prefix stringByAppendingString:@"ScalePercent"] def:100 mn:50 mx:200]];
         [specs addObject:[self numSlider:@"X偏移" key:[prefix stringByAppendingString:@"OffsetX"] def:0 mn:-10 mx:10]];
         [specs addObject:[self numSlider:@"Y偏移" key:[prefix stringByAppendingString:@"OffsetY"] def:0 mn:-10 mx:10]];
-        PSSpecifier *asset=[PSSpecifier preferenceSpecifierNamed:@"素材文件夹名" target:self set:@selector(setPreferenceValue:specifier:) get:@selector(readPreferenceValue:) detail:nil cell:PSEditTextCell edit:nil];
+        PSSpecifier *asset=[PSSpecifier preferenceSpecifierNamed:@"选择帧率素材" target:self set:NULL get:@selector(readPreferenceValue:) detail:[side isEqualToString:@"Mini"]?[DIRecordingMiniFolders class]:[DIRecordingTrailingFolders class] cell:PSLinkCell edit:nil];
         [asset setProperty:[prefix stringByAppendingString:@"Asset"] forKey:@"key"];[asset setProperty:kDomain forKey:@"defaults"];[asset setProperty:@"default" forKey:@"default"];
         [specs addObject:asset];
     }

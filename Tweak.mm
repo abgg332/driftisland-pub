@@ -309,6 +309,10 @@ static void RLog(NSString *fmt, ...) {
     NSString *out = [NSString stringWithFormat:@"[%@] [现场] %@\n", [diLogDF() stringFromDate:[NSDate date]], line];
     diLogWrite(out);
 }
+extern "C" void DIRecordingIslandLog(NSString *message) {
+    RLog(@"[录屏岛] %@",message);
+}
+
 #define DI_STEP(fmt, ...) RLog(fmt, ##__VA_ARGS__)
 
 /* ===== 3.0.21: 主线程停摆看门狗 + 阶段面包屑 =====
