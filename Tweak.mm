@@ -18864,9 +18864,129 @@ static void di31CardSetFrame(id self, SEL cmd, CGRect f) {
     if (gDI31OrigCardSetFrame) gDI31OrigCardSetFrame(self, cmd, f);
 }
 
+/* ===== 3.0.119: 真 3×1 —— 改模块"占位", 不只是压显示宽度 =====
+   用户 508 号日志的结论: 3.0.118 的收窄是生效的(容器/卡片 356→263), 但网格布局
+   仍然把这一行当成 4 格: 第 4 格一直空着, 别的控件也塞不进来 —— 这就是用户说的
+   "假的 3×1"。宽度只是画出来的, 占位由模块自己的 gridSize 决定, 必须把 gridSize
+   从 {4,1} 改成 {3,1}, 布局引擎才会真的只分配 3 格, 第 4 格回到公共池。 */
+typedef union {
+    struct { uint64_t a, b; } u64;
+    struct { uint32_t a, b, c, d; } u32;
+    uint64_t raw[2];
+} DI31GridVal;
+
+static BOOL gDI31GridHooked = NO;
+static int  gDI31GridHit = 0;
+static BOOL gDI31GridByArg = NO;      /* 方法带模块标识参数(manager 形态) */
+static char gDI31GridEnc[32] = {0};   /* 返回类型编码, 日志里能看到 */
+static DI31GridVal (*gDI31OrigGridFn)(id, SEL, id, id) = NULL;
+
+static BOOL di31IdentIsNP(id obj) {
+    if (!obj) return NO;
+    @try {
+        id x = [obj valueForKey:@"moduleIdentifier"];
+        if ([x isKindOfClass:NSString.class]) return [(NSString *)x containsString:@"nowplaying"];
+    } @catch (__unused NSException *e) {}
+    @try {
+        id y = [obj valueForKey:@"controlIdentifier"];
+        if ([y isKindOfClass:NSString.class]) return [(NSString *)y containsString:@"nowplaying"];
+    } @catch (__unused NSException *e) {}
+    return NO;
+}
+
+static DI31GridVal di31GridSizeHook(id self, SEL cmd, id a1, id a2) {
+    DI31GridVal v;
+    memset(&v, 0, sizeof(v));
+    if (gDI31OrigGridFn) v = gDI31OrigGridFn(self, cmd, a1, a2);
+    if (!di31KeyOn()) return v;
+    BOOL np = di31IdentIsNP(self);
+    if (!np && gDI31GridByArg && [a1 isKindOfClass:NSString.class])
+        np = [(NSString *)a1 containsString:@"nowplaying"];
+    if (!np) return v;
+
+    BOOL changed = NO;
+    if (strstr(gDI31GridEnc, "QQ")) {          /* {CCUIModuleGridSize=QQ} 列,行 */
+        if (v.u64.a == 4 && v.u64.b == 1) { v.u64.a = 3; changed = YES; }
+        else if (v.u64.a == 1 && v.u64.b == 4) { v.u64.b = 3; changed = YES; }
+    } else if (strstr(gDI31GridEnc, "II")) {   /* 32 位字段 */
+        if (v.u32.a == 4 && v.u32.b == 1) { v.u32.a = 3; changed = YES; }
+        else if (v.u32.a == 1 && v.u32.b == 4) { v.u32.b = 3; changed = YES; }
+    }
+    if (changed) {
+        gDI31GridHit++;
+        if (gDI31GridHit <= 8) RLog(@"[3x1][网格] 占位 4x1→3x1 (第 %d 次)", gDI31GridHit);
+    }
+    return v;
+}
+
+static void di31HookGridSel(Class c, NSString *selName, BOOL byArg) {
+    if (!c || gDI31OrigGridFn) return;
+    SEL sel = NSSelectorFromString(selName);
+    Method m = sel ? class_getInstanceMethod(c, sel) : NULL;
+    if (!m) return;
+    const char *enc = method_getTypeEncoding(m);
+    if (!enc) return;
+    size_t sz = 0;
+    NSGetSizeAndAlignment(enc, &sz, NULL);
+    BOOL integral = (strstr(enc, "QQ") != NULL) || (strstr(enc, "II") != NULL);
+    RLog(@"[3x1][网格] 探测 %@ -%@ 编码=%s 大小=%zu", NSStringFromClass(c), selName, enc, sz);
+    if (enc[0] != '{' || !integral || sz < 8 || sz > 16) return;
+    strncpy(gDI31GridEnc, enc, sizeof(gDI31GridEnc) - 1);
+    gDI31GridEnc[sizeof(gDI31GridEnc) - 1] = 0;
+    gDI31GridByArg = byArg;
+    @try {
+        MSHookMessageEx(c, sel, (IMP)di31GridSizeHook, (IMP *)&gDI31OrigGridFn);
+    } @catch (__unused NSException *e) {}
+    RLog(@"[3x1][网格] hook %@ -%@", gDI31OrigGridFn ? @"装上" : @"失败",
+         NSStringFromSelector(sel));
+}
+
+static void di31ScanGridClasses(void) {
+    int n = objc_getClassList(NULL, 0);
+    if (n <= 0) return;
+    Class *list = (Class *)malloc(sizeof(Class) * (size_t)n);
+    if (!list) return;
+    n = objc_getClassList(list, n);
+    NSMutableString *sb = [NSMutableString string];
+    int shown = 0;
+    for (int i = 0; i < n && shown < 40; i++) {
+        const char *nm = class_getName(list[i]);
+        if (!nm) continue;
+        if (strstr(nm, "ModuleInstance") || strstr(nm, "ModuleLayout")
+            || strstr(nm, "PageGrid") || strstr(nm, "CCUIModule")) {
+            [sb appendFormat:@"%s ", nm];
+            shown++;
+        }
+    }
+    free(list);
+    RLog(@"[3x1][网格] 相关类: %@", sb.length ? sb : @"(无)");
+}
+
+static void di31InstallGrid(void) {
+    if (gDI31GridHooked) return;
+    gDI31GridHooked = YES;
+    /* 候选: 模块实例自己报尺寸 → 最直接; 其次是 manager 按标识查表。 */
+    NSArray<NSArray *> *cands = @[
+        @[@"CCUIModuleInstance", @"gridSize", @NO],
+        @[@"CCUIModuleInstance", @"gridSizeForOrientation:", @YES],
+        @[@"CCUIModuleInstance", @"size", @NO],
+        @[@"CCUIModuleInstanceManager", @"gridSizeForModuleIdentifier:", @YES],
+        @[@"CCUIModuleInstanceManager", @"gridSizeForModuleIdentifier:orientation:", @YES],
+    ];
+    for (NSArray *c in cands) {
+        Class cls = NSClassFromString(c[0]);
+        if (!cls) { RLog(@"[3x1][网格] 类不存在 %@", c[0]); continue; }
+        di31HookGridSel(cls, c[1], [c[2] boolValue]);
+        if (gDI31OrigGridFn) break;
+    }
+    if (!gDI31OrigGridFn) di31ScanGridClasses();
+    RLog(@"[3x1][网格] 结果 %@", gDI31OrigGridFn ? @"已接管占位" : @"没找到入口(见上面的类列表)");
+}
+
 static void di31Install(void) {
     if (gDI31Hooked) return;
     gDI31Hooked = YES;
+    @try { di31InstallGrid(); } @catch (__unused NSException *e) {}
     Class box = NSClassFromString(@"CCUIContentModuleContainerView");
     Class card = NSClassFromString(@"CCUIContentModuleContentContainerView");
     if (box) {
