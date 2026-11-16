@@ -6790,21 +6790,26 @@ static BOOL diBarStyleOK(int s) {
     NSMutableArray *rows=[NSMutableArray array];
     [rows addObject:[self groupSpec:@"布局调整" footer:@"按当前播放器尺寸独立保存。仅折叠态生效；X正数向右，Y正数向下。位移过大会重叠或超出卡片，请小幅调整。"]];
     [rows addObject:[self switchSpec:@"启用布局调整" key:diFxSizedKey(@"AlbumLayoutOn") def:@NO]];
-    NSArray *labels=@[@"上一首",@"播放／暂停",@"下一首",@"时间条"],*keys=@[@"Prev",@"Play",@"Next",@"Time"];
+    BOOL groupMode=[diNPCurrentSize() isEqualToString:@"3x1"];
+    if(groupMode){
+        [rows addObject:[self groupSpec:@"3×1 整组按钮" footer:@"默认整体右移8点，设为0恢复。三颗按钮一起移动；其他尺寸不受影响。"]];
+        [rows addObject:[self npSlider:@"整组左右位移" key:diFxSizedKey(@"AlbumLayoutGroupX") def:8 mn:-30 mx:30]];
+        [rows addObject:[self npSlider:@"整组上下位移" key:diFxSizedKey(@"AlbumLayoutGroupY") def:0 mn:-30 mx:30]];
+    }
+    NSArray *labels=groupMode?@[@"时间条"]:@[@"上一首",@"播放／暂停",@"下一首",@"时间条"];
+    NSArray *keys=groupMode?@[@"Time"]:@[@"Prev",@"Play",@"Next",@"Time"];
     for(NSUInteger i=0;i<keys.count;i++){
         [rows addObject:[self groupSpec:labels[i] footer:nil]];
         for(NSString *axis in @[@"X",@"Y"]){NSString *key=[NSString stringWithFormat:@"AlbumLayout%@%@",keys[i],axis];
             [rows addObject:[self npSlider:[axis isEqual:@"X"]?@"左右位移":@"上下位移" key:diFxSizedKey(key) def:0 mn:-60 mx:60]];
         }
     }
-    [rows addObject:[self groupSpec:@"专辑头像" footer:@"暂停或未播放时隐藏头像，恢复播放后还原。不会移除专辑视图或改变占位。"]];
-    [rows addObject:[self switchSpec:@"未播放时隐藏专辑头像" key:diFxSizedKey(@"AlbumLayoutHideIdleArt") def:@NO]];
     [rows addObject:[self buttonSpec:@"恢复当前尺寸默认布局" action:@selector(resetLayout:)]];
     return rows;
 }
 - (void)resetLayout:(PSSpecifier *)sp {
     (void)sp;
-    for(NSString *key in @[@"AlbumLayoutOn",@"AlbumLayoutHideIdleArt",@"AlbumLayoutPrevX",@"AlbumLayoutPrevY",@"AlbumLayoutPlayX",@"AlbumLayoutPlayY",@"AlbumLayoutNextX",@"AlbumLayoutNextY",@"AlbumLayoutTimeX",@"AlbumLayoutTimeY"])
+    for(NSString *key in @[@"AlbumLayoutOn",@"AlbumLayoutGroupX",@"AlbumLayoutGroupY",@"AlbumLayoutPrevX",@"AlbumLayoutPrevY",@"AlbumLayoutPlayX",@"AlbumLayoutPlayY",@"AlbumLayoutNextX",@"AlbumLayoutNextY",@"AlbumLayoutTimeX",@"AlbumLayoutTimeY"])
         CFPreferencesSetAppValue((__bridge CFStringRef)diFxSizedKey(key),(__bridge CFPropertyListRef)@0,(__bridge CFStringRef)kDomain);
     CFPreferencesAppSynchronize((__bridge CFStringRef)kDomain);diPostFxTune();[self reloadSpecifiers];
 }

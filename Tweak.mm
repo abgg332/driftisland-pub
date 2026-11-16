@@ -18718,16 +18718,8 @@ static void diLayoutMove(UIView *v,CGFloat x,CGFloat y){
     [diLayoutTouched addObject:v];
 }
 static void diLayoutArt(UIView *v,BOOL hide){
-    // Hold presentation opacity; do not race other modules' alpha restoration.
-    if(hide){
-        if(![v.layer animationForKey:@"di.layout.idleArt"]){
-            CABasicAnimation *a=[CABasicAnimation animationWithKeyPath:@"opacity"];
-            a.fromValue=@0;a.toValue=@0;a.duration=1;a.repeatCount=HUGE_VALF;
-            a.removedOnCompletion=NO;[v.layer addAnimation:a forKey:@"di.layout.idleArt"];
-        }
-        [diLayoutTouched addObject:v];
-    }else [v.layer removeAnimationForKey:@"di.layout.idleArt"];
-    // Migrate 121 alpha ownership back to the original value once.
+    (void)hide;
+    [v.layer removeAnimationForKey:@"di.layout.idleArt"];
     NSNumber *saved=objc_getAssociatedObject(v,"di.layout.alpha");
     if(saved){v.alpha=saved.doubleValue;objc_setAssociatedObject(v,"di.layout.alpha",nil,OBJC_ASSOCIATION_RETAIN_NONATOMIC);}
 }
@@ -18755,15 +18747,21 @@ static void diLayoutAdjustTick(void){
         for(UIView *root in gDIArtRoots.allObjects){
             if(!root.window || root.hidden || [NSStringFromClass(root.class) containsString:@"Activity"])continue;
             BOOL collapsed=!diTimeExpanded(root);
+            BOOL groupMode=[diFxSizeId() isEqualToString:@"3x1"];
             NSMutableArray *queue=[NSMutableArray arrayWithObject:root],*buttons=[NSMutableArray array];
             int budget=400;
             while(queue.count && budget-->0){
                 UIView *v=queue.lastObject;[queue removeLastObject];NSString *cn=NSStringFromClass(v.class);
                 if([cn containsString:@"MRUTransportButton"] && diLayoutVisible(v,root) && v.bounds.size.width>4){[buttons addObject:v];continue;}
+                if(groupMode && [cn containsString:@"TransportControlsView"]){
+                    CGFloat dx=collapsed?fxDouble(@"AlbumLayoutGroupX",8):0;
+                    CGFloat dy=collapsed?fxDouble(@"AlbumLayoutGroupY",0):0;
+                    diLayoutMove(v,MAX(-30,MIN(30,dx)),MAX(-30,MIN(30,dy)));[handled addObject:v];continue;
+                }
                 if([cn containsString:@"TimeControls"]){
                     diLayoutMove(v,on&&collapsed?fxDouble(@"AlbumLayoutTimeX",0):0,on&&collapsed?fxDouble(@"AlbumLayoutTimeY",0):0);[handled addObject:v];continue;
                 }
-                if([cn containsString:@"ArtworkView"]){diLayoutArt(v,on&&collapsed&&fxBool(@"AlbumLayoutHideIdleArt",NO)&&!stablePlaying);[handled addObject:v];continue;}
+                if([cn containsString:@"ArtworkView"]){diLayoutArt(v,NO);[handled addObject:v];continue;}
                 [queue addObjectsFromArray:v.subviews];
             }
             NSMutableDictionary *groups=[NSMutableDictionary dictionary];
@@ -18778,7 +18776,7 @@ static void diLayoutAdjustTick(void){
             }
             if(selected)buttons=[selected mutableCopy];
             else [buttons removeAllObjects];
-            if(buttons.count==3){
+            if(!groupMode && buttons.count==3){
                 [buttons sortUsingComparator:^NSComparisonResult(UIView *a,UIView *b){
                     NSValue *av=objc_getAssociatedObject(a,"di.layout.last"),*bv=objc_getAssociatedObject(b,"di.layout.last");
                     (void)av;(void)bv;
