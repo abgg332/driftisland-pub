@@ -106,7 +106,7 @@ static void diriLog(NSString *s){NSLog(@"[DI录屏岛] %@",s);}
 @end
 static char diriKey;
 static UIView *diriView(id obj,NSString *selector){id v=diriCall(obj,selector);return [v isKindOfClass:UIView.class]?v:nil;}
-static void diriAttach(UIView *v,BOOL left){
+static void __attribute__((unused)) diriAttach(UIView *v,BOOL left){
     if(!v)return;
     DIRecordingIslandView *overlay=objc_getAssociatedObject(v,&diriKey);
     if(!diriBool(@"RecordingIslandEnabled",NO)){[overlay removeFromSuperview];return;}
