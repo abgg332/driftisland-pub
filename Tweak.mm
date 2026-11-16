@@ -20448,7 +20448,7 @@ static void diFxUpdateDots(UIView *host, CGRect cover, float dt,
         float radialPulse = cover.size.width * 0.055f * pulse;
         // Reference artRingContainer scales particle offsets AND glyphs together.
         // Keep the verified visible host; apply the same affine transform numerically.
-        float groupScale = rhythmOn ? gDICoverScaleNow*(1.0f-0.035f*diSharedPunch) : 1.0f;
+        float groupScale = rhythmOn ? gDICoverScaleNow : 1.0f;
         layer.position = CGPointMake(cx + cosf(d->ang) * ((d->rad + radialPulse)*groupScale),
                                      cy + sinf(d->ang) * ((d->rad + radialPulse)*groupScale));
         layer.opacity = alpha;
@@ -22108,13 +22108,37 @@ static void diRhythmTickWithDelta(float dtIn) {
     // Reference detector uses spectrum energy, not the legacy PCM kick detector.
     float referenceScale=diFxAdvanceBeat(active, gDIFxEnergy, 1.0, dt);
     diSharedVisualPulse=fminf(1,fmaxf(0,(referenceScale-1)/0.095f));
-    float onset=active?fminf(1,fmaxf(0,gDIKickTarget)):0;
-    float punchTarget=onset>diSharedPunch?onset:diSharedPunch*expf(-dt/0.095f);
-    diSharedPunch+=(punchTarget-diSharedPunch)*(1-expf(-dt/(punchTarget>diSharedPunch?0.018f:0.030f)));
+    // Spectral onset detector: bass and mid/high positive flux, once per audio packet.
+    static float prevBands[24]={}, fluxFloor=0.002f, amplitude=0;
+    static CFAbsoluteTime packetStamp=0;
+    static CFTimeInterval onsetAt=0;
+    CFTimeInterval onsetNow=CACurrentMediaTime();
+    if(active && real && gDIAuStamp!=packetStamp){
+        float low=0,high=0;
+        for(int i=0;i<24;i++){
+            float v=isfinite(gDIBandRaw[i])?fminf(1,fmaxf(0,gDIBandRaw[i])):0;
+            float rise=fmaxf(0,v-prevBands[i]);prevBands[i]=v;
+            if(i<6)low+=rise/6;else high+=rise/18;
+        }
+        float flux=fmaxf(low,high);
+        float threshold=fmaxf(0.012f,fluxFloor*2.2f);
+        if(onsetNow-onsetAt>0.14 && (flux>threshold || gDIKickTarget>0.45f)){
+            amplitude=fminf(1,fmaxf(0.4f,fmaxf(gDIKickTarget,flux/(threshold*2))));
+            onsetAt=onsetNow;
+        }
+        fluxFloor+=0.06f*(flux-fluxFloor);packetStamp=gDIAuStamp;
+    }
+    if(!active || !real){memset(prevBands,0,sizeof(prevBands));amplitude=0;fluxFloor=.002f;onsetAt=0;}
+    double age=onsetAt>0?onsetNow-onsetAt:1;
+    diSharedPunch=amplitude*(age<.025?age/.025:exp(-(age-.025)/.095));
+    if(age>.5)diSharedPunch=0;
     diISPublishBeat(active);
     float fxBeatS=1+fminf(0.22f,(float)rhythmBeatScale*0.095f*diSharedVisualPulse);
     /* A short downward compression at each onset, then return to the common scale. */
-    fxBeatS-=fminf(0.035f,0.035f*diSharedPunch);
+    float compression=fminf(0.12f,0.10f*fmaxf(0,(float)rhythmBeatScale)*diSharedPunch);
+    fxBeatS=fxBeatS*(1-diSharedPunch)+(1-compression)*diSharedPunch;
+    static CFTimeInterval punchLogAt=0;
+    if(active && onsetNow-punchLogAt>2){punchLogAt=onsetNow;RLog(@"[播放器起音] 收缩包络=%.3f 共同缩放=%.4f 真频谱=%d",diSharedPunch,fxBeatS,real);}
 
     if (!gDIFxRealLogged && active && real && gDIBandSeen) {
         gDIFxRealLogged = YES;
@@ -22188,7 +22212,7 @@ static void diRhythmTickWithDelta(float dtIn) {
                不再用 gDIKick·0.20·幅度 自己算 —— 那一套是"底鼓起音前沿",
                和参考实现的"相对基线能量瞬态"手感不是一回事。 */
             CGFloat s = fxBeatS;
-            if (s < 1.0) s = 1.0;
+            if (s < 0.88) s = 0.88;
             if (s > 1.22) s = 1.22;
             sDbg = s;
             gDICoverScaleNow = (float)s;      /* 粒子遮罩的孔固定 1.02R, 这里只做记录 */
