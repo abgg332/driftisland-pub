@@ -18711,15 +18711,16 @@ static void diNPApplyHideTime(void) {
 /* ---------- 模块容器钩子 ---------- */
 static void (*gDIOrigModuleLayout)(id, SEL) = NULL;
 
-/* ===== 3.0.116: 3×1 档位（回到 3.0.112 的窄岛做法, 只修收回偏移） =====
+/* ===== 3.0.117: 3×1 档位（容器 + 卡片一起收窄, 收回也保持 3×1） =====
    用户验收结论: 3.0.112 的 3×1 布局是对的("布局看着没问题"), 唯一毛病是收回时偏一下;
    3.0.113 的按钮右移、3.0.114 的动画判据、3.0.115 的延时收窄都是越改越错 —— 全部撤掉。
    现在的做法 = 3.0.112 + 两条小改动:
    ① 只处理"系统给的满宽帧"(width ≥ 基准−0.5)。收回/展开动画的中间帧(宽度在变小)
       一律原样放行, 不再把每一帧都摁回 263 —— 收回时那个"偏移一下"就是这么来的;
    ② 基准只在宽度真的换了(首次/旋转/换档)时刷新, 收起动画里 x 漂移不会改掉基准。
-   内容容器(卡片)不 hook: 容器收窄后系统自己会把卡片排成同宽, 按钮位置完全交给播放器,
-   一个坐标都不挪(3.0.113 的 inset 已删除)。
+   3.0.117 补: 内容容器(卡片)也必须 hook。506 日志里收起时容器一次满宽帧都没收到,
+   但画面上仍有一条 4×1 宽卡片 —— 那是卡片自己按满宽画的, 所以"收回变 4×1"。
+   卡片只收窄到与容器同宽、x 恒为 0, **不做任何 inset**, 按钮位置完全交给播放器。
 
    目标宽 = 满宽 × 0.75 − 4（4 格 → 3 格, 扣掉格间距）; 左对齐, 只缩右边界。 */
 
@@ -18728,6 +18729,7 @@ static char kDI31BaseW;    /* 该视图自己的"满宽"(4 格时的宽度) */
 static char kDI31BaseX;    /* 该视图满宽时的左边距 —— 收窄后钉在这个 x 上 */
 static BOOL gDI31Hooked = NO;
 static void (*gDI31OrigBoxSetFrame)(id, SEL, CGRect) = NULL;
+static void (*gDI31OrigCardSetFrame)(id, SEL, CGRect) = NULL;
 
 static BOOL di31KeyOn(void) {
     static NSString *cache = nil;
@@ -18766,6 +18768,19 @@ static BOOL di31HasNP(UIView *v, int depth, int *budget) {
     return NO;
 }
 
+static BOOL di31IsPlayer(UIView *v);
+
+/* 卡片自己身上查不到 moduleIdentifier / NowPlaying 类名时, 向上找模块容器再判定。 */
+static BOOL di31IsPlayerViaAncestor(UIView *v) {
+    UIView *p = v.superview;
+    for (int i = 0; p && i < 6; i++) {
+        if ([NSStringFromClass(p.class) containsString:@"CCUIContentModuleContainerView"])
+            return di31IsPlayer(p);
+        p = p.superview;
+    }
+    return NO;
+}
+
 static BOOL di31IsPlayer(UIView *v) {
     if (!v) return NO;
     NSNumber *neg = objc_getAssociatedObject(v, &kDI31NegTS);
@@ -18792,8 +18807,9 @@ static BOOL di31IsPlayer(UIView *v) {
     return yes;
 }
 
-/* 唯一改 frame 的地方。只认"系统给的满宽帧", 中间帧一律放行。 */
-static CGRect di31Adjust(UIView *v, CGRect f) {
+/* 唯一改 frame 的地方。只认"系统给的满宽帧", 中间帧一律放行。
+   isCard: 内容容器 —— 只收窄到与模块容器同宽, 左边距恒为 0, 不挪按钮。 */
+static CGRect di31Adjust(UIView *v, CGRect f, BOOL isCard) {
     if (!di31KeyOn()) return f;
     if (f.size.height < 40.0 || f.size.height > 130.0) return f;   /* 只要折叠态 */
     if (f.size.width < 200.0) return f;                            /* 占位/已经窄了 */
@@ -18807,11 +18823,11 @@ static CGRect di31Adjust(UIView *v, CGRect f) {
        收起动画里系统一边滑一边给 356, 每帧都刷会把左边距带跑。 */
     if (f.size.width >= 300.0 && (baseW < 300.0 || fabs(f.size.width - baseW) > 8.0)) {
         baseW = f.size.width;
-        baseX = f.origin.x;
+        baseX = isCard ? 0.0 : f.origin.x;
         objc_setAssociatedObject(v, &kDI31BaseW, @(baseW), OBJC_ASSOCIATION_RETAIN_NONATOMIC);
         objc_setAssociatedObject(v, &kDI31BaseX, @(baseX), OBJC_ASSOCIATION_RETAIN_NONATOMIC);
         static int sLog = 0;
-        if (sLog < 10) { sLog++; RLog(@"[3x1] 基准 容器 %.0f x=%.0f", baseW, baseX); }
+        if (sLog < 10) { sLog++; RLog(@"[3x1] 基准 %@ %.0f x=%.0f", isCard ? @"卡片" : @"容器", baseW, baseX); }
     }
     if (baseW < 300.0) return f;              /* 不是全宽模块, 连识别都不用做 */
 
@@ -18819,36 +18835,48 @@ static CGRect di31Adjust(UIView *v, CGRect f) {
        以前每一帧都被摁回 263, 动画被拽住, 视觉上就是"收回时偏移一下"。 */
     if (f.size.width < baseW - 0.5) return f;
 
-    if (!di31IsPlayer(v)) return f;
+    if (isCard ? !di31IsPlayerViaAncestor(v) : !di31IsPlayer(v)) return f;
 
     CGFloat target = baseW * 0.75 - 4.0;
     if (target < 150.0) return f;
     CGFloat oldW = f.size.width;
     if (fabs(f.size.width - target) >= 0.6) f.size.width = target;
-    f.origin.x = baseX;                       /* 左对齐: 只缩右边 */
+    f.origin.x = baseX;                       /* 左对齐: 只缩右边; 卡片 x 恒 0 */
     {
         static int sLogN = 0;
-        if (sLogN < 12) { sLogN++; RLog(@"[3x1] 收窄 容器 %.0f→%.0f x=%.0f", oldW, target, baseX); }
+        if (sLogN < 14) { sLogN++; RLog(@"[3x1] 收窄 %@ %.0f→%.0f x=%.0f", isCard ? @"卡片" : @"容器", oldW, target, baseX); }
     }
     return f;
 }
 
 static void di31BoxSetFrame(id self, SEL cmd, CGRect f) {
-    @try { f = di31Adjust((UIView *)self, f); } @catch (__unused NSException *e) {}
+    @try { f = di31Adjust((UIView *)self, f, NO); } @catch (__unused NSException *e) {}
     if (gDI31OrigBoxSetFrame) gDI31OrigBoxSetFrame(self, cmd, f);
+}
+static void di31CardSetFrame(id self, SEL cmd, CGRect f) {
+    @try { f = di31Adjust((UIView *)self, f, YES); } @catch (__unused NSException *e) {}
+    if (gDI31OrigCardSetFrame) gDI31OrigCardSetFrame(self, cmd, f);
 }
 
 static void di31Install(void) {
     if (gDI31Hooked) return;
     gDI31Hooked = YES;
     Class box = NSClassFromString(@"CCUIContentModuleContainerView");
+    Class card = NSClassFromString(@"CCUIContentModuleContentContainerView");
     if (box) {
         @try {
             MSHookMessageEx(box, @selector(setFrame:), (IMP)di31BoxSetFrame,
                             (IMP *)&gDI31OrigBoxSetFrame);
         } @catch (__unused NSException *e) {}
     }
-    RLog(@"[3x1] 安装 容器 %@ (卡片不hook, 按钮位置交给播放器)", box ? @"OK" : @"nil");
+    if (card) {
+        @try {
+            MSHookMessageEx(card, @selector(setFrame:), (IMP)di31CardSetFrame,
+                            (IMP *)&gDI31OrigCardSetFrame);
+        } @catch (__unused NSException *e) {}
+    }
+    RLog(@"[3x1] 安装 容器 %@ / 卡片 %@ (卡片只收窄同宽, 不挪按钮)",
+         box ? @"OK" : @"nil", card ? @"OK" : @"nil");
 }
 
 static void diNPHandleModuleVC(id vc) {
