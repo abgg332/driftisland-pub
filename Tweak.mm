@@ -18718,9 +18718,25 @@ static void diLayoutMove(UIView *v,CGFloat x,CGFloat y){
     [diLayoutTouched addObject:v];
 }
 static void diLayoutArt(UIView *v,BOOL hide){
+    // Hold presentation opacity; do not race other modules' alpha restoration.
+    if(hide){
+        if(![v.layer animationForKey:@"di.layout.idleArt"]){
+            CABasicAnimation *a=[CABasicAnimation animationWithKeyPath:@"opacity"];
+            a.fromValue=@0;a.toValue=@0;a.duration=1;a.repeatCount=HUGE_VALF;
+            a.removedOnCompletion=NO;[v.layer addAnimation:a forKey:@"di.layout.idleArt"];
+        }
+        [diLayoutTouched addObject:v];
+    }else [v.layer removeAnimationForKey:@"di.layout.idleArt"];
+    // Migrate 121 alpha ownership back to the original value once.
     NSNumber *saved=objc_getAssociatedObject(v,"di.layout.alpha");
-    if(hide){if(!saved)objc_setAssociatedObject(v,"di.layout.alpha",@(v.alpha),OBJC_ASSOCIATION_RETAIN_NONATOMIC);if(v.alpha!=0)v.alpha=0;[diLayoutTouched addObject:v];}
-    else if(saved){if(v.alpha==0)v.alpha=saved.doubleValue;objc_setAssociatedObject(v,"di.layout.alpha",nil,OBJC_ASSOCIATION_RETAIN_NONATOMIC);}
+    if(saved){v.alpha=saved.doubleValue;objc_setAssociatedObject(v,"di.layout.alpha",nil,OBJC_ASSOCIATION_RETAIN_NONATOMIC);}
+}
+static BOOL diLayoutVisible(UIView *v,UIView *root){
+    for(UIView *a=v;a;a=a.superview){
+        if(a.hidden || a.alpha<0.05)return NO;
+        if(a==root)break;
+    }
+    return v.window!=nil;
 }
 static void diLayoutAdjustTick(void){
     if(!NSThread.isMainThread)return;
@@ -18730,21 +18746,38 @@ static void diLayoutAdjustTick(void){
         if(!diLayoutTouched)diLayoutTouched=[NSHashTable weakObjectsHashTable];
         BOOL on=fxBool(@"AlbumLayoutOn",NO);
         NSMutableSet *handled=[NSMutableSet set];
+        CFPreferencesAppSynchronize((__bridge CFStringRef)kDomain);
+        static BOOL stablePlaying=NO, candidate=NO;
+        static CFAbsoluteTime candidateAt=0;
+        BOOL nowPlaying=musicPlaying;
+        if(nowPlaying!=candidate){candidate=nowPlaying;candidateAt=CFAbsoluteTimeGetCurrent();}
+        if(CFAbsoluteTimeGetCurrent()-candidateAt>.6)stablePlaying=candidate;
         for(UIView *root in gDIArtRoots.allObjects){
             if(!root.window || root.hidden || [NSStringFromClass(root.class) containsString:@"Activity"])continue;
             BOOL collapsed=!diTimeExpanded(root);
             NSMutableArray *queue=[NSMutableArray arrayWithObject:root],*buttons=[NSMutableArray array];
-            int budget=180;
+            int budget=400;
             while(queue.count && budget-->0){
                 UIView *v=queue.lastObject;[queue removeLastObject];NSString *cn=NSStringFromClass(v.class);
-                if([cn containsString:@"MRUTransportButton"] && !v.hidden && v.bounds.size.width>4){[buttons addObject:v];continue;}
+                if([cn containsString:@"MRUTransportButton"] && diLayoutVisible(v,root) && v.bounds.size.width>4){[buttons addObject:v];continue;}
                 if([cn containsString:@"TimeControls"]){
                     diLayoutMove(v,on&&collapsed?fxDouble(@"AlbumLayoutTimeX",0):0,on&&collapsed?fxDouble(@"AlbumLayoutTimeY",0):0);[handled addObject:v];continue;
                 }
-                if([cn containsString:@"ArtworkView"]){diLayoutArt(v,on&&collapsed&&fxBool(@"AlbumLayoutHideIdleArt",NO)&&!musicPlaying);[handled addObject:v];continue;}
+                if([cn containsString:@"ArtworkView"]){diLayoutArt(v,on&&collapsed&&fxBool(@"AlbumLayoutHideIdleArt",NO)&&!stablePlaying);[handled addObject:v];continue;}
                 [queue addObjectsFromArray:v.subviews];
             }
-            // Only exactly three native transport controls: do not guess extra routing buttons.
+            NSMutableDictionary *groups=[NSMutableDictionary dictionary];
+            for(UIView *v in buttons){
+                NSValue *key=[NSValue valueWithNonretainedObject:v.superview];
+                if(!groups[key])groups[key]=[NSMutableArray array];
+                [groups[key] addObject:v];
+            }
+            NSArray *selected=nil;
+            for(NSArray *group in groups.allValues)if(group.count==3){
+                if(!selected || ((UIView *)group[0]).superview.bounds.size.width>((UIView *)selected[0]).superview.bounds.size.width)selected=group;
+            }
+            if(selected)buttons=[selected mutableCopy];
+            else [buttons removeAllObjects];
             if(buttons.count==3){
                 [buttons sortUsingComparator:^NSComparisonResult(UIView *a,UIView *b){
                     NSValue *av=objc_getAssociatedObject(a,"di.layout.last"),*bv=objc_getAssociatedObject(b,"di.layout.last");
@@ -18761,6 +18794,8 @@ static void diLayoutAdjustTick(void){
             }
         }
         for(UIView *v in diLayoutTouched.allObjects)if(![handled containsObject:v]){diLayoutMove(v,0,0);diLayoutArt(v,NO);}
+        static CFAbsoluteTime logged=0;
+        if(on && CFAbsoluteTimeGetCurrent()-logged>3){logged=CFAbsoluteTimeGetCurrent();RLog(@"[布局调整] 尺寸=%@ 开=%d 播=%d 根=%lu 处理=%lu 上=(%.1f,%.1f) 播=(%.1f,%.1f) 下=(%.1f,%.1f)",diFxSizeId(),on,stablePlaying,(unsigned long)gDIArtRoots.count,(unsigned long)handled.count,fxDouble(@"AlbumLayoutPrevX",0),fxDouble(@"AlbumLayoutPrevY",0),fxDouble(@"AlbumLayoutPlayX",0),fxDouble(@"AlbumLayoutPlayY",0),fxDouble(@"AlbumLayoutNextX",0),fxDouble(@"AlbumLayoutNextY",0));}
     }@catch(NSException *e){RLog(@"[布局调整] %@",e.reason);}
     busy=NO;
 }

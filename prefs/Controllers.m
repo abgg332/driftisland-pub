@@ -6188,7 +6188,8 @@ static void diNPEnsureActivation(void) {
     v = round(v * 1000.0) / 1000.0;
     CFPreferencesSetAppValue((__bridge CFStringRef)key, (__bridge CFPropertyListRef)@(v),
                              (__bridge CFStringRef)kDomain);
-    /* 特效键不落盘同步(拖动时每秒几十次 fsync 会卡设置页), 由 cfprefsd 异步落盘 */
+    if ([key hasPrefix:@"AlbumLayout"]) CFPreferencesAppSynchronize((__bridge CFStringRef)kDomain);
+    /* Other effects retain asynchronous preference writes. */
     if (diIsFxKey(key)) diPostFxTune();               /* 轻量: 只重读特效参数 */
     else notify_post("com.local.playerexact/artwork-changed");
 }
@@ -6249,6 +6250,7 @@ static void diNPEnsureActivation(void) {
     [specs addObject:[self linkSpec:@"遮罩素材" detail:[DIPlayerMaskPicker class]]];
     /* 3.0.45: 律动特效 —— 设置全部收进一个入口页(用户要求) */
     [specs addObject:[self linkSpec:@"律动特效" detail:[DIFxPage class]]];
+    [specs addObject:[self linkSpec:@"布局调整" detail:[DILayoutAdjustPage class]]];
 
     /* ---- 原版参数管理 ----
        3.0.66: 478 用户要求「原插件参数下的设置项暂时删除(但保留源码配置)」——
@@ -6653,7 +6655,8 @@ static BOOL diBarStyleOK(int s) {
     v = round(v * 1000.0) / 1000.0;
     CFPreferencesSetAppValue((__bridge CFStringRef)key, (__bridge CFPropertyListRef)@(v),
                              (__bridge CFStringRef)kDomain);
-    /* 特效键不落盘同步(拖动时每秒几十次 fsync 会卡设置页), 由 cfprefsd 异步落盘 */
+    if ([key hasPrefix:@"AlbumLayout"]) CFPreferencesAppSynchronize((__bridge CFStringRef)kDomain);
+    /* Other effects retain asynchronous preference writes. */
     if (diIsFxKey(key)) diPostFxTune();               /* 轻量: 只重读特效参数 */
     else notify_post("com.local.playerexact/artwork-changed");
 }
@@ -6736,7 +6739,6 @@ static BOOL diBarStyleOK(int s) {
     /* 3.0.66: 所有键都按当前播放器尺寸落键(AlbumBeatScale@3x2 这种形态) ——
        "应用那个尺寸设置的就当前尺寸保存"。读端(Tweak)对没写过的尺寸键会回落原键。 */
     NSMutableArray *specs = [NSMutableArray array];
-    [specs addObject:[self linkSpec:@"布局调整" detail:[DILayoutAdjustPage class]]];
     [specs addObject:[self groupSpec:@"专辑律动" footer:nil]];
     [specs addObject:[self switchSpec:@"启用律动特效" key:diFxSizedKey(@"AlbumEffectsOn") def:@YES]];
     /* 3.0.61: 删掉「圆形封面」—— 它和「原生播放 → 启用遮罩」抢同一件事(封面的形状),
