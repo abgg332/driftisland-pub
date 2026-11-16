@@ -6350,6 +6350,10 @@ static id gDIFxColorBridge = nil;
                                      (__bridge CFStringRef)kDomain);
         }
     }
+    if(self.modeKey.length){
+        NSString *flow=[self.modeKey stringByReplacingOccurrencesOfString:@"ColorMode" withString:@"FlowOn"];
+        if(![flow isEqualToString:self.modeKey])CFPreferencesSetAppValue((__bridge CFStringRef)flow,kCFBooleanFalse,(__bridge CFStringRef)kDomain);
+    }
     CFPreferencesAppSynchronize((__bridge CFStringRef)kDomain);
     diPostFxTune();
     diStep(@"配色 %@ = %@", self.key, hex);
@@ -6364,6 +6368,8 @@ static id gDIFxColorBridge = nil;
     [self writeColor:color];
 }
 - (void)colorPickerViewControllerDidFinish:(UIColorPickerViewController *)vc {
+    _lastAt=0; _lastHex=nil;
+    [self writeColor:vc.selectedColor];
     gDIFxColorBridge = nil;
     @try { [self.page reloadSpecifiers]; } @catch (__unused NSException *e) {}
 }
@@ -6463,6 +6469,7 @@ static NSString *diModeName(int m) {
     CFPreferencesSetAppValue((__bridge CFStringRef)key,
                              (__bridge CFPropertyListRef)@(m),
                              (__bridge CFStringRef)kDomain);
+    CFPreferencesAppSynchronize((__bridge CFStringRef)kDomain);
     if (diIsFxKey(key)) diPostFxTune(); else postReload();
     [self reloadSpecifiers];
     diStep(@"颜色来源: %@", diModeName(m));
@@ -6476,30 +6483,17 @@ static NSString *diBarStyleLabel(int s) {
         case 0:  return @"柱状";
         case 1:  return @"点阵";
         case 2:  return @"镜像";
-        case 3:  return @"阶梯";
         case 4:  return @"峰值";
         case 5:  return @"尖刺";
         case 6:  return @"斜切";
-        case 7:  return @"电波";
-        case 8:return @"气泡";
-        case 9:return @"流体声带";
-        case 10:return @"平滑山峦";
-        case 11:return @"镜像丝带";
-        case 12:return @"悬浮星阵";
-        case 13:return @"放射光环";
-        case 14:return @"不对称声纹";
-        case 15:return @"层叠流体";
-        case 16:return @"干涉波带";
-        case 17:return @"轨道星环";
-        case 18:return @"双向喷流";
-        default:return @"等高线波纹";
+        default:return @"柱状";
     }
 }
 - (int)diBarStyleIndex {
     id v = diFxReadSized(@"SpectrumStyle");
     int s = v ? [v intValue] : 0;
     if (s < 0) s = 0;
-    if (s > 19) s = 19;
+    if (!(s==0||s==1||s==2||s==4||s==5||s==6)) s=0;
     return s;
 }
 - (PSSpecifier *)barStyleSpec {
@@ -6576,6 +6570,7 @@ static NSString *diBarStyleLabel(int s) {
     CFPreferencesSetAppValue((__bridge CFStringRef)key,
                              (__bridge CFPropertyListRef)@([value boolValue]),
                              (__bridge CFStringRef)kDomain);
+    CFPreferencesAppSynchronize((__bridge CFStringRef)kDomain);
     diPostFxTune();
     diStep(@"%@ = %d", key, [value boolValue] ? 1 : 0);
 }

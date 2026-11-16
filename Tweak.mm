@@ -1,4 +1,3 @@
-#import "DIExtraSpectrum.h"
 // 漂流岛 Drift Island —— 灵动岛视频背景
 // 素材目录: /var/mobile/灵动岛 (mp4/mov/m4v, 按文件名排序, 设置里按序号选用)
 #import <UIKit/UIKit.h>
@@ -1050,7 +1049,7 @@ static void diFxLoadPrefs(void) {
                                                                (__bridge CFStringRef)kDomain));
             int st = sv ? [sv intValue] : 0;
             if (st < 0) st = 0;
-            if (st > 19) st = 19;
+            if (!(st==0||st==1||st==2||st==4||st==5||st==6)) st=0;
             if (st != gDIBarStyle) {
                 gDIBarStyle = st;
                 for (int i = 0; i < 64; i++) gDIBarPeak[i] = 0.0f;   /* 换样式时峰值重新来 */
@@ -17967,6 +17966,8 @@ static const void *kDIBgRectKey = &kDIBgRectKey;   /* 3.0.15: 缓存背景矩形
 static NSHashTable *gDIBgHosts = nil;       /* 模块内容容器(隐藏未在播放用) */
 static NSHashTable *gDIBgPlayers = nil;     /* 3.0.15: 背景宿主 = 播放器视图(各尺寸的可见卡片) */
 static UIImage *gDIBgImage = nil;
+static UIImage *diFxArtworkImage=nil;
+static NSData *diFxArtworkData=nil;
 static NSData *gDIBgData = nil;          /* 3.0.14: 专辑图原始数据, 换曲判定用 */
 static CFTimeInterval gDIBgFetchTS = 0;
 static CFTimeInterval gDIBgLastReqTS = 0;   /* 3.0.15: 取图请求节流 */
@@ -18485,10 +18486,17 @@ static void diNPQueryNowPlaying(void) {
             has = (info != NULL);
         } @catch (__unused NSException *e) {}
         NSDictionary *meta = info ? [(__bridge NSDictionary *)info copy] : @{};
+        // Read the actual track artwork even when the album-background feature is off.
+        NSData *art=meta[@"kMRMediaRemoteNowPlayingInfoArtworkData"];
+        UIImage *decoded=nil;
+        if([art isKindOfClass:NSData.class] && art.length && ![art isEqualToData:diFxArtworkData])
+            decoded=diNPDownscaleImage([UIImage imageWithData:art],64);
         double elapsed=[meta[@"kMRMediaRemoteNowPlayingInfoElapsedTime"] doubleValue];
         double duration=[meta[@"kMRMediaRemoteNowPlayingInfoDuration"] doubleValue];
         double rate=[meta[@"kMRMediaRemoteNowPlayingInfoPlaybackRate"] doubleValue];
         dispatch_async(dispatch_get_main_queue(), ^{
+            if(decoded){diFxArtworkData=art;diFxArtworkImage=decoded;gDIParticleColorDirty=YES;}
+            if(!has){diFxArtworkData=nil;diFxArtworkImage=nil;}
             diRingElapsed=isfinite(elapsed)?fmax(0,elapsed):0;
             diRingDuration=isfinite(duration)?fmax(0,duration):0;
             diRingRate=isfinite(rate)?rate:0;
@@ -20881,7 +20889,7 @@ static void diRhythmUpdateBars(UIView *host, BOOL active) {
                    [UIColor colorWithRed:0.42 green:0.72 blue:1.00 alpha:1.0],
                    gDIHuePhase, NO, &ca, &cb);
     static double lastBarsHue = -1.0;
-    BOOL colorsDirty = (spectrumColorMode != gDIBarsModeUsed)
+    BOOL colorsDirty = (spectrumColorMode==0) || (spectrumColorMode != gDIBarsModeUsed)
         || ![gDIBarsUsedA isEqualToString:(spectrumColorA ?: @"")]
         || ![gDIBarsUsedB isEqualToString:(spectrumColorB ?: @"")]
         || (spectrumColorMode == 2 && fabs(gDIHuePhase - lastBarsHue) > 0.004);
@@ -20921,12 +20929,7 @@ static void diRhythmUpdateBars(UIView *host, BOOL active) {
     CGMutablePathRef p = CGPathCreateMutable();
     const CGFloat xMidAll = (top + bottom) * 0.5f;   /* 镜像样式的中线 */
 
-    if(gDIBarStyle>=9){
-        CGFloat values[64];for(int i=0;i<n;i++)values[i]=vArr[i];
-        CGRect box=CGRectMake(x0,top,bw*n+gap*(n-1),height);
-        CGPathRef extra=diExtraSpectrumPath(gDIBarStyle,values,n,box);
-        CGPathAddPath(p,NULL,extra);CGPathRelease(extra);
-    } else switch (gDIBarStyle) {
+    switch(gDIBarStyle){
         case 1: {   /* 点阵: 每列是一串自下而上的小方块(LED 电平表), 亮的格数随频谱值 */
             CGFloat cell = 2.2f, cgap = 1.0f, cspan = cell + cgap;
             int cells = (int)floorf((height + cgap) / cspan);
@@ -20953,22 +20956,6 @@ static void diRhythmUpdateBars(UIView *host, BOOL active) {
                 if (rr < 0.0f) rr = 0.0f;
                 diSafeSpectrumRoundedRect(p, NULL, r, rr, rr);
             }
-            break;
-        }
-        case 3: {   /* 阶梯: 相邻列用水平台面连起来, 整条是一块连续的阶梯山脊 */
-            CGFloat step = bw + gap;
-            if (step < 0.5f) step = 0.5f;
-            CGFloat xEnd = x0 + (CGFloat)(n - 1) * step + bw;   /* 最后一根的右边缘 */
-            CGPathMoveToPoint(p, NULL, x0, bottom);
-            for (int i = 0; i < n; i++) {
-                CGFloat xl = x0 + (CGFloat)i * step;
-                CGFloat xr = (i == n - 1) ? xEnd : (xl + step);
-                CGFloat y = bottom - hArr[i];
-                CGPathAddLineToPoint(p, NULL, xl, y);   /* 竖起来 */
-                CGPathAddLineToPoint(p, NULL, xr, y);   /* 平台面 */
-            }
-            CGPathAddLineToPoint(p, NULL, xEnd, bottom);
-            CGPathCloseSubpath(p);
             break;
         }
         case 4: {   /* 峰值: 柱状 + 顶部峰值帽(峰值缓降, 像专业频谱仪) */
@@ -21029,104 +21016,6 @@ static void diRhythmUpdateBars(UIView *host, BOOL active) {
             }
             break;
         }
-        case 7: {   /* 电波: 一条随频谱起伏的细折线(示波器), 拐点补圆点防缺口 */
-            CGFloat lw = MIN(0.8f, MAX(0.45f, bw * 0.22f));
-            CGFloat step = bw + gap;
-            if (step < 0.5f) step = 0.5f;
-            CGPoint prev = CGPointZero;
-            BOOL has = NO;
-            for (int i = 0; i < n; i++) {
-                CGPoint cur = CGPointMake(x0 + (CGFloat)i * step + bw * 0.5f, bottom - hArr[i]);
-                if (has) {
-                    CGFloat dx = cur.x - prev.x, dy = cur.y - prev.y;
-                    CGFloat len = sqrtf(dx * dx + dy * dy);
-                    if (len < 0.0001f) len = 0.0001f;
-                    CGFloat nx = -dy / len * lw, ny = dx / len * lw;
-                    CGPathMoveToPoint(p, NULL, prev.x + nx, prev.y + ny);
-                    CGPathAddLineToPoint(p, NULL, cur.x + nx, cur.y + ny);
-                    CGPathAddLineToPoint(p, NULL, cur.x - nx, cur.y - ny);
-                    CGPathAddLineToPoint(p, NULL, prev.x - nx, prev.y - ny);
-                    CGPathCloseSubpath(p);
-                }
-                prev = cur;
-                has = YES;
-            }
-            for (int i = 0; i < n; i++) {
-                CGFloat cx = x0 + (CGFloat)i * step + bw * 0.5f;
-                CGFloat cy = bottom - hArr[i];
-                CGPathAddEllipseInRect(p, NULL, CGRectMake(cx - lw, cy - lw, lw * 2.0f, lw * 2.0f));
-            }
-            break;
-        }
-        case 8: {   /* 气泡: 柱子照常在, 柱顶随机吐泡泡往上飘(鱼吐泡泡) */
-            CFAbsoluteTime nowB = CACurrentMediaTime();
-            float dtb = (gDIBubbleT > 0.0f) ? (float)(nowB - gDIBubbleT) : 0.016f;
-            if (dtb < 0.0f) dtb = 0.0f;
-            if (dtb > 0.10f) dtb = 0.10f;
-            gDIBubbleT = (float)nowB;
-
-            /* 柱子当"嘴", 画法与柱状一致 */
-            for (int i = 0; i < n; i++) {
-                CGRect r = CGRectMake(x0 + i * (bw + gap), bottom - hArr[i], bw, hArr[i]);
-                CGFloat rr = MIN(bw * 0.5f, MIN(hArr[i] * 0.45f, 1.6f));
-                if (rr < 0.0f) rr = 0.0f;
-                diSafeSpectrumRoundedRect(p, NULL, r, rr, rr);
-            }
-
-            /* 吐泡: 起音(值突然跳起来)必吐; 高能量柱持续吐(按柱子各自节流) */
-            for (int i = 0; i < n; i++) {
-                float v = (float)vArr[i];
-                float dv = v - gDIBubbleLastV[i];
-                gDIBubbleLastV[i] = v;
-                BOOL pop = (v > 0.18f && dv > 0.10f)
-                        || (v > 0.42f && nowB >= gDIBubbleNextAt[i]);
-                if (!pop) continue;
-                int slot = -1;
-                for (int k = 0; k < DI_BUBBLE_MAX; k++)
-                    if (!gDIBubbles[k].alive) { slot = k; break; }
-                if (slot < 0) { gDIBubbleNextAt[i] = nowB + 0.30; continue; }
-                float r1 = (float)arc4random_uniform(1000) / 1000.0f;
-                float r2 = (float)arc4random_uniform(1000) / 1000.0f;
-                float r3 = (float)arc4random_uniform(1000) / 1000.0f;
-                DIBubble *b = &gDIBubbles[slot];
-                CGFloat cx = x0 + (CGFloat)i * (bw + gap) + bw * 0.5f;
-                b->x = (float)(cx + ((CGFloat)r1 - 0.5f) * 1.8f);
-                b->y = (float)(bottom - hArr[i] - 1.2f);
-                b->r0 = 0.85f + 1.25f * v + r2 * 0.45f;
-                b->vy = 7.0f + 7.0f * r3;
-                b->swayPh = r2 * 6.283f;
-                b->swayAmp = 3.0f + r3 * 5.0f;
-                b->maxLife = 0.85f + v * 1.05f;
-                b->life = b->maxLife;
-                b->alive = 1;
-                gDIBubbleNextAt[i] = nowB + 0.26 + (double)r1 * 0.34;
-            }
-
-            /* 更新 + 画圆: 泡泡一律画实心小圆 —— 真机上直径只有 2~5pt,
-               空心环在 1x 屏看不出层次, 反而会和柱子重叠时把柱子挖出洞。
-               大小随寿命收一下、横向轻微摆动, 就够了。 */
-            float yLimit = (float)top - 34.0f;
-            if (yLimit < 4.0f) yLimit = 4.0f;
-            for (int k = 0; k < DI_BUBBLE_MAX; k++) {
-                DIBubble *b = &gDIBubbles[k];
-                if (!b->alive) continue;
-                b->life -= dtb;
-                if (b->life <= 0.0f) { b->alive = 0; continue; }
-                b->vy += 2.5f * dtb;
-                b->y -= b->vy * dtb;
-                b->swayPh += 2.6f * dtb;
-                b->x += sinf(b->swayPh) * b->swayAmp * dtb;
-                float tt = b->life / b->maxLife;
-                /* 前 75% 寿命基本保持大小(0.55~1.0 倍), 最后 25% 快速缩小 —— 像泡泡破掉,
-                   而不是一直缩成针尖再消失 */
-                float keep = (tt > 0.25f) ? (0.55f + 0.45f * sqrtf(tt)) : (0.55f * (tt / 0.25f));
-                float rr = b->r0 * keep;
-                if (b->y < yLimit || rr < 0.20f) { b->alive = 0; continue; }
-                CGPathAddEllipseInRect(p, NULL,
-                    CGRectMake(b->x - rr, b->y - rr, rr * 2.0f, rr * 2.0f));
-            }
-            break;
-        }
         default: {  /* 0: 柱状(默认) —— 圆角长条, 中间高两边低 */
             for (int i = 0; i < n; i++) {
                 CGRect r = CGRectMake(x0 + i * (bw + gap), bottom - hArr[i], bw, hArr[i]);
@@ -21176,10 +21065,10 @@ static void diRGB2HSB(UIColor *c, double *h, double *s, double *b) {
    缩到 6x6 求平均, 跳过近黑像素, 最后把饱和度/亮度抬到能看清的程度。 */
 static UIColor *diCoverAverageColor(UIView *cover) {
     if (!cover) return nil;
-    UIImage *img = nil;
+    UIImage *img = diFxArtworkImage;
     NSMutableArray *st = [NSMutableArray arrayWithObject:cover];
     int budget = 300;
-    while (st.count && budget-- > 0) {
+    while (!img && st.count && budget-- > 0) {
         UIView *v = st.lastObject; [st removeLastObject];
         if ([v isKindOfClass:UIImageView.class]) {
             UIImage *im = ((UIImageView *)v).image;
@@ -21190,14 +21079,16 @@ static UIColor *diCoverAverageColor(UIView *cover) {
     CGImageRef cg = img.CGImage;
     if (!cg) {
         id cont = cover.layer.contents;
-        if (cont) {
+        if (cont && CFGetTypeID((__bridge CFTypeRef)cont)==CGImageGetTypeID()) {
             @try { cg = (__bridge CGImageRef)cont; } @catch (__unused NSException *e) { cg = NULL; }
         }
     }
     if (!cg) return nil;
+    static UIImage *cachedImage=nil;static UIColor *cachedColor=nil;
+    if(img && img==cachedImage && cachedColor)return cachedColor;
     unsigned char px[6 * 6 * 4] = {0};
     CGColorSpaceRef cs = CGColorSpaceCreateDeviceRGB();
-    CGContextRef ctx = CGBitmapContextCreate(px, 6, 6, 8, 24, cs, kCGImageAlphaPremultipliedLast);
+    CGContextRef ctx = CGBitmapContextCreate(px, 6, 6, 8, 24, cs, kCGBitmapByteOrder32Big | kCGImageAlphaPremultipliedLast);
     CGColorSpaceRelease(cs);
     if (!ctx) return nil;
     CGContextDrawImage(ctx, CGRectMake(0, 0, 6, 6), cg);
@@ -21205,16 +21096,14 @@ static UIColor *diCoverAverageColor(UIView *cover) {
     double r = 0, g = 0, b = 0, n = 0;
     for (int i = 0; i < 36; i++) {
         double rr = px[i*4] / 255.0, gg = px[i*4+1] / 255.0, bb = px[i*4+2] / 255.0;
-        if (rr + gg + bb < 0.12) continue;          /* 跳过近黑边角 */
-        r += rr; g += gg; b += bb; n += 1;
+        double alpha=px[i*4+3]/255.0;
+        if(alpha<0.05)continue;
+        r+=MIN(1.0,rr/alpha);g+=MIN(1.0,gg/alpha);b+=MIN(1.0,bb/alpha);n+=1;
     }
     if (n < 1) return nil;
-    UIColor *avg = [UIColor colorWithRed:r/n green:g/n blue:b/n alpha:1.0];
-    double h, sat, bri;
-    diRGB2HSB(avg, &h, &sat, &bri);
-    sat = MIN(1.0, MAX(0.45, sat * 1.35));
-    bri = MIN(1.0, MAX(0.55, bri * 1.20));
-    return diHSB(h, sat, bri);
+    UIColor *result=[UIColor colorWithRed:r/n green:g/n blue:b/n alpha:1.0];
+    if(img){cachedImage=img;cachedColor=result;}
+    return result;
 }
 
 /* 统一调色板: 返回 A/B 两个颜色 */
@@ -21224,15 +21113,12 @@ static void diColorPalette(int mode, NSString *hexA, NSString *hexB,
                            UIColor **outA, UIColor **outB) {
     if (mode == 0) {
         UIColor *base = gDIRhythmTarget ? diCoverAverageColor(gDIRhythmTarget) : nil;
-        if (!base) base = defA;
-        double h, sat, bri;
-        diRGB2HSB(base, &h, &sat, &bri);
-        *outA = diHSB(h, sat, MIN(1.0, bri * 1.05));
-        *outB = diHSB(h + 0.10, MAX(0.30, sat * 0.85), MIN(1.0, bri * 1.10));
-        if (forParticles) {   /* 粒子偏浅: 参考里粒子是米白/淡紫, 不是满饱和 */
-            *outA = diHSB(h, MIN(0.55, sat), MIN(1.0, bri * 1.15));
-            *outB = diHSB(h + 0.14, MIN(0.45, sat * 0.8), MIN(1.0, bri * 1.20));
+        if(!base && gDIBgImage) {
+            UIImageView *fallback=[[UIImageView alloc]initWithImage:gDIBgImage];
+            base=diCoverAverageColor(fallback);
         }
+        *outA=base ?: defA; *outB=base ?: defA;
+        (void)forParticles;
         return;
     }
     if (mode == 2) {
@@ -22091,6 +21977,10 @@ static void diRhythmTickWithDelta(float dtIn) {
     }
 
     /* 3.0.56: 粒子不再跟鼓点(用户要求"不受鼓点影响"), 自然补充、自然消失 */
+    static CFTimeInterval followColorAt=0;
+    if(particleColorMode==0 && CACurrentMediaTime()-followColorAt>0.5){
+        followColorAt=CACurrentMediaTime();gDIParticleColorDirty=YES;
+    }
     if (gDIParticleColorDirty) {
         gDIParticleColorDirty = NO;
         diFxRefreshColors();
