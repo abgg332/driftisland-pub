@@ -49,7 +49,7 @@ static void diriLog(NSString *s){NSLog(@"[DI录屏岛] %@",s);}
     self.image.frame=self.bounds;
     NSString *name=diriPrefs[[self key:@"Asset"]];
     if(![name isKindOfClass:NSString.class]||!name.length||[name isEqualToString:@"default"]){
-        name=diriPrefs[self.left?@"miniAlbumFolder":@"miniAudioFolder"];
+        name=diriPrefs[self.left?@"smallAnimFolder":@"miniAudioFolder"];
         if(![name isKindOfClass:NSString.class]||!name.length)name=diriPrefs[@"animFolder"];
         if(![name isKindOfClass:NSString.class])name=@"";
     }
