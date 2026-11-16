@@ -77,7 +77,7 @@ static BOOL rhythmRoundCover = YES;            // 3.0.47: 封面裁成正圆
 static BOOL rhythmBarsOn = YES;                // 3.0.48: 频谱条(进度条上方)
 static int  rhythmBarsCount = 40;              // 3.0.50: 频谱条根数(可调)
 /* 3.0.83: 频谱条样式 —— 0 柱状 / 1 点阵 / 2 镜像 / 4 峰值 / 5 尖刺 / 6 斜切
-   / 10 萤火 / 14 星轨 / 15 胶囊 / 16 霓虹 / 17 双子
+   / 10 萤火 / 14 星轨 / 15 胶囊 / 16 霓虹 / 17 双子 / 18 声呐 / 19 波浪 / 20 雨帘
    (3/7/8 历史预留位; 9/11/12/13 已在 3.0.112 按用户要求删除) */
 static int gDIBarStyle = 0;
 static float gDIBarPeak[64];
@@ -1057,7 +1057,7 @@ static void diFxLoadPrefs(void) {
     rhythmBarsOn = fxBool(@"AlbumBarsOn", YES);
     {
         /* 3.0.113: 频谱条样式 —— 0/1/2/4/5/6 原有六种 + 10 萤火 + 14 星轨
-           + 15 胶囊 + 16 霓虹 + 17 双子, 共十一种。
+           + 15 胶囊 + 16 霓虹 + 17 双子 + 18 声呐 + 19 波浪 + 20 雨帘, 共十四种。
            3/7/8 是历史预留位; 9/11/12/13(绸带/山峦/脉冲/阶梯)已按用户要求删除,
            域里若还留着这四个值, 一律回落到柱状。 */
         {
@@ -1066,7 +1066,7 @@ static void diFxLoadPrefs(void) {
             int st = sv ? [sv intValue] : 0;
             if (st < 0) st = 0;
             if (!(st==0||st==1||st==2||st==4||st==5||st==6
-                  ||st==10||st==14||st==15||st==16||st==17)) st=0;
+                  ||st==10||st==14||st==15||st==16||st==17||st==18||st==19||st==20)) st=0;
             if (st != gDIBarStyle) {
                 gDIBarStyle = st;
                 for (int i = 0; i < 64; i++) gDIBarPeak[i] = 0.0f;   /* 换样式时峰值重新来 */
@@ -18723,11 +18723,12 @@ static void (*gDIOrigModuleLayout)(id, SEL) = NULL;
    (那排按钮交给播放器自己按新宽度排, 一个坐标都不猜)。只处理折叠态(高 40~130),
    展开态一个像素都不动。 */
 /* 3.0.113: 3×1 内容容器的左侧缩进 —— 让按钮组整体右移一点 */
-#define DI31_CARD_INSET 12.0
+#define DI31_CARD_INSET 20.0
 
 static char kDI31NegTS;
 static char kDI31BaseW;    /* 该视图自己的"满宽"(4 格时的宽度) */
 static char kDI31BaseX;    /* 该视图满宽时的左边距 —— 收窄后钉在这个 x 上 */
+static char kDI31BaseY;    /* 该视图满宽时的 y —— 判断"是否还在原位" */
 static BOOL gDI31Hooked = NO;
 static void (*gDI31OrigBoxSetFrame)(id, SEL, CGRect) = NULL;
 static void (*gDI31OrigCardSetFrame)(id, SEL, CGRect) = NULL;
@@ -18795,48 +18796,60 @@ static BOOL di31IsPlayer(UIView *v) {
     return yes;
 }
 
-/* 唯一改 frame 的地方。isCard: 内容容器在父容器坐标系里, 左边距恒为 0。 */
+/* 唯一改 frame 的地方。isCard: 内容容器在父容器坐标系里, 左边距恒为 0。
+   3.0.114 三条放行判据(都是为了"收回时不再偏移"):
+   ① 视图身上挂着动画(展开/收起/转场) → 一帧都不碰;
+   ② 宽度不在目标附近、x/y 也不在原位 → 过渡帧, 放行;
+   ③ 宽度已经等于目标 → 只把左边距摆正(幂等, 不会引起宽度跳)。
+   只有"系统安静后给的满宽"才会被真正收窄。 */
 static CGRect di31Adjust(UIView *v, CGRect f, BOOL isCard) {
     if (!di31KeyOn()) return f;
     if (f.size.height < 40.0 || f.size.height > 130.0) return f;   /* 只要折叠态 */
     if (f.size.width < 200.0) return f;                            /* 占位/已经窄了 */
+    if (v.layer.animationKeys.count > 0) return f;                 /* 动画中完全不介入 */
 
     NSNumber *bwN = objc_getAssociatedObject(v, &kDI31BaseW);
     NSNumber *bxN = objc_getAssociatedObject(v, &kDI31BaseX);
+    NSNumber *byN = objc_getAssociatedObject(v, &kDI31BaseY);
     CGFloat baseW = bwN ? bwN.doubleValue : 0.0;
     CGFloat baseX = bxN ? bxN.doubleValue : f.origin.x;
+    CGFloat baseY = byN ? byN.doubleValue : f.origin.y;
 
-    /* 基准只在"宽度真的换了"(首次 / 旋转 / 换档)时刷新。
-       以前每帧满宽都刷, 收起动画里系统一边滑走一边给 356, baseX 就被动画帧改掉,
-       下一帧又把模块拽回来 —— 这就是"收回时偏移一下"。 */
+    /* 基准只在"宽度真的换了"(首次 / 旋转 / 换档)时刷新 */
     if (f.size.width >= 300.0 && (baseW < 300.0 || fabs(f.size.width - baseW) > 8.0)) {
         baseW = f.size.width;
         baseX = isCard ? 0.0 : f.origin.x;
+        baseY = f.origin.y;
         objc_setAssociatedObject(v, &kDI31BaseW, @(baseW), OBJC_ASSOCIATION_RETAIN_NONATOMIC);
         objc_setAssociatedObject(v, &kDI31BaseX, @(baseX), OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        objc_setAssociatedObject(v, &kDI31BaseY, @(baseY), OBJC_ASSOCIATION_RETAIN_NONATOMIC);
         static int sLog = 0;
-        if (sLog < 12) { sLog++; RLog(@"[3x1] 基准 %@ %.0f x=%.0f", isCard ? @"卡片" : @"容器", baseW, baseX); }
+        if (sLog < 8) { sLog++; RLog(@"[3x1] 基准 %@ %.0f x=%.0f y=%.0f", isCard ? @"卡片" : @"容器", baseW, baseX, baseY); }
     }
     if (baseW < 300.0) return f;              /* 不是全宽模块, 连识别都不用做 */
     if (!di31IsPlayer(v)) return f;
 
     CGFloat target = baseW * 0.75 - 4.0;
     if (target < 150.0) return f;
-    /* 3.0.113: 只处理"系统正在给满宽"的那一帧。
-       收回/展开动画里系统会把宽度从 356 连续缩到 0, 若中间帧也按比例改,
-       动画就会从 356 一帧跳到 263 —— 用户看到的就是"收回时偏移一下"。
-       这里放行所有中间帧, 让系统自己的动画走完; 稳定后那帧满宽再一次性收窄。 */
-    if (f.size.width < baseW - 0.5) return f;
-    /* 左边距和基准差得多 = 正在滑走(收起/转场动画), 这一帧完全放行,
-       不缩宽度也不改位置, 动画才能顺着系统走。 */
-    if (!isCard && fabs(f.origin.x - baseX) > 2.0) return f;
-    if (isCard) {
-        /* 内容容器再缩进一点: 里面那排按钮整体右移, 不再贴着左边缘 */
-        f.origin.x = DI31_CARD_INSET;
-        f.size.width = target - DI31_CARD_INSET;
-    } else {
-        f.origin.x = baseX;                   /* 左对齐: 只缩右边 */
-        f.size.width = target;
+    CGFloat wantW = isCard ? (target - DI31_CARD_INSET) : target;
+    CGFloat wantX = isCard ? DI31_CARD_INSET : baseX;
+
+    BOOL atTarget = (fabs(f.size.width - wantW) <= 3.0);
+    BOOL stable = (fabs(f.origin.x - baseX) <= 2.0) && (fabs(f.origin.y - baseY) <= 2.0);
+
+    if (atTarget) {                     /* 宽度已经对了: 只把位置摆正 */
+        f.size.width = wantW;
+        f.origin.x = wantX;
+        return f;
+    }
+    if (!stable) return f;              /* 过渡帧(宽度/位置都在变) → 放行 */
+    if (f.size.width < wantW - 3.0) return f;   /* 比目标还窄, 别撑大 */
+    CGFloat oldW = f.size.width;
+    f.size.width = wantW;
+    f.origin.x = wantX;
+    {
+        static int sLogN = 0;
+        if (sLogN < 12) { sLogN++; RLog(@"[3x1] 收窄 %@ %.0f→%.0f x=%.0f", isCard ? @"卡片" : @"容器", oldW, wantW, wantX); }
     }
     return f;
 }
@@ -21238,6 +21251,67 @@ static void diRhythmUpdateBars(UIView *host, BOOL active) {
                 CGPathAddRect(p, NULL, CGRectMake(cx - 0.35f, topY, 0.7f, hArr[i]));
                 CGFloat r = 0.8f + 2.4f * (CGFloat)vArr[i];
                 CGPathAddEllipseInRect(p, NULL, CGRectMake(cx - r, topY - r, r * 2.0f, r * 2.0f));
+            }
+            break;
+        }
+        case 18: {  /* 声呐: 24 段绕成一整圈, 每段向外的长度随频谱 —— 像雷达扫描 */
+            CGFloat cx = (x0 + x1) * 0.5f;
+            CGFloat cy = (top + bottom) * 0.5f;
+            CGFloat baseR = MIN(avail, height) * 0.33f;
+            CGFloat stepA = (CGFloat)(M_PI * 2.0) / (CGFloat)n;
+            for (int i = 0; i < n; i++) {
+                CGFloat a0 = (CGFloat)(-M_PI_2) + (CGFloat)i * stepA + stepA * 0.10f;
+                CGFloat a1 = a0 + stepA * 0.78f;
+                CGFloat r1 = baseR * (1.10f + 0.80f * (CGFloat)vArr[i]);
+                const int seg = 5;
+                CGPathMoveToPoint(p, NULL, cx + cosf(a0) * baseR, cy + sinf(a0) * baseR);
+                for (int k = 1; k <= seg; k++) {
+                    CGFloat a = a0 + (a1 - a0) * (CGFloat)k / (CGFloat)seg;
+                    CGPathAddLineToPoint(p, NULL, cx + cosf(a) * baseR, cy + sinf(a) * baseR);
+                }
+                for (int k = seg; k >= 0; k--) {
+                    CGFloat a = a0 + (a1 - a0) * (CGFloat)k / (CGFloat)seg;
+                    CGPathAddLineToPoint(p, NULL, cx + cosf(a) * r1, cy + sinf(a) * r1);
+                }
+                CGPathCloseSubpath(p);
+            }
+            break;
+        }
+        case 19: {  /* 波浪: 一整条横向波带, 没有柱子 —— 起伏最连贯 */
+            CGFloat thick = MAX(2.4f, (CGFloat)height * 0.22f);
+            CGFloat amp = (CGFloat)height * 0.52f;
+            CGFloat baseY = bottom - (CGFloat)height * 0.24f;
+            int nn = n > 64 ? 64 : n;
+            if (nn < 2) break;
+            CGFloat stepX = avail / (CGFloat)(nn - 1);
+            CGFloat xs[64], ys[64];
+            for (int i = 0; i < nn; i++) {
+                xs[i] = x0 + (CGFloat)i * stepX;
+                ys[i] = baseY - (CGFloat)vArr[i] * amp;
+            }
+            CGPathMoveToPoint(p, NULL, xs[0], ys[0]);
+            for (int i = 1; i < nn; i++) {
+                CGFloat mx = (xs[i - 1] + xs[i]) * 0.5f;
+                CGFloat my = (ys[i - 1] + ys[i]) * 0.5f;
+                CGPathAddQuadCurveToPoint(p, NULL, xs[i - 1], ys[i - 1], mx, my);
+            }
+            CGPathAddLineToPoint(p, NULL, xs[nn - 1], ys[nn - 1]);
+            CGPathAddLineToPoint(p, NULL, xs[nn - 1], ys[nn - 1] + thick);
+            for (int i = nn - 1; i >= 1; i--) {
+                CGFloat mx = (xs[i - 1] + xs[i]) * 0.5f;
+                CGFloat my = (ys[i - 1] + ys[i]) * 0.5f + thick;
+                CGPathAddQuadCurveToPoint(p, NULL, xs[i] + 0.01f, ys[i] + thick, mx, my);
+            }
+            CGPathAddLineToPoint(p, NULL, xs[0], ys[0] + thick);
+            CGPathCloseSubpath(p);
+            break;
+        }
+        case 20: {  /* 雨帘: 从顶部垂下的雨丝, 越长越响 —— 跟柱状正好反过来 */
+            for (int i = 0; i < n; i++) {
+                CGFloat cx = x0 + (CGFloat)i * (bw + gap) + bw * 0.5f;
+                CGFloat ww = MAX(0.8f, bw * 0.42f);
+                CGFloat len = MIN((CGFloat)height, MAX(3.0f, hArr[i] * 1.05f));
+                diSafeSpectrumRoundedRect(p, NULL, CGRectMake(cx - ww * 0.5f, top, ww, len), ww * 0.5f, ww * 0.5f);
             }
             break;
         }
