@@ -890,8 +890,6 @@ static Class diStepSliderClass(void) {
 @interface DIMaterialsSmall : DIMaterialsController @end
 @interface DIMaterialsExpand : DIMaterialsController @end
 @interface DIFrameFolders : PSListController @end
-@interface DIRecordingMiniFolders : DIFrameFolders @end
-@interface DIRecordingTrailingFolders : DIFrameFolders @end
 
 @interface DIPrefsController : PSListController {
     NSInteger _smallRow; /* 小岛素材选择 行号 */
@@ -911,7 +909,6 @@ static Class diStepSliderClass(void) {
 @end
 /* 2.6.28: 锁屏设置页 —— 完全照歌词岛的做法(DIMiniBaseController + linkSpec),
    这是唯一一个从来没闪退过的二级页形态 */
-@interface DIRecordingIslandPage : DIMiniBaseController @end
 @interface DILockScreenPage : DIMiniBaseController @end
 /* 2.6.29: 文字颜色页(原"文字样式"组的内容, 整体搬进来, 键值零改动) */
 @interface DITextStylePage : DIMiniBaseController @end
@@ -1608,7 +1605,6 @@ static void diWriteColors(NSArray<NSString *> *colors) {
         DI_ADD([self linkSpec:@"锁屏通知" detail:[DILockScreenPage class]]);
         /* 2.8.22: "歌词岛"更名"专辑遮罩"(左侧专辑帧率 + 右侧音频帧率 + 专辑遮罩) */
         DI_ADD([self linkSpec:@"专辑遮罩" detail:[DILyricsIslandSettings class]]);
-        DI_ADD([self linkSpec:@"录屏岛" detail:[DIRecordingIslandPage class]]);
         /* 2.8.88: 展开定义 —— 按用户要求做成独立入口, 就放在「专辑遮罩」下面;
            页内上面是帧率, 下面是展开岛的歌词/歌名位置与大小 */
         DI_ADD([self linkSpec:@"歌词位置" detail:[DIExpandDefinePage class]]);
@@ -6771,40 +6767,6 @@ static NSString *diBarStyleLabel(int s) {
     [specs addObject:[self fxColorSpec:@"起始颜色" key:diFxSizedKey(@"SpectrumColorA") def:@"#9A8AFF" modeKey:diFxSizedKey(@"SpectrumColorMode")]];
     [specs addObject:[self fxColorSpec:@"结束颜色" key:diFxSizedKey(@"SpectrumColorB") def:@"#6BB8FF" modeKey:diFxSizedKey(@"SpectrumColorMode")]];
     [specs addObject:[self fxFlowSpec:@"流光(颜色缓慢流动)" key:diFxSizedKey(@"SpectrumFlowOn")]];
-    return specs;
-}
-@end
-
-@implementation DIRecordingMiniFolders
-- (NSString *)prefKey { return @"RecordingIslandMiniAsset"; }
-- (void)saveFolder:(NSString *)name { [super saveFolder:name ?: @"."]; }
-@end
-@implementation DIRecordingTrailingFolders
-- (NSString *)prefKey { return @"RecordingIslandTrailingAsset"; }
-- (void)saveFolder:(NSString *)name { [super saveFolder:name ?: @"."]; }
-@end
-
-@implementation DIRecordingIslandPage
-- (NSArray *)buildSpecifiers {
-    NSMutableArray *specs=[NSMutableArray array];
-    [specs addObject:[self groupSpec:@"录屏岛" footer:@"仅在系统录屏活动中显示逐帧素材。不依赖 UIScreen.isCaptured，不替换系统录屏控制。首次安装需注销以加载 hook。请关闭旧的「录屏显示素材」避免叠加。"]];
-    [specs addObject:[self switchSpec:@"启用录屏岛" key:@"RecordingIslandEnabled" def:@NO]];
-    for(NSString *side in @[@"Mini",@"Trailing"]){
-        NSString *prefix=[@"RecordingIsland" stringByAppendingString:side];
-        [specs addObject:[self groupSpec:[side isEqualToString:@"Mini"]?@"左侧（Mini）":@"右侧" footer:@"点击「选择帧率素材」选择原有文件夹；未选择时继承原有左右素材。文件夹内按数字命名 PNG/JPEG。旋转速度为本插件的适配单位，不承诺与参考包数值等价。"]];
-        [specs addObject:[self switchSpec:@"启用动画" key:[prefix stringByAppendingString:@"Enabled"] def:@YES]];
-        [specs addObject:[self numSlider:@"动画帧率" key:[prefix stringByAppendingString:@"FPS"] def:60 mn:0 mx:1000]];
-        [specs addObject:[self switchSpec:@"启用素材旋转" key:[prefix stringByAppendingString:@"Rotation"] def:@NO]];
-        [specs addObject:[self switchSpec:@"素材旋转反转" key:[prefix stringByAppendingString:@"Reverse"] def:@NO]];
-        [specs addObject:[self numSlider:@"旋转速度" key:[prefix stringByAppendingString:@"RotationSpeed"] def:5 mn:0 mx:10]];
-        [specs addObject:[self numSlider:@"缩放百分比" key:[prefix stringByAppendingString:@"ScalePercent"] def:100 mn:50 mx:200]];
-        [specs addObject:[self numSlider:@"X偏移" key:[prefix stringByAppendingString:@"OffsetX"] def:0 mn:-10 mx:10]];
-        [specs addObject:[self numSlider:@"Y偏移" key:[prefix stringByAppendingString:@"OffsetY"] def:0 mn:-10 mx:10]];
-        PSSpecifier *asset=[PSSpecifier preferenceSpecifierNamed:@"选择帧率素材" target:self set:NULL get:@selector(readPreferenceValue:) detail:[side isEqualToString:@"Mini"]?[DIRecordingMiniFolders class]:[DIRecordingTrailingFolders class] cell:PSLinkCell edit:nil];
-        [asset setProperty:[prefix stringByAppendingString:@"Asset"] forKey:@"key"];[asset setProperty:kDomain forKey:@"defaults"];[asset setProperty:@"default" forKey:@"default"];
-        [specs addObject:asset];
-    }
-    [specs addObject:[self groupSpec:nil footer:@"素材路径：/var/mobile/灵动岛/帧率素材/文件夹名。左右共用原有素材库，各自选择，不需要移动或复制素材。"]];
     return specs;
 }
 @end

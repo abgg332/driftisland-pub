@@ -166,7 +166,6 @@ static double expandTextScale = 100.0; // 文字大小(%, 100=原样)
 /* 2.8.86: 构建戳 —— 之前横幅打的是 SpringBoard 自己的 CFBundleShortVersionString(恒 1.0),
    日志里根本看不出装的是哪一版。所有诊断行都带这个戳, 下轮日志一眼定位。 */
 #define DI_BUILD_VER DI_VERSION   /* 3.0.28: 唯一来源 DIVersion.h */
-extern "C" BOOL DIRecordingIslandExclusive(void);
 static BOOL gRecordingActive = NO; // 保留: 岛素材总闸条件
 static NSString *diElementId(UIView *host);
 static BOOL diMiniMusicActive(UIView *host); // 2.6.3: 前置(遮罩层使用)
@@ -310,10 +309,6 @@ static void RLog(NSString *fmt, ...) {
     NSString *out = [NSString stringWithFormat:@"[%@] [现场] %@\n", [diLogDF() stringFromDate:[NSDate date]], line];
     diLogWrite(out);
 }
-extern "C" void DIRecordingIslandLog(NSString *message) {
-    RLog(@"[录屏岛] %@",message);
-}
-
 #define DI_STEP(fmt, ...) RLog(fmt, ##__VA_ARGS__)
 
 /* ===== 3.0.21: 主线程停摆看门狗 + 阶段面包屑 =====
@@ -1699,13 +1694,6 @@ static void diDumpWindowsForVolume(void) {
         if (self.player.timeControlStatus != AVPlayerTimeControlStatusPaused) [self.player pause];
         return;
     }
-    /* Recording replacement owns the aperture materials while active. No preference
-       is rewritten; normal playback resumes through the existing sync path. */
-    if (DIRecordingIslandExclusive()) {
-        self.hidden=YES;
-        if (self.player.timeControlStatus != AVPlayerTimeControlStatusPaused) [self.player pause];
-        return;
-    }
     /* 2.2.59: 边框流光层 —— 几何完全由 diApplyEdgeGlow 自己算(mask 环 + 缩放),
        绝不能走下面的主同步(那会把 frame 改成宿主 bounds, 并把 mask 顶掉),
        所以这里只做"播放/隐藏"两件事。 */
@@ -1746,7 +1734,7 @@ static void diDumpWindowsForVolume(void) {
         }
         UIView *acc = nil;
         CGRect slot = (onRec ? diRecSlotRect(island, NO, &acc) : CGRectZero);
-        BOOL show = !DIRecordingIslandExclusive() && enabled && recOn && diIsScreenRecording() && onRec && slot.size.width > 2;
+        BOOL show = enabled && recOn && diIsScreenRecording() && onRec && slot.size.width > 2;
         /* 2.9.16 诊断: 只在 show 翻转时打一条, 用来确认"挂上了但没显示"卡在哪一步 */
         {
             static int sPrevShow = -1; static CFAbsoluteTime sT;
@@ -3140,7 +3128,7 @@ __attribute__((unused)) static BOOL diMiniMusicActive(UIView *host) {
         }
     }
     BOOL sideOn = (self.side == 1) ? miniAudioOn : miniAnimOn;
-    if (!mini || !enabled || gLocked || !sideOn || !frames.count || !mediaActive || !musicGate || gRecordingActive || DIRecordingIslandExclusive()) {
+    if (!mini || !enabled || gLocked || !sideOn || !frames.count || !mediaActive || !musicGate || gRecordingActive) {
         if (!self.hidden) self.hidden = YES;
         if (_iv.image) _iv.image = nil;
         if (++_miss > 15) _link.paused = YES;
@@ -22298,7 +22286,24 @@ static BOOL __attribute__((unused)) diISMClips(UIView *v) {
    不再往上爬 —— 往上爬会走到窗体一级, 那正是 3.0.89/90 "粒子数有、屏幕没有"
    和"粒子跑到展开页"的来源。 */
 static UIView *diISMHostParent(UIView *art) {
-    return art.superview; /* attach inside the visible aperture content branch, not secure-window root */
+    // Stay INSIDE the aperture's visible content tree. Never attach to UIWindow.
+    // Accessory-local particles can be cropped by a portal even with clipsToBounds=NO.
+    UIView *fallback=art.superview;
+    for(UIView *v=fallback;v && v!=art.window;v=v.superview){
+        NSString *name=NSStringFromClass(v.class);
+        if([name containsString:@"MRUActivityNowPlayingView"]){
+            UIView *content=v.superview;
+            NSString *parentName=NSStringFromClass(content.class);
+            if(content && content!=art.window && content.window==art.window
+                && ![parentName containsString:@"Transition"]
+                && ![parentName containsString:@"DropShadow"]
+                && content.bounds.size.width>=v.bounds.size.width
+                && content.bounds.size.height>=v.bounds.size.height)
+                return content;
+            return v;
+        }
+    }
+    return fallback;
 }
 
 static void diISMEnsureHost(void) {
@@ -22310,12 +22315,14 @@ static void diISMEnsureHost(void) {
     /* 比 87 的 0.6 倍大一圈: 粒子能飘出小岛, 但宿主仍贴着头像, 不会跑到展开页 */
     CGFloat pad = MAX(box.size.width, box.size.height) * 1.6 + 10.0;
     (void)pad; (void)box;
-    CGRect want = CGRectInset(box, -MAX(90.0, box.size.width*4.0), -MAX(90.0, box.size.height*4.0));
+    // A large, noninteractive canvas in the same visible content branch.
+    CGRect want = CGRectUnion(parent.bounds,CGRectInset(box,-160.0,-160.0));
     if (gDIISMHost && gDIISMHost.superview == parent) {
         if (!CGRectEqualToRect(gDIISMHost.frame, want)) gDIISMHost.frame = want;
         /* 玻璃/系统层随时可能挤到前面: 每帧把粒子层顶回去(只是改 zPosition, 不动布局) */
         if (gDIISMHost.layer.zPosition < 900.0) gDIISMHost.layer.zPosition = 900.0;
         gDIISMHost.hidden=NO; gDIISMHost.alpha=1;
+        gDIISMHost.clipsToBounds=NO; gDIISMHost.layer.masksToBounds=NO;
         [parent bringSubviewToFront:gDIISMHost];
         return;
     }
@@ -22358,7 +22365,8 @@ static void diISMSpawnDot(void) {
     DIISMDot *d = &gDIISMDots[slot];
     float u1=diISMRand01(),u2=diISMRand01(),u3=diISMRand01();
     d->ang=2*M_PI*u1; d->rad=(31.5f+2.5f*u2)*k;
-    d->drift=(5+7*u3+4*diIslandEnergy)*k;
+    // Wider travel without moving the birth position or changing beat/lifetime.
+    d->drift=(5+7*u3+4*diIslandEnergy)*k*2.0f;
     d->push=0; d->sway=0; d->swayAmp=0;
     d->shape=arc4random_uniform(4);
     d->size=diFxShapeSide(d->shape)*k*(float)gDIISMDotS;
@@ -22433,7 +22441,8 @@ static void diISMUpdateDots(CGRect cover, float dt, BOOL active) {
             if (gDIISMDotCount > 0) gDIISMDotCount--;
             continue;
         }
-        d->rad+=d->drift*dt;
+        d->rad+=d->drift*dt; // no capsule-size/radius clamp
+
         d->rot+=d->rotSpd*dt;
         float progress=fminf(1,fmaxf(0,1-d->life/MAX(d->maxLife,0.16f)));
         float pulseGain=active && diParticleExtraBeat?gDIISMKick*fminf(2,fmaxf(0,stg)):0;
@@ -22733,7 +22742,7 @@ static void diISMRUFrame(float dtIn) {
             }
         }
         diMruFileLog([NSString stringWithFormat:
-            @"岛特效同步探针 内容分支外飘=1 头像=%.0fx%.0f 文件=%d 播放=%d 鼓=%.2f 缩放=%.3f 粒子=%d 宿主=%@ 曾在=%@",
+            @"岛特效同步探针 102基线外扩=2 内容分支外飘=1 头像=%.0fx%.0f 文件=%d 播放=%d 鼓=%.2f 缩放=%.3f 粒子=%d 宿主=%@ 曾在=%@",
             art.bounds.size.width, art.bounds.size.height, (int)fromFile,
             (int)playing, kick, gDIISMScaleNow, gDIISMDotCount,
             gDIISMHost ? NSStringFromClass(gDIISMHost.superview.class) : @"无",
