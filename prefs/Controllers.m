@@ -931,6 +931,7 @@ static Class diStepSliderClass(void) {
 - (void)diOpenFxPickerKeyA:(NSString *)a keyB:(NSString *)b title:(NSString *)t;
 @end
 /* 3.0.1: 尺寸选择页自建 —— 不再走系统的 PSListItemsController(点进去闪退) */
+@interface DILayoutAdjustPage : DIFxPage @end
 @interface DIPlayerSizePage : DIMiniBaseController @end
 @interface DIFrameFoldersMask : DIFrameFolders @end /* 2.6.3: 遮罩素材选择(键 maskAnimFolder) */
 @interface DIFrameFoldersMini : DIFrameFolders @end  /* 左侧(mini)帧率素材选择(键 smallAnimFolder) */
@@ -6735,6 +6736,7 @@ static BOOL diBarStyleOK(int s) {
     /* 3.0.66: 所有键都按当前播放器尺寸落键(AlbumBeatScale@3x2 这种形态) ——
        "应用那个尺寸设置的就当前尺寸保存"。读端(Tweak)对没写过的尺寸键会回落原键。 */
     NSMutableArray *specs = [NSMutableArray array];
+    [specs addObject:[self linkSpec:@"布局调整" detail:[DILayoutAdjustPage class]]];
     [specs addObject:[self groupSpec:@"专辑律动" footer:nil]];
     [specs addObject:[self switchSpec:@"启用律动特效" key:diFxSizedKey(@"AlbumEffectsOn") def:@YES]];
     /* 3.0.61: 删掉「圆形封面」—— 它和「原生播放 → 启用遮罩」抢同一件事(封面的形状),
@@ -6778,5 +6780,30 @@ static BOOL diBarStyleOK(int s) {
     [specs addObject:[self fxColorSpec:@"结束颜色" key:diFxSizedKey(@"SpectrumColorB") def:@"#6BB8FF" modeKey:diFxSizedKey(@"SpectrumColorMode")]];
     [specs addObject:[self fxFlowSpec:@"流光(颜色缓慢流动)" key:diFxSizedKey(@"SpectrumFlowOn")]];
     return specs;
+}
+@end
+
+@implementation DILayoutAdjustPage
+- (NSArray *)buildSpecifiers {
+    NSMutableArray *rows=[NSMutableArray array];
+    [rows addObject:[self groupSpec:@"布局调整" footer:@"按当前播放器尺寸独立保存。仅折叠态生效；X正数向右，Y正数向下。位移过大会重叠或超出卡片，请小幅调整。"]];
+    [rows addObject:[self switchSpec:@"启用布局调整" key:diFxSizedKey(@"AlbumLayoutOn") def:@NO]];
+    NSArray *labels=@[@"上一首",@"播放／暂停",@"下一首",@"时间条"],*keys=@[@"Prev",@"Play",@"Next",@"Time"];
+    for(NSUInteger i=0;i<keys.count;i++){
+        [rows addObject:[self groupSpec:labels[i] footer:nil]];
+        for(NSString *axis in @[@"X",@"Y"]){NSString *key=[NSString stringWithFormat:@"AlbumLayout%@%@",keys[i],axis];
+            [rows addObject:[self npSlider:[axis isEqual:@"X"]?@"左右位移":@"上下位移" key:diFxSizedKey(key) def:0 mn:-60 mx:60]];
+        }
+    }
+    [rows addObject:[self groupSpec:@"专辑头像" footer:@"暂停或未播放时隐藏头像，恢复播放后还原。不会移除专辑视图或改变占位。"]];
+    [rows addObject:[self switchSpec:@"未播放时隐藏专辑头像" key:diFxSizedKey(@"AlbumLayoutHideIdleArt") def:@NO]];
+    [rows addObject:[self buttonSpec:@"恢复当前尺寸默认布局" action:@selector(resetLayout:)]];
+    return rows;
+}
+- (void)resetLayout:(PSSpecifier *)sp {
+    (void)sp;
+    for(NSString *key in @[@"AlbumLayoutOn",@"AlbumLayoutHideIdleArt",@"AlbumLayoutPrevX",@"AlbumLayoutPrevY",@"AlbumLayoutPlayX",@"AlbumLayoutPlayY",@"AlbumLayoutNextX",@"AlbumLayoutNextY",@"AlbumLayoutTimeX",@"AlbumLayoutTimeY"])
+        CFPreferencesSetAppValue((__bridge CFStringRef)diFxSizedKey(key),(__bridge CFPropertyListRef)@0,(__bridge CFStringRef)kDomain);
+    CFPreferencesAppSynchronize((__bridge CFStringRef)kDomain);diPostFxTune();[self reloadSpecifiers];
 }
 @end

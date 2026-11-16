@@ -18698,12 +18698,80 @@ static void diFxTuneChanged(CFNotificationCenterRef c, void *obs, CFStringRef na
     });
 }
 
+/* Per-view offset bookkeeping: subtract only our last contribution when unchanged. */
+static NSHashTable *diLayoutTouched;
+static void diLayoutMove(UIView *v,CGFloat x,CGFloat y){
+    if(!v)return;
+    NSValue *baseV=objc_getAssociatedObject(v,"di.layout.base");
+    NSValue *lastV=objc_getAssociatedObject(v,"di.layout.last");
+    CGAffineTransform current=v.transform,base=current;
+    if(baseV && lastV && CGAffineTransformEqualToTransform(current,lastV.CGAffineTransformValue))base=baseV.CGAffineTransformValue;
+    if(x==0 && y==0){
+        if(baseV && lastV && CGAffineTransformEqualToTransform(current,lastV.CGAffineTransformValue))v.transform=base;
+        objc_setAssociatedObject(v,"di.layout.base",nil,OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        objc_setAssociatedObject(v,"di.layout.last",nil,OBJC_ASSOCIATION_RETAIN_NONATOMIC);return;
+    }
+    CGAffineTransform result=base;result.tx+=x;result.ty+=y;
+    objc_setAssociatedObject(v,"di.layout.base",[NSValue valueWithCGAffineTransform:base],OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    objc_setAssociatedObject(v,"di.layout.last",[NSValue valueWithCGAffineTransform:result],OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    if(!CGAffineTransformEqualToTransform(current,result))v.transform=result;
+    [diLayoutTouched addObject:v];
+}
+static void diLayoutArt(UIView *v,BOOL hide){
+    NSNumber *saved=objc_getAssociatedObject(v,"di.layout.alpha");
+    if(hide){if(!saved)objc_setAssociatedObject(v,"di.layout.alpha",@(v.alpha),OBJC_ASSOCIATION_RETAIN_NONATOMIC);if(v.alpha!=0)v.alpha=0;[diLayoutTouched addObject:v];}
+    else if(saved){if(v.alpha==0)v.alpha=saved.doubleValue;objc_setAssociatedObject(v,"di.layout.alpha",nil,OBJC_ASSOCIATION_RETAIN_NONATOMIC);}
+}
+static void diLayoutAdjustTick(void){
+    if(!NSThread.isMainThread)return;
+    static BOOL busy=NO;if(busy)return;
+    busy=YES;
+    @try{
+        if(!diLayoutTouched)diLayoutTouched=[NSHashTable weakObjectsHashTable];
+        BOOL on=fxBool(@"AlbumLayoutOn",NO);
+        NSMutableSet *handled=[NSMutableSet set];
+        for(UIView *root in gDIArtRoots.allObjects){
+            if(!root.window || root.hidden || [NSStringFromClass(root.class) containsString:@"Activity"])continue;
+            BOOL collapsed=!diTimeExpanded(root);
+            NSMutableArray *queue=[NSMutableArray arrayWithObject:root],*buttons=[NSMutableArray array];
+            int budget=180;
+            while(queue.count && budget-->0){
+                UIView *v=queue.lastObject;[queue removeLastObject];NSString *cn=NSStringFromClass(v.class);
+                if([cn containsString:@"MRUTransportButton"] && !v.hidden && v.bounds.size.width>4){[buttons addObject:v];continue;}
+                if([cn containsString:@"TimeControls"]){
+                    diLayoutMove(v,on&&collapsed?fxDouble(@"AlbumLayoutTimeX",0):0,on&&collapsed?fxDouble(@"AlbumLayoutTimeY",0):0);[handled addObject:v];continue;
+                }
+                if([cn containsString:@"ArtworkView"]){diLayoutArt(v,on&&collapsed&&fxBool(@"AlbumLayoutHideIdleArt",NO)&&!musicPlaying);[handled addObject:v];continue;}
+                [queue addObjectsFromArray:v.subviews];
+            }
+            // Only exactly three native transport controls: do not guess extra routing buttons.
+            if(buttons.count==3){
+                [buttons sortUsingComparator:^NSComparisonResult(UIView *a,UIView *b){
+                    NSValue *av=objc_getAssociatedObject(a,"di.layout.last"),*bv=objc_getAssociatedObject(b,"di.layout.last");
+                    (void)av;(void)bv;
+                    CGFloat x=[a.superview convertPoint:a.center toView:root].x,y=[b.superview convertPoint:b.center toView:root].x;
+                    return x<y?NSOrderedAscending:x>y?NSOrderedDescending:NSOrderedSame;
+                }];
+                NSArray *keys=@[@"Prev",@"Play",@"Next"];
+                for(int i=0;i<3;i++){
+                    CGFloat x=on&&collapsed?fxDouble([NSString stringWithFormat:@"AlbumLayout%@X",keys[i]],0):0;
+                    CGFloat y=on&&collapsed?fxDouble([NSString stringWithFormat:@"AlbumLayout%@Y",keys[i]],0):0;
+                    diLayoutMove(buttons[i],MAX(-60,MIN(60,x)),MAX(-60,MIN(60,y)));[handled addObject:buttons[i]];
+                }
+            }
+        }
+        for(UIView *v in diLayoutTouched.allObjects)if(![handled containsObject:v]){diLayoutMove(v,0,0);diLayoutArt(v,NO);}
+    }@catch(NSException *e){RLog(@"[布局调整] %@",e.reason);}
+    busy=NO;
+}
+
 static void diNPApplyHideTime(void) {
     static CFAbsoluteTime lastScan = 0;
     CFTimeInterval now = CFAbsoluteTimeGetCurrent();
     if (now - lastScan < 0.4) return;
     lastScan = now;
 
+    diLayoutAdjustTick();
     diNPQueryNowPlaying();   /* 律动那边还靠 gDIHasNowPlaying 判"到底有没有歌" */
 }
 
