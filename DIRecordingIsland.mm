@@ -138,7 +138,7 @@ static void diriApply(id e){
         slot.frame=CGRectMake(i==0?CGRectGetMinX(element.bounds):CGRectGetMaxX(element.bounds)-side,CGRectGetMidY(element.bounds)-side/2,side,side);
         [v refresh];
     }
-    diriLog([NSString stringWithFormat:@"录屏挂载 host=%@ element=%@ bounds=%@",NSStringFromClass(host.class),NSStringFromClass(element.class),NSStringFromCGRect(element.bounds)]);
+    diriLog([NSString stringWithFormat:@"录屏挂载 host=%@ element=%@ bounds=%@",NSStringFromClass([host class]),NSStringFromClass(element.class),NSStringFromCGRect(element.bounds)]);
 }
 static void(*diriTransitionOrig)(id,SEL,CGSize,id,id);
 static void diriTransition(id self,SEL cmd,CGSize size,id container,id coordinator){
