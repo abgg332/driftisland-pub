@@ -18811,26 +18811,42 @@ static id di31Instance(id self,SEL cmd,id metadata,id module,DI31LayoutSize prot
 // altering module size, internal button spacing, or invoking another UIView layout.
 static char di31RowLastKey,di31RowBaseKey;
 static BOOL di31RowBusy=NO;
+static void (*di31RowBoundsOrig)(id,SEL,CGRect);
 static void di31RowApply(UIView *row){
-    if(di31RowBusy || !row)return;
-    BOOL active=di31KeyOn() && row.window && !diTimeExpanded(row);
-    for(UIView *v=row;v;v=v.superview){
-        if([NSStringFromClass(v.class) containsString:@"Activity"]){active=NO;break;}
-    }
-    NSValue *last=objc_getAssociatedObject(row,&di31RowLastKey);
-    NSValue *base=objc_getAssociatedObject(row,&di31RowBaseKey);
-    CGPoint current=row.layer.position,origin=current;
-    if(last && base && CGPointEqualToPoint(current,last.CGPointValue))origin=base.CGPointValue;
-    CGPoint target=origin;if(active)target.x+=8.0;
+    if(di31RowBusy || !row || !di31RowBoundsOrig)return;
     di31RowBusy=YES;
-    [CATransaction begin];[CATransaction setDisableActions:YES];
-    if(!CGPointEqualToPoint(current,target))row.layer.position=target;
-    [CATransaction commit];
-    objc_setAssociatedObject(row,&di31RowBaseKey,active?[NSValue valueWithCGPoint:origin]:nil,OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-    objc_setAssociatedObject(row,&di31RowLastKey,active?[NSValue valueWithCGPoint:target]:nil,OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    @try {
+        BOOL active=di31KeyOn() && row.window && row.bounds.size.width>1;
+        for(UIView *v=row;v;v=v.superview){
+            NSString *name=NSStringFromClass(v.class);
+            if([name containsString:@"Activity"]){active=NO;break;}
+        }
+        if(active && diTimeExpanded(row))active=NO;
+        CGRect current=row.bounds,base=current;
+        NSValue *last=objc_getAssociatedObject(row,&di31RowLastKey);
+        NSValue *saved=objc_getAssociatedObject(row,&di31RowBaseKey);
+        if(last && saved && fabs(current.origin.x-last.CGRectValue.origin.x)<0.001)
+            base.origin.x=saved.CGRectValue.origin.x;
+        CGRect target=base;
+        if(active)target.origin.x-=8.0; // content and hit-test coordinates move right
+        [CATransaction begin];[CATransaction setDisableActions:YES];
+        if(!CGRectEqualToRect(current,target))di31RowBoundsOrig(row,@selector(setBounds:),target);
+        [CATransaction commit];
+        objc_setAssociatedObject(row,&di31RowBaseKey,active?[NSValue valueWithCGRect:base]:nil,OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        objc_setAssociatedObject(row,&di31RowLastKey,active?[NSValue valueWithCGRect:target]:nil,OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        static CFAbsoluteTime logged=0;
+        if(active && CFAbsoluteTimeGetCurrent()-logged>3){
+            logged=CFAbsoluteTimeGetCurrent();
+            NSMutableString *buttons=[NSMutableString string];
+            for(UIView *v in row.subviews)if([NSStringFromClass(v.class) containsString:@"TransportButton"] && !v.hidden && v.alpha>.05)
+                [buttons appendFormat:@" %@",NSStringFromCGRect([v convertRect:v.bounds toView:row.window])];
+            RLog(@"[3x1按钮125] 内容右移8pt frame=%@ bounds=%@ 可见按钮窗口坐标=%@",NSStringFromCGRect(row.frame),NSStringFromCGRect(row.bounds),buttons);
+        }
+    }@catch(NSException *e){RLog(@"[3x1按钮125] %@",e.reason);}
     di31RowBusy=NO;
-    static CFAbsoluteTime logged=0;
-    if(active && CFAbsoluteTimeGetCurrent()-logged>3){logged=CFAbsoluteTimeGetCurrent();RLog(@"[3x1按钮] 固定右移8pt row=%@ base=%@ output=%@",NSStringFromClass(row.class),NSStringFromCGPoint(origin),NSStringFromCGPoint(row.layer.position));}
+}
+static void di31RowBounds(id obj,SEL sel,CGRect bounds){
+    di31RowBoundsOrig(obj,sel,bounds);di31RowApply(obj);
 }
 static void (*di31RowLayoutOrig)(id,SEL);
 static void (*di31RowFrameOrig)(id,SEL,CGRect);
@@ -18844,7 +18860,8 @@ static void di31InstallRow(void){
     MSHookMessageEx(c,@selector(layoutSubviews),(IMP)di31RowLayout,(IMP *)&di31RowLayoutOrig);
     MSHookMessageEx(c,@selector(setFrame:),(IMP)di31RowFrame,(IMP *)&di31RowFrameOrig);
     MSHookMessageEx(c,@selector(setTransform:),(IMP)di31RowTransform,(IMP *)&di31RowTransformOrig);
-    installed=YES;RLog(@"[3x1按钮] 原生布局后固定右移已安装");
+    MSHookMessageEx(c,@selector(setBounds:),(IMP)di31RowBounds,(IMP *)&di31RowBoundsOrig);
+    installed=YES;RLog(@"[3x1按钮125] 内容坐标右移已安装");
 }
 static void di31Install(void){
     di31InstallRow();
