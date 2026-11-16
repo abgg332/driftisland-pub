@@ -101,7 +101,7 @@ static void diriLog(NSString *s){DIRecordingIslandLog(s);}
                 if(!strong||strong.generation!=generation)return;
                 strong.image.animationImages=frames;strong.image.image=frames.firstObject;
                 diriLog([NSString stringWithFormat:@"素材 %@ 帧=%lu",path,(unsigned long)frames.count]);
-                [strong applyAnimation];
+                [strong refresh]; // revalidate scene ownership before exposing decoded frames
             });
         });
     }
