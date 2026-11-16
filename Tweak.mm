@@ -166,6 +166,7 @@ static double expandTextScale = 100.0; // 文字大小(%, 100=原样)
 /* 2.8.86: 构建戳 —— 之前横幅打的是 SpringBoard 自己的 CFBundleShortVersionString(恒 1.0),
    日志里根本看不出装的是哪一版。所有诊断行都带这个戳, 下轮日志一眼定位。 */
 #define DI_BUILD_VER DI_VERSION   /* 3.0.28: 唯一来源 DIVersion.h */
+extern "C" BOOL DIRecordingIslandExclusive(void);
 static BOOL gRecordingActive = NO; // 保留: 岛素材总闸条件
 static NSString *diElementId(UIView *host);
 static BOOL diMiniMusicActive(UIView *host); // 2.6.3: 前置(遮罩层使用)
@@ -1738,7 +1739,7 @@ static void diDumpWindowsForVolume(void) {
         }
         UIView *acc = nil;
         CGRect slot = (onRec ? diRecSlotRect(island, NO, &acc) : CGRectZero);
-        BOOL show = enabled && recOn && diIsScreenRecording() && onRec && slot.size.width > 2;
+        BOOL show = !DIRecordingIslandExclusive() && enabled && recOn && diIsScreenRecording() && onRec && slot.size.width > 2;
         /* 2.9.16 诊断: 只在 show 翻转时打一条, 用来确认"挂上了但没显示"卡在哪一步 */
         {
             static int sPrevShow = -1; static CFAbsoluteTime sT;
@@ -3132,7 +3133,7 @@ __attribute__((unused)) static BOOL diMiniMusicActive(UIView *host) {
         }
     }
     BOOL sideOn = (self.side == 1) ? miniAudioOn : miniAnimOn;
-    if (!mini || !enabled || gLocked || !sideOn || !frames.count || !mediaActive || !musicGate || gRecordingActive) {
+    if (!mini || !enabled || gLocked || !sideOn || !frames.count || !mediaActive || !musicGate || gRecordingActive || DIRecordingIslandExclusive()) {
         if (!self.hidden) self.hidden = YES;
         if (_iv.image) _iv.image = nil;
         if (++_miss > 15) _link.paused = YES;

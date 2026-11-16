@@ -14,6 +14,10 @@ static BOOL diriHooked=NO;
 static NSHashTable *diriScenes;
 static char diriSceneKey;
 static BOOL diriApplying=NO;
+static NSHashTable *diriElements;
+extern "C" BOOL DIRecordingIslandExclusive(void);
+static BOOL diriRecording(id e);
+static char diriOwnerKey;
 extern "C" void DIRecordingIslandLog(NSString *message);
 static id diriCall(id o,NSString *s) {
     SEL a=NSSelectorFromString(s);
@@ -25,6 +29,11 @@ static void diriLog(NSString *s){DIRecordingIslandLog(s);}
 @interface DIRecordingIslandView : UIView
 @property(nonatomic,strong) UIImageView *image;
 @property(nonatomic,weak) UIView *source;
+@property(nonatomic,weak) id scene;
+@property(nonatomic,weak) UIView *element;
+@property(nonatomic,weak) UIView *nativeSlot;
+@property(nonatomic,strong) NSNumber *savedAlpha;
+- (void)restoreNative;
 @property(nonatomic,assign) BOOL left;
 @property(nonatomic,copy) NSString *loaded;
 @property(nonatomic,assign) NSUInteger generation;
@@ -40,10 +49,19 @@ static void diriLog(NSString *s){DIRecordingIslandLog(s);}
     }return self;
 }
 - (NSString *)key:(NSString *)s{return [NSString stringWithFormat:@"RecordingIsland%@%@",self.left?@"Mini":@"Trailing",s];}
+- (void)restoreNative {
+    if(self.savedAlpha && self.nativeSlot) self.nativeSlot.layer.opacity=self.savedAlpha.floatValue;
+    self.savedAlpha=nil;
+}
 - (void)refresh {
-    BOOL on=diriBool(@"RecordingIslandEnabled",NO)&&diriBool([self key:@"Enabled"],YES);
+    BOOL on=diriBool(@"RecordingIslandEnabled",NO)&&diriBool([self key:@"Enabled"],YES)
+        && self.scene && diriRecording(self.scene)
+        && objc_getAssociatedObject(self.element,&diriOwnerKey)==self.scene
+        && self.element.window && !self.source.hidden
+        && (diriCall(diriCall(self.scene,@"elementHost"),@"_elementView")==self.element
+            || diriCall(self.scene,@"elementHost")==self.element);
     self.hidden=!on;
-    if(!on){[self.image stopAnimating];return;}
+    if(!on){[self.image stopAnimating];[self restoreNative];return;}
     UIView *v=self.source;if(!v.window){[self.image stopAnimating];return;}
     CGFloat scale=MAX(.5,MIN(2,diriNumber([self key:@"ScalePercent"],100)/100.0));
     CGFloat size=MIN(v.bounds.size.width,v.bounds.size.height);
@@ -91,8 +109,13 @@ static void diriLog(NSString *s){DIRecordingIslandLog(s);}
 }
 - (void)applyAnimation {
     double fps=MAX(0,MIN(1000,diriNumber([self key:@"FPS"],60)));
-    if(self.hidden||!self.window||fps<=0){[self.image stopAnimating];}
-    else if(self.image.animationImages.count>1){
+    if(self.hidden||!self.window||fps<=0){[self.image stopAnimating];[self restoreNative];}
+    else if(self.image.image && self.nativeSlot){
+        if(!self.savedAlpha)self.savedAlpha=@(self.nativeSlot.layer.opacity);
+        self.nativeSlot.layer.opacity=0; // suppress pixels only; original hit testing/action remains.
+    }
+    if(!self.hidden && self.window && fps>0 && self.image.animationImages.count>1)
+    {
         NSTimeInterval duration=self.image.animationImages.count/fps;
         if(fabs(self.image.animationDuration-duration)>.00001){[self.image stopAnimating];self.image.animationDuration=duration;}
         self.image.animationRepeatCount=0;if(!self.image.isAnimating)[self.image startAnimating];
@@ -111,7 +134,7 @@ static void diriLog(NSString *s){DIRecordingIslandLog(s);}
         }
     }
 }
-- (void)didMoveToWindow{[super didMoveToWindow];if(!self.window)[self.image stopAnimating];else [self refresh];}
+- (void)didMoveToWindow{[super didMoveToWindow];if(!self.window){[self.image stopAnimating];[self restoreNative];}else [self refresh];}
 @end
 static char diriKey;
 static UIView *diriView(id obj,NSString *selector){id v=diriCall(obj,selector);return [v isKindOfClass:UIView.class]?v:nil;}
@@ -129,38 +152,83 @@ static BOOL diriRecording(id e){
     // The exported constant name is not necessarily its NSString value on iOS16.
     return [ident isEqualToString:@"screenRecording"] || [ident isEqualToString:DIRIIdentifier];
 }
-static void diriApply(id e){
-    if(!diriRecording(e))return;
-    [diriScenes addObject:e];
-    id host=diriCall(e,@"elementHost");
-    id controller=[host isKindOfClass:NSClassFromString(@"SAUIElementViewController")]?host:nil;
-    UIView *element=diriView(controller,@"_elementView");
-    if(!element && [host isKindOfClass:UIView.class])element=(UIView *)host;
-    if(element)objc_setAssociatedObject(element,&diriSceneKey,@YES,OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-    if(!element){diriLog(@"录屏活动已识别，但 elementHost/_elementView 尚未就绪");return;}
-    // Two distinct overlays in the confirmed element view. Layout is our adaptation,
-    // not an assumption that playback getters exist on a recording scene element.
+static void diriClear(UIView *element){
     NSArray *views=objc_getAssociatedObject(element,&diriKey);
-    if(![views isKindOfClass:NSArray.class]){
-        NSMutableArray *created=[NSMutableArray array];
-        for(int i=0;i<2;i++){
-            UIView *slot=[[UIView alloc]initWithFrame:CGRectZero];slot.userInteractionEnabled=NO;slot.backgroundColor=UIColor.clearColor;slot.clipsToBounds=NO;
-            DIRecordingIslandView *v=[[DIRecordingIslandView alloc]initWithFrame:CGRectZero];v.source=slot;v.left=(i==0);[slot addSubview:v];[element addSubview:slot];[created addObject:v];
-        }
-        views=created;objc_setAssociatedObject(element,&diriKey,views,OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    for(DIRecordingIslandView *v in views){[v restoreNative];[v.image stopAnimating];v.generation++;[v.source removeFromSuperview];}
+    objc_setAssociatedObject(element,&diriKey,nil,OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    objc_setAssociatedObject(element,&diriOwnerKey,nil,OBJC_ASSOCIATION_ASSIGN);
+    objc_setAssociatedObject(element,&diriSceneKey,nil,OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+}
+extern "C" BOOL DIRecordingIslandExclusive(void){
+    if(!diriBool(@"RecordingIslandEnabled",NO))return NO;
+    for(UIView *v in diriElements.allObjects){
+        NSArray *overlays=objc_getAssociatedObject(v,&diriKey);
+        id scene=((DIRecordingIslandView *)overlays.firstObject).scene;
+        if(v.window && !v.hidden && v.alpha>0.01 && diriRecording(scene))return YES;
     }
-    if(element.bounds.size.width<2 || element.bounds.size.height<2)return;
-    CGFloat side=MIN(22.0,element.bounds.size.height);
+    return NO;
+}
+static void diriApply(id e){
+    id host=diriCall(e,@"elementHost");
+    UIView *element=diriView(host,@"_elementView");
+    if(!element && [host isKindOfClass:UIView.class])element=host;
+    // A reused element must relinquish recording content even for non-recording callbacks.
+    if(!diriRecording(e)){
+        for(UIView *v in diriElements.allObjects)
+            if(v==element || objc_getAssociatedObject(v,&diriOwnerKey)==e)diriClear(v);
+        return;
+    }
+    [diriScenes addObject:e];
+    if(!element)return;
+    [diriElements addObject:element];
+    id old=objc_getAssociatedObject(element,&diriOwnerKey);
+    if(old && old!=e)diriClear(element);
+    if(!diriBool(@"RecordingIslandEnabled",NO)){diriClear(element);return;}
+    objc_setAssociatedObject(element,&diriOwnerKey,e,OBJC_ASSOCIATION_ASSIGN);
+    objc_setAssociatedObject(element,&diriSceneKey,@YES,OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    // Prefer native provided-view containers; never assume both sides exist in minimal mode.
+    NSMutableArray *native=[NSMutableArray array],*queue=[NSMutableArray arrayWithObject:element];
+    for(int guard=0;queue.count && guard<100;guard++){
+        UIView *v=queue.firstObject;[queue removeObjectAtIndex:0];
+        if([v isKindOfClass:DIRecordingIslandView.class] || [v.accessibilityIdentifier isEqualToString:@"di.recording.slot"])continue;
+        if([NSStringFromClass(v.class) isEqualToString:@"_SAUIProvidedViewContainerView"]){[native addObject:v];continue;}
+        [queue addObjectsFromArray:v.subviews];
+    }
+    NSMutableArray *transforms=[NSMutableArray array];
+    for(NSString *selector in @[@"leadingTransformView",@"trailingTransformView",@"minimalTransformView"]){
+        UIView *slot=diriView(element,selector);
+        if(slot && !slot.hidden && slot.window && slot.bounds.size.width>1 && slot.bounds.size.height>1 && (slot==element || [slot isDescendantOfView:element])){
+            if(![transforms containsObject:slot])[transforms addObject:slot];
+        }
+    }
+    // A single minimal recording activity must never instantiate two visible sides.
+    if(transforms.count)native=transforms;
+    [native sortUsingComparator:^NSComparisonResult(UIView *a,UIView *b){
+        CGFloat x=[a convertPoint:CGPointZero toView:element].x,y=[b convertPoint:CGPointZero toView:element].x;
+        return x<y?NSOrderedAscending:x>y?NSOrderedDescending:NSOrderedSame;
+    }];
+    NSArray *views=objc_getAssociatedObject(element,&diriKey);
+    if(!views){
+        NSMutableArray *made=[NSMutableArray array];
+        for(int i=0;i<2;i++){
+            UIView *slot=[UIView new];slot.accessibilityIdentifier=@"di.recording.slot";slot.userInteractionEnabled=NO;slot.clipsToBounds=NO;slot.hidden=YES;
+            DIRecordingIslandView *v=[[DIRecordingIslandView alloc]initWithFrame:CGRectZero];v.source=slot;v.scene=e;v.element=element;v.left=i==0;
+            [slot addSubview:v];[element addSubview:slot];[made addObject:v];
+        }
+        views=made;objc_setAssociatedObject(element,&diriKey,views,OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    }
     for(NSUInteger i=0;i<views.count;i++){
-        DIRecordingIslandView *v=views[i];UIView *slot=v.source;
-        slot.frame=CGRectMake(i==0?CGRectGetMinX(element.bounds):CGRectGetMaxX(element.bounds)-side,CGRectGetMidY(element.bounds)-side/2,side,side);
+        DIRecordingIslandView *v=views[i];UIView *target=i<native.count?native[i]:nil;
+        [v restoreNative];v.nativeSlot=target;
+        BOOL available=target!=nil;
+        // Without a verified second slot, do not draw two materials into a 38pt island.
+        if(!native.count && i==0 && element.bounds.size.width>2 && element.bounds.size.width<=60)available=YES;
+        v.source.hidden=!available;
+        if(available){v.source.frame=target?[target convertRect:target.bounds toView:element]:element.bounds;[element bringSubviewToFront:v.source];}
         [v refresh];
     }
-    static CFAbsoluteTime lastLayoutLog=0;
-    if(CFAbsoluteTimeGetCurrent()-lastLayoutLog>2){
-        lastLayoutLog=CFAbsoluteTimeGetCurrent();
-        diriLog([NSString stringWithFormat:@"录屏挂载 host=%@ element=%@ bounds=%@ 开=%d",NSStringFromClass([host class]),NSStringFromClass(element.class),NSStringFromCGRect(element.bounds),diriBool(@"RecordingIslandEnabled",NO)]);
-    }
+    static CFAbsoluteTime last=0;
+    if(CFAbsoluteTimeGetCurrent()-last>2){last=CFAbsoluteTimeGetCurrent();diriLog([NSString stringWithFormat:@"活动隔离 id=%@ element=%p bounds=%@ 原生槽=%lu",diriCall(e,@"elementIdentifier"),element,NSStringFromCGRect(element.bounds),(unsigned long)native.count]);}
 }
 static void(*diriTransitionOrig)(id,SEL,CGSize,id,id);
 static void diriTransition(id self,SEL cmd,CGSize size,id container,id coordinator){
@@ -179,14 +247,20 @@ static void diriReload(int token){
     diriPrefs=CFBridgingRelease(CFPreferencesCopyMultiple(NULL,(__bridge CFStringRef)DIRIDomain,kCFPreferencesCurrentUser,kCFPreferencesAnyHost))?:@{};
     diriLog([NSString stringWithFormat:@"配置 总=%d 左=%@ 右=%@ scenes=%lu",diriBool(@"RecordingIslandEnabled",NO),diriPrefs[@"RecordingIslandMiniAsset"],diriPrefs[@"RecordingIslandTrailingAsset"],(unsigned long)diriScenes.count]);
     for(DIRecordingIslandView *v in diriViews.allObjects){v.loaded=nil;[v refresh];}
-    for(id scene in diriScenes.allObjects)diriApply(scene);
+    for(UIView *element in diriElements.allObjects){
+        NSArray *views=objc_getAssociatedObject(element,&diriKey);
+        id owner=((DIRecordingIslandView *)views.firstObject).scene;
+        if(owner)diriApply(owner);else diriClear(element);
+    }
 }
 static void(*diriLayoutOrig)(id,SEL);
 static void diriLayout(id self,SEL cmd){
     diriLayoutOrig(self,cmd);
     if(diriApplying || !objc_getAssociatedObject(self,&diriSceneKey))return;
     diriApplying=YES;
-    for(id scene in diriScenes.allObjects)diriApply(scene);
+    NSArray *overlays=objc_getAssociatedObject(self,&diriKey);
+    id scene=((DIRecordingIslandView *)overlays.firstObject).scene;
+    if(scene)diriApply(scene);else diriClear(self);
     diriApplying=NO;
 }
 static void diriInstall(void){
@@ -203,7 +277,7 @@ static void diriInstall(void){
 __attribute__((constructor))static void diriStart(void){
     if(![NSProcessInfo.processInfo.processName isEqualToString:@"SpringBoard"])return;
     dispatch_async(dispatch_get_main_queue(),^{
-        diriViews=[NSHashTable weakObjectsHashTable];diriScenes=[NSHashTable weakObjectsHashTable];diriReload(0);diriInstall();
+        diriViews=[NSHashTable weakObjectsHashTable];diriScenes=[NSHashTable weakObjectsHashTable];diriElements=[NSHashTable weakObjectsHashTable];diriReload(0);diriInstall();
         int token;notify_register_dispatch("com.abgg332.driftisland.reload",&token,dispatch_get_main_queue(),^(int t){diriReload(t);});
         for(int delay=1;delay<=15;delay+=7)dispatch_after(dispatch_time(DISPATCH_TIME_NOW,delay*NSEC_PER_SEC),dispatch_get_main_queue(),^{diriInstall();});
     });
