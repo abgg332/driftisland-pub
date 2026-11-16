@@ -76,7 +76,8 @@ static BOOL rhythmParticlesOn = YES;           // 封面外圈粒子
 static BOOL rhythmRoundCover = YES;            // 3.0.47: 封面裁成正圆
 static BOOL rhythmBarsOn = YES;                // 3.0.48: 频谱条(进度条上方)
 static int  rhythmBarsCount = 40;              // 3.0.50: 频谱条根数(可调)
-/* 3.0.83: 频谱条样式 —— 0 柱状 / 1 点阵 / 2 镜像 / 4 峰值 / 5 尖刺 / 6 斜切 / 10 萤火 / 14 星轨
+/* 3.0.83: 频谱条样式 —— 0 柱状 / 1 点阵 / 2 镜像 / 4 峰值 / 5 尖刺 / 6 斜切
+   / 10 萤火 / 14 星轨 / 15 胶囊 / 16 霓虹 / 17 双子
    (3/7/8 历史预留位; 9/11/12/13 已在 3.0.112 按用户要求删除) */
 static int gDIBarStyle = 0;
 static float gDIBarPeak[64];
@@ -1055,7 +1056,8 @@ static void diFxLoadPrefs(void) {
     rhythmRoundCover = YES;   /* 3.0.61: 开关已从律动页移除(与「启用遮罩」重复), 恒为圆形 */
     rhythmBarsOn = fxBool(@"AlbumBarsOn", YES);
     {
-        /* 3.0.112: 频谱条样式 —— 0/1/2/4/5/6 原有六种 + 10 萤火 + 14 星轨, 共八种。
+        /* 3.0.113: 频谱条样式 —— 0/1/2/4/5/6 原有六种 + 10 萤火 + 14 星轨
+           + 15 胶囊 + 16 霓虹 + 17 双子, 共十一种。
            3/7/8 是历史预留位; 9/11/12/13(绸带/山峦/脉冲/阶梯)已按用户要求删除,
            域里若还留着这四个值, 一律回落到柱状。 */
         {
@@ -1064,7 +1066,7 @@ static void diFxLoadPrefs(void) {
             int st = sv ? [sv intValue] : 0;
             if (st < 0) st = 0;
             if (!(st==0||st==1||st==2||st==4||st==5||st==6
-                  ||st==10||st==14)) st=0;
+                  ||st==10||st==14||st==15||st==16||st==17)) st=0;
             if (st != gDIBarStyle) {
                 gDIBarStyle = st;
                 for (int i = 0; i < 64; i++) gDIBarPeak[i] = 0.0f;   /* 换样式时峰值重新来 */
@@ -18720,6 +18722,9 @@ static void (*gDIOrigModuleLayout)(id, SEL) = NULL;
    只 hook 系统的 setFrame, 不装 layoutSubviews / watchdog, 也不手动挪任何按钮
    (那排按钮交给播放器自己按新宽度排, 一个坐标都不猜)。只处理折叠态(高 40~130),
    展开态一个像素都不动。 */
+/* 3.0.113: 3×1 内容容器的左侧缩进 —— 让按钮组整体右移一点 */
+#define DI31_CARD_INSET 12.0
+
 static char kDI31NegTS;
 static char kDI31BaseW;    /* 该视图自己的"满宽"(4 格时的宽度) */
 static char kDI31BaseX;    /* 该视图满宽时的左边距 —— 收窄后钉在这个 x 上 */
@@ -18801,9 +18806,10 @@ static CGRect di31Adjust(UIView *v, CGRect f, BOOL isCard) {
     CGFloat baseW = bwN ? bwN.doubleValue : 0.0;
     CGFloat baseX = bxN ? bxN.doubleValue : f.origin.x;
 
-    /* 系统正在给"满宽": 刷新这个视图自己的基准(宽度和左边距一起)
-       —— 旋转/重排后左边距变了, 这里跟着更新, 收窄后位置才不会漂。 */
-    if (f.size.width >= 300.0 && f.size.width >= baseW - 0.5) {
+    /* 基准只在"宽度真的换了"(首次 / 旋转 / 换档)时刷新。
+       以前每帧满宽都刷, 收起动画里系统一边滑走一边给 356, baseX 就被动画帧改掉,
+       下一帧又把模块拽回来 —— 这就是"收回时偏移一下"。 */
+    if (f.size.width >= 300.0 && (baseW < 300.0 || fabs(f.size.width - baseW) > 8.0)) {
         baseW = f.size.width;
         baseX = isCard ? 0.0 : f.origin.x;
         objc_setAssociatedObject(v, &kDI31BaseW, @(baseW), OBJC_ASSOCIATION_RETAIN_NONATOMIC);
@@ -18816,9 +18822,22 @@ static CGRect di31Adjust(UIView *v, CGRect f, BOOL isCard) {
 
     CGFloat target = baseW * 0.75 - 4.0;
     if (target < 150.0) return f;
-    if (f.size.width < target - 0.5) return f;   /* 动画中间帧比目标还窄, 别撑大 */
-    if (fabs(f.size.width - target) >= 0.6) f.size.width = target;
-    f.origin.x = isCard ? 0.0 : baseX;        /* 左对齐: 只缩右边 */
+    /* 3.0.113: 只处理"系统正在给满宽"的那一帧。
+       收回/展开动画里系统会把宽度从 356 连续缩到 0, 若中间帧也按比例改,
+       动画就会从 356 一帧跳到 263 —— 用户看到的就是"收回时偏移一下"。
+       这里放行所有中间帧, 让系统自己的动画走完; 稳定后那帧满宽再一次性收窄。 */
+    if (f.size.width < baseW - 0.5) return f;
+    /* 左边距和基准差得多 = 正在滑走(收起/转场动画), 这一帧完全放行,
+       不缩宽度也不改位置, 动画才能顺着系统走。 */
+    if (!isCard && fabs(f.origin.x - baseX) > 2.0) return f;
+    if (isCard) {
+        /* 内容容器再缩进一点: 里面那排按钮整体右移, 不再贴着左边缘 */
+        f.origin.x = DI31_CARD_INSET;
+        f.size.width = target - DI31_CARD_INSET;
+    } else {
+        f.origin.x = baseX;                   /* 左对齐: 只缩右边 */
+        f.size.width = target;
+    }
     return f;
 }
 
@@ -21219,6 +21238,47 @@ static void diRhythmUpdateBars(UIView *host, BOOL active) {
                 CGPathAddRect(p, NULL, CGRectMake(cx - 0.35f, topY, 0.7f, hArr[i]));
                 CGFloat r = 0.8f + 2.4f * (CGFloat)vArr[i];
                 CGPathAddEllipseInRect(p, NULL, CGRectMake(cx - r, topY - r, r * 2.0f, r * 2.0f));
+            }
+            break;
+        }
+        case 15: {  /* 胶囊: 整根圆头竖胶囊, 高低反差最干净 —— iOS 音量条那种 */
+            for (int i = 0; i < n; i++) {
+                CGFloat cw = bw * 1.30f;
+                CGFloat cx = x0 + i * (bw + gap) + bw * 0.5f;
+                CGFloat hh = MAX(2.0f, hArr[i]);
+                CGFloat rr = MIN(cw * 0.5f, hh * 0.5f);
+                diSafeSpectrumRoundedRect(p, NULL, CGRectMake(cx - cw * 0.5f, bottom - hh, cw, hh), rr, rr);
+            }
+            break;
+        }
+        case 16: {  /* 霓虹: 空心灯管 + 管内一小段亮芯, 夜里最出效果 */
+            for (int i = 0; i < n; i++) {
+                CGFloat cw = bw * 1.15f;
+                CGFloat cx = x0 + i * (bw + gap) + bw * 0.5f;
+                CGFloat hh = MAX(5.0f, hArr[i]);
+                CGFloat t = MAX(0.85f, cw * 0.26f);
+                CGFloat xl = cx - cw * 0.5f, yt = bottom - hh;
+                CGFloat rr = MIN(t * 0.5f, 1.2f);
+                diSafeSpectrumRoundedRect(p, NULL, CGRectMake(xl, yt, cw, t), rr, rr);          /* 顶 */
+                diSafeSpectrumRoundedRect(p, NULL, CGRectMake(xl, bottom - t, cw, t), rr, rr);   /* 底 */
+                diSafeSpectrumRoundedRect(p, NULL, CGRectMake(xl, yt, t, hh), rr, rr);           /* 左 */
+                diSafeSpectrumRoundedRect(p, NULL, CGRectMake(xl + cw - t, yt, t, hh), rr, rr);   /* 右 */
+                /* 亮芯: 从底部升起的一段 */
+                CGFloat ch = hh * 0.42f;
+                diSafeSpectrumRoundedRect(p, NULL, CGRectMake(cx - t * 0.32f, bottom - ch, t * 0.64f, ch), 0.5f, 0.5f);
+            }
+            break;
+        }
+        case 17: {  /* 双子: 每格主副两根细柱(副柱 55% 高), 立体的层次感 */
+            for (int i = 0; i < n; i++) {
+                CGFloat slot = bw + gap;
+                CGFloat cw = MAX(0.9f, bw * 0.44f);
+                CGFloat cx = x0 + i * slot + slot * 0.5f;
+                CGFloat h1 = MAX(2.0f, hArr[i]);
+                CGFloat h2 = MAX(1.4f, h1 * 0.55f);
+                CGFloat rr = MIN(cw * 0.5f, 1.3f);
+                diSafeSpectrumRoundedRect(p, NULL, CGRectMake(cx - cw - 0.35f, bottom - h1, cw, h1), rr, rr);
+                diSafeSpectrumRoundedRect(p, NULL, CGRectMake(cx + 0.35f, bottom - h2, cw, h2), rr, rr);
             }
             break;
         }

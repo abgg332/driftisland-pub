@@ -10,13 +10,21 @@
 @interface DISpectrumStaticController : PSListController
 @end
 
-/* 3.0.112: 8 种 —— 原有 柱状/点阵/镜像/峰值/尖刺/斜切 + 萤火 + 星轨。
+/* 3.0.113: 11 种 —— 原有 柱状/点阵/镜像/峰值/尖刺/斜切 + 萤火/星轨/胶囊/霓虹/双子。
    3.0.111 新增的 绸带/山峦/脉冲/阶梯 已按用户要求删除。 */
-static const NSInteger diStyleIDs[8] = { 0, 1, 2, 4, 5, 6, 10, 14 };
+static const NSInteger diStyleIDs[11] = { 0, 1, 2, 4, 5, 6, 10, 14, 15, 16, 17 };
 
 static BOOL diStyleKnown(NSInteger s) {
-    for (int i = 0; i < 8; i++) if (diStyleIDs[i] == s) return YES;
+    for (int i = 0; i < 11; i++) if (diStyleIDs[i] == s) return YES;
     return NO;
+}
+
+/* 缩略图用的圆角矩形填充 */
+static void diPrevRound(CGContextRef ctx, CGRect r, CGFloat rr) {
+    CGPathRef p = CGPathCreateWithRoundedRect(r, rr, rr, NULL);
+    CGContextAddPath(ctx, p);
+    CGContextFillPath(ctx);
+    CGPathRelease(p);
 }
 
 /* 固定信号下的静态示意 —— 和播放器里那 8 种画法一一对应, 只画形状不跑动画。 */
@@ -53,6 +61,25 @@ static UIImage *diStaticShape(NSInteger style){
                 CGContextFillRect(ctx,CGRectMake(cx-0.45f,y-r,0.9f,r*2));
                 CGContextFillRect(ctx,CGRectMake(cx-r,y-0.45f,r*2,0.9f));
             }
+            else if(style==15){                  /* 胶囊: 圆头竖条 */
+                CGFloat cw=w*1.30f, cx2=x+w*0.5f, hh=MAX(2.0f,h);
+                diPrevRound(ctx,CGRectMake(cx2-cw*0.5f,38-hh,cw,hh),MIN(cw*0.5f,hh*0.5f));
+            }
+            else if(style==16){                  /* 霓虹: 空心管 + 亮芯 */
+                CGFloat cw=w*1.15f, cx2=x+w*0.5f, hh=MAX(5.0f,h);
+                CGFloat t=MAX(0.9f,cw*0.26f), xl=cx2-cw*0.5f, yt=38-hh;
+                diPrevRound(ctx,CGRectMake(xl,yt,cw,t),0.6f);
+                diPrevRound(ctx,CGRectMake(xl,38-t,cw,t),0.6f);
+                diPrevRound(ctx,CGRectMake(xl,yt,t,hh),0.6f);
+                diPrevRound(ctx,CGRectMake(xl+cw-t,yt,t,hh),0.6f);
+                CGFloat ch=hh*0.42f;
+                diPrevRound(ctx,CGRectMake(cx2-t*0.32f,38-ch,t*0.64f,ch),0.4f);
+            }
+            else if(style==17){                  /* 双子: 主副两根 */
+                CGFloat cw=MAX(0.9f,w*0.44f), cx2=x+w*0.5f, hh=MAX(2.0f,h);
+                diPrevRound(ctx,CGRectMake(cx2-cw-0.35f,38-hh,cw,hh),MIN(cw*0.5f,1.2f));
+                diPrevRound(ctx,CGRectMake(cx2+0.35f,38-hh*0.55f,cw,MAX(1.4f,hh*0.55f)),MIN(cw*0.5f,1.0f));
+            }
             else {CGContextFillRect(ctx,CGRectMake(x,y,w,h));}
         }
     }
@@ -62,7 +89,7 @@ static UIImage *diStaticShape(NSInteger style){
 - (NSArray *)specifiers {
     if(!_specifiers){
         NSArray *names=@[@"柱状",@"点阵",@"镜像",@"峰值",@"尖刺",@"斜切",
-                         @"萤火",@"星轨"];
+                         @"萤火",@"星轨",@"胶囊",@"霓虹",@"双子"];
         NSMutableArray *rows=[NSMutableArray array];
         PSSpecifier *group=[PSSpecifier preferenceSpecifierNamed:@"静态形状图 · 点选应用" target:nil set:NULL get:NULL detail:nil cell:PSGroupCell edit:nil];
         [group setProperty:@"图示为固定信号下的形状示意，不播放动画、不采集音频。选中后到播放器查看实际音乐效果。" forKey:@"footerText"];[rows addObject:group];

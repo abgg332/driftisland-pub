@@ -5946,6 +5946,15 @@ static BOOL diNPReadEnabled(void) {
 static NSString * const kNPModuleID = @"com.apple.mediaremote.controlcenter.nowplaying";
 
 static NSString *diNPCurrentSize(void) {
+    /* 3.0.113: 3×1 必须先认 Size —— 它的模块占位写的是 4x1(系统只认这几档), 而
+       PlayerGridVariant 被清空, 所以按下面原顺序会读到 ModuleSizes 的 "4x1",
+       设置页于是把参数写到 AlbumXxx@4x1, 运行时却按 @3x1 读 —— 键对不上,
+       用户看到的就是"3×1 下参数设置无效"。这里先拦一道。 */
+    {
+        id s31 = diNPRead(@"Size", kNPDomain);
+        if ([s31 isKindOfClass:NSString.class] && [(NSString *)s31 isEqualToString:@"3x1"])
+            return @"3x1";
+    }
     id variant = diNPRead(@"PlayerGridVariant", kNPDomain);
     if ([variant isKindOfClass:NSString.class] && [variant length]) return variant;
     id dict = diNPRead(@"ModuleSizes", kNPDomain);
@@ -6484,7 +6493,7 @@ static NSString *diModeName(int m) {
 }
 
 /* ===== 3.0.83: 频谱条样式 =====
-   3.0.112: 共 8 种 —— 原有 柱状/点阵/镜像/峰值/尖刺/斜切 + 萤火/星轨。
+   3.0.113: 共 11 种 —— 原有 柱状/点阵/镜像/峰值/尖刺/斜切 + 萤火/星轨/胶囊/霓虹/双子。
    3.0.111 里新增的 绸带/山峦/脉冲/阶梯 已按用户要求删除, 域里留着也回落柱状。
    用**不分尺寸的原键** —— 样式对每个播放器尺寸都该一致。 */
 static NSString *diBarStyleLabel(int s) {
@@ -6497,13 +6506,16 @@ static NSString *diBarStyleLabel(int s) {
         case 6:  return @"斜切";
         case 10: return @"萤火";
         case 14: return @"星轨";
+        case 15: return @"胶囊";
+        case 16: return @"霓虹";
+        case 17: return @"双子";
         default:return @"柱状";
     }
 }
 static BOOL diBarStyleOK(int s) {
     switch (s) {
         case 0: case 1: case 2: case 4: case 5: case 6:
-        case 10: case 14: return YES;
+        case 10: case 14: case 15: case 16: case 17: return YES;
         default: return NO;
     }
 }
