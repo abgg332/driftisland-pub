@@ -18719,7 +18719,6 @@ static void (*gDIOrigModuleLayout)(id, SEL) = NULL;
 
    目标宽 = 满宽 × 0.75 − 4（4 格 → 3 格, 扣掉格间距）; 居中摆放(旧版是左对齐,
    所以内容整体偏左)。只处理折叠态(高 40~130), 展开态一个像素都不动。 */
-static char kDI31FullW;      /* 用不到, 占位保留 */
 static char kDI31NegTS;
 static CGFloat gDI31FullW = 0.0;   /* 全局满宽(同一时刻只有一个播放器模块) */
 static BOOL gDI31Hooked = NO;
