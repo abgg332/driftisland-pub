@@ -18698,113 +18698,12 @@ static void diFxTuneChanged(CFNotificationCenterRef c, void *obs, CFStringRef na
     });
 }
 
-/* Per-view offset bookkeeping: subtract only our last contribution when unchanged. */
-static NSHashTable *diLayoutTouched;
-static void diLayoutMove(UIView *v,CGFloat x,CGFloat y){
-    if(!v)return;
-    NSValue *baseV=objc_getAssociatedObject(v,"di.layout.base");
-    NSValue *lastV=objc_getAssociatedObject(v,"di.layout.last");
-    CGAffineTransform current=v.transform,base=current;
-    if(baseV && lastV && CGAffineTransformEqualToTransform(current,lastV.CGAffineTransformValue))base=baseV.CGAffineTransformValue;
-    if(x==0 && y==0){
-        if(baseV && lastV && CGAffineTransformEqualToTransform(current,lastV.CGAffineTransformValue))v.transform=base;
-        objc_setAssociatedObject(v,"di.layout.base",nil,OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-        objc_setAssociatedObject(v,"di.layout.last",nil,OBJC_ASSOCIATION_RETAIN_NONATOMIC);return;
-    }
-    CGAffineTransform result=base;result.tx+=x;result.ty+=y;
-    objc_setAssociatedObject(v,"di.layout.base",[NSValue valueWithCGAffineTransform:base],OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-    objc_setAssociatedObject(v,"di.layout.last",[NSValue valueWithCGAffineTransform:result],OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-    if(!CGAffineTransformEqualToTransform(current,result))v.transform=result;
-    [diLayoutTouched addObject:v];
-}
-static void diLayoutArt(UIView *v,BOOL hide){
-    (void)hide;
-    [v.layer removeAnimationForKey:@"di.layout.idleArt"];
-    NSNumber *saved=objc_getAssociatedObject(v,"di.layout.alpha");
-    if(saved){v.alpha=saved.doubleValue;objc_setAssociatedObject(v,"di.layout.alpha",nil,OBJC_ASSOCIATION_RETAIN_NONATOMIC);}
-}
-static BOOL diLayoutVisible(UIView *v,UIView *root){
-    for(UIView *a=v;a;a=a.superview){
-        if(a.hidden || a.alpha<0.05)return NO;
-        if(a==root)break;
-    }
-    return v.window!=nil;
-}
-static void diLayoutAdjustTick(void){
-    if(!NSThread.isMainThread)return;
-    static BOOL busy=NO;if(busy)return;
-    busy=YES;
-    @try{
-        if(!diLayoutTouched)diLayoutTouched=[NSHashTable weakObjectsHashTable];
-        BOOL on=fxBool(@"AlbumLayoutOn",NO);
-        NSMutableSet *handled=[NSMutableSet set];
-        CFPreferencesAppSynchronize((__bridge CFStringRef)kDomain);
-        static BOOL stablePlaying=NO, candidate=NO;
-        static CFAbsoluteTime candidateAt=0;
-        BOOL nowPlaying=musicPlaying;
-        if(nowPlaying!=candidate){candidate=nowPlaying;candidateAt=CFAbsoluteTimeGetCurrent();}
-        if(CFAbsoluteTimeGetCurrent()-candidateAt>.6)stablePlaying=candidate;
-        for(UIView *root in gDIArtRoots.allObjects){
-            if(!root.window || root.hidden || [NSStringFromClass(root.class) containsString:@"Activity"])continue;
-            BOOL collapsed=!diTimeExpanded(root);
-            BOOL groupMode=[diFxSizeId() isEqualToString:@"3x1"];
-            NSMutableArray *queue=[NSMutableArray arrayWithObject:root],*buttons=[NSMutableArray array];
-            int budget=400;
-            while(queue.count && budget-->0){
-                UIView *v=queue.lastObject;[queue removeLastObject];NSString *cn=NSStringFromClass(v.class);
-                if([cn containsString:@"MRUTransportButton"] && diLayoutVisible(v,root) && v.bounds.size.width>4){[buttons addObject:v];continue;}
-                if(groupMode && [cn containsString:@"TransportControlsView"]){
-                    CGFloat dx=collapsed?fxDouble(@"AlbumLayoutGroupX",8):0;
-                    CGFloat dy=collapsed?fxDouble(@"AlbumLayoutGroupY",0):0;
-                    diLayoutMove(v,MAX(-30,MIN(30,dx)),MAX(-30,MIN(30,dy)));[handled addObject:v];continue;
-                }
-                if([cn containsString:@"TimeControls"]){
-                    diLayoutMove(v,on&&collapsed?fxDouble(@"AlbumLayoutTimeX",0):0,on&&collapsed?fxDouble(@"AlbumLayoutTimeY",0):0);[handled addObject:v];continue;
-                }
-                if([cn containsString:@"ArtworkView"]){diLayoutArt(v,NO);[handled addObject:v];continue;}
-                [queue addObjectsFromArray:v.subviews];
-            }
-            NSMutableDictionary *groups=[NSMutableDictionary dictionary];
-            for(UIView *v in buttons){
-                NSValue *key=[NSValue valueWithNonretainedObject:v.superview];
-                if(!groups[key])groups[key]=[NSMutableArray array];
-                [groups[key] addObject:v];
-            }
-            NSArray *selected=nil;
-            for(NSArray *group in groups.allValues)if(group.count==3){
-                if(!selected || ((UIView *)group[0]).superview.bounds.size.width>((UIView *)selected[0]).superview.bounds.size.width)selected=group;
-            }
-            if(selected)buttons=[selected mutableCopy];
-            else [buttons removeAllObjects];
-            if(!groupMode && buttons.count==3){
-                [buttons sortUsingComparator:^NSComparisonResult(UIView *a,UIView *b){
-                    NSValue *av=objc_getAssociatedObject(a,"di.layout.last"),*bv=objc_getAssociatedObject(b,"di.layout.last");
-                    (void)av;(void)bv;
-                    CGFloat x=[a.superview convertPoint:a.center toView:root].x,y=[b.superview convertPoint:b.center toView:root].x;
-                    return x<y?NSOrderedAscending:x>y?NSOrderedDescending:NSOrderedSame;
-                }];
-                NSArray *keys=@[@"Prev",@"Play",@"Next"];
-                for(int i=0;i<3;i++){
-                    CGFloat x=on&&collapsed?fxDouble([NSString stringWithFormat:@"AlbumLayout%@X",keys[i]],0):0;
-                    CGFloat y=on&&collapsed?fxDouble([NSString stringWithFormat:@"AlbumLayout%@Y",keys[i]],0):0;
-                    diLayoutMove(buttons[i],MAX(-60,MIN(60,x)),MAX(-60,MIN(60,y)));[handled addObject:buttons[i]];
-                }
-            }
-        }
-        for(UIView *v in diLayoutTouched.allObjects)if(![handled containsObject:v]){diLayoutMove(v,0,0);diLayoutArt(v,NO);}
-        static CFAbsoluteTime logged=0;
-        if(on && CFAbsoluteTimeGetCurrent()-logged>3){logged=CFAbsoluteTimeGetCurrent();RLog(@"[布局调整] 尺寸=%@ 开=%d 播=%d 根=%lu 处理=%lu 上=(%.1f,%.1f) 播=(%.1f,%.1f) 下=(%.1f,%.1f)",diFxSizeId(),on,stablePlaying,(unsigned long)gDIArtRoots.count,(unsigned long)handled.count,fxDouble(@"AlbumLayoutPrevX",0),fxDouble(@"AlbumLayoutPrevY",0),fxDouble(@"AlbumLayoutPlayX",0),fxDouble(@"AlbumLayoutPlayY",0),fxDouble(@"AlbumLayoutNextX",0),fxDouble(@"AlbumLayoutNextY",0));}
-    }@catch(NSException *e){RLog(@"[布局调整] %@",e.reason);}
-    busy=NO;
-}
-
 static void diNPApplyHideTime(void) {
     static CFAbsoluteTime lastScan = 0;
     CFTimeInterval now = CFAbsoluteTimeGetCurrent();
     if (now - lastScan < 0.4) return;
     lastScan = now;
 
-    diLayoutAdjustTick();
     diNPQueryNowPlaying();   /* 律动那边还靠 gDIHasNowPlaying 判"到底有没有歌" */
 }
 
@@ -18907,7 +18806,48 @@ static id di31Instance(id self,SEL cmd,id metadata,id module,DI31LayoutSize prot
     if(di31KeyOn() && [identifier isEqual:di31ModuleID])prototype=(DI31LayoutSize){3,1};
     return di31InstanceOrig(self,cmd,metadata,module,prototype);
 }
+// Fixed 3x1 row offset. Applied AFTER native layout/frame/transform writes.
+// layer.position moves the entire control row and its hit-test geometry without
+// altering module size, internal button spacing, or invoking another UIView layout.
+static char di31RowLastKey,di31RowBaseKey;
+static BOOL di31RowBusy=NO;
+static void di31RowApply(UIView *row){
+    if(di31RowBusy || !row)return;
+    BOOL active=di31KeyOn() && row.window && !diTimeExpanded(row);
+    for(UIView *v=row;v;v=v.superview){
+        if([NSStringFromClass(v.class) containsString:@"Activity"]){active=NO;break;}
+    }
+    NSValue *last=objc_getAssociatedObject(row,&di31RowLastKey);
+    NSValue *base=objc_getAssociatedObject(row,&di31RowBaseKey);
+    CGPoint current=row.layer.position,origin=current;
+    if(last && base && CGPointEqualToPoint(current,last.CGPointValue))origin=base.CGPointValue;
+    CGPoint target=origin;if(active)target.x+=8.0;
+    di31RowBusy=YES;
+    [CATransaction begin];[CATransaction setDisableActions:YES];
+    if(!CGPointEqualToPoint(current,target))row.layer.position=target;
+    [CATransaction commit];
+    objc_setAssociatedObject(row,&di31RowBaseKey,active?[NSValue valueWithCGPoint:origin]:nil,OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    objc_setAssociatedObject(row,&di31RowLastKey,active?[NSValue valueWithCGPoint:target]:nil,OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    di31RowBusy=NO;
+    static CFAbsoluteTime logged=0;
+    if(active && CFAbsoluteTimeGetCurrent()-logged>3){logged=CFAbsoluteTimeGetCurrent();RLog(@"[3x1按钮] 固定右移8pt row=%@ base=%@ output=%@",NSStringFromClass(row.class),NSStringFromCGPoint(origin),NSStringFromCGPoint(row.layer.position));}
+}
+static void (*di31RowLayoutOrig)(id,SEL);
+static void (*di31RowFrameOrig)(id,SEL,CGRect);
+static void (*di31RowTransformOrig)(id,SEL,CGAffineTransform);
+static void di31RowLayout(id obj,SEL sel){di31RowLayoutOrig(obj,sel);di31RowApply(obj);}
+static void di31RowFrame(id obj,SEL sel,CGRect frame){di31RowFrameOrig(obj,sel,frame);di31RowApply(obj);}
+static void di31RowTransform(id obj,SEL sel,CGAffineTransform transform){di31RowTransformOrig(obj,sel,transform);di31RowApply(obj);}
+static void di31InstallRow(void){
+    static BOOL installed=NO;if(installed)return;
+    Class c=NSClassFromString(@"MRUNowPlayingTransportControlsView");if(!c)return;
+    MSHookMessageEx(c,@selector(layoutSubviews),(IMP)di31RowLayout,(IMP *)&di31RowLayoutOrig);
+    MSHookMessageEx(c,@selector(setFrame:),(IMP)di31RowFrame,(IMP *)&di31RowFrameOrig);
+    MSHookMessageEx(c,@selector(setTransform:),(IMP)di31RowTransform,(IMP *)&di31RowTransformOrig);
+    installed=YES;RLog(@"[3x1按钮] 原生布局后固定右移已安装");
+}
 static void di31Install(void){
+    di31InstallRow();
     Class manager=NSClassFromString(@"CCUIModuleSettingsManager");
     SEL settings=NSSelectorFromString(@"moduleSettingsForModuleIdentifier:prototypeSize:");
     if(!di31SettingsInstalled && di31SizeABI(class_getInstanceMethod(manager,settings),3)){

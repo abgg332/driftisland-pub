@@ -931,7 +931,6 @@ static Class diStepSliderClass(void) {
 - (void)diOpenFxPickerKeyA:(NSString *)a keyB:(NSString *)b title:(NSString *)t;
 @end
 /* 3.0.1: 尺寸选择页自建 —— 不再走系统的 PSListItemsController(点进去闪退) */
-@interface DILayoutAdjustPage : DIFxPage @end
 @interface DIPlayerSizePage : DIMiniBaseController @end
 @interface DIFrameFoldersMask : DIFrameFolders @end /* 2.6.3: 遮罩素材选择(键 maskAnimFolder) */
 @interface DIFrameFoldersMini : DIFrameFolders @end  /* 左侧(mini)帧率素材选择(键 smallAnimFolder) */
@@ -6188,7 +6187,6 @@ static void diNPEnsureActivation(void) {
     v = round(v * 1000.0) / 1000.0;
     CFPreferencesSetAppValue((__bridge CFStringRef)key, (__bridge CFPropertyListRef)@(v),
                              (__bridge CFStringRef)kDomain);
-    if ([key hasPrefix:@"AlbumLayout"]) CFPreferencesAppSynchronize((__bridge CFStringRef)kDomain);
     /* Other effects retain asynchronous preference writes. */
     if (diIsFxKey(key)) diPostFxTune();               /* 轻量: 只重读特效参数 */
     else notify_post("com.local.playerexact/artwork-changed");
@@ -6250,7 +6248,6 @@ static void diNPEnsureActivation(void) {
     [specs addObject:[self linkSpec:@"遮罩素材" detail:[DIPlayerMaskPicker class]]];
     /* 3.0.45: 律动特效 —— 设置全部收进一个入口页(用户要求) */
     [specs addObject:[self linkSpec:@"律动特效" detail:[DIFxPage class]]];
-    [specs addObject:[self linkSpec:@"布局调整" detail:[DILayoutAdjustPage class]]];
 
     /* ---- 原版参数管理 ----
        3.0.66: 478 用户要求「原插件参数下的设置项暂时删除(但保留源码配置)」——
@@ -6655,7 +6652,6 @@ static BOOL diBarStyleOK(int s) {
     v = round(v * 1000.0) / 1000.0;
     CFPreferencesSetAppValue((__bridge CFStringRef)key, (__bridge CFPropertyListRef)@(v),
                              (__bridge CFStringRef)kDomain);
-    if ([key hasPrefix:@"AlbumLayout"]) CFPreferencesAppSynchronize((__bridge CFStringRef)kDomain);
     /* Other effects retain asynchronous preference writes. */
     if (diIsFxKey(key)) diPostFxTune();               /* 轻量: 只重读特效参数 */
     else notify_post("com.local.playerexact/artwork-changed");
@@ -6785,32 +6781,4 @@ static BOOL diBarStyleOK(int s) {
 }
 @end
 
-@implementation DILayoutAdjustPage
-- (NSArray *)buildSpecifiers {
-    NSMutableArray *rows=[NSMutableArray array];
-    [rows addObject:[self groupSpec:@"布局调整" footer:@"按当前播放器尺寸独立保存。仅折叠态生效；X正数向右，Y正数向下。位移过大会重叠或超出卡片，请小幅调整。"]];
-    [rows addObject:[self switchSpec:@"启用布局调整" key:diFxSizedKey(@"AlbumLayoutOn") def:@NO]];
-    BOOL groupMode=[diNPCurrentSize() isEqualToString:@"3x1"];
-    if(groupMode){
-        [rows addObject:[self groupSpec:@"3×1 整组按钮" footer:@"默认整体右移8点，设为0恢复。三颗按钮一起移动；其他尺寸不受影响。"]];
-        [rows addObject:[self npSlider:@"整组左右位移" key:diFxSizedKey(@"AlbumLayoutGroupX") def:8 mn:-30 mx:30]];
-        [rows addObject:[self npSlider:@"整组上下位移" key:diFxSizedKey(@"AlbumLayoutGroupY") def:0 mn:-30 mx:30]];
-    }
-    NSArray *labels=groupMode?@[@"时间条"]:@[@"上一首",@"播放／暂停",@"下一首",@"时间条"];
-    NSArray *keys=groupMode?@[@"Time"]:@[@"Prev",@"Play",@"Next",@"Time"];
-    for(NSUInteger i=0;i<keys.count;i++){
-        [rows addObject:[self groupSpec:labels[i] footer:nil]];
-        for(NSString *axis in @[@"X",@"Y"]){NSString *key=[NSString stringWithFormat:@"AlbumLayout%@%@",keys[i],axis];
-            [rows addObject:[self npSlider:[axis isEqual:@"X"]?@"左右位移":@"上下位移" key:diFxSizedKey(key) def:0 mn:-60 mx:60]];
-        }
-    }
-    [rows addObject:[self buttonSpec:@"恢复当前尺寸默认布局" action:@selector(resetLayout:)]];
-    return rows;
-}
-- (void)resetLayout:(PSSpecifier *)sp {
-    (void)sp;
-    for(NSString *key in @[@"AlbumLayoutOn",@"AlbumLayoutGroupX",@"AlbumLayoutGroupY",@"AlbumLayoutPrevX",@"AlbumLayoutPrevY",@"AlbumLayoutPlayX",@"AlbumLayoutPlayY",@"AlbumLayoutNextX",@"AlbumLayoutNextY",@"AlbumLayoutTimeX",@"AlbumLayoutTimeY"])
-        CFPreferencesSetAppValue((__bridge CFStringRef)diFxSizedKey(key),(__bridge CFPropertyListRef)@0,(__bridge CFStringRef)kDomain);
-    CFPreferencesAppSynchronize((__bridge CFStringRef)kDomain);diPostFxTune();[self reloadSpecifiers];
-}
-@end
+
