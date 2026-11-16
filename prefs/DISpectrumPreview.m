@@ -30,7 +30,6 @@ static UIImage *diStaticShape(NSInteger style){
     CGContextSetLineCap(ctx, kCGLineCapRound);
     CGContextSetLineJoin(ctx, kCGLineJoinRound);
     CGRect b=CGRectMake(3,4,126,46);
-    CGFloat base = CGRectGetMaxY(b);
     {
         CGFloat dx=b.size.width/24;
         if (style == 9) {                       /* 绸带: 一条平滑的粗曲线 */
