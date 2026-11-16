@@ -1699,6 +1699,13 @@ static void diDumpWindowsForVolume(void) {
         if (self.player.timeControlStatus != AVPlayerTimeControlStatusPaused) [self.player pause];
         return;
     }
+    /* Recording replacement owns the aperture materials while active. No preference
+       is rewritten; normal playback resumes through the existing sync path. */
+    if (DIRecordingIslandExclusive()) {
+        self.hidden=YES;
+        if (self.player.timeControlStatus != AVPlayerTimeControlStatusPaused) [self.player pause];
+        return;
+    }
     /* 2.2.59: 边框流光层 —— 几何完全由 diApplyEdgeGlow 自己算(mask 环 + 缩放),
        绝不能走下面的主同步(那会把 frame 改成宿主 bounds, 并把 mask 顶掉),
        所以这里只做"播放/隐藏"两件事。 */

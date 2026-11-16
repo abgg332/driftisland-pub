@@ -201,8 +201,24 @@ static void diriApply(id e){
             if(![transforms containsObject:slot])[transforms addObject:slot];
         }
     }
-    // A single minimal recording activity must never instantiate two visible sides.
-    if(transforms.count)native=transforms;
+    // Exclude detached/inactive presentation branches and duplicate geometry.
+    NSMutableArray *distinct=[NSMutableArray array];
+    for(UIView *slot in transforms){
+        BOOL visible=YES;
+        for(UIView *a=slot;a && a!=element;a=a.superview)if(a.hidden || a.alpha<0.01){visible=NO;break;}
+        if(!visible || slot==element)continue;
+        CGRect rect=[slot convertRect:slot.bounds toView:element];
+        if(!CGRectIntersectsRect(rect,element.bounds))continue;
+        BOOL duplicate=NO;
+        for(UIView *v in distinct){
+            CGRect r=[v convertRect:v.bounds toView:element];
+            CGRect intersection=CGRectIntersection(rect,r);
+            CGFloat area=MIN(rect.size.width*rect.size.height,r.size.width*r.size.height);
+            if(area>0 && !CGRectIsNull(intersection) && intersection.size.width*intersection.size.height>area*0.65){duplicate=YES;break;}
+        }
+        if(!duplicate)[distinct addObject:slot];
+    }
+    if(distinct.count)native=distinct;
     [native sortUsingComparator:^NSComparisonResult(UIView *a,UIView *b){
         CGFloat x=[a convertPoint:CGPointZero toView:element].x,y=[b convertPoint:CGPointZero toView:element].x;
         return x<y?NSOrderedAscending:x>y?NSOrderedDescending:NSOrderedSame;
