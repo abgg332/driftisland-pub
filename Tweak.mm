@@ -19734,6 +19734,7 @@ static BOOL gDIRhythmDriving = NO;     /* 上一帧我们是否在写 transform(
    现在两处都只看这一个 gDIKick: 低频(3.0.68 起只看 60~140Hz 底鼓基频)的**起音前沿**
    → 跳到 0~1 → 170ms 衰减。 */
 static float diSharedVisualPulse=0;
+static float diSharedPunch=0; /* short visual dip/recover shared by album and particles */
 static float gDIKick = 0.0f;           /* 视觉包络: 3.0.74 起由统一顺滑包络推进(45ms 顶/170ms 落) */
 static float gDIKickTarget = 0.0f;     /* 3.0.74: 本次咚的目标强度 */
 static CFTimeInterval gDIKickAtkT = 0; /* 3.0.74: 起音时刻(45ms 趋近窗口) */
@@ -20447,7 +20448,7 @@ static void diFxUpdateDots(UIView *host, CGRect cover, float dt,
         float radialPulse = cover.size.width * 0.055f * pulse;
         // Reference artRingContainer scales particle offsets AND glyphs together.
         // Keep the verified visible host; apply the same affine transform numerically.
-        float groupScale = rhythmOn ? gDICoverScaleNow : 1.0f;
+        float groupScale = rhythmOn ? gDICoverScaleNow*(1.0f-0.035f*diSharedPunch) : 1.0f;
         layer.position = CGPointMake(cx + cosf(d->ang) * ((d->rad + radialPulse)*groupScale),
                                      cy + sinf(d->ang) * ((d->rad + radialPulse)*groupScale));
         layer.opacity = alpha;
@@ -22107,8 +22108,13 @@ static void diRhythmTickWithDelta(float dtIn) {
     // Reference detector uses spectrum energy, not the legacy PCM kick detector.
     float referenceScale=diFxAdvanceBeat(active, gDIFxEnergy, 1.0, dt);
     diSharedVisualPulse=fminf(1,fmaxf(0,(referenceScale-1)/0.095f));
+    float onset=active?fminf(1,fmaxf(0,gDIKickTarget)):0;
+    float punchTarget=onset>diSharedPunch?onset:diSharedPunch*expf(-dt/0.095f);
+    diSharedPunch+=(punchTarget-diSharedPunch)*(1-expf(-dt/(punchTarget>diSharedPunch?0.018f:0.030f)));
     diISPublishBeat(active);
     float fxBeatS=1+fminf(0.22f,(float)rhythmBeatScale*0.095f*diSharedVisualPulse);
+    /* A short downward compression at each onset, then return to the common scale. */
+    fxBeatS-=fminf(0.035f,0.035f*diSharedPunch);
 
     if (!gDIFxRealLogged && active && real && gDIBandSeen) {
         gDIFxRealLogged = YES;
