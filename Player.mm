@@ -14,7 +14,13 @@ static UIImage *pnpArtwork,*pnpMask;
 static NSData *pnpArtData;
 static BOOL pnpPlaying=NO,pnpBusy=NO,pnpQuery=NO;
 static CFAbsoluteTime pnpLastQuery=0;
-static void (*pnpInfo)(dispatch_queue_t,void(^)(CFDictionaryRef));
+static NSDictionary *pnpNowPlayingInfo(void){
+ // Prefer the stable Objective-C class path over a guessed C symbol.
+ Class ctl=NSClassFromString(@"MRMediaRemoteController");
+ SEL sel=sel_registerName("nowPlayingInfo");
+ if([ctl respondsToSelector:sel]){id r=[(id(*)(id,SEL))objc_msgSend(ctl,sel)];return [r isKindOfClass:NSDictionary.class]?r:nil;}
+ return nil;
+}
 static void PNPLog(NSString *fmt,...){va_list args;va_start(args,fmt);NSString *s=[[NSString alloc]initWithFormat:fmt arguments:args];va_end(args);NSLog(@"[原生播放器] %@",s);}
 static BOOL pnpBool(NSString *key,BOOL fallback){id v=pnpNative[key];return v?[v boolValue]:fallback;}
 #include "Grid.inc"
@@ -76,19 +82,22 @@ static void pnpReload(void){
  if([name isKindOfClass:NSString.class]&&![name containsString:@".."]&&!name.isAbsolutePath)pnpMask=[UIImage imageWithContentsOfFile:[base stringByAppendingPathComponent:name]];else pnpMask=nil;
  pnpRefresh();
 }
-static void pnpPoll(void){
- BOOL visible=NO;for(UIView *r in pnpRoots.allObjects)if(r.window&&!r.hidden&&r.alpha>.01&&!r.window.hidden){visible=YES;break;}
- if(!visible||!pnpInfo||pnpQuery||CFAbsoluteTimeGetCurrent()-pnpLastQuery<1)return;
- pnpLastQuery=CFAbsoluteTimeGetCurrent();pnpQuery=YES;
- pnpInfo(dispatch_get_main_queue(),^(CFDictionaryRef info){
-  NSDictionary *d=(__bridge NSDictionary *)info;id data=d[@"kMRMediaRemoteNowPlayingInfoArtworkData"];
-  pnpPlaying=[d[@"kMRMediaRemoteNowPlayingInfoPlaybackRate"] doubleValue]>.01;
+static void pnpApplyNowPlaying(NSDictionary *d){
+ if([d isKindOfClass:NSDictionary.class]){
+  id data=d[@"kMRMediaRemoteNowPlayingInfoArtworkData"];
+  pnpPlaying=[[d objectForKey:@"kMRMediaRemoteNowPlayingInfoPlaybackRate"] doubleValue]>.01;
   if([data isKindOfClass:NSData.class]&&![data isEqual:pnpArtData]){pnpArtData=data;UIImage *im=[UIImage imageWithData:data];
    if(im){UIGraphicsBeginImageContextWithOptions(CGSizeMake(256,256),NO,1);[im drawInRect:CGRectMake(0,0,256,256)];pnpArtwork=UIGraphicsGetImageFromCurrentImageContext();UIGraphicsEndImageContext();}
   }
-  if(!info){pnpArtwork=nil;pnpArtData=nil;}
-  pnpQuery=NO;pnpRefresh();
- });
+ }else{pnpArtwork=nil;pnpArtData=nil;pnpPlaying=NO;}
+}
+static void pnpPoll(void){
+ if(pnpQuery)return; // do not gate the whole feature chain on a guessed C symbol
+ if(CFAbsoluteTimeGetCurrent()-pnpLastQuery<1)return;
+ pnpLastQuery=CFAbsoluteTimeGetCurrent();pnpQuery=YES;
+ NSDictionary *d=pnpNowPlayingInfo();
+ pnpApplyNowPlaying(d);
+ pnpQuery=NO;pnpRefresh();
 }
 static void(*pnpLayoutOrig)(id,SEL);
 static void pnpLayout(id obj,SEL cmd){pnpLayoutOrig(obj,cmd);UIView *v=obj;if([NSStringFromClass(v.class) containsString:@"Activity"])return;[pnpRoots addObject:v];pnpApply(v);}
@@ -103,8 +112,6 @@ __attribute__((constructor))static void pnpStart(void){
  if(![NSProcessInfo.processInfo.processName isEqual:@"SpringBoard"])return;
  dispatch_async(dispatch_get_main_queue(),^{
   pnpRoots=[NSHashTable weakObjectsHashTable];pnpReload();
-  void *h=dlopen("/System/Library/PrivateFrameworks/MediaRemote.framework/MediaRemote",RTLD_LAZY);
-  pnpInfo=(void(*)(dispatch_queue_t,void(^)(CFDictionaryRef)))dlsym(h,"MRMediaRemoteGetNowPlayingInfo");
   int token;notify_register_dispatch("com.local.playerexact/artwork-changed",&token,dispatch_get_main_queue(),^(int t){(void)t;pnpReload();});
   for(int delay: {2,6,12,30})dispatch_after(dispatch_time(DISPATCH_TIME_NOW,delay*NSEC_PER_SEC),dispatch_get_main_queue(),^{pnpInstall();});
   NSTimer *timer=[NSTimer timerWithTimeInterval:1 repeats:YES block:^(NSTimer *t){(void)t;pnpInstall();pnpPoll();}];[NSRunLoop.mainRunLoop addTimer:timer forMode:NSRunLoopCommonModes];

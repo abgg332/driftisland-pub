@@ -12,6 +12,8 @@
 		<string>PNPRootController</string>
 		<key>icon</key>
 		<string>icon.png</string>
+		<key>isController</key>
+		<true/>
 		<key>label</key>
 		<string>原生播放器</string>
 	</dict>
