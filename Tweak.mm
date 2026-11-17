@@ -19952,33 +19952,15 @@ static void diRhythmRememberBase(UIView *v) {
                              OBJC_ASSOCIATION_RETAIN_NONATOMIC);
 }
 
+/* iOS16 reference: the beat envelope is already smoothed. Do not add a second
+   CABasicAnimation interpolation that delays only artwork relative to particles.
+   Retain system view hierarchy; applying the same matrix to separate render branches
+   is the coordinate-equivalent adaptation, not a recovered original container. */
 static void diRhythmWriteTransform(UIView *v, CATransform3D tr) {
     if (!v) return;
-    CALayer *l = v.layer;
-    /* 3.0.62: 475 日志 "缩放=1.180 实=1.000" 交替 —— 写进 model 的缩放会被系统重新布局
-       顶回 identity, 视觉上就是"偶尔抖一下"。
-       3.0.63: 兜底动画从整份 transform 改成 **transform.scale** —— 整份会连旋转一起覆盖,
-       跟 di.art.spin(transform.rotation.z) 打架, 也就是 476 说的"律动和旋转冲突,
-       打开动态就怪怪的"。只动 scale 分量, 旋转留给 spin 动画。 */
-    CGFloat fromS = 1.0, toS = 1.0;
-    CALayer *pl = (CALayer *)l.presentationLayer;
-    if (pl) {
-        CATransform3D pt = pl.transform;
-        CGFloat sx = sqrt(pt.m11 * pt.m11 + pt.m12 * pt.m12);
-        if (sx > 0.01) fromS = sx;
-    }
-    CGFloat tsx = sqrt(tr.m11 * tr.m11 + tr.m12 * tr.m12);
-    if (tsx > 0.01) toS = tsx;
-    l.transform = tr;
-    if (fabs(toS - fromS) < 0.0005) return;
-    CABasicAnimation *an = [CABasicAnimation animationWithKeyPath:@"transform.scale"];
-    an.fromValue = @(fromS);
-    an.toValue = @(toS);
-    an.duration = 1.0 / 60.0;
-    an.timingFunction = [CAMediaTimingFunction functionWithName:kCAMediaTimingFunctionLinear];
-    an.fillMode = kCAFillModeForwards;
-    an.removedOnCompletion = NO;
-    [l addAnimation:an forKey:@"di.rhythm.tf"];
+    CALayer *l=v.layer;
+    [l removeAnimationForKey:@"di.rhythm.tf"];
+    l.transform=tr;
 }
 
 /* 把同一个 tr 写到封面壳 + 所有"有图像内容"的同区域视图上(最多 3 个额外视图) */
@@ -20069,7 +20051,7 @@ static float gDICoverScaleNow = 1.0f;     /* 封面当前缩放(遮罩孔跟着�
 static int gDIDotCount = 0;
 static float gDISpawnAcc = 0.0f;
 
-static float diFxRand01(void) { return (float)((double)arc4random() / (double)UINT32_MAX); }
+static float diFxRand01(void) { return (float)arc4random_uniform(10000)/10000.0f; }
 
 /* ===== 3.0.92: 形状换成 FlexMusic 1.1.6 逆向后逐点还原的那四种 =====
    style%4: 0 空心三角 / 1 空心菱形 / 2 实心圆 / 3 空心四角星。
@@ -20191,8 +20173,7 @@ static void diFxUpdateMask(CGRect cover, float coverScale) {
        孔跟着封面一涨一缩, 边缘那圈粒子每一下鼓点被"吃掉"又"吐出来",
        看上去就是粒子在跟着鼓点抽。现在孔不动, 粒子的可见范围就完全由它自己的
        漂移决定; 封面涨到 1.18R 时顶多在边缘盖住几颗粒子(物理上就该被挡住)。 */
-    (void)coverScale;
-    CGFloat r = MAX(4.0, cover.size.width * 0.5 * 1.02);
+    CGFloat r = MAX(4.0, cover.size.width * 0.5 * 1.02 * MAX(0.01f,coverScale));
     CGPoint c = CGPointMake(CGRectGetMidX(cover) - (sup ? sup.bounds.origin.x : 0.0),
                             CGRectGetMidY(cover) - (sup ? sup.bounds.origin.y : 0.0));
     static CGRect lastB; static CGPoint lastC; static CGFloat lastR;
@@ -20333,6 +20314,17 @@ static void diFxUpdateDots(UIView *host, CGRect cover, float dt,
     (void)energy;
     if (gDICoverScaleNow <= 0.05f) gDICoverScaleNow = 1.0f;
     diFxUpdateMask(cover, gDICoverScaleNow);
+    if(gDIDotClipLayer){
+        CGFloat sc=rhythmOn?gDICoverScaleNow:1.0f;
+        CGPoint c=CGPointMake(CGRectGetMidX(cover)-host.bounds.origin.x,CGRectGetMidY(cover)-host.bounds.origin.y);
+        CATransform3D tr=CATransform3DIdentity;
+        tr=CATransform3DTranslate(tr,c.x,c.y,0);
+        tr=CATransform3DScale(tr,sc,sc,1);
+        tr=CATransform3DTranslate(tr,-c.x,-c.y,0);
+        [CATransaction begin];[CATransaction setDisableActions:YES];
+        gDIDotClipLayer.sublayerTransform=tr;
+        [CATransaction commit];
+    }
     if (gDIDotCount == 0) return;
 
     CGFloat cx = CGRectGetMidX(cover) - host.bounds.origin.x;
@@ -20342,7 +20334,7 @@ static void diFxUpdateDots(UIView *host, CGRect cover, float dt,
     if (limit > DI_DOT_CAP) limit = DI_DOT_CAP;
     /* 3.0.95: existing particles follow the measured kick, not just spawn rate.
        Strength affects the transient only; zero preserves natural drift/opacity. */
-    float beat = active && diParticleExtraBeat ? diSharedVisualPulse : 0.0f;
+    float beat = 0.0f; // reference particles have no independent beat pulse
     float strength = fminf(2.0f, fmaxf(0.0f, (float)rhythmParticleStrength));
     float beatTarget = beat * strength;
     float alphaMul = (float)rhythmParticleAlpha;
@@ -20390,7 +20382,7 @@ static void diFxUpdateDots(UIView *host, CGRect cover, float dt,
         float radialPulse = cover.size.width * 0.055f * pulse;
         // Reference artRingContainer scales particle offsets AND glyphs together.
         // Keep the verified visible host; apply the same affine transform numerically.
-        float groupScale = rhythmOn ? gDICoverScaleNow : 1.0f;
+        float groupScale = 1.0f; // parent sublayerTransform applies the shared scale once
         layer.position = CGPointMake(cx + cosf(d->ang) * ((d->rad + radialPulse)*groupScale),
                                      cy + sinf(d->ang) * ((d->rad + radialPulse)*groupScale));
         layer.opacity = alpha;
@@ -20550,7 +20542,7 @@ static float diFxAdvanceBeat(BOOL active, float energy, double strengthSlider, f
         gDIFxBeatPulse *= powf(0.72f, step);
         /* 3.0.93: 停一会儿之后从干净状态重来 —— 否则再按播放时基线还挂在
            上回的低位, 第一帧 excess 会顶满, 封面"啪"地放大一下。 */
-        if (gDIFxBeatPulse < 0.004f) { gDIFxBeatPulse = 0.0f; gDIFxBeatBase = 0.0f; }
+        /* Reference: retain the decaying baseline and pulse. */
         desired = 1.0f;
     }
     float rate = (desired > gDIFxBeatScale) ? 0.58f : 0.20f;
@@ -20558,8 +20550,7 @@ static float diFxAdvanceBeat(BOOL active, float energy, double strengthSlider, f
     gDIFxBeatScale += (desired - gDIFxBeatScale) * rate;
     /* 拍与拍之间必须严格回到 1.000(3.0.64 用户"静止时必须是 1.000") ——
        指数回落永远差一点, 这里在脉冲已经落干净时直接吸住。 */
-    if (gDIFxBeatPulse < 0.0015f && fabsf(gDIFxBeatScale - 1.0f) < 0.004f)
-        gDIFxBeatScale = 1.0f;
+    /* Reference snaps to identity only when inactive, below 0.0005. */
     if (!active && fabsf(gDIFxBeatScale - 1.0f) < 0.0005f) gDIFxBeatScale = 1.0f;
     return gDIFxBeatScale;
 }
@@ -22072,10 +22063,10 @@ static void diRhythmTickWithDelta(float dtIn) {
        岛(MRU)那条链路仍然读 gDIKick/beat.bin, 一行没动。 */
     diFxAdvanceEnergy(active, real, dt);
     // Reference detector uses spectrum energy, not the legacy PCM kick detector.
-    float referenceScale=diFxAdvanceBeat(active, gDIFxEnergy, 1.0, dt);
-    diSharedVisualPulse=fminf(1,fmaxf(0,(referenceScale-1)/0.095f));
+    float referenceScale=diFxAdvanceBeat(active, gDIFxEnergy, rhythmBeatScale, dt);
+    diSharedVisualPulse=gDIFxBeatPulse;
     diISPublishBeat(active);
-    float fxBeatS=1+fminf(0.22f,(float)rhythmBeatScale*0.095f*diSharedVisualPulse);
+    float fxBeatS=referenceScale;
 
     if (!gDIFxRealLogged && active && real && gDIBandSeen) {
         gDIFxRealLogged = YES;

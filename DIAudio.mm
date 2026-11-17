@@ -320,6 +320,7 @@ static void *diAudioClientThread(void *arg) {
     int c = (int)(intptr_t)arg;
     if (c < 0) return NULL;
     diAudioConsumers.fetch_add(1,std::memory_order_relaxed);
+    float referencePeaks[72] = {}; // per-client FFT AGC, no cross-thread shared peak state
     int nb = fcntl(c, F_GETFL, 0);
     if (nb >= 0) fcntl(c, F_SETFL, nb | O_NONBLOCK);
     {
@@ -338,7 +339,7 @@ static void *diAudioClientThread(void *arg) {
             }
             /* 3.0.55: 33ms → 16ms。30Hz 的数据在 120Hz 屏上就是"每四帧才变一次",
                刻度和粒子再怎么平滑也是顿的。60Hz 发包, 32 字节/包, 开销可以忽略。 */
-            usleep(33333);
+            usleep(16667);
             BOOL live = (CFAbsoluteTimeGetCurrent() - gDIStamp < 0.5);
             float fast = 0.0f, slow = 0.0f;
             uint8_t bands[DI_BANDS];
@@ -352,7 +353,7 @@ static void *diAudioClientThread(void *arg) {
                 for (int b = 0; b < DI_BANDS; b++) gDIBandF[b] *= 0.6f;
             }
             uint8_t reference[72] = {};
-            static float referencePeaks[72] = {};
+
             if (live && gDIRingFill >= 512) {
                 float snapshot[512];
                 int start = (gDIRingW - 512 + DI_RING) % DI_RING;
