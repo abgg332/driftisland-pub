@@ -7,6 +7,21 @@
 #include <sys/sysctl.h>
 #include <sys/param.h>
 #include <stdlib.h>
+static NSString *const kMaterialDir = @"/var/mobile/灵动岛";
+static NSArray<NSString *> *diSortStrs(NSArray *arr);
+
+/* 偏好字符串读写 */
+static NSString *readPrefString(NSString *key) {
+    if (!key.length) return nil;
+    CFPreferencesAppSynchronize((__bridge CFStringRef)kDomain);
+    id v = CFBridgingRelease(CFPreferencesCopyAppValue((__bridge CFStringRef)key, (__bridge CFStringRef)kDomain));
+    return [v isKindOfClass:NSString.class] ? (NSString *)v : nil;
+}
+static void diPostReloadRaw(void) {
+    CFNotificationCenterPostNotification(CFNotificationCenterGetDarwinNotifyCenter(),
+        (__bridge CFStringRef)kNotifyStr, NULL, NULL, YES);
+}
+
 static NSString *const kDIAlbumMaskKey = @"diAlbumMaskAsset";
 static NSString *const kDIPlayerMaskKey = @"PlayerMaskAsset";
 static NSString *const kDomain = @"com.abgg332.driftisland";
