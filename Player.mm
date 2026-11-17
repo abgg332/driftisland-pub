@@ -59,7 +59,7 @@ static void pnpApply(UIView *root){
  while(queue.count&&budget-->0){UIView *v=queue.lastObject;[queue removeLastObject];NSString *name=NSStringFromClass(v.class);
   if([name containsString:@"Activity"])continue;
   if([name containsString:@"ArtworkView"]){
-   BOOL mask=enabled&&!expanded&&[pnpPrefs[@"MaskEnabled"] boolValue]&&pnpMask;
+   BOOL mask=enabled&&!expanded&&[pnpBool(@"MaskEnabled",NO)]&&pnpMask;
    PNPArtState *state=objc_getAssociatedObject(v,&pnpArtKey);
    if(mask&&!state){state=[PNPArtState new];state.originalMask=v.layer.mask;state.mask=[CALayer layer];state.mask.contentsGravity=kCAGravityResizeAspect;objc_setAssociatedObject(v,&pnpArtKey,state,OBJC_ASSOCIATION_RETAIN_NONATOMIC);}
    if(mask){state.mask.frame=v.bounds;state.mask.contents=(__bridge id)pnpMask.CGImage;v.layer.mask=state.mask;}
@@ -79,10 +79,12 @@ static void pnpApply(UIView *root){
 }
 static void pnpRefresh(void){for(UIView *v in pnpRoots.allObjects)pnpApply(v);}
 static void pnpReload(void){
- CFPreferencesAppSynchronize((__bridge CFStringRef)PNPDomain);CFPreferencesAppSynchronize(CFSTR("com.local.playerexact"));
- pnpPrefs=CFBridgingRelease(CFPreferencesCopyMultiple(NULL,(__bridge CFStringRef)PNPDomain,kCFPreferencesCurrentUser,kCFPreferencesAnyHost))?:@{};
+ CFPreferencesAppSynchronize(CFSTR("com.local.playerexact"));
+ pnpPrefs=@{};
  pnpNative=CFBridgingRelease(CFPreferencesCopyMultiple(NULL,CFSTR("com.local.playerexact"),kCFPreferencesCurrentUser,kCFPreferencesAnyHost))?:@{};
- NSString *name=pnpPrefs[@"MaskAsset"];
+ /* 遮罩素材键由面板写在 /var/mobile/原生播放器/遮罩素材 目录域, 开关 MaskEnabled 写 native 域 */
+ CFPreferencesAppSynchronize(CFSTR("/var/mobile/原生播放器/遮罩素材"));
+ id name=CFBridgingRelease(CFPreferencesCopyAppValue(CFSTR("MaskAsset"),CFSTR("/var/mobile/原生播放器/遮罩素材")));
  NSString *base=@"/var/mobile/原生播放器/遮罩素材";
  if([name isKindOfClass:NSString.class]&&![name containsString:@".."]&&!name.isAbsolutePath)pnpMask=[UIImage imageWithContentsOfFile:[base stringByAppendingPathComponent:name]];else pnpMask=nil;
  pnpRefresh();
