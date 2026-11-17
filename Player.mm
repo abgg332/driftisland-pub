@@ -6,6 +6,7 @@
 #import <notify.h>
 #include <math.h>
 #include <string.h>
+#include <initializer_list>
 static NSString *const PNPDomain=@"com.privatecustom.nativeplayer";
 static NSDictionary *pnpPrefs,*pnpNative;
 static NSHashTable *pnpRoots;
