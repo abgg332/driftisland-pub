@@ -1,8 +1,8 @@
 #!/bin/sh
 set -e
 if [ "$1" = configure ]; then
- mkdir -p /var/mobile/原生播放器/遮罩素材
- chown -R mobile:mobile /var/mobile/原生播放器 2>/dev/null || true
+ mkdir -p /var/mobile/灵动岛/遮罩素材
+ chown -R mobile:mobile /var/mobile/灵动岛 2>/dev/null || true
  for D in /var/jb/usr/bin/defaults /usr/bin/defaults; do
   if [ -x "$D" ]; then
    P=/var/mobile/Library/Preferences/com.local.playerexact

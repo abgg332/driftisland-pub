@@ -15,6 +15,6 @@
 	<key>CFBundleVersion</key>
 	<string>1.0</string>
 	<key>NSPrincipalClass</key>
-	<string>PNPRootController</string>
+	<string>DIPlayerEntryPage</string>
 </dict>
 </plist>
