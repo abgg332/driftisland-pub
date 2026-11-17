@@ -14,7 +14,7 @@
 static NSString *const kDomain   = @"com.abgg332.driftisland";
 static NSString *const kDIPlayerMaskOnKey = @"PlayerMaskOn";
 static NSString *const kDIAlbumMaskKey    = @"diAlbumMaskAsset";
-static NSString *const kDIMaskRoot = @"/var/mobile/灵动岛/遮罩素材";
+static NSString *const kDIMaskRoot = @"/var/mobile/原生播放器";
 static NSString * const kNPDomain   = @"com.local.playerexact";
 static NSString * const kNPModuleID = @"com.apple.mediaremote.controlcenter.nowplaying";
 static NSString * const kNPActivationVer = @"0.3.1";
@@ -190,7 +190,7 @@ static NSArray<NSString *> *diSortStrs(NSArray *a){return [a sortedArrayUsingCom
             PSSpecifier *empty = [PSSpecifier preferenceSpecifierNamed:@"（目录里还没有 png 素材）"
                                                                 target:nil set:nil get:nil detail:nil
                                                                 cell:PSListItemCell edit:nil];
-            [empty setProperty:@"把 png 放进 /var/mobile/灵动岛/遮罩素材 即可, 无需重编译" forKey:@"footerText"];
+            [empty setProperty:@"把 png 放进 /var/mobile/原生播放器 即可, 无需重编译" forKey:@"footerText"];
             [specs addObject:empty];
         } else {
             NSString *eff = cur.length ? cur : list.firstObject;
@@ -341,18 +341,9 @@ static NSArray<NSString *> *diSortStrs(NSArray *a){return [a sortedArrayUsingCom
 }
 - (void)doRespring:(PSSpecifier *)sp {
     diNPWrite(@"PendingRespringTS", @((double)[[NSDate date] timeIntervalSince1970]), kDomain);
-    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.6 * NSEC_PER_SEC)),
-                   dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
+    dispatch_async(dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
         diwKillByComm("chronod");
         diwKillByComm("SpringBoard");
-    });
-    UIAlertController *ac = [UIAlertController alertControllerWithTitle:@"正在注销"
-        message:@"屏幕会短暂黑一下, 桌面回来后尺寸生效。" preferredStyle:UIAlertControllerStyleAlert];
-    [ac addAction:[UIAlertAction actionWithTitle:@"好" style:UIAlertActionStyleCancel handler:nil]];
-    [self presentViewController:ac animated:YES completion:nil];
-    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(2.5 * NSEC_PER_SEC)),
-                   dispatch_get_main_queue(), ^{
-        if (ac.presentingViewController) [ac dismissViewControllerAnimated:YES completion:nil];
     });
 }
 - (PSSpecifier *)npSwitch:(NSString *)name key:(NSString *)key def:(BOOL)def {

@@ -14,7 +14,7 @@ static BOOL gDiMaskHasAlpha=NO,gDiMaskBrightIsShape=YES;
 static int gDiMaskThreshold=0;
 #define DLog RLog
 static NSString *const kDomain=@"com.abgg332.driftisland";
-static NSString *const kDIMaskRoot=@"/var/mobile/灵动岛/遮罩素材";
+static NSString *const kDIMaskRoot=@"/var/mobile/原生播放器";
 static BOOL diPrefBoolNow(NSString *key,BOOL fallback){
  id v=CFBridgingRelease(CFPreferencesCopyAppValue((__bridge CFStringRef)key,(__bridge CFStringRef)kDomain));
  return [v respondsToSelector:@selector(boolValue)]?[v boolValue]:fallback;
