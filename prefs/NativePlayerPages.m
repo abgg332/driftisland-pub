@@ -382,9 +382,6 @@ static void diWritePrefString(NSString *value, NSString *key) {
         /* 律动特效: 用户明确排除 */
 
         [specs addObject:[self groupSpec:nil footer:nil]];
-        [specs addObject:[self buttonSpec:@"导入原播放器参数" action:@selector(importPlayerPreferences:)]];
-        [specs addObject:[self buttonSpec:@"恢复默认播放器参数" action:@selector(resetPlayerPreferences:)]];
-        [specs addObject:[self groupSpec:nil footer:nil]];
         [specs addObject:[self buttonSpec:@"注销生效" action:@selector(doRespring:)]];
         _specifiers = specs;
     }
