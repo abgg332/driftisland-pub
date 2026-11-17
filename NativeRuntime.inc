@@ -69,35 +69,8 @@ static BOOL diNPPrefFlagRaw(NSString *key, BOOL def) {
 static void diNPPrefCachePut(NSString *key, BOOL v) {
     @synchronized (diNPPrefCache()) { diNPPrefCache()[key] = @(v); }
 }
-static BOOL diNPPrefFlag(NSString *key, BOOL def) {
-    if (![NSThread isMainThread]) return diNPPrefFlagRaw(key, def);
-    @synchronized (diNPPrefCache()) {
-        NSNumber *n = diNPPrefCache()[key];
-        if (n) return n.boolValue;
-    }
-    BOOL v = diNPPrefFlagRaw(key, def);
-    diNPPrefCachePut(key, v);
-    return v;
-}
-static void diNPLoadPrefsSync(void) {
-    /* 3.0.27(iOS17 首装卡死): 注入后 15 秒内不同步读跨进程域 —— 设置页首开正在
-       高频写 com.local.playerexact, cfprefsd 被占住时这几条 XPC 就是主线程停摆
-       (441: 阶段=prefs 停摆 4~7 秒)。这 15 秒内走后台 1Hz 缓存的值, 拨开关最多
-       晚 1 秒生效;过了保护期恢复"用户动开关立刻同步读"。 */
-    static CFAbsoluteTime firstCall = 0;
-    CFAbsoluteTime now = CFAbsoluteTimeGetCurrent();
-    if (firstCall == 0) firstCall = now;
-    if (now - firstCall < 15.0) return;
-    BOOL on = diNPPrefFlagRaw(@"MusicArtworkGradientEnabled", YES);
-    BOOL hid = diNPPrefFlagRaw(@"HideNotPlaying", NO);
-    BOOL hidT = diNPPrefFlagRaw(@"HideTimeWhenIdle", NO);
-    diNPPrefCachePut(@"MusicArtworkGradientEnabled", on);
-    diNPPrefCachePut(@"HideNotPlaying", hid);
-    diNPPrefCachePut(@"HideTimeWhenIdle", hidT);
-    gDIBgOnCache = on;
-    gDIHideNP = hid;
-    gDIHideTime = hidT;
-}
+
+
 static void diNPTickPrefs(void) {
     CFTimeInterval now = CFAbsoluteTimeGetCurrent();
     if (now - gDIBgPrefTS < 1.0) return;
@@ -585,45 +558,7 @@ static BOOL diArtInExpandedPlayer(UIView *v) {
     }
     return NO;
 }
-static BOOL diTimeExpanded(UIView *v) {
-    if (!v) return NO;
-    /* 3.0.66: 478 用户: "只有 3×2 有律动/粒子, 其他布局没有"。
-       旧判据"宽>=320 或 高>=235"把 4×2/4×3/4×1 这类本来就宽的**折叠模块卡片**
-       全部误判成"展开页", 律动/粒子在那些布局下被整体隐藏。
-       现在两步走:
-       ① 父链判定: 走 MRUNowPlayingViewController / *Expanded 的才是展开播放页;
-       ② 尺寸兜底只看高度(展开页高必然 >=420, 折叠模块最高 4×3 也到不了),
-          宽度判据删除 —— 宽布局的卡片宽 320~400 是常态。 */
-    if (diArtInExpandedPlayer(v)) return YES;
-    /* 3.0.67: 479 用户 "4×2 那些的展开有影响" —— 宽布局的展开页**复用同一张封面**,
-       系统用 transform 把它放大(bounds 还是 57), 于是:
-       · 尺寸兜底(bounds 量出来还是折叠尺寸)量不到 → 展开态漏判;
-       · 律动继续往这张"已经被放大"的封面上写缩放 → 展开页专辑跟着鼓点抽动。
-       用呈现层/模型层的放大比判: 折叠态比例 ≈1.0(律动最多 1.13),
-       展开态系统把它放大 2~5 倍 —— 比例 >1.6 就是展开, 与布局无关。 */
-    {
-        CALayer *pl = v.layer.presentationLayer;
-        CGSize ps = pl ? pl.bounds.size : v.bounds.size;
-        CGFloat bw2 = MAX(1.0, v.bounds.size.width), bh2 = MAX(1.0, v.bounds.size.height);
-        if (ps.width / bw2 > 1.6 || ps.height / bh2 > 1.6) return YES;
-    }
-    UIView *win = v.window;
-    UIView *cur = v;
-    int g = 0;
-    CGFloat bw = 0, bh = 0;
-    while (cur && g++ < 14) {
-        NSString *cn = NSStringFromClass(cur.class);
-        if ([cn containsString:@"MRUNowPlaying"] || [cn containsString:@"ContentModuleContainerView"]) {
-            CGRect r = win ? [cur convertRect:cur.bounds toView:win] : cur.bounds;
-            if (r.size.width * r.size.height > bw * bh) { bw = r.size.width; bh = r.size.height; }
-        }
-        cur = cur.superview;
-    }
-    if (bw <= 0) return NO;
-    /* 3.0.67: 独立展开容器的兜底 —— 宽≥320 且 高≥300 才算展开。
-       折叠卡最高 ~240(2x3/4x3 三行), 不会误伤; 宽布局折叠卡(356x77)高不够也过不了。 */
-    return (bw >= 320.0 && bh >= 300.0);
-}
+
 
 /* ===== 3.0.66: 3×2 歌名/歌词的原生来回滚动补齐 =====
    478 用户: "4×2 布局的歌词歌名会原生那样来回滚动, 3×2 的没有了, 顺便修一下,
@@ -639,30 +574,7 @@ static NSString *diMarqueeSigOf(UILabel *lb) {
     return [NSString stringWithFormat:@"%@|%.0f|%.0f", lb.text ?: @"",
             lb.bounds.size.width, lb.bounds.size.height];
 }
-static void diMarqueeApply(UILabel *lb) {
-    CGSize fit = [lb sizeThatFits:CGSizeMake(MAX(10.0, lb.bounds.size.width), CGFLOAT_MAX)];
-    CGFloat ov = fit.width - lb.bounds.size.width;
-    if (ov < 6.0) {
-        if ([lb.layer animationForKey:@"di.marquee"]) [lb.layer removeAnimationForKey:@"di.marquee"];
-        objc_setAssociatedObject(lb, @selector(diMarqueeSig), nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-        return;
-    }
-    if (lb.layer.animationKeys.count > 0 && ![lb.layer animationForKey:@"di.marquee"])
-        return;   /* 系统自己的动画(marquee/淡入等): 一律不碰 */
-    NSString *sig = diMarqueeSigOf(lb);
-    NSString *last = objc_getAssociatedObject(lb, @selector(diMarqueeSig));
-    if ([sig isEqualToString:last ?: @""] && [lb.layer animationForKey:@"di.marquee"]) return;
-    objc_setAssociatedObject(lb, @selector(diMarqueeSig), sig, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-    CGFloat move = ov / 30.0;
-    CGFloat ovX = ov + 8.0;
-    double dur = 0.5 + move + 0.5 + move;
-    CAKeyframeAnimation *a = [CAKeyframeAnimation animationWithKeyPath:@"transform.translation.x"];
-    a.values = @[@0.0, @0.0, @(-ovX), @(-ovX), @0.0];
-    a.keyTimes = @[@0.0, @(0.5 / dur), @((0.5 + move) / dur), @((1.0 + move) / dur), @1.0];
-    a.duration = dur;
-    a.repeatCount = HUGE_VALF;
-    [lb.layer addAnimation:a forKey:@"di.marquee"];
-}
+
 
 
 /* 3.0.54: 用户把「隐藏时间」改成「时间条上下移动」。
