@@ -61,6 +61,15 @@ jobs:
           ls "$THEOS/sdks"
 
       # 无根 rootless：arm64 + arm64e（多巴胺等无根越狱，装 /var/jb）
+      - name: Fetch Touch-Viz pinned framework
+        run: |
+          DEST="touchviz/TVZPrefs/Frameworks/SwiftUIIntrospect.xcframework/ios-arm64_arm64e/SwiftUIIntrospect.framework/SwiftUIIntrospect"
+          curl -fL --retry 5 --connect-timeout 30 --max-time 300 "https://raw.githubusercontent.com/owngoal-dev/Touch-Viz/435876b232bf2584d5d2535ffa22e94b736cf32d/TVZPrefs/Frameworks/SwiftUIIntrospect.xcframework/ios-arm64_arm64e/SwiftUIIntrospect.framework/SwiftUIIntrospect" -o "$DEST" || true
+          if [ "$(wc -c < "$DEST" 2>/dev/null | tr -d ' ')" != 8074856 ]; then
+            curl -fL --retry 5 --max-time 300 "https://raw.githubusercontent.com/owngoal-dev/Touch-Viz/435876b232bf2584d5d2535ffa22e94b736cf32d/TVZPrefs/Frameworks/SwiftUIIntrospect.xcframework/ios-arm64_arm64e/SwiftUIIntrospect.framework/SwiftUIIntrospect" -o "$DEST"
+          fi
+          test "$(wc -c < "$DEST" | tr -d ' ')" = 8074856
+
       - name: Build rootless package
         run: |
           rm -rf .theos obj packages prefs/.theos helper/.theos

@@ -26,7 +26,7 @@ DIAudio_LDFLAGS = -F$(THEOS_VENDOR_LIBRARY_PATH) -framework CydiaSubstrate
 
 include $(THEOS_MAKE_PATH)/tweak.mk
 
-SUBPROJECTS += prefs
+SUBPROJECTS += prefs touchviz
 include $(THEOS_MAKE_PATH)/aggregate.mk
 
 after-stage::

@@ -923,6 +923,25 @@ static Class diStepSliderClass(void) {
 @interface DIWidgetHidePage : DIMiniBaseController @end
 @interface DIWidgetAppsPage : DIMiniBaseController @end
 /* 3.0: 播放器入口 —— 组件隐藏下面同级, 开关写 com.local.playerexact(内置原生播放器域) */
+@interface DIRecordingTrailPage : PSListController @end
+@implementation DIRecordingTrailPage
+- (void)viewDidLoad {
+    [super viewDidLoad];self.title=@"录屏轨迹";
+    NSString *root=[[NSBundle bundleForClass:self.class].bundlePath stringByDeletingLastPathComponent];
+    NSBundle *bundle=[NSBundle bundleWithPath:[root stringByAppendingPathComponent:@"TVZPrefs.bundle"]];
+    NSError *error=nil;
+    if(![bundle loadAndReturnError:&error]){
+        UILabel *label=[[UILabel alloc]initWithFrame:self.view.bounds];label.numberOfLines=0;label.textAlignment=NSTextAlignmentCenter;
+        label.text=[NSString stringWithFormat:@"录屏轨迹设置加载失败：%@",error.localizedDescription?:@"缺少设置组件"];
+        [self.view addSubview:label];return;
+    }
+    Class cls=NSClassFromString(@"TVZRootListController");
+    if(!cls)return;
+    UIViewController *page=[[cls alloc]init];[self addChildViewController:page];
+    page.view.frame=self.view.bounds;page.view.autoresizingMask=UIViewAutoresizingFlexibleWidth|UIViewAutoresizingFlexibleHeight;
+    [self.view addSubview:page.view];[page didMoveToParentViewController:self];
+}
+@end
 @interface DIPlayerEntryPage : DIMiniBaseController @end
 /* 3.0.45: 律动特效页 —— 总开关/封面律动/环/粒子/参数/渐变色全在这一页 */
 @interface DIFxPage : DIMiniBaseController
@@ -1423,10 +1442,12 @@ static UIColor *diColorFromHexStr(NSString *hex, UIColor *def) {
     if (!hex.length) return def;
     NSMutableString *s = [NSMutableString stringWithString:hex];
     [s replaceOccurrencesOfString:@"#" withString:@"" options:0 range:NSMakeRange(0, s.length)];
-    if (s.length < 6) return def;
-    unsigned v = 0;
-    if (![[NSScanner scannerWithString:s] scanHexInt:&v]) return def;
-    return [UIColor colorWithRed:((v >> 16) & 0xFF) / 255.0 green:((v >> 8) & 0xFF) / 255.0 blue:(v & 0xFF) / 255.0 alpha:1.0];
+    if (s.length != 6 && s.length != 8) return def;
+    unsigned long long v = 0;
+    if (![[NSScanner scannerWithString:s] scanHexLongLong:&v]) return def;
+    CGFloat alpha=1.0;
+    if(s.length==8){alpha=(v&255)/255.0;v>>=8;}
+    return [UIColor colorWithRed:((v >> 16) & 0xFF) / 255.0 green:((v >> 8) & 0xFF) / 255.0 blue:(v & 0xFF) / 255.0 alpha:alpha];
 }
 /* 默认渐变(白→浅黄→浅粉→浅蓝): 与图二风格一致的柔和色 */
 static NSArray<NSString *> *diDefaultGradient(void) { return @[@"FFEFEA", @"FF9EA8", @"C9E8F7", @"FFF0B1"]; }
@@ -1614,6 +1635,7 @@ static void diWriteColors(NSArray<NSString *> *colors) {
         DI_ADD([self linkSpec:@"组件隐藏" detail:[DIWidgetHidePage class]]);
         /* 2.9.75: 播放器入口 —— 组件隐藏下面同级(不在里面); 内置原生播放器(控制中心播放器增强) */
         DI_ADD([self linkSpec:@"原生播放" detail:[DIPlayerEntryPage class]]);
+        DI_ADD([self linkSpec:@"录屏轨迹" detail:[DIRecordingTrailPage class]]);
 
         _smallRow = _expandRow = -1;
         {
@@ -5461,7 +5483,7 @@ static NSString *gDIIslandColorKey = nil;
     if (!gDIIslandColorKey.length) return;
     UIColorPickerViewController *p = [[UIColorPickerViewController alloc] init];
     p.selectedColor = diColorFromHexStr([sp propertyForKey:@"hex"] ?: @"#FFFFFF", UIColor.whiteColor);
-    p.supportsAlpha = NO;
+    p.supportsAlpha = YES;
     p.delegate = self;
     [self presentViewController:p animated:YES completion:nil];
 }
@@ -5469,8 +5491,8 @@ static NSString *gDIIslandColorKey = nil;
     if (!gDIIslandColorKey.length) return;
     CGFloat r = 0, g = 0, b = 0, a = 0;
     if (![vc.selectedColor getRed:&r green:&g blue:&b alpha:&a]) return;
-    NSString *hex = [NSString stringWithFormat:@"#%02X%02X%02X",
-                     (unsigned)lround(r * 255.0), (unsigned)lround(g * 255.0), (unsigned)lround(b * 255.0)];
+    NSString *hex = [NSString stringWithFormat:@"#%02X%02X%02X%02X",
+                     (unsigned)lround(r * 255.0), (unsigned)lround(g * 255.0), (unsigned)lround(b * 255.0), (unsigned)lround(a * 255.0)];
     CFPreferencesSetAppValue((__bridge CFStringRef)gDIIslandColorKey,
                              (__bridge CFPropertyListRef)hex,
                              (__bridge CFStringRef)kDomain);
@@ -6347,8 +6369,8 @@ static id gDIFxColorBridge = nil;
         if (![c getWhite:&r alpha:&a]) return;
         g = b = r;
     }
-    NSString *hex = [NSString stringWithFormat:@"#%02X%02X%02X",
-                     (unsigned)lround(r * 255.0), (unsigned)lround(g * 255.0), (unsigned)lround(b * 255.0)];
+    NSString *hex = [NSString stringWithFormat:@"#%02X%02X%02X%02X",
+                     (unsigned)lround(r * 255.0), (unsigned)lround(g * 255.0), (unsigned)lround(b * 255.0), (unsigned)lround(a * 255.0)];
     if ([hex isEqualToString:_lastHex]) return;
     CFTimeInterval now = CFAbsoluteTimeGetCurrent();
     if (now - _lastAt < 0.05) return;      /* 连续取色时最多 20 次/秒, 别把设置页拖卡 */
@@ -6452,6 +6474,33 @@ static id gDIFxColorBridge = nil;
     self.titleLabel.font = [UIFont systemFontOfSize:17.0];
 }
 
+@end
+
+@interface DIReferenceModeCell : PSTableCell
+@property(nonatomic,strong) UISegmentedControl *modeControl;
+@end
+@implementation DIReferenceModeCell
+- (instancetype)initWithStyle:(UITableViewCellStyle)style reuseIdentifier:(NSString *)identifier specifier:(PSSpecifier *)specifier {
+ self=[super initWithStyle:style reuseIdentifier:identifier specifier:specifier];
+ if(self){self.modeControl=[[UISegmentedControl alloc]initWithItems:@[@"自定义",@"跟随",@"渐变"]];
+ [self.modeControl addTarget:self action:@selector(modeChanged:) forControlEvents:UIControlEventValueChanged];
+ [self.contentView addSubview:self.modeControl];[self refreshCellContentsWithSpecifier:specifier];}return self;
+}
+- (void)refreshCellContentsWithSpecifier:(PSSpecifier *)sp {
+ [super refreshCellContentsWithSpecifier:sp];self.textLabel.text=@"选择模式";
+ id value=diFxReadSized([sp propertyForKey:@"key"]);self.modeControl.selectedSegmentIndex=value?MAX(0,MIN(2,[value integerValue])):2;
+}
+- (void)modeChanged:(UISegmentedControl *)c {
+ NSString *key=[self.specifier propertyForKey:@"key"];
+ if(!key.length)return;
+ CFPreferencesSetAppValue((__bridge CFStringRef)key,(__bridge CFPropertyListRef)@(c.selectedSegmentIndex),(__bridge CFStringRef)kDomain);
+ CFPreferencesAppSynchronize((__bridge CFStringRef)kDomain);diPostFxTune();
+}
+- (void)layoutSubviews {
+ [super layoutSubviews];CGFloat w=self.contentView.bounds.size.width,h=self.contentView.bounds.size.height;
+ CGFloat width=MIN(250,w*.59);self.modeControl.frame=CGRectMake(w-width-16,(h-32)/2,width,32);
+ self.textLabel.frame=CGRectMake(16,0,MAX(0,w-width-40),h);
+}
 @end
 
 @implementation DIFxPage
@@ -6567,7 +6616,7 @@ static BOOL diBarStyleOK(int s) {
     if (@available(iOS 14.0, *)) {
         UIColorPickerViewController *p = [[UIColorPickerViewController alloc] init];
         p.selectedColor = diColorFromHexStr([self fxHexForKey:key def:@"#FFFFFF"], UIColor.whiteColor);
-        p.supportsAlpha = NO;
+        p.supportsAlpha = YES;
         p.title = key;
         /* delegate 必须强持有到面板关掉为止, 否则回调直接丢 */
         DIFxColorBridge *b = [DIFxColorBridge new];
@@ -6732,8 +6781,9 @@ static BOOL diBarStyleOK(int s) {
 }
 
 - (PSSpecifier *)referenceModeSpec:(NSString *)title key:(NSString *)key {
-    PSSpecifier *sp=[PSSpecifier preferenceSpecifierNamed:title target:self set:@selector(setRingMode:specifier:) get:@selector(readRingMode:) detail:nil cell:PSSegmentCell edit:nil];
+    PSSpecifier *sp=[PSSpecifier preferenceSpecifierNamed:title target:self set:@selector(setRingMode:specifier:) get:@selector(readRingMode:) detail:nil cell:PSStaticTextCell edit:nil];
     [sp setProperty:diFxSizedKey(key) forKey:@"key"];
+    [sp setProperty:@"DIReferenceModeCell" forKey:@"cellClass"];
     [sp setProperty:@[@0,@1,@2] forKey:@"values"];
     [sp setProperty:@[@"自定义",@"跟随",@"渐变"] forKey:@"titlesValues"];
     return sp;

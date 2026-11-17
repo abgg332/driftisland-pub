@@ -1,0 +1,85 @@
+// swift-interface-format-version: 1.0
+// swift-compiler-version: Apple Swift version 5.8.1 (swiftlang-5.8.0.124.5 clang-1403.0.22.11.100)
+// swift-module-flags: -target arm64-apple-ios15.0 -enable-objc-interop -enable-library-evolution -swift-version 5 -enforce-exclusivity=checked -O -module-name MCEmojiPicker
+// swift-module-flags-ignorable: -enable-bare-slash-regex
+import Foundation
+import Swift
+import SwiftUI
+import UIKit.UIDevice
+import UIKit
+import _Concurrency
+import _StringProcessing
+@available(iOS 13, *)
+extension SwiftUI.View {
+  public func emojiPicker(isPresented: SwiftUI.Binding<Swift.Bool>, selectedEmoji: SwiftUI.Binding<Swift.String>, arrowDirection: MCEmojiPicker.MCPickerArrowDirection? = nil, customHeight: CoreFoundation.CGFloat? = nil, horizontalInset: CoreFoundation.CGFloat? = nil, isDismissAfterChoosing: Swift.Bool? = nil, selectedEmojiCategoryTintColor: UIKit.UIColor? = nil, feedBackGeneratorStyle: UIKit.UIImpactFeedbackGenerator.FeedbackStyle? = nil) -> some SwiftUI.View
+  
+}
+public enum MCPickerArrowDirection : Swift.UInt {
+  case up
+  case down
+  public init?(rawValue: Swift.UInt)
+  public typealias RawValue = Swift.UInt
+  public var rawValue: Swift.UInt {
+    get
+  }
+}
+@available(iOS 13.0, *)
+public struct MCEmojiPickerRepresentableController : SwiftUI.UIViewControllerRepresentable {
+  public var arrowDirection: MCEmojiPicker.MCPickerArrowDirection?
+  public var customHeight: CoreFoundation.CGFloat?
+  public var horizontalInset: CoreFoundation.CGFloat?
+  public var isDismissAfterChoosing: Swift.Bool?
+  public var selectedEmojiCategoryTintColor: UIKit.UIColor?
+  public var feedBackGeneratorStyle: UIKit.UIImpactFeedbackGenerator.FeedbackStyle?
+  public init(isPresented: SwiftUI.Binding<Swift.Bool>, selectedEmoji: SwiftUI.Binding<Swift.String>, arrowDirection: MCEmojiPicker.MCPickerArrowDirection? = nil, customHeight: CoreFoundation.CGFloat? = nil, horizontalInset: CoreFoundation.CGFloat? = nil, isDismissAfterChoosing: Swift.Bool? = nil, selectedEmojiCategoryTintColor: UIKit.UIColor? = nil, feedBackGeneratorStyle: UIKit.UIImpactFeedbackGenerator.FeedbackStyle? = nil)
+  @_Concurrency.MainActor(unsafe) public func makeCoordinator() -> MCEmojiPicker.MCEmojiPickerRepresentableController.Coordinator
+  @_Concurrency.MainActor(unsafe) public func makeUIViewController(context: MCEmojiPicker.MCEmojiPickerRepresentableController.Context) -> UIKit.UIViewController
+  @_Concurrency.MainActor(unsafe) public func updateUIViewController(_ representableController: UIKit.UIViewController, context: MCEmojiPicker.MCEmojiPickerRepresentableController.Context)
+  public typealias Body = Swift.Never
+  public typealias UIViewControllerType = UIKit.UIViewController
+}
+@available(iOS 13.0, *)
+extension MCEmojiPicker.MCEmojiPickerRepresentableController {
+  @objc @_hasMissingDesignatedInitializers public class Coordinator : ObjectiveC.NSObject, MCEmojiPicker.MCEmojiPickerDelegate {
+    public var isNewEmojiSet: Swift.Bool
+    public var isPresented: Swift.Bool
+    public func addPickerDismissingObserver()
+    public func didGetEmoji(emoji: Swift.String)
+    @objc public func pickerDismissingAction()
+    @objc deinit
+  }
+}
+public protocol MCEmojiPickerDelegate : AnyObject {
+  func didGetEmoji(emoji: Swift.String)
+}
+@objc @_hasMissingDesignatedInitializers @_Concurrency.MainActor(unsafe) final public class MCEmojiPickerViewController : UIKit.UIViewController {
+  @_Concurrency.MainActor(unsafe) weak final public var delegate: (any MCEmojiPicker.MCEmojiPickerDelegate)?
+  @_Concurrency.MainActor(unsafe) final public var arrowDirection: MCEmojiPicker.MCPickerArrowDirection
+  @_Concurrency.MainActor(unsafe) final public var customHeight: CoreFoundation.CGFloat?
+  @_Concurrency.MainActor(unsafe) final public var horizontalInset: CoreFoundation.CGFloat
+  @_Concurrency.MainActor(unsafe) final public var isDismissAfterChoosing: Swift.Bool
+  @_Concurrency.MainActor(unsafe) final public var selectedEmojiCategoryTintColor: UIKit.UIColor? {
+    get
+    set
+  }
+  @_Concurrency.MainActor(unsafe) final public var sourceView: UIKit.UIView? {
+    get
+    set
+  }
+  @_Concurrency.MainActor(unsafe) final public var feedBackGeneratorStyle: UIKit.UIImpactFeedbackGenerator.FeedbackStyle? {
+    get
+    set
+  }
+  @_Concurrency.MainActor(unsafe) @objc dynamic public init()
+  @_Concurrency.MainActor(unsafe) @objc override final public func loadView()
+  @_Concurrency.MainActor(unsafe) @objc override final public func viewDidLoad()
+  @_Concurrency.MainActor(unsafe) @objc override final public func viewWillAppear(_ animated: Swift.Bool)
+  @_Concurrency.MainActor(unsafe) @objc override final public func viewDidDisappear(_ animated: Swift.Bool)
+  @objc deinit
+}
+extension MCEmojiPicker.MCEmojiPickerViewController : UIKit.UIAdaptivePresentationControllerDelegate {
+  @_Concurrency.MainActor(unsafe) @objc final public func adaptivePresentationStyle(for controller: UIKit.UIPresentationController, traitCollection: UIKit.UITraitCollection) -> UIKit.UIModalPresentationStyle
+}
+extension MCEmojiPicker.MCPickerArrowDirection : Swift.Equatable {}
+extension MCEmojiPicker.MCPickerArrowDirection : Swift.Hashable {}
+extension MCEmojiPicker.MCPickerArrowDirection : Swift.RawRepresentable {}

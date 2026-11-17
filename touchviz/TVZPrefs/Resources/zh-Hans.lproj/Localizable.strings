@@ -1,0 +1,113 @@
+/* No comment provided by engineer. */
+"Animation Duration" = "动画持续时间";
+
+/* No comment provided by engineer. */
+"Are you sure you want to reset all settings to their default values?" = "你确定要还原所有设置为默认值吗？";
+
+/* No comment provided by engineer. */
+"Auto Rotate" = "自动旋转";
+
+/* No comment provided by engineer. */
+"Automatically rotates the image to match the path direction." = "自动旋转图片以匹配路径方向。";
+
+/* No comment provided by engineer. */
+"Border Color" = "边框颜色";
+
+/* No comment provided by engineer. */
+"Border Width" = "边框宽度";
+
+/* No comment provided by engineer. */
+"Change Emoji" = "更换 Emoji";
+
+/* No comment provided by engineer. */
+"Change Image" = "更换图片";
+
+/* No comment provided by engineer. */
+"Copyright © 2024-2025 OwnGoal Studio." = "版权所有 © 2024-2025 OwnGoal Studio.";
+
+/* No comment provided by engineer. */
+"Corner Radius" = "圆角半径";
+
+/* No comment provided by engineer. */
+"Credits:\n@LeoNatan: LNTouchVisualizer (MIT License)\nIvan Izyumkin: MCEmojiPicker (MIT License)" = "致谢：\n@LeoNatan: LNTouchVisualizer (MIT 许可证)\nIvan Izyumkin: MCEmojiPicker (MIT 许可证)";
+
+/* No comment provided by engineer. */
+"Custom Image" = "自定义图片";
+
+/* No comment provided by engineer. */
+"Displays touch indicators only during screen recording." = "仅在屏幕录制期间显示触摸指示器。";
+
+/* No comment provided by engineer. */
+"Effects" = "效果";
+
+/* No comment provided by engineer. */
+"Enable Touch-Viz" = "启用 Touch-Viz";
+
+/* No comment provided by engineer. */
+"Fill Color" = "填充颜色";
+
+/* No comment provided by engineer. */
+"Fill Size" = "填充大小";
+
+/* No comment provided by engineer. */
+"General" = "通用";
+
+/* No comment provided by engineer. */
+"Image Effect" = "图片效果";
+
+/* No comment provided by engineer. */
+"Lift Scale" = "抬起缩放";
+
+/* No comment provided by engineer. */
+"Morph Effect" = "变形效果";
+
+/* No comment provided by engineer. */
+"Only for Recording" = "仅录屏显示";
+
+/* No comment provided by engineer. */
+"Opacity" = "不透明度";
+
+/* No comment provided by engineer. */
+"Quick Path Effect" = "笔刷效果";
+
+/* No comment provided by engineer. */
+"Remove Emoji" = "移除 Emoji";
+
+/* No comment provided by engineer. */
+"Remove Image" = "移除图片";
+
+/* No comment provided by engineer. */
+"Reset" = "重置";
+
+/* No comment provided by engineer. */
+"Reset to Default" = "重置设置";
+
+/* No comment provided by engineer. */
+"Select Emoji" = "选择 Emoji";
+
+/* No comment provided by engineer. */
+"Select Image" = "选择图片";
+
+/* No comment provided by engineer. */
+"Touch Colors" = "触摸颜色";
+
+/* No comment provided by engineer. */
+"Touch-Viz" = "Touch-Viz";
+
+/* No comment provided by engineer. */
+"Touch-Viz has been turned off from Control Center." = "Touch-Viz 已从“控制中心”关闭。";
+
+/* No comment provided by engineer. */
+"Touch-Viz has been turned on from Control Center." = "Touch-Viz 已从“控制中心”打开。";
+
+/* No comment provided by engineer. */
+"Tracking Effect" = "跟踪效果";
+
+/* No comment provided by engineer. */
+"Use Clear Colors" = "使用透明颜色";
+
+/* No comment provided by engineer. */
+"Use Suggested Colors" = "使用建议颜色";
+
+/* No comment provided by engineer. */
+"v%@ - @Lessica" = "v%@ - @Lessica";
