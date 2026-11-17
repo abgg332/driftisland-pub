@@ -1044,7 +1044,7 @@ static void diFxLoadPrefs(void) {
     /* 3.0.43/3.0.46/3.0.66: 专辑律动 / 环 / 粒子 —— 全部按当前播放器尺寸读 */
     rhythmFxOn = fxBool(@"AlbumEffectsOn", YES);
     rhythmOn = fxBool(@"AlbumRhythmOn", YES);
-    rhythmRingOn = NO; /* retired at user request */
+    rhythmRingOn = fxBool(@"AlbumRingOn", NO);
     rhythmParticlesOn = fxBool(@"AlbumParticlesOn", YES);
     diParticleExtraBeat=NO; // retired: preserve only common album/particle affine scale
     rhythmStrength = fxDouble(@"AlbumRhythmStrength", 0.90);
@@ -1117,6 +1117,8 @@ static void diFxLoadPrefs(void) {
     /* 3.0.57: 颜色来源(0=跟随封面 1=自定义) + 流光开关 → 内部 0/1/2。
        旧版的 2(流光) 顺手迁移成"自定义 + 流光开关=开", 免得设置页显示和实际不一致。 */
     ringColorMode = diColorModeLoadFx(@"RingColorMode", @"RingFlowOn");
+    { int mode=(int)fxInt(@"AlbumRingDisplayMode", -1);
+      if(mode>=0)ringColorMode=mode==1?0:(mode==2?3:1); }
     particleColorMode = diColorModeLoadFx(@"ParticleColorMode", @"ParticleFlowOn");
     rhythmParticleAlpha = fxDouble(@"RhythmParticleAlpha", 0.74);
     if (rhythmParticleAlpha < 0.1) rhythmParticleAlpha = 0.1;
@@ -19961,6 +19963,15 @@ static void diRhythmWriteTransform(UIView *v, CATransform3D tr) {
     CALayer *l=v.layer;
     [l removeAnimationForKey:@"di.rhythm.tf"];
     l.transform=tr;
+    // Rotation animation/system layout may replace the model transform.
+    // Hold only the already-smoothed scale component; no second interpolation.
+    CGFloat sc=sqrt(tr.m11*tr.m11+tr.m12*tr.m12);
+    if(fabs(sc-1)>0.00005){
+        CABasicAnimation *hold=[CABasicAnimation animationWithKeyPath:@"transform.scale"];
+        hold.fromValue=@(sc);hold.toValue=@(sc);hold.duration=1;
+        hold.repeatCount=HUGE_VALF;hold.removedOnCompletion=NO;
+        [l addAnimation:hold forKey:@"di.rhythm.scale.hold"];
+    }else [l removeAnimationForKey:@"di.rhythm.scale.hold"];
 }
 
 /* 把同一个 tr 写到封面壳 + 所有"有图像内容"的同区域视图上(最多 3 个额外视图) */
@@ -20315,7 +20326,9 @@ static void diFxUpdateDots(UIView *host, CGRect cover, float dt,
     if (gDICoverScaleNow <= 0.05f) gDICoverScaleNow = 1.0f;
     diFxUpdateMask(cover, gDICoverScaleNow);
     if(gDIDotClipLayer){
-        CGFloat sc=rhythmOn?gDICoverScaleNow:1.0f;
+        // Strength 0 preserves natural drift, 1 is the shared reference pulse.
+        CGFloat gain=MIN(2,MAX(0,rhythmParticleStrength));
+        CGFloat sc=rhythmOn?1+(gDICoverScaleNow-1)*gain:1.0f;
         CGPoint c=CGPointMake(CGRectGetMidX(cover)-host.bounds.origin.x,CGRectGetMidY(cover)-host.bounds.origin.y);
         CATransform3D tr=CATransform3DIdentity;
         tr=CATransform3DTranslate(tr,c.x,c.y,0);
@@ -20364,7 +20377,7 @@ static void diFxUpdateDots(UIView *host, CGRect cover, float dt,
             layer.opacity = 0.0f;
             continue;
         }
-        d->rad += d->drift * dt;
+        d->rad += d->drift * dt * fminf(2,fmaxf(0,(float)rhythmParticleStrength));
         d->rot += d->rotSpd * dt;
 
         float progress = 1.0f - d->life / MAX(d->maxLife, 0.16f);
@@ -21372,6 +21385,7 @@ static void diColorPalette(int mode, NSString *hexA, NSString *hexB,
     }
     *outA = diRhythmHexColor(hexA, defA);
     *outB = diRhythmHexColor(hexB, defB);
+    if(!forParticles && ringColorMode==1 && mode==1)*outB=*outA;
 }
 
 static void diRhythmRebuild(UIView *t) {
@@ -21415,6 +21429,7 @@ static void diRhythmReset(void) {
     if (dv && gDIRhythmBaseValid) {
         [CATransaction begin];
         [CATransaction setDisableActions:YES];
+        [dv.layer removeAnimationForKey:@"di.rhythm.scale.hold"];
         dv.layer.transform = gDIRhythmBase;
         [CATransaction commit];
     }
@@ -22067,6 +22082,11 @@ static void diRhythmTickWithDelta(float dtIn) {
     diSharedVisualPulse=gDIFxBeatPulse;
     diISPublishBeat(active);
     float fxBeatS=referenceScale;
+    static CFTimeInterval outProbe=0;
+    if(logEnabled && CACurrentMediaTime()-outProbe>10){
+      outProbe=CACurrentMediaTime();
+      RLog(@"[律动输出312] 开=%d 幅度=%.2f E=%.4f pulse=%.4f scale=%.5f 粒强=%.2f 环=%d",rhythmOn,rhythmBeatScale,gDIFxEnergy,gDIFxBeatPulse,referenceScale,rhythmParticleStrength,rhythmRingOn);
+    }
 
     if (!gDIFxRealLogged && active && real && gDIBandSeen) {
         gDIFxRealLogged = YES;

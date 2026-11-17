@@ -6731,6 +6731,21 @@ static BOOL diBarStyleOK(int s) {
     [self diOpenFxPickerKeyA:@"SpectrumColorA" keyB:@"SpectrumColorB" title:@"频谱条颜色"];
 }
 
+- (id)readRingMode:(PSSpecifier *)sp {
+    id v=diFxReadSized([sp propertyForKey:@"key"]);return v?:@2;
+}
+- (void)setRingMode:(id)value specifier:(PSSpecifier *)sp {
+    NSString *key=[sp propertyForKey:@"key"];
+    CFPreferencesSetAppValue((__bridge CFStringRef)key,(__bridge CFPropertyListRef)value,(__bridge CFStringRef)kDomain);
+    CFPreferencesAppSynchronize((__bridge CFStringRef)kDomain);diPostFxTune();
+}
+- (PSSpecifier *)ringModeSpec {
+    PSSpecifier *sp=[PSSpecifier preferenceSpecifierNamed:@"选择模式" target:self set:@selector(setRingMode:specifier:) get:@selector(readRingMode:) detail:nil cell:PSSegmentCell edit:nil];
+    [sp setProperty:diFxSizedKey(@"AlbumRingDisplayMode") forKey:@"key"];
+    [sp setProperty:@[@0,@1,@2] forKey:@"values"];
+    [sp setProperty:@[@"自定义",@"跟随",@"渐变"] forKey:@"titlesValues"];
+    return sp;
+}
 - (NSArray *)buildSpecifiers {
     /* 3.0.66: 所有键都按当前播放器尺寸落键(AlbumBeatScale@3x2 这种形态) ——
        "应用那个尺寸设置的就当前尺寸保存"。读端(Tweak)对没写过的尺寸键会回落原键。 */
@@ -6741,6 +6756,11 @@ static BOOL diBarStyleOK(int s) {
        用户 474 原话"功能里有个旋转、律动里又有个圆形封面, 专辑都冲突了"。
        专辑形状统一由「启用遮罩」管; 这里恒为圆形(与历史默认一致, 不改观感)。 */
 
+    [specs addObject:[self switchSpec:@"启用律动专辑环" key:diFxSizedKey(@"AlbumRingOn") def:@NO]];
+    [specs addObject:[self ringModeSpec]];
+    [specs addObject:[self npSlider:@"律动强度" key:diFxSizedKey(@"AlbumRhythmStrength") def:0.90 mn:0.10 mx:2.50]];
+    [specs addObject:[self fxColorSpec:@"渐变起始色" key:diFxSizedKey(@"AlbumColorA") def:@"#E59971" modeKey:diFxSizedKey(@"RingColorMode")]];
+    [specs addObject:[self fxColorSpec:@"渐变结束色" key:diFxSizedKey(@"AlbumColorB") def:@"#948FFF" modeKey:diFxSizedKey(@"RingColorMode")]];
     [specs addObject:[self switchSpec:@"专辑跟随律动" key:diFxSizedKey(@"AlbumRhythmOn") def:@YES]];
     [specs addObject:[self npSlider:@"专辑律动幅度" key:diFxSizedKey(@"AlbumBeatScale") def:0.70 mn:0.00 mx:2.00]];
 
