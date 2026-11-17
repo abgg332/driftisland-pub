@@ -4,6 +4,7 @@
 #import <Preferences/PSListController.h>
 #import <Preferences/PSSpecifier.h>
 #import <notify.h>
+#import <objc/runtime.h>
 #include <sys/sysctl.h>
 #include <sys/param.h>
 #include <stdlib.h>
@@ -18,10 +19,10 @@ static NSString *readPrefString(NSString *key) {
     return [v isKindOfClass:NSString.class] ? (NSString *)v : nil;
 }
 static void diPostReloadRaw(void) {
-    CFNotificationCenterPostNotification(CFNotificationCenterGetDarwinNotifyCenter(),
-        (__bridge CFStringRef)kNotifyStr, NULL, NULL, YES);
+ /* standalone: no driftisland prefs reload */
 }
 
+static NSString *const kNotifyStr = @"com.abgg332.driftisland/prefsChanged";
 static NSString *const kDIAlbumMaskKey = @"diAlbumMaskAsset";
 static NSString *const kDIPlayerMaskKey = @"PlayerMaskAsset";
 static NSString *const kDomain = @"com.abgg332.driftisland";
