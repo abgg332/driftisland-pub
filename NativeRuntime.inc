@@ -1,5 +1,6 @@
-/* 独立原生播放器 运行时
-static BOOL gDIHasNowPlaying = NO; —— 逐字摘自 漂流岛 3.1 Tweak.mm(除音律)。*/
+/* 独立原生播放器 运行时 —— 逐字摘自 漂流岛 3.1 Tweak.mm(除音律)。背景/隐藏未在/隐藏时间/MediaRemote取图。*/
+static BOOL gDIHasNowPlaying = NO;
+static dispatch_source_t gDIBgTimer = NULL;
 static void RLog(NSString *fmt, ...) { va_list a; va_start(a,fmt); NSString *s=[[NSString alloc] initWithFormat:fmt arguments:a]; va_end(a); NSLog(@"[原生播放器] %@",s); }
 static void diNoImplicitActions(CALayer *l) {
     if (!l) return;
@@ -27,6 +28,7 @@ static void diCrumb(NSString *s) {
     } @catch (__unused NSException *e) {}
 }
 static int gDIStage = 3;
+static void diPhase(const char *p){ (void)p; }
 static const void *kDIBgIVKey  = &kDIBgIVKey;
 static const void *kDIBgDimKey = &kDIBgDimKey;
 static const void *kDIBgLastKey = &kDIBgLastKey;   /* 3.0.10: 模块 VC 处理节流 */
@@ -512,6 +514,7 @@ static void diNPHideNotPlayingLabels(UIView *root, BOOL hide) {
     }
 }
 
+static void diNPApplyHideTime(void);
 static void diNPApplyHideForRoot(UIView *root) {
     diNPTickPrefs();
     diNPHideNotPlayingLabels(root, gDIHideNP);
@@ -558,16 +561,13 @@ static void diNPQueryNowPlaying(void) {
         } @catch (__unused NSException *e) {}
         NSDictionary *meta = info ? [(__bridge NSDictionary *)info copy] : @{};
         // Read the actual track artwork even when the album-background feature is off.
-        NSData *art=(id)[meta objectForKey:@"kMRMediaRemoteNowPlayingInfoArtworkData"];
-        UIImage *decoded=nil;
-        if([art isKindOfClass:NSData.class] && art.length)
-            decoded=diNPDownscaleImage([UIImage imageWithData:art],64);
-        double elapsed=[meta[@"kMRMediaRemoteNowPlayingInfoElapsedTime"] doubleValue];
+        NSData *art=meta[@"kMRMediaRemoteNowPlayingInfoArtworkData"];
+                        double elapsed=[meta[@"kMRMediaRemoteNowPlayingInfoElapsedTime"] doubleValue];
         double duration=[meta[@"kMRMediaRemoteNowPlayingInfoDuration"] doubleValue];
         double rate=[meta[@"kMRMediaRemoteNowPlayingInfoPlaybackRate"] doubleValue];
         dispatch_async(dispatch_get_main_queue(), ^{
-            /* standalone: no rhythm */
-            /* standalone: no rhythm */
+            /* standalone */
+            /* standalone */
             gDIHasNowPlaying = has;
         });
     });
@@ -658,27 +658,7 @@ static void diMarqueeApply(UILabel *lb) {
     a.repeatCount = HUGE_VALF;
     [lb.layer addAnimation:a forKey:@"di.marquee"];
 }
-static void diNPMarqueeScan(UIView *root) {
-    if (!root || !root.window || root.hidden) return;
-    if (!diArtIs3x2()) return;                    /* 其他布局系统原生会滚, 不碰 */
-    if (diArtInExpandedPlayer(root)) return;      /* 展开播放页不碰 */
-    NSMutableArray<UIView *> *stack = [NSMutableArray arrayWithObject:root];
-    int budget = 800;
-    while (stack.count && budget-- > 0) {
-        UIView *v = stack.lastObject; [stack removeLastObject];
-        if ([v isKindOfClass:UILabel.class]) {
-            UILabel *lb = (UILabel *)v;
-            BOOL inHeader = NO;
-            for (UIView *p = lb.superview; p && p != root; p = p.superview) {
-                if ([NSStringFromClass(p.class) containsString:@"Header"]) { inHeader = YES; break; }
-            }
-            if (inHeader && lb.text.length > 0 && !lb.hidden && lb.alpha > 0.3) {
-                @try { diMarqueeApply(lb); } @catch (__unused NSException *e) {}
-            }
-        }
-        for (UIView *c in v.subviews) [stack addObject:c];
-    }
-}
+
 
 /* 3.0.54: 用户把「隐藏时间」改成「时间条上下移动」。
    ------------------------------------------------------------------
@@ -696,18 +676,7 @@ static void diNPMarqueeScan(UIView *root) {
    每秒三五次, SpringBoard 主线程直接被按住, 用户看到的就是"一设置就卡死"。
    现在只做: 重读特效参数 → 立即套时间条位移 → 确保引擎在跑。
    合并 0.12 秒, 连续拖动也只会在停顿处生效一两次。 */
-static void diFxTuneChanged(CFNotificationCenterRef c, void *obs, CFStringRef name,
-                            const void *obj, CFDictionaryRef info) {
-    static BOOL pending = NO;
-    if (pending) return;
-    pending = YES;
-    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.12 * NSEC_PER_SEC)),
-                   dispatch_get_main_queue(), ^{
-        pending = NO;
-        @try { diFxLoadPrefs(); } @catch (__unused NSException *e) {}
-        @try { diRhythmEnsure(); } @catch (__unused NSException *e) {}
-    });
-}
+
 
 static void diNPApplyHideTime(void) {
     static CFAbsoluteTime lastScan = 0;
@@ -717,108 +686,6 @@ static void diNPApplyHideTime(void) {
 
     diNPQueryNowPlaying();   /* 律动那边还靠 gDIHasNowPlaying 判"到底有没有歌" */
 }
-
-
-/* ---------- 模块容器钩子 ---------- */
-static void (*gDIOrigModuleLayout)(id, SEL) = NULL;
-
-/* ===== 3.0.117: 3×1 档位（容器 + 卡片一起收窄, 收回也保持 3×1） =====
-   用户验收结论: 3.0.112 的 3×1 布局是对的("布局看着没问题"), 唯一毛病是收回时偏一下;
-   3.0.113 的按钮右移、3.0.114 的动画判据、3.0.115 的延时收窄都是越改越错 —— 全部撤掉。
-   现在的做法 = 3.0.112 + 两条小改动:
-   ① 只处理"系统给的满宽帧"(width ≥ 基准−0.5)。收回/展开动画的中间帧(宽度在变小)
-      一律原样放行, 不再把每一帧都摁回 263 —— 收回时那个"偏移一下"就是这么来的;
-   ② 基准只在宽度真的换了(首次/旋转/换档)时刷新, 收起动画里 x 漂移不会改掉基准。
-   3.0.118: 收起展开播放器时, 卡片会先变成"又宽又矮"(约 340×90)再缩回 3 格 ——
-   那一帧就是用户看到的"闪一下 4×1"。3.0.116 起"只处理满宽帧"把 300~355 的
-   中间帧全放行了, 于是闪一帧宽卡片。现在只要比 3 格宽(target−0.5)就立刻压回,
-   宁可让收起动画"直接就是 3 格", 也不要先撑宽再收。
-
-   3.0.117 补: 内容容器(卡片)也必须 hook。506 日志里收起时容器一次满宽帧都没收到,
-   但画面上仍有一条 4×1 宽卡片 —— 那是卡片自己按满宽画的, 所以"收回变 4×1"。
-   卡片只收窄到与容器同宽、x 恒为 0, **不做任何 inset**, 按钮位置完全交给播放器。
-
-   目标宽 = 满宽 × 0.75 − 4（4 格 → 3 格, 扣掉格间距）; 左对齐, 只缩右边界。 */
-
-static BOOL di31KeyOn(void) {
-    static NSString *cache = nil;
-    static CFTimeInterval ts = 0;
-    CFTimeInterval now = CFAbsoluteTimeGetCurrent();
-    if (cache && now - ts < 2.0) return [cache isEqualToString:@"3x1"];
-    NSString *cur = nil;
-    id sz = CFBridgingRelease(CFPreferencesCopyAppValue(CFSTR("Size"),
-                                                       CFSTR("com.local.playerexact")));
-    if ([sz isKindOfClass:NSString.class] && [(NSString *)sz length]) cur = sz;
-    if (!cur.length) {
-        id d = CFBridgingRelease(CFPreferencesCopyAppValue(CFSTR("ModuleSizes"),
-                                                          CFSTR("com.local.playerexact")));
-        if ([d isKindOfClass:NSDictionary.class]) {
-            id s = ((NSDictionary *)d)[@"com.apple.mediaremote.controlcenter.nowplaying"];
-            if ([s isKindOfClass:NSString.class]) cur = s;
-        }
-    }
-    if (!cur.length) {
-        id v = CFBridgingRelease(CFPreferencesCopyAppValue(CFSTR("PlayerGridVariant"),
-                                                          CFSTR("com.local.playerexact")));
-        if ([v isKindOfClass:NSString.class] && [(NSString *)v length]) cur = v;
-    }
-    cache = cur ?: @"";
-    ts = now;
-    return [cache isEqualToString:@"3x1"];
-}
-
-/* 3.0.120: NP runtime verified at 0xa974/0xa99c/0xa9c4 (arm64).
-   Layout is allocated as three columns, not a late setFrame visual crop. */
-typedef struct { NSUInteger width,height; } DI31LayoutSize;
-static id (*di31SettingsOrig)(id,SEL,NSString *,DI31LayoutSize);
-static id (*di31SizesOrig)(id,SEL,id,id,NSInteger);
-static id (*di31InstanceOrig)(id,SEL,id,id,DI31LayoutSize);
-static BOOL di31SettingsInstalled=NO,di31SizesInstalled=NO,di31InstanceInstalled=NO;
-static NSString *const di31ModuleID=@"com.apple.mediaremote.controlcenter.nowplaying";
-static BOOL di31SizeABI(Method m,unsigned argument) {
-    if(!m)return NO;
-    char *type=method_copyArgumentType(m,argument);
-    BOOL ok=NO;
-    if(type && type[0]=='{' && strstr(type,"=QQ}")){
-        NSUInteger size=0;NSGetSizeAndAlignment(type,&size,NULL);ok=size==sizeof(DI31LayoutSize);
-    }
-    if(type)free(type);return ok;
-}
-static id di31Settings(id self,SEL cmd,NSString *identifier,DI31LayoutSize prototype){
-    if(!di31KeyOn() || ![identifier isEqualToString:di31ModuleID])return di31SettingsOrig(self,cmd,identifier,prototype);
-    Class cls=NSClassFromString(@"CCUIModuleSettings");SEL init=NSSelectorFromString(@"initWithPortraitLayoutSize:landscapeLayoutSize:");
-    Method method=class_getInstanceMethod(cls,init);
-    if(di31SizeABI(method,2)&&di31SizeABI(method,3)){
-        DI31LayoutSize size={3,1};
-        id value=((id(*)(id,SEL,DI31LayoutSize,DI31LayoutSize))objc_msgSend)([cls alloc],init,size,size);
-        if(value){static int logs=0;if(logs++<4)RLog(@"[3x1][真实占位] settings portrait=3x1 landscape=3x1");return value;}
-    }
-    RLog(@"[3x1][真实占位] settings ABI不匹配，保留系统返回");
-    return di31SettingsOrig(self,cmd,identifier,prototype);
-}
-static id di31Sizes(id self,SEL cmd,id identifiers,id instances,NSInteger orientation){
-    id original=di31SizesOrig(self,cmd,identifiers,instances,orientation);
-    if(!di31KeyOn() || ![identifiers isKindOfClass:NSArray.class] || ![original isKindOfClass:NSArray.class])return original;
-    NSUInteger index=[identifiers indexOfObject:di31ModuleID];
-    if(index==NSNotFound || index>=[original count])return original;
-    SEL factory=NSSelectorFromString(@"ccui_valueWithLayoutSize:");
-    Method method=class_getClassMethod(NSValue.class,factory);
-    if(!di31SizeABI(method,2))return original;
-    DI31LayoutSize size={3,1};
-    id value=((id(*)(id,SEL,DI31LayoutSize))objc_msgSend)(NSValue.class,factory,size);
-    if(!value)return original;
-    NSMutableArray *result=[original mutableCopy];result[index]=value;
-    static int logs=0;if(logs++<8)RLog(@"[3x1][真实占位] collection index=%lu orientation=%ld →3x1",(unsigned long)index,(long)orientation);
-    return result;
-}
-static id di31Instance(id self,SEL cmd,id metadata,id module,DI31LayoutSize prototype){
-    SEL selector=NSSelectorFromString(@"moduleIdentifier");
-    id identifier=[metadata respondsToSelector:selector]?((id(*)(id,SEL))objc_msgSend)(metadata,selector):nil;
-    if(di31KeyOn() && [identifier isEqual:di31ModuleID])prototype=(DI31LayoutSize){3,1};
-    return di31InstanceOrig(self,cmd,metadata,module,prototype);
-}
-static void di31Install(void){
-    Class manager=NSClassFromString(@"CCUIModuleSettingsManager");
 static void diNPStartBgTimer(void) {
     if (gDIBgTimer) return;
     if (gDIStage < 1) return;
