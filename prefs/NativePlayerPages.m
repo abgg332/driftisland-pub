@@ -3,7 +3,6 @@
 #import <UIKit/UIKit.h>
 #import <Preferences/PSListController.h>
 #import <Preferences/PSSpecifier.h>
-#import <Preferences/PSListItemCell.h>
 #import <notify.h>
 #include <sys/sysctl.h>
 #include <sys/param.h>
