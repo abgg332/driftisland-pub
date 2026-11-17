@@ -1,8 +1,8 @@
-name: Build DriftIsland
+name: Build Private Native Player
 
 on:
   push:
-    branches: [main, master]
+    branches: [native-player-standalone]
   workflow_dispatch:
 
 permissions:
@@ -12,7 +12,7 @@ permissions:
 # 注意 cancel-in-progress 必须为 false —— 设 true 时每个新 run 都会掐掉上一个,
 # 结果是"全都 cancelled, 一个产物都没有"(2.6.10 踩过的坑)。
 concurrency:
-  group: driftisland-build
+  group: private-native-player-build
   cancel-in-progress: false
 
 jobs:
@@ -65,12 +65,12 @@ jobs:
         run: |
           rm -rf .theos obj packages prefs/.theos helper/.theos
           make package FINALPACKAGE=1 THEOS_PACKAGE_SCHEME=rootless ARCHS="arm64 arm64e"
-          mv packages/*.deb "packages/DriftIsland-${VERSION}-无根rootless-arm64-arm64e.deb"
+          mv packages/*.deb "packages/NativePlayer-${VERSION}-无根rootless-arm64-arm64e.deb"
 
       - name: Upload rootless package
         uses: actions/upload-artifact@v4
         with:
-          name: driftisland-rootless
+          name: nativeplayer-rootless
           path: packages/*.deb
           if-no-files-found: error
           retention-days: 30
@@ -109,12 +109,12 @@ jobs:
         run: |
           rm -rf .theos obj packages prefs/.theos helper/.theos
           make package FINALPACKAGE=1 THEOS_PACKAGE_SCHEME=roothide ARCHS=arm64e
-          mv packages/*.deb "packages/DriftIsland-${VERSION}-RootHide原生-arm64e.deb"
+          mv packages/*.deb "packages/NativePlayer-${VERSION}-RootHide原生-arm64e.deb"
 
       - name: Upload roothide package
         uses: actions/upload-artifact@v4
         with:
-          name: driftisland-roothide
+          name: nativeplayer-roothide
           path: packages/*.deb
           if-no-files-found: error
           retention-days: 30

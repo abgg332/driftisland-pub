@@ -1,13 +1,10 @@
-Package: com.abgg332.driftisland
-Name: 漂流岛
-Icon: {path: /var/jb/Library/Application Support/DriftIsland/icon.png}
-Depends: mobilesubstrate, preferenceloader
-Conflicts: com.yechen.bofangqi, com.jaysuen.evocenter, com.local.nativeplayerresize
-Replaces: com.yechen.bofangqi, com.local.nativeplayerresize
-Provides: com.yechen.bofangqi
-Version: 3.1
+Package: com.privatecustom.nativeplayer
+Name: 原生播放器
+Version: 1.0
 Architecture: iphoneos-arm64
-Description: 在灵动岛内加载视频背景。
-Maintainer: 一条鱼的记忆
-Author: 一条鱼的记忆
+Description: 独立原生播放器：尺寸、背景、旋转、投送隐藏与专辑遮罩。
+Maintainer: 私人定制
+Author: 私人定制
 Section: Tweaks
+Depends: mobilesubstrate, preferenceloader
+Conflicts: com.abgg332.driftisland, com.local.nativeplayerresize, com.jaysuen.evocenter, com.yechen.bofangqi
