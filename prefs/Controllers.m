@@ -275,8 +275,9 @@ static NSArray<NSString *> *pmListAssets(void) {
 }
 /* 注销生效按钮(原版 doRespring) */
 - (void)doRespring:(PSSpecifier *)sp {
-    npWrite(@"PendingRespringTS",@((double)[[NSDate date] timeIntervalSince1970]),kPMPackage);
-    npWrite(@"PendingRespringTS",@((double)[[NSDate date] timeIntervalSince1970]),CFSTR(@"com.abgg332.driftisland"));
+    double now=[NSDate date].timeIntervalSince1970;
+    npWrite(@"PendingRespringTS",@(now),kPMPackage);
+    npWrite(@"PendingRespringTS",@(now),@"com.abgg332.driftisland");
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW,(int64_t)(0.6*NSEC_PER_SEC)),
                    dispatch_get_global_queue(QOS_CLASS_UTILITY,0),^{
         npKillByComm("chronod"); npKillByComm("SpringBoard");
