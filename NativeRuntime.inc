@@ -545,19 +545,7 @@ static void diNPQueryNowPlaying(void) {
      ② 类名不能用 isEqualToString 比对, 实际拿到的是 MRUNowPlayingView 的子类。
    现在: 沿父链把所有 MRUNowPlaying* / *ContentModuleContainerView 都换算到 window
    坐标量一遍(带 transform 的真实大小), 取最大那块, 宽≥320 或 高≥235 就算展开。 */
-static BOOL diArtInExpandedPlayer(UIView *v) {
-    UIView *p = v;
-    for (int i = 0; i < 16 && p; i++) {
-        NSString *cn = NSStringFromClass(p.class);
-        if ([cn containsString:@"ControlCenter"] || [cn containsString:@"ContentModule"]) return NO;
-        if ([cn containsString:@"SystemAperture"]) return NO;
-        if ([cn containsString:@"NowPlayingViewController"] ||
-            [cn containsString:@"NowPlayingExpanded"] ||
-            [cn containsString:@"Expanded"]) return YES;
-        p = p.superview;
-    }
-    return NO;
-}
+
 
 
 /* ===== 3.0.66: 3×2 歌名/歌词的原生来回滚动补齐 =====
@@ -570,10 +558,8 @@ static BOOL diArtInExpandedPlayer(UIView *v) {
    · 系统已经在滚(层上有别的动画)的标签一律不碰 —— 保持原生逻辑;
    · 文本/宽度变了自动重建, 文本放得下自动摘掉。
    原生节奏: 起停各停 0.5 秒, 移动速度约 30pt/s, 到头停半秒再回来。 */
-static NSString *diMarqueeSigOf(UILabel *lb) {
-    return [NSString stringWithFormat:@"%@|%.0f|%.0f", lb.text ?: @"",
-            lb.bounds.size.width, lb.bounds.size.height];
-}
+
+
 
 
 
