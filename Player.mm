@@ -83,7 +83,7 @@ static NSString *const kPIMaskDir=@"/var/mobile/灵动岛/遮罩素材";
 static void pnpReload(void){
  CFPreferencesAppSynchronize(CFSTR("com.local.playerexact"));
  pnpNative=CFBridgingRelease(CFPreferencesCopyMultiple(NULL,CFSTR("com.local.playerexact"),kCFPreferencesCurrentUser,kCFPreferencesAnyHost))?:@{};
- pnpPrefs=CFBridgingRelease(CFPreferencesCopyMultiple(NULL,CFSTR(kPIDomain),kCFPreferencesCurrentUser,kCFPreferencesAnyHost))?:@{};
+ pnpPrefs=CFBridgingRelease(CFPreferencesCopyMultiple(NULL,(__bridge CFStringRef)kPIDomain,kCFPreferencesCurrentUser,kCFPreferencesAnyHost))?:@{};
  id asset=pnpPrefs[@"PlayerMaskAsset"];
  if(![asset isKindOfClass:NSString.class]) asset=pnpPrefs[@"diAlbumMaskAsset"];
  if([asset isKindOfClass:NSString.class]&&![asset containsString:@".."]&&![asset isAbsolutePath])
