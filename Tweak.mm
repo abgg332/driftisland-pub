@@ -1053,7 +1053,7 @@ static void diFxLoadPrefs(void) {
     if (rhythmStrength > 2.50) rhythmStrength = 2.50;
     rhythmBeatScale = fxDouble(@"AlbumBeatScale", 0.70);
     if (rhythmBeatScale < 0.0) rhythmBeatScale = 0.0;
-    if (rhythmBeatScale > 2.0) rhythmBeatScale = 2.0;
+    if (rhythmBeatScale > 2.5) rhythmBeatScale = 2.5;
     rhythmRoundCover = YES;   /* 3.0.61: 开关已从律动页移除(与「启用遮罩」重复), 恒为圆形 */
     rhythmBarsOn = fxBool(@"AlbumBarsOn", YES);
     {
@@ -1133,7 +1133,7 @@ static void diFxLoadPrefs(void) {
     {
         int c = (int)fxInt(@"AlbumParticleCount2", 25);
         if (c < 0) c = 0;
-        if (c > 40) c = 40;
+        if (c > 48) c = 48;
         rhythmParticleCount = c;
     }
     rhythmColorA = fxString(@"AlbumColorA");
@@ -1157,22 +1157,14 @@ static void diFxLoadPrefs(void) {
     diProgressRingWidth = fmax(0.5, fmin(10.0, fxDouble(@"ArtworkRingWidth", 3.0)));
     diProgressRingColor = fxString(@"ArtworkRingColor");
 
-    /* 3.1.3 user-requested fixed FMusic iOS16 profile.
-       Evidence: 35bd8 count20; 37298 alpha.82; 35c88 ring1; 35cec beat1.
-       Preserve master on/off, progress ring and spectrum bar settings. */
-    rhythmOn=YES;
-    rhythmRingOn=YES;
-    rhythmParticlesOn=YES;
-    rhythmBeatScale=1.0;
-    rhythmStrength=1.0;
-    rhythmParticleStrength=1.0;
+    /* 3.1.4 restore complete album/ring/particle configuration. */
+    rhythmOn=fxBool(@"AlbumRhythmOn",YES);
+    rhythmRingOn=fxBool(@"AlbumRingOn",YES);
+    rhythmParticlesOn=fxBool(@"AlbumParticlesOn",YES);
+    rhythmParticleStrength=1.0; // reference has no independent particle beat gain
     rhythmParticleSize=1.0;
-    rhythmParticleCount=20;
-    rhythmParticleAlpha=0.82;
-    rhythmRingFollowAlpha=0.88;
-    rhythmRingWidth=2.2;
-    ringColorMode=0;
-    particleColorMode=0;
+    { int m=(int)fxInt(@"AlbumRingDisplayMode",2);ringColorMode=m==1?0:(m==2?3:1); }
+    { int m=(int)fxInt(@"AlbumParticleDisplayMode",2);particleColorMode=m==1?0:(m==2?3:1); }
     diParticleExtraBeat=NO;
 
     /* 粒子颜色/模式变了 → 现有粒子也要立刻换色(以前只影响新生的, 看着像"改了没用") */
@@ -20661,12 +20653,14 @@ static BOOL diArtInExpandedPlayer(UIView *v) {
     return NO;
 }
 
+static BOOL diFxExpandedOrSuggestion(UIView *v);
 static UIView *diRhythmPickTarget(void) {
     UIView *best = nil;
     CGFloat bestArea = 0;
     if (!gDIArtKnown) return nil;
     for (UIView *v in gDIArtKnown.allObjects) {
         if (!v.window || v.hidden || v.alpha < 0.3) continue;
+        if (diFxExpandedOrSuggestion(v)) continue;
         if (diViewIsSuggestions(v)) continue;          /* 3.0.48: 不认"媒体建议"页 */
         if (diArtInExpandedPlayer(v)) continue;        /* 3.0.63: 展开的播放页不归律动管 */
         /* 3.0.67: 呈现层被系统放大 >1.6 倍 = 展开页复用的这张封面(bounds 不变,
@@ -21755,7 +21749,7 @@ static void diPlayRatePoll(void) {
     }
     gMRGetNowPlayingInfo(dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^(CFDictionaryRef info) {
         /* 取不到信息时保持上一次判断 —— 一次查询失败不该把特效灭掉 */
-        if (!info) return;
+        if (!info) { dispatch_async(dispatch_get_main_queue(), ^{gDIPlayRateState=0;}); return; }
         CFStringRef key = (gMRRateKeyPtr && *gMRRateKeyPtr) ? *gMRRateKeyPtr : NULL;
         if (!key) return;
         id rv = (__bridge id)CFDictionaryGetValue(info, key);
@@ -21873,13 +21867,29 @@ static BOOL diPowerPlayerVisible(UIView *v){
     CGRect r=[v convertRect:v.bounds toView:v.window];
     return !CGRectIsEmpty(r) && CGRectIntersectsRect(r,v.window.bounds);
 }
+static BOOL diFxExpandedOrSuggestion(UIView *v){
+    if(!v)return NO;
+    for(UIView *p=v;p && p!=p.window;p=p.superview){
+        NSString *n=NSStringFromClass(p.class);
+        if([n containsString:@"Suggestion"] || [n containsString:@"Expanded"])return YES;
+        if(([n containsString:@"NowPlaying"] || [n containsString:@"ContentModule"]) && p.bounds.size.height>=420)return YES;
+    }
+    return diTimeExpanded(v);
+}
+static void diFxSuspendVisuals(void){
+    if(gDIRhythmDriving && gDIRhythmBaseValid)diRhythmWriteAll(1,0,NO,0,YES);
+    gDIRhythmDriving=NO;gDICoverScaleNow=1;
+    diFxHardStop();
+    gDIRhythmRingBox.hidden=YES;
+    if(gDIRhythmLink)gDIRhythmLink.paused=YES;
+}
 static void diRhythmTickWithDelta(float dtIn) {
     BOOL anyFx = (rhythmOn || rhythmRingOn || diProgressRingOn || rhythmParticlesOn || rhythmBarsOn);
     /* 3.0.85: 岛专辑特效改走 MRU(真实专辑遮罩)进程, SB 引擎不再为它启动 */
     if (!rhythmFxOn || !anyFx) { diRhythmReset(); return; }
 
     UIView *t = gDIRhythmTarget;
-    BOOL stale = (!t || !t.window || t.hidden || t.alpha < 0.1);
+    BOOL stale = (!t || !t.window || t.hidden || t.alpha < 0.1 || diFxExpandedOrSuggestion(t));
     if (!stale) {
         UIView *better = nil;
         CFTimeInterval now2 = CACurrentMediaTime();
@@ -21976,7 +21986,7 @@ static void diRhythmTickWithDelta(float dtIn) {
     UIView *dv = gDIRhythmDrive ?: t;
 
     /* 展开态: 特效整体隐藏(与"特效只在不展开的播放卡显示"一致) */
-    BOOL expanded = diTimeExpanded(t);
+    BOOL expanded = diFxExpandedOrSuggestion(t);
     /* 3.0.61: 尺寸一变(57 ↔ 308 展开/收起、模块缩放), 之前记的 base 立刻作废。
        这时**一个字都不写** —— 展开态那张大图的适配缩放是系统用 transform 做的,
        我们把它按 57pt 时的 base 写回去, 用户看到的就是"关掉旋转后展开全乱了"。 */
@@ -21996,6 +22006,7 @@ static void diRhythmTickWithDelta(float dtIn) {
         gDIRhythmDriving = NO;
     }
     if (expanded) {
+        diFxSuspendVisuals();
         diAuClose();
         if(gDIRhythmLink.preferredFramesPerSecond!=20)gDIRhythmLink.preferredFramesPerSecond=20;
         [CATransaction begin];
@@ -22016,6 +22027,7 @@ static void diRhythmTickWithDelta(float dtIn) {
         return;
     }
 
+    if(gDIPlayRateState==0){diFxSuspendVisuals();return;}
     /* 3.0.97: reconcile the ring independently; do not detach working particles,
        progress ring or artwork transforms when toggling a spectrum preference. */
     if (!rhythmRingOn && gDIRhythmRingBox) {
@@ -22101,7 +22113,7 @@ static void diRhythmTickWithDelta(float dtIn) {
     static CFTimeInterval outProbe=0;
     if(logEnabled && CACurrentMediaTime()-outProbe>10){
       outProbe=CACurrentMediaTime();
-      RLog(@"[律动输出312] 开=%d 幅度=%.2f E=%.4f pulse=%.4f scale=%.5f 粒强=%.2f 环=%d",rhythmOn,rhythmBeatScale,gDIFxEnergy,gDIFxBeatPulse,referenceScale,rhythmParticleStrength,rhythmRingOn);
+      RLog(@"[律动输出314] 开=%d 幅度=%.2f E=%.4f pulse=%.4f scale=%.5f 粒强=%.2f 环=%d",rhythmOn,rhythmBeatScale,gDIFxEnergy,gDIFxBeatPulse,referenceScale,rhythmParticleStrength,rhythmRingOn);
     }
 
     if (!gDIFxRealLogged && active && real && gDIBandSeen) {
@@ -22140,6 +22152,7 @@ static void diRhythmTickWithDelta(float dtIn) {
             RLog(@"[律动] 暂停/停止 → 粒子与频谱已隐藏, 引擎挂起");
         }
         if (gDIRhythmLink && !gDIRhythmLink.paused) gDIRhythmLink.paused = YES;
+        return;
     } else if (rhythmOn) {
         /* 尺寸变了之后(展开→收起)base 已作废, 用系统现在的 transform 重新记一次 */
         if (!gDIRhythmBaseValid && dv) {
@@ -22979,6 +22992,11 @@ static void diISMRUFrame(float dtIn) {
 static void diRhythmEnsure(void) {
     /* 3.0.79: 巡检时同步刷新播放状态 —— 引擎挂起后, 这就是唯一的"该不该醒"依据 */
     diPlayRatePoll();
+    if(gDIPlayRateState==0 || diFxExpandedOrSuggestion(gDIRhythmTarget)){
+        diFxSuspendVisuals();
+        if(!diRhythmPickTarget())return;
+        if(gDIPlayRateState==0)return;
+    }
     /* 3.0.49: 与保险档位联动 —— 连续崩两次(档位≤1)时律动整体停, 先保系统能开机。
        用户在设置里拨任意开关会重新拉满档位, 律动随之恢复。 */
     /* 3.0.84: 只开岛特效时也要把引擎拉起来 */

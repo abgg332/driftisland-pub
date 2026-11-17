@@ -6731,6 +6731,13 @@ static BOOL diBarStyleOK(int s) {
     [self diOpenFxPickerKeyA:@"SpectrumColorA" keyB:@"SpectrumColorB" title:@"频谱条颜色"];
 }
 
+- (PSSpecifier *)referenceModeSpec:(NSString *)title key:(NSString *)key {
+    PSSpecifier *sp=[PSSpecifier preferenceSpecifierNamed:title target:self set:@selector(setRingMode:specifier:) get:@selector(readRingMode:) detail:nil cell:PSSegmentCell edit:nil];
+    [sp setProperty:diFxSizedKey(key) forKey:@"key"];
+    [sp setProperty:@[@0,@1,@2] forKey:@"values"];
+    [sp setProperty:@[@"自定义",@"跟随",@"渐变"] forKey:@"titlesValues"];
+    return sp;
+}
 - (id)readRingMode:(PSSpecifier *)sp {
     id v=diFxReadSized([sp propertyForKey:@"key"]);return v?:@2;
 }
@@ -6750,8 +6757,23 @@ static BOOL diBarStyleOK(int s) {
     /* 3.0.66: 所有键都按当前播放器尺寸落键(AlbumBeatScale@3x2 这种形态) ——
        "应用那个尺寸设置的就当前尺寸保存"。读端(Tweak)对没写过的尺寸键会回落原键。 */
     NSMutableArray *specs = [NSMutableArray array];
-    [specs addObject:[self groupSpec:@"FMusic 固定参数" footer:@"专辑律动、律动环、粒子采用 iOS 16 参考还原参数。专辑/环强度 1.0，粒子 20、透明度 0.82。旧的强度、数量和颜色参数不再覆盖此配置。"]];
+    [specs addObject:[self groupSpec:@"专辑律动" footer:@"专辑律动幅度可自由调节，建议 1.0 左右；与粒子共享同一鼓点缩放，不额外叠加粒子弹跳。"]];
     [specs addObject:[self switchSpec:@"启用律动特效" key:diFxSizedKey(@"AlbumEffectsOn") def:@YES]];
+    [specs addObject:[self switchSpec:@"启用律动专辑环" key:diFxSizedKey(@"AlbumRingOn") def:@YES]];
+    [specs addObject:[self referenceModeSpec:@"选择模式" key:@"AlbumRingDisplayMode"]];
+    [specs addObject:[self npSlider:@"律动强度" key:diFxSizedKey(@"AlbumRhythmStrength") def:0.90 mn:0.3 mx:2.5]];
+    [specs addObject:[self fxColorSpec:@"渐变起始色" key:diFxSizedKey(@"AlbumColorA") def:@"#E59971" modeKey:nil]];
+    [specs addObject:[self fxColorSpec:@"渐变结束色" key:diFxSizedKey(@"AlbumColorB") def:@"#948FFF" modeKey:nil]];
+    [specs addObject:[self switchSpec:@"专辑跟随律动" key:diFxSizedKey(@"AlbumRhythmOn") def:@YES]];
+    [specs addObject:[self npSlider:@"专辑律动幅度" key:diFxSizedKey(@"AlbumBeatScale") def:0.70 mn:0.3 mx:2.5]];
+    [specs addObject:[self groupSpec:@"律动粒子" footer:@"不建议使用太多粒子，可能会影响流畅度。"]];
+    [specs addObject:[self switchSpec:@"启用律动粒子" key:diFxSizedKey(@"AlbumParticlesOn") def:@YES]];
+    [specs addObject:[self referenceModeSpec:@"选择模式" key:@"AlbumParticleDisplayMode"]];
+    [specs addObject:[self npSlider:@"粒子数量" key:diFxSizedKey(@"AlbumParticleCount2") def:25 mn:4 mx:48]];
+    [specs addObject:[self npSlider:@"粒子透明" key:diFxSizedKey(@"RhythmParticleAlpha") def:0.74 mn:0.1 mx:1.0]];
+    [specs addObject:[self fxColorSpec:@"渐变起始色" key:diFxSizedKey(@"ParticleColorA") def:@"#FFFFBC" modeKey:nil]];
+    [specs addObject:[self fxColorSpec:@"渐变结束色" key:diFxSizedKey(@"ParticleColorB") def:@"#BFCDF8" modeKey:nil]];
+
     [specs addObject:[self groupSpec:@"专辑进度环" footer:@"根据歌曲实际播放进度绘制，暂停保留位置；没有时长的直播不显示。"]];
     [specs addObject:[self switchSpec:@"启用专辑进度环" key:diFxSizedKey(@"ArtworkProgressRingEnabled") def:@NO]];
     [specs addObject:[self npSlider:@"进度环宽度" key:diFxSizedKey(@"ArtworkRingWidth") def:3.0 mn:0.5 mx:10.0]];
