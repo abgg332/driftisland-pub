@@ -15,13 +15,15 @@ static NSData *pnpArtData;
 static BOOL pnpPlaying=NO,pnpBusy=NO,pnpQuery=NO;
 static CFAbsoluteTime pnpLastQuery=0;
 static NSDictionary *pnpNowPlayingInfo(void){
- // Prefer the stable Objective-C class path over a guessed C symbol.
- Class ctl=NSClassFromString(@"MRMediaRemoteController");
- SEL sel=sel_registerName("nowPlayingInfo");
- if([ctl respondsToSelector:sel]){
-  id r=(id)objc_msgSend((id)ctl,sel);
-  return [r isKindOfClass:NSDictionary.class]?r:nil;
- }
+ // Read the read-only 'nowPlayingInfo' via KVC to avoid typed msgSend issues in C++.
+ Class cls=NSClassFromString(@"MRMediaRemoteController");
+ @try{
+  id shared=[cls valueForKey:@"sharedController"];
+  if([shared isKindOfClass:NSObject.class]){
+   NSDictionary *r=[shared valueForKey:@"nowPlayingInfo"];
+   if([r isKindOfClass:NSDictionary.class])return r;
+  }
+ }@catch(NSException *e){}
  return nil;
 }
 static void PNPLog(NSString *fmt,...){va_list args;va_start(args,fmt);NSString *s=[[NSString alloc]initWithFormat:fmt arguments:args];va_end(args);NSLog(@"[原生播放器] %@",s);}
