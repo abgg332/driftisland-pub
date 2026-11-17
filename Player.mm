@@ -14,6 +14,7 @@
 #include <initializer_list>
 
 #include "NativeRuntime.inc"
+#include "Rotation.inc"
 
 static void PNPLog(NSString *fmt, ...) { va_list a; va_start(a,fmt); NSString *s=[[NSString alloc] initWithFormat:fmt arguments:a]; va_end(a); NSLog(@"[原生播放器] %@",s); }
 #include "Grid.inc"
@@ -24,8 +25,7 @@ static NSHashTable *npRoots = nil;
 static void npDriveRoot(UIView *root) {
     if (!root || !root.window) return;
     @try {
-        diNPBackgroundTick(root);
-        diNPApplyHideForRoot(root);
+        diArtPlayerPost(root);
     } @catch (__unused NSException *e) {}
 }
 
@@ -41,6 +41,8 @@ static void npLayout(id self, SEL cmd) {
 }
 
 static void npInstallHooks(void) {
+    pnp31Install();
+    diArtInstallAVHook();
     static BOOL done = NO;
     if (done) return;
     Class npv = NSClassFromString(@"MRUNowPlayingView");
@@ -53,6 +55,13 @@ static void npInstallHooks(void) {
 
 static void npRespringReload(void) {
     /* 面板注销后 SpringBoard 重启, 重新驱动一次 */
+    dispatch_async(diPrefQ(), ^{
+        diArtForceRefresh();
+        dispatch_async(dispatch_get_main_queue(), ^{
+            for(UIView *a in gDIArtKnown.allObjects)diArtApply(a,diArtPrefOn()||diArtMaskWanted());
+        });
+    });
+    gDISizeGen++;
     npInstallHooks();
     for (UIView *r in npRoots.allObjects) npDriveRoot(r);
 }
@@ -60,7 +69,7 @@ static void npRespringReload(void) {
 __attribute__((constructor)) static void npStart(void) {
     if (![NSProcessInfo.processInfo.processName isEqual:@"SpringBoard"]) return;
     dispatch_async(dispatch_get_main_queue(), ^{
-        npInstallHooks();
+        npRespringReload();
         diNPStartBgTimer();
         /* 监听面板/核心库的刷新通知 */
         int tok;

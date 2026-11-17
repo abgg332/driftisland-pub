@@ -107,17 +107,37 @@ static void diwKillByComm(const char *comm) {
     free(procs);
 }
 /* 遮罩素材目录列举 */
+static NSArray<NSString *> *diSortStrs(NSArray *a);
 static NSArray<NSString *> *diMaskListAssets(void) {
-    NSMutableArray *out = [NSMutableArray array];
     NSFileManager *fm = [NSFileManager defaultManager];
+    NSMutableArray<NSString *> *out = [NSMutableArray array];
     BOOL isDir = NO;
     if (![fm fileExistsAtPath:kDIMaskRoot isDirectory:&isDir] || !isDir) return out;
-    for (NSString *rel in [fm contentsOfDirectoryAtPath:kDIMaskRoot error:NULL]) {
-        NSString *full = [kDIMaskRoot stringByAppendingPathComponent:rel];
-        if (![fm fileExistsAtPath:full isDirectory:&isDir] || isDir) continue;
-        if ([rel.pathExtension.lowercaseString isEqual:@"png"]) [out addObject:rel];
+
+    NSMutableArray<NSString *> *queue = [NSMutableArray arrayWithObject:@""];
+    int depthGuard = 0;
+    while (queue.count && depthGuard++ < 200) {
+        NSString *rel = queue.firstObject;
+        [queue removeObjectAtIndex:0];
+        NSInteger depth = rel.length ? ([rel componentsSeparatedByString:@"/"].count) : 0;
+        NSString *full = rel.length ? [kDIMaskRoot stringByAppendingPathComponent:rel] : kDIMaskRoot;
+        NSArray<NSString *> *items = diSortStrs([fm contentsOfDirectoryAtPath:full error:NULL]);
+        for (NSString *name in items) {
+            if (![name isKindOfClass:NSString.class]) continue;
+            if ([name hasPrefix:@"."]) continue;
+            NSString *childRel = rel.length ? [rel stringByAppendingPathComponent:name] : name;
+            NSString *childFull = [kDIMaskRoot stringByAppendingPathComponent:childRel];
+            BOOL d = NO;
+            if (![fm fileExistsAtPath:childFull isDirectory:&d]) continue;
+            if (!d) {
+                NSString *ext = name.pathExtension.lowercaseString;
+                if ([ext isEqualToString:@"png"] || [ext isEqualToString:@"jpg"] ||
+                    [ext isEqualToString:@"jpeg"]) [out addObject:childRel];
+            } else if (depth < 3) {
+                [queue addObject:childRel];
+            }
+        }
     }
-    [out sortUsingSelector:@selector(localizedStandardCompare:)];
     return out;
 }
 static NSString *diReadPrefString(NSString *key) {
@@ -129,40 +149,57 @@ static void diWritePrefString(NSString *value, NSString *key) {
 }
 
 /* ================= 遮罩素材选择页(对齐 DIMaskPicker + DIPlayerMaskPicker) ================= */
-@interface DIPlayerMaskPicker : PSListController @end
-@implementation DIPlayerMaskPicker
+static NSString *const kDIPlayerMaskKey=@"PlayerMaskAsset";
+static NSString *readPrefString(NSString *key){return diReadPrefString(key);}
+static void writePrefString(NSString *value,NSString *key){diWritePrefString(value,key);notify_post("com.local.playerexact/artwork-changed");}
+static NSArray *DIMaskListAssets(void){return diMaskListAssets();}
+static NSArray<NSString *> *diSortStrs(NSArray *a){return [a sortedArrayUsingComparator:^NSComparisonResult(NSString *x,NSString *y){return [x localizedStandardCompare:y];}] ?: @[];}
+@interface DIMaskPicker:PSListController
+- (NSString *)maskKey;
+- (NSString *)pickerTitle;
+@end
+@implementation DIMaskPicker
+- (NSString *)maskKey { return kDIAlbumMaskKey; }
 - (NSString *)pickerTitle { return @"专辑遮罩素材"; }
 - (void)viewDidLoad {
     [super viewDidLoad];
     self.title = [self pickerTitle];
+    /* 进页就保证目录存在, 方便用户直接往里面丢 png(不用先手动建目录) */
     NSFileManager *fm = [NSFileManager defaultManager];
     BOOL d = NO;
-    if (![fm fileExistsAtPath:kDIMaskRoot isDirectory:&d] || !d)
+    if (![fm fileExistsAtPath:kDIMaskRoot isDirectory:&d] || !d) {
         [fm createDirectoryAtPath:kDIMaskRoot withIntermediateDirectories:YES
-                          attributes:@{NSFilePosixPermissions:@0777} error:NULL];
+                       attributes:@{NSFilePosixPermissions: @0777} error:NULL];
+    }
 }
+
 - (NSArray *)specifiers {
     if (!_specifiers) {
         NSMutableArray *specs = [NSMutableArray array];
-        NSArray<NSString *> *list = diMaskListAssets();
-        NSString *cur = diReadPrefString(kDIAlbumMaskKey);
+        NSArray<NSString *> *list = DIMaskListAssets();
+        NSString *cur = readPrefString([self maskKey]);
+
         PSSpecifier *none = [PSSpecifier preferenceSpecifierNamed:@"不遮罩（关闭遮罩）"
-            target:self set:NULL get:NULL detail:nil cell:PSListItemCell edit:nil];
+                                                           target:self set:nil get:@selector(currentValueForSpecifier:)
+                                                           detail:nil cell:PSListItemCell edit:nil];
         [none setProperty:@"__none__" forKey:@"diKey"];
-        [none setProperty:@([cur isEqualToString:@"__none__"] || cur.length==0) forKey:@"diChecked"];
+        [none setProperty:[NSNumber numberWithBool:[cur isEqualToString:@"__none__"]] forKey:@"diChecked"];
         [specs addObject:none];
+
         if (!list.count) {
             PSSpecifier *empty = [PSSpecifier preferenceSpecifierNamed:@"（目录里还没有 png 素材）"
-                target:nil set:NULL get:NULL detail:nil cell:PSListItemCell edit:nil];
+                                                                target:nil set:nil get:nil detail:nil
+                                                                cell:PSListItemCell edit:nil];
             [empty setProperty:@"把 png 放进 /var/mobile/灵动岛/遮罩素材 即可, 无需重编译" forKey:@"footerText"];
             [specs addObject:empty];
         } else {
             NSString *eff = cur.length ? cur : list.firstObject;
             for (NSString *rel in list) {
                 PSSpecifier *sp = [PSSpecifier preferenceSpecifierNamed:rel
-                    target:self set:NULL get:NULL detail:nil cell:PSListItemCell edit:nil];
+                                                                 target:self set:nil get:@selector(currentValueForSpecifier:)
+                                                                 detail:nil cell:PSListItemCell edit:nil];
                 [sp setProperty:rel forKey:@"diKey"];
-                [sp setProperty:@([rel isEqualToString:eff]) forKey:@"diChecked"];
+                [sp setProperty:[NSNumber numberWithBool:[rel isEqualToString:eff]] forKey:@"diChecked"];
                 [specs addObject:sp];
             }
         }
@@ -170,26 +207,42 @@ static void diWritePrefString(NSString *value, NSString *key) {
     }
     return _specifiers;
 }
+
+- (id)currentValueForSpecifier:(PSSpecifier *)spec {
+    return nil;
+}
+
 - (void)tableView:(UITableView *)tv didSelectRowAtIndexPath:(NSIndexPath *)ip {
     PSSpecifier *sp = [self specifierAtIndexPath:ip];
     NSString *key = [sp propertyForKey:@"diKey"];
     if (key) {
-        if ([key isEqualToString:@"__none__"]) diWritePrefString(nil, kDIAlbumMaskKey);
-        else diWritePrefString(key, kDIAlbumMaskKey);
+        writePrefString(key, [self maskKey]);
+        /* 让悬浮岛立刻刷新 */
         CFNotificationCenterPostNotification(CFNotificationCenterGetDarwinNotifyCenter(),
-                                             CFSTR("com.local.playerexact/artwork-changed"), NULL, NULL, YES);
+                                             CFSTR("com.abgg332.driftisland/prefsChanged"), NULL, NULL, YES);
         [tv deselectRowAtIndexPath:ip animated:YES];
-        dispatch_after(dispatch_time(DISPATCH_TIME_NOW,(int64_t)(0.15*NSEC_PER_SEC)),
-                       dispatch_get_main_queue(),^{ [self reloadSpecifiers]; });
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.15 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+            [self reloadSpecifiers];
+        });
     }
 }
+
+/* 选中项打勾 */
 - (void)tableView:(UITableView *)tv willDisplayCell:(UITableViewCell *)cell forRowAtIndexPath:(NSIndexPath *)ip {
     PSSpecifier *sp = [self specifierAtIndexPath:ip];
     BOOL on = [[sp propertyForKey:@"diChecked"] boolValue];
     cell.accessoryType = on ? UITableViewCellAccessoryCheckmark : UITableViewCellAccessoryNone;
 }
-@end
 
+- (NSString *)tableView:(UITableView *)tv titleForHeaderInSection:(NSInteger)section {
+    return @"点选即生效（无需重启）";
+}
+@end
+@interface DIPlayerMaskPicker:DIMaskPicker @end
+@implementation DIPlayerMaskPicker
+- (NSString *)maskKey { return kDIPlayerMaskKey; }
+- (NSString *)pickerTitle { return @"播放器遮罩素材"; }
+@end
 /* ================= 尺寸页(对齐 DIPlayerSizePage) ================= */
 @interface DIPlayerSizePage : PSListController @end
 @implementation DIPlayerSizePage
@@ -363,7 +416,7 @@ static void diWritePrefString(NSString *value, NSString *key) {
 
         [specs addObject:[self groupSpec:@"播放器尺寸" footer:nil]];
         PSSpecifier *size = [PSSpecifier preferenceSpecifierNamed:@"播放器尺寸" target:self
-            set:NULL get:NULL detail:[DIPlayerSizePage class] cell:PSLinkListCell edit:nil];
+            set:@selector(setPreferenceValue:specifier:) get:@selector(readPreferenceValue:) detail:[DIPlayerSizePage class] cell:PSLinkListCell edit:nil];
         [size setProperty:@"Size" forKey:@"key"];
         [size setProperty:kNPDomain forKey:@"defaults"];
         [size setProperty:@"2x2" forKey:@"default"];
