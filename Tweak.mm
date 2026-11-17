@@ -1157,6 +1157,24 @@ static void diFxLoadPrefs(void) {
     diProgressRingWidth = fmax(0.5, fmin(10.0, fxDouble(@"ArtworkRingWidth", 3.0)));
     diProgressRingColor = fxString(@"ArtworkRingColor");
 
+    /* 3.1.3 user-requested fixed FMusic iOS16 profile.
+       Evidence: 35bd8 count20; 37298 alpha.82; 35c88 ring1; 35cec beat1.
+       Preserve master on/off, progress ring and spectrum bar settings. */
+    rhythmOn=YES;
+    rhythmRingOn=YES;
+    rhythmParticlesOn=YES;
+    rhythmBeatScale=1.0;
+    rhythmStrength=1.0;
+    rhythmParticleStrength=1.0;
+    rhythmParticleSize=1.0;
+    rhythmParticleCount=20;
+    rhythmParticleAlpha=0.82;
+    rhythmRingFollowAlpha=0.88;
+    rhythmRingWidth=2.2;
+    ringColorMode=0;
+    particleColorMode=0;
+    diParticleExtraBeat=NO;
+
     /* 粒子颜色/模式变了 → 现有粒子也要立刻换色(以前只影响新生的, 看着像"改了没用") */
     {
         static int lastMode = -1;
@@ -20326,9 +20344,7 @@ static void diFxUpdateDots(UIView *host, CGRect cover, float dt,
     if (gDICoverScaleNow <= 0.05f) gDICoverScaleNow = 1.0f;
     diFxUpdateMask(cover, gDICoverScaleNow);
     if(gDIDotClipLayer){
-        // Strength 0 preserves natural drift, 1 is the shared reference pulse.
-        CGFloat gain=MIN(2,MAX(0,rhythmParticleStrength));
-        CGFloat sc=rhythmOn?1+(gDICoverScaleNow-1)*gain:1.0f;
+        CGFloat sc=rhythmOn?gDICoverScaleNow:1.0f;
         CGPoint c=CGPointMake(CGRectGetMidX(cover)-host.bounds.origin.x,CGRectGetMidY(cover)-host.bounds.origin.y);
         CATransform3D tr=CATransform3DIdentity;
         tr=CATransform3DTranslate(tr,c.x,c.y,0);
@@ -20377,7 +20393,7 @@ static void diFxUpdateDots(UIView *host, CGRect cover, float dt,
             layer.opacity = 0.0f;
             continue;
         }
-        d->rad += d->drift * dt * fminf(2,fmaxf(0,(float)rhythmParticleStrength));
+        d->rad += d->drift * dt;
         d->rot += d->rotSpd * dt;
 
         float progress = 1.0f - d->life / MAX(d->maxLife, 0.16f);
@@ -20799,7 +20815,7 @@ static void diRhythmDetach(void) {
         [CATransaction setDisableActions:YES];
         for (int i = 0; i < gDIRhythmExtraN; i++)
             if (gDIRhythmExtras[i])
-                gDIRhythmExtras[i].layer.transform = diRhythmBaseOf(gDIRhythmExtras[i]);
+                { [gDIRhythmExtras[i].layer removeAnimationForKey:@"di.rhythm.scale.hold"]; gDIRhythmExtras[i].layer.transform = diRhythmBaseOf(gDIRhythmExtras[i]); }
         [CATransaction commit];
     }
     /* 3.0.67: 摘掉壳和额外视图上遗留的 di.rhythm.tf 兜底动画 —— 它是
@@ -21884,9 +21900,9 @@ static void diRhythmTickWithDelta(float dtIn) {
         if (oldDrive && gDIRhythmBaseValid && oldDrive.window) {
             [CATransaction begin];
             [CATransaction setDisableActions:YES];
-            oldDrive.layer.transform = gDIRhythmBase;
+            [oldDrive.layer removeAnimationForKey:@"di.rhythm.scale.hold"]; oldDrive.layer.transform = gDIRhythmBase;
             for (int i = 0; i < gDIRhythmExtraN; i++)
-                if (gDIRhythmExtras[i]) gDIRhythmExtras[i].layer.transform = diRhythmBaseOf(gDIRhythmExtras[i]);
+                if (gDIRhythmExtras[i]) { [gDIRhythmExtras[i].layer removeAnimationForKey:@"di.rhythm.scale.hold"]; gDIRhythmExtras[i].layer.transform = diRhythmBaseOf(gDIRhythmExtras[i]); }
             [CATransaction commit];
         }
         for (int i = 0; i < DI_RHYTHM_EXTRA_MAX; i++) gDIRhythmExtras[i] = nil;
