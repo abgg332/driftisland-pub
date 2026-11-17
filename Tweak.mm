@@ -21395,7 +21395,7 @@ static void diColorPalette(int mode, NSString *hexA, NSString *hexB,
     }
     *outA = diRhythmHexColor(hexA, defA);
     *outB = diRhythmHexColor(hexB, defB);
-    if(!forParticles && ringColorMode==1 && mode==1)*outB=*outA;
+    if(mode==1)*outB=*outA;
 }
 
 static void diRhythmRebuild(UIView *t) {
