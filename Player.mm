@@ -27,6 +27,7 @@ static NSDictionary *pnpNowPlayingInfo(void){
  return nil;
 }
 static void PNPLog(NSString *fmt,...){va_list args;va_start(args,fmt);NSString *s=[[NSString alloc]initWithFormat:fmt arguments:args];va_end(args);NSLog(@"[原生播放器] %@",s);}
+static BOOL pnpPrefBool(NSString *key,BOOL fallback){id v=pnpPrefs[key];return v?[v boolValue]:fallback;}
 static BOOL pnpBool(NSString *key,BOOL fallback){id v=pnpNative[key];return v?[v boolValue]:fallback;}
 #include "Grid.inc"
 @interface PNPArtState:NSObject
@@ -59,7 +60,7 @@ static void pnpApply(UIView *root){
  while(queue.count&&budget-->0){UIView *v=queue.lastObject;[queue removeLastObject];NSString *name=NSStringFromClass(v.class);
   if([name containsString:@"Activity"])continue;
   if([name containsString:@"ArtworkView"]){
-   BOOL mask=enabled&&!expanded&&pnpBool(@"PlayerMaskOn",NO)&&pnpMask;
+   BOOL mask=enabled&&!expanded&&pnpPrefBool(@"PlayerMaskOn",NO)&&pnpMask;
    PNPArtState *state=objc_getAssociatedObject(v,&pnpArtKey);
    if(mask&&!state){state=[PNPArtState new];state.originalMask=v.layer.mask;state.mask=[CALayer layer];state.mask.contentsGravity=kCAGravityResizeAspect;objc_setAssociatedObject(v,&pnpArtKey,state,OBJC_ASSOCIATION_RETAIN_NONATOMIC);}
    if(mask){state.mask.frame=v.bounds;state.mask.contents=(__bridge id)pnpMask.CGImage;v.layer.mask=state.mask;}
