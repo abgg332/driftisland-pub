@@ -3,7 +3,7 @@ ARCHS = arm64 arm64e
 include $(THEOS)/makefiles/common.mk
 TWEAK_NAME = PrivateNativePlayer
 PrivateNativePlayer_FILES = Player.mm
-PrivateNativePlayer_CFLAGS = -fobjc-arc -std=c++17
+PrivateNativePlayer_CFLAGS = -fobjc-arc -std=c++17 -Wno-unused-function -Wno-unused-variable
 PrivateNativePlayer_FRAMEWORKS = UIKit Foundation QuartzCore CoreFoundation
 PrivateNativePlayer_LDFLAGS = -F$(THEOS_VENDOR_LIBRARY_PATH) -framework CydiaSubstrate
 include $(THEOS_MAKE_PATH)/tweak.mk

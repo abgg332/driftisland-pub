@@ -3,6 +3,8 @@
 #import <mach-o/dyld.h>
 static int gDISizeGen=0;
 static BOOL playerMaskOn=NO;
+static void (*gNPRSetRotation)(BOOL)=NULL;
+static BOOL gNPRLooked=NO;
 static BOOL enabled=YES;
 static CFTimeInterval gDISpinEpoch=0;
 static const CFTimeInterval kDISpinDur=10.0;
@@ -19,9 +21,26 @@ static BOOL diPrefBoolNow(NSString *key,BOOL fallback){
 }
 
 
+@interface DIArtMaskState : NSObject
+@property (nonatomic, strong) CAShapeLayer *mask;
+@property (nonatomic, strong) CALayer *origMask;   /* 必须强引用: 换掉后系统层没人持有, 弱引用会变 nil 还原不回去 */
+@property (nonatomic, assign) CGFloat origRadius;
+@property (nonatomic, assign) BOOL origClip;
+@property (nonatomic, assign) CATransform3D origTransform;
+@property (nonatomic, assign) CGPoint origAnchor;      /* 3.0.19: 原始锚点(不居中会"绕外围转") */
+@property (nonatomic, assign) CGSize lastSize;
+@property (nonatomic, assign) CFTimeInterval spinTS;   /* 3.0.15: 旋转起始时刻, 重挂时按相位续上 */
+@property (nonatomic, assign) BOOL assetOn;                /* 3.0.39: 当前蒙版是"遮罩素材"而不是内切圆 */
+@property (nonatomic, weak) UIImage *assetImg;             /* 3.0.39: 上次贴上去的那张素材(换素材要重贴) */
+@end
 @implementation DIArtMaskState
 @end
 
+@interface DIArtRootState : NSObject
+@property (nonatomic, strong) NSArray<UIView *> *arts;
+@property (nonatomic, assign) CFTimeInterval scanTS;
+@property (nonatomic, assign) int recollects;   /* 3.0.13: 延迟二次收集的链式次数上限 */
+@end
 @implementation DIArtRootState
 @end
 
