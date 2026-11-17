@@ -1,6 +1,4 @@
 /* 独立原生播放器 运行时 —— 逐字摘自 漂流岛 3.1 Tweak.mm(除音律)。背景/隐藏未在/隐藏时间/MediaRemote取图。*/
-static BOOL gDIHasNowPlaying = NO;
-static dispatch_source_t gDIBgTimer = NULL;
 static void RLog(NSString *fmt, ...) { va_list a; va_start(a,fmt); NSString *s=[[NSString alloc] initWithFormat:fmt arguments:a]; va_end(a); NSLog(@"[原生播放器] %@",s); }
 static void diNoImplicitActions(CALayer *l) {
     if (!l) return;
@@ -559,12 +557,7 @@ static void diNPQueryNowPlaying(void) {
                "到底在不在放"交给 PlaybackRate 那条硬信号, 不靠这里。 */
             has = (info != NULL);
         } @catch (__unused NSException *e) {}
-        NSDictionary *meta = info ? [(__bridge NSDictionary *)info copy] : @{};
-        // Read the actual track artwork even when the album-background feature is off.
-        NSData *art=meta[@"kMRMediaRemoteNowPlayingInfoArtworkData"];
-                        double elapsed=[meta[@"kMRMediaRemoteNowPlayingInfoElapsedTime"] doubleValue];
-        double duration=[meta[@"kMRMediaRemoteNowPlayingInfoDuration"] doubleValue];
-        double rate=[meta[@"kMRMediaRemoteNowPlayingInfoPlaybackRate"] doubleValue];
+        (void)info;
         dispatch_async(dispatch_get_main_queue(), ^{
             /* standalone */
             /* standalone */
