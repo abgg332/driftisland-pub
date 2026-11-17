@@ -7,7 +7,6 @@
 #include <math.h>
 #include <string.h>
 #include <initializer_list>
-extern "C" id objc_msgSend(id, SEL);
 static NSString *const PNPDomain=@"com.privatecustom.nativeplayer";
 static NSDictionary *pnpPrefs,*pnpNative;
 static NSHashTable *pnpRoots;
@@ -19,7 +18,10 @@ static NSDictionary *pnpNowPlayingInfo(void){
  // Prefer the stable Objective-C class path over a guessed C symbol.
  Class ctl=NSClassFromString(@"MRMediaRemoteController");
  SEL sel=sel_registerName("nowPlayingInfo");
- if([ctl respondsToSelector:sel]){id r=objc_msgSend(ctl,sel);return [r isKindOfClass:NSDictionary.class]?r:nil;}
+ if([ctl respondsToSelector:sel]){
+  id r=(id)objc_msgSend((id)ctl,sel);
+  return [r isKindOfClass:NSDictionary.class]?r:nil;
+ }
  return nil;
 }
 static void PNPLog(NSString *fmt,...){va_list args;va_start(args,fmt);NSString *s=[[NSString alloc]initWithFormat:fmt arguments:args];va_end(args);NSLog(@"[原生播放器] %@",s);}
