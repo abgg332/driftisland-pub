@@ -18806,65 +18806,7 @@ static id di31Instance(id self,SEL cmd,id metadata,id module,DI31LayoutSize prot
     if(di31KeyOn() && [identifier isEqual:di31ModuleID])prototype=(DI31LayoutSize){3,1};
     return di31InstanceOrig(self,cmd,metadata,module,prototype);
 }
-// Fixed 3x1 row offset. Applied AFTER native layout/frame/transform writes.
-// layer.position moves the entire control row and its hit-test geometry without
-// altering module size, internal button spacing, or invoking another UIView layout.
-static char di31RowLastKey,di31RowBaseKey;
-static BOOL di31RowBusy=NO;
-static void (*di31RowBoundsOrig)(id,SEL,CGRect);
-static void di31RowApply(UIView *row){
-    if(di31RowBusy || !row || !di31RowBoundsOrig)return;
-    di31RowBusy=YES;
-    @try {
-        BOOL active=di31KeyOn() && row.window && row.bounds.size.width>1;
-        for(UIView *v=row;v;v=v.superview){
-            NSString *name=NSStringFromClass(v.class);
-            if([name containsString:@"Activity"]){active=NO;break;}
-        }
-        if(active && diTimeExpanded(row))active=NO;
-        CGRect current=row.bounds,base=current;
-        NSValue *last=objc_getAssociatedObject(row,&di31RowLastKey);
-        NSValue *saved=objc_getAssociatedObject(row,&di31RowBaseKey);
-        if(last && saved && fabs(current.origin.x-last.CGRectValue.origin.x)<0.001)
-            base.origin.x=saved.CGRectValue.origin.x;
-        CGRect target=base;
-        if(active)target.origin.x-=8.0; // content and hit-test coordinates move right
-        [CATransaction begin];[CATransaction setDisableActions:YES];
-        if(!CGRectEqualToRect(current,target))di31RowBoundsOrig(row,@selector(setBounds:),target);
-        [CATransaction commit];
-        objc_setAssociatedObject(row,&di31RowBaseKey,active?[NSValue valueWithCGRect:base]:nil,OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-        objc_setAssociatedObject(row,&di31RowLastKey,active?[NSValue valueWithCGRect:target]:nil,OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-        static CFAbsoluteTime logged=0;
-        if(active && CFAbsoluteTimeGetCurrent()-logged>3){
-            logged=CFAbsoluteTimeGetCurrent();
-            NSMutableString *buttons=[NSMutableString string];
-            for(UIView *v in row.subviews)if([NSStringFromClass(v.class) containsString:@"TransportButton"] && !v.hidden && v.alpha>.05)
-                [buttons appendFormat:@" %@",NSStringFromCGRect([v convertRect:v.bounds toView:row.window])];
-            RLog(@"[3x1按钮125] 内容右移8pt frame=%@ bounds=%@ 可见按钮窗口坐标=%@",NSStringFromCGRect(row.frame),NSStringFromCGRect(row.bounds),buttons);
-        }
-    }@catch(NSException *e){RLog(@"[3x1按钮125] %@",e.reason);}
-    di31RowBusy=NO;
-}
-static void di31RowBounds(id obj,SEL sel,CGRect bounds){
-    di31RowBoundsOrig(obj,sel,bounds);di31RowApply(obj);
-}
-static void (*di31RowLayoutOrig)(id,SEL);
-static void (*di31RowFrameOrig)(id,SEL,CGRect);
-static void (*di31RowTransformOrig)(id,SEL,CGAffineTransform);
-static void di31RowLayout(id obj,SEL sel){di31RowLayoutOrig(obj,sel);di31RowApply(obj);}
-static void di31RowFrame(id obj,SEL sel,CGRect frame){di31RowFrameOrig(obj,sel,frame);di31RowApply(obj);}
-static void di31RowTransform(id obj,SEL sel,CGAffineTransform transform){di31RowTransformOrig(obj,sel,transform);di31RowApply(obj);}
-static void di31InstallRow(void){
-    static BOOL installed=NO;if(installed)return;
-    Class c=NSClassFromString(@"MRUNowPlayingTransportControlsView");if(!c)return;
-    MSHookMessageEx(c,@selector(layoutSubviews),(IMP)di31RowLayout,(IMP *)&di31RowLayoutOrig);
-    MSHookMessageEx(c,@selector(setFrame:),(IMP)di31RowFrame,(IMP *)&di31RowFrameOrig);
-    MSHookMessageEx(c,@selector(setTransform:),(IMP)di31RowTransform,(IMP *)&di31RowTransformOrig);
-    MSHookMessageEx(c,@selector(setBounds:),(IMP)di31RowBounds,(IMP *)&di31RowBoundsOrig);
-    installed=YES;RLog(@"[3x1按钮125] 内容坐标右移已安装");
-}
 static void di31Install(void){
-    di31InstallRow();
     Class manager=NSClassFromString(@"CCUIModuleSettingsManager");
     SEL settings=NSSelectorFromString(@"moduleSettingsForModuleIdentifier:prototypeSize:");
     if(!di31SettingsInstalled && di31SizeABI(class_getInstanceMethod(manager,settings),3)){
@@ -19734,7 +19676,6 @@ static BOOL gDIRhythmDriving = NO;     /* 上一帧我们是否在写 transform(
    现在两处都只看这一个 gDIKick: 低频(3.0.68 起只看 60~140Hz 底鼓基频)的**起音前沿**
    → 跳到 0~1 → 170ms 衰减。 */
 static float diSharedVisualPulse=0;
-static float diSharedPunch=0; /* short visual dip/recover shared by album and particles */
 static float gDIKick = 0.0f;           /* 视觉包络: 3.0.74 起由统一顺滑包络推进(45ms 顶/170ms 落) */
 static float gDIKickTarget = 0.0f;     /* 3.0.74: 本次咚的目标强度 */
 static CFTimeInterval gDIKickAtkT = 0; /* 3.0.74: 起音时刻(45ms 趋近窗口) */
@@ -19942,6 +19883,7 @@ static void diRhythmDumpLayerNode(CALayer *l, int d,
 }
 
 static void diRhythmDumpTree(UIView *dv) {
+    if(!logEnabled)return;
     if (!dv) return;
     UIView *root = dv;
     for (int i = 0; i < 2 && root.superview && root.superview != root.window; i++)
@@ -20463,7 +20405,7 @@ static void diFxUpdateDots(UIView *host, CGRect cover, float dt,
     static float particlePeak = 0;
     particlePeak = fmaxf(particlePeak, beatTarget);
     CFTimeInterval probeNow = CACurrentMediaTime();
-    if (active && probeNow - particleProbeAt >= 2.0) {
+    if (logEnabled && active && probeNow - particleProbeAt >= 10.0) {
         RLog(@"[粒子鼓点] 存活=%d 强度=%.2f 两秒峰值=%.3f 缩放增益=%.3f 径向增益=%.2fpt 同步组缩放=%.4f 额外弹跳=%d", alive, strength, particlePeak, 0.60f*particlePeak, cover.size.width*0.055f*particlePeak, gDICoverScaleNow, diParticleExtraBeat);
         particleProbeAt = probeNow;
         particlePeak = 0;
@@ -21054,6 +20996,10 @@ static void diRhythmUpdateBars(UIView *host, BOOL active) {
         if (gDIRhythmBars) { gDIRhythmBars = nil; }
         return;
     }
+    static CFTimeInterval pathAt=0;
+    CFTimeInterval pathNow=CACurrentMediaTime();
+    if(pathNow-pathAt<1.0/30.0)return;
+    pathAt=pathNow;
     UIView *sl = gDIRhythmSliderW;
     if (!sl || CACurrentMediaTime() - gDIRhythmSliderAt > 0.5) {
         sl = diFindSliderIn(host, 0);
@@ -21122,11 +21068,13 @@ static void diRhythmUpdateBars(UIView *host, BOOL active) {
                    [UIColor colorWithRed:0.42 green:0.72 blue:1.00 alpha:1.0],
                    gDIHuePhase, NO, &ca, &cb);
     static double lastBarsHue = -1.0;
-    BOOL colorsDirty = (spectrumColorMode==0) || (spectrumColorMode != gDIBarsModeUsed)
+    static UIColor *lastResolvedA=nil,*lastResolvedB=nil;
+    BOOL colorsDirty = ![ca isEqual:lastResolvedA] || ![cb isEqual:lastResolvedB] || (spectrumColorMode != gDIBarsModeUsed)
         || ![gDIBarsUsedA isEqualToString:(spectrumColorA ?: @"")]
         || ![gDIBarsUsedB isEqualToString:(spectrumColorB ?: @"")]
         || (spectrumColorMode == 2 && fabs(gDIHuePhase - lastBarsHue) > 0.004);
     if (colorsDirty) {
+        lastResolvedA=ca;lastResolvedB=cb;
         gDIBarsModeUsed = spectrumColorMode;
         gDIBarsUsedA = [(spectrumColorA ?: @"") copy];
         gDIBarsUsedB = [(spectrumColorB ?: @"") copy];
@@ -21470,6 +21418,7 @@ static void diRhythmRebuild(UIView *t) {
 }
 
 static void diRhythmReset(void) {
+    diAuClose();
     UIView *t = gDIRhythmTarget;
     UIView *dv = gDIRhythmDrive ?: t;
     if (dv && gDIRhythmBaseValid) {
@@ -21835,6 +21784,7 @@ static void diISHardStop(void) {
    注意粒子层下一帧会重新变可见(opacity 由 diFxUpdateDots 写), 所以清空用的是
    life=0 + count=0 —— updateDots 对 life<=0 的槽位只写 opacity 0, 不会被"复活"。 */
 static void diFxHardStop(void) {
+    diAuClose();
     [CATransaction begin];
     [CATransaction setDisableActions:YES];
     for (int i = 0; i < DI_DOT_CAP; i++) {
@@ -21893,6 +21843,14 @@ static void diISPublishBeat(BOOL playing) {
     pwrite(fd, &sn, sizeof sn, 0);
 }
 
+static BOOL diPowerPlayerVisible(UIView *v){
+    if(!v || !v.window || v.window.hidden)return NO;
+    for(UIView *p=v;p;p=p.superview){
+        if(p.hidden || p.alpha<0.01)return NO;
+    }
+    CGRect r=[v convertRect:v.bounds toView:v.window];
+    return !CGRectIsEmpty(r) && CGRectIntersectsRect(r,v.window.bounds);
+}
 static void diRhythmTickWithDelta(float dtIn) {
     BOOL anyFx = (rhythmOn || rhythmRingOn || diProgressRingOn || rhythmParticlesOn || rhythmBarsOn);
     /* 3.0.85: 岛专辑特效改走 MRU(真实专辑遮罩)进程, SB 引擎不再为它启动 */
@@ -21988,6 +21946,11 @@ static void diRhythmTickWithDelta(float dtIn) {
         return;
     }
 
+    if(!diPowerPlayerVisible(t)){
+        diAuClose();
+        if(gDIRhythmLink)gDIRhythmLink.paused=YES;
+        return;
+    }
     UIView *dv = gDIRhythmDrive ?: t;
 
     /* 展开态: 特效整体隐藏(与"特效只在不展开的播放卡显示"一致) */
@@ -22011,6 +21974,8 @@ static void diRhythmTickWithDelta(float dtIn) {
         gDIRhythmDriving = NO;
     }
     if (expanded) {
+        diAuClose();
+        if(gDIRhythmLink.preferredFramesPerSecond!=20)gDIRhythmLink.preferredFramesPerSecond=20;
         [CATransaction begin];
         [CATransaction setDisableActions:YES];
         diProgressBack.hidden=YES; diProgressFront.hidden=YES;
@@ -22084,7 +22049,8 @@ static void diRhythmTickWithDelta(float dtIn) {
        我们这边不再动布局(见粒子层的池化), 再补一条: 没在放歌就别按 120Hz 空转。
        播放时立刻恢复 0 = 跟随原生刷新率。 */
     if (gDIRhythmLink) {
-        NSInteger wantFps = active ? 0 : 20;
+        NSProcessInfo *power=NSProcessInfo.processInfo;
+        NSInteger wantFps=active ? ((power.lowPowerModeEnabled || power.thermalState>=NSProcessInfoThermalStateSerious)?30:60) : 20;
         if (gDIRhythmLink.preferredFramesPerSecond != wantFps)
             gDIRhythmLink.preferredFramesPerSecond = wantFps;
     }
@@ -22108,37 +22074,8 @@ static void diRhythmTickWithDelta(float dtIn) {
     // Reference detector uses spectrum energy, not the legacy PCM kick detector.
     float referenceScale=diFxAdvanceBeat(active, gDIFxEnergy, 1.0, dt);
     diSharedVisualPulse=fminf(1,fmaxf(0,(referenceScale-1)/0.095f));
-    // Spectral onset detector: bass and mid/high positive flux, once per audio packet.
-    static float prevBands[24]={}, fluxFloor=0.002f, amplitude=0;
-    static CFAbsoluteTime packetStamp=0;
-    static CFTimeInterval onsetAt=0;
-    CFTimeInterval onsetNow=CACurrentMediaTime();
-    if(active && real && gDIAuStamp!=packetStamp){
-        float low=0,high=0;
-        for(int i=0;i<24;i++){
-            float v=isfinite(gDIBandRaw[i])?fminf(1,fmaxf(0,gDIBandRaw[i])):0;
-            float rise=fmaxf(0,v-prevBands[i]);prevBands[i]=v;
-            if(i<6)low+=rise/6;else high+=rise/18;
-        }
-        float flux=fmaxf(low,high);
-        float threshold=fmaxf(0.012f,fluxFloor*2.2f);
-        if(onsetNow-onsetAt>0.14 && (flux>threshold || gDIKickTarget>0.45f)){
-            amplitude=fminf(1,fmaxf(0.4f,fmaxf(gDIKickTarget,flux/(threshold*2))));
-            onsetAt=onsetNow;
-        }
-        fluxFloor+=0.06f*(flux-fluxFloor);packetStamp=gDIAuStamp;
-    }
-    if(!active || !real){memset(prevBands,0,sizeof(prevBands));amplitude=0;fluxFloor=.002f;onsetAt=0;}
-    double age=onsetAt>0?onsetNow-onsetAt:1;
-    diSharedPunch=amplitude*(age<.025?age/.025:exp(-(age-.025)/.095));
-    if(age>.5)diSharedPunch=0;
     diISPublishBeat(active);
     float fxBeatS=1+fminf(0.22f,(float)rhythmBeatScale*0.095f*diSharedVisualPulse);
-    /* A short downward compression at each onset, then return to the common scale. */
-    float compression=fminf(0.12f,0.10f*fmaxf(0,(float)rhythmBeatScale)*diSharedPunch);
-    fxBeatS=fxBeatS*(1-diSharedPunch)+(1-compression)*diSharedPunch;
-    static CFTimeInterval punchLogAt=0;
-    if(active && onsetNow-punchLogAt>2){punchLogAt=onsetNow;RLog(@"[播放器起音] 收缩包络=%.3f 共同缩放=%.4f 真频谱=%d",diSharedPunch,fxBeatS,real);}
 
     if (!gDIFxRealLogged && active && real && gDIBandSeen) {
         gDIFxRealLogged = YES;
@@ -22212,7 +22149,7 @@ static void diRhythmTickWithDelta(float dtIn) {
                不再用 gDIKick·0.20·幅度 自己算 —— 那一套是"底鼓起音前沿",
                和参考实现的"相对基线能量瞬态"手感不是一回事。 */
             CGFloat s = fxBeatS;
-            if (s < 0.88) s = 0.88;
+            if (s < 1.0) s = 1.0;
             if (s > 1.22) s = 1.22;
             sDbg = s;
             gDICoverScaleNow = (float)s;      /* 粒子遮罩的孔固定 1.02R, 这里只做记录 */
@@ -22236,7 +22173,7 @@ static void diRhythmTickWithDelta(float dtIn) {
     {
         static CFTimeInterval probeAt = 0;
         CFTimeInterval nowP = CACurrentMediaTime();
-        if (nowP - probeAt >= 1.5) {
+        if (logEnabled && nowP - probeAt >= 10.0) {
             probeAt = nowP;
             CATransform3D p3 = dv.layer.transform;
             /* 3.0.58: 旋转接管后 m11 = cos(角度)×缩放, 单看 m11 会以为是乱跳。
@@ -22330,8 +22267,10 @@ static void diRhythmTickWithDelta(float dtIn) {
 @end
 @implementation DIFxTicker
 - (void)onFrame:(CADisplayLink *)link {
-    double dt = link.targetTimestamp - link.timestamp;
-    if (dt <= 0.0 || dt > 0.12) dt = 1.0 / 60.0;
+    static CFTimeInterval previous=0;
+    double dt=previous>0?link.timestamp-previous:1.0/60.0;
+    previous=link.timestamp;
+    if(dt<=0 || dt>0.12)dt=1.0/60.0;
     @try { diRhythmTickWithDelta((float)dt); } @catch (__unused NSException *e) {}
 }
 @end
@@ -23025,7 +22964,7 @@ static void diRhythmEnsure(void) {
                                                     selector:@selector(onFrame:)];
         /* 0 = 跟随屏幕原生刷新率(ProMotion 120Hz)。以前写死 60Hz, 在 120Hz 屏上
            每两帧才动一次 —— 这就是"一卡一卡"的直接原因。 */
-        gDIRhythmLink.preferredFramesPerSecond = 0;
+        gDIRhythmLink.preferredFramesPerSecond = 60;
         [gDIRhythmLink addToRunLoop:[NSRunLoop mainRunLoop] forMode:NSRunLoopCommonModes];
         RLog(@"[律动] 引擎启动 CADisplayLink %ld (0=跟随原生刷新率) (总=%d 圆=%d 缩放=%d 环=%d 粒=%d 条=%d)",
              (long)gDIRhythmLink.preferredFramesPerSecond,
@@ -23047,6 +22986,9 @@ static void diRhythmEnsure(void) {
         if (gDIPlayRateState == 0) playNow = NO;
         else if (gDIPlayRateState == 1) playNow = YES;
         if (!playNow || !songNow) return;
+        BOOL visible=diPowerPlayerVisible(gDIRhythmTarget);
+        if(!visible)for(UIView *root in gDIArtRoots.allObjects)if(diPowerPlayerVisible(root)){visible=YES;break;}
+        if(!visible)return;
         gDIBeatStopped = NO;
         gDIRhythmLink.paused = NO;
         RLog(@"[律动] 重新播放 → 引擎唤醒");

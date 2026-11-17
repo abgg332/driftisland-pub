@@ -27,6 +27,8 @@
 #import <string.h>
 #import <math.h>
 #import <pthread.h>
+#include <atomic>
+static std::atomic<int> diAudioConsumers{0};
 
 #include "DIReferenceSpectrum.h"
 
@@ -251,6 +253,7 @@ static OSStatus diAudioRenderHook(AudioUnit inUnit,
                                                inBusNumber, inNumberFrames, ioData)
                                : AudioUnitRender(inUnit, ioActionFlags, inTimeStamp,
                                                  inBusNumber, inNumberFrames, ioData);
+    if (diAudioConsumers.load(std::memory_order_relaxed)==0) return r;
     if (r == noErr && ioData && ioData->mNumberBuffers > 0 && inNumberFrames > 0) {
         AudioBuffer *b = &ioData->mBuffers[0];
         if (!b->mData || b->mDataByteSize < 64) return r;
@@ -316,6 +319,7 @@ static OSStatus diAudioRenderHook(AudioUnit inUnit,
 static void *diAudioClientThread(void *arg) {
     int c = (int)(intptr_t)arg;
     if (c < 0) return NULL;
+    diAudioConsumers.fetch_add(1,std::memory_order_relaxed);
     int nb = fcntl(c, F_GETFL, 0);
     if (nb >= 0) fcntl(c, F_SETFL, nb | O_NONBLOCK);
     {
@@ -325,13 +329,16 @@ static void *diAudioClientThread(void *arg) {
                看着就是"暂停了音频还在动"。现在没声音就 20Hz 轻量巡检、**不发包**;
                render 一回来(live=YES)立刻恢复 60Hz。 */
             if (CFAbsoluteTimeGetCurrent() - gDIStamp >= 0.5) {
-                usleep(50000);
+                // Detect disconnected clients even while render callbacks are idle.
+                char byte;ssize_t state=recv(c,&byte,1,MSG_PEEK|MSG_DONTWAIT);
+                if(state==0 || (state<0 && errno!=EAGAIN && errno!=EWOULDBLOCK && errno!=EINTR))break;
+                usleep(200000);
                 for (int b = 0; b < DI_BANDS; b++) gDIBandF[b] *= 0.85f;
                 continue;
             }
             /* 3.0.55: 33ms → 16ms。30Hz 的数据在 120Hz 屏上就是"每四帧才变一次",
                刻度和粒子再怎么平滑也是顿的。60Hz 发包, 32 字节/包, 开销可以忽略。 */
-            usleep(16000);
+            usleep(33333);
             BOOL live = (CFAbsoluteTimeGetCurrent() - gDIStamp < 0.5);
             float fast = 0.0f, slow = 0.0f;
             uint8_t bands[DI_BANDS];
@@ -379,6 +386,7 @@ static void *diAudioClientThread(void *arg) {
         }
     }
     close(c);
+    diAudioConsumers.fetch_sub(1,std::memory_order_relaxed);
     return NULL;
 }
 

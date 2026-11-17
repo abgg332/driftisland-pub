@@ -6187,7 +6187,7 @@ static void diNPEnsureActivation(void) {
     v = round(v * 1000.0) / 1000.0;
     CFPreferencesSetAppValue((__bridge CFStringRef)key, (__bridge CFPropertyListRef)@(v),
                              (__bridge CFStringRef)kDomain);
-    /* Other effects retain asynchronous preference writes. */
+    /* 特效键不落盘同步(拖动时每秒几十次 fsync 会卡设置页), 由 cfprefsd 异步落盘 */
     if (diIsFxKey(key)) diPostFxTune();               /* 轻量: 只重读特效参数 */
     else notify_post("com.local.playerexact/artwork-changed");
 }
@@ -6652,7 +6652,7 @@ static BOOL diBarStyleOK(int s) {
     v = round(v * 1000.0) / 1000.0;
     CFPreferencesSetAppValue((__bridge CFStringRef)key, (__bridge CFPropertyListRef)@(v),
                              (__bridge CFStringRef)kDomain);
-    /* Other effects retain asynchronous preference writes. */
+    /* 特效键不落盘同步(拖动时每秒几十次 fsync 会卡设置页), 由 cfprefsd 异步落盘 */
     if (diIsFxKey(key)) diPostFxTune();               /* 轻量: 只重读特效参数 */
     else notify_post("com.local.playerexact/artwork-changed");
 }
@@ -6780,5 +6780,3 @@ static BOOL diBarStyleOK(int s) {
     return specs;
 }
 @end
-
-
