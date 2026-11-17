@@ -572,7 +572,19 @@ static void diNPQueryNowPlaying(void) {
      ② 类名不能用 isEqualToString 比对, 实际拿到的是 MRUNowPlayingView 的子类。
    现在: 沿父链把所有 MRUNowPlaying* / *ContentModuleContainerView 都换算到 window
    坐标量一遍(带 transform 的真实大小), 取最大那块, 宽≥320 或 高≥235 就算展开。 */
-static BOOL diArtInExpandedPlayer(UIView *v);   /* 3.0.66: 定义在律动段, 这里先用 */
+static BOOL diArtInExpandedPlayer(UIView *v) {
+    UIView *p = v;
+    for (int i = 0; i < 16 && p; i++) {
+        NSString *cn = NSStringFromClass(p.class);
+        if ([cn containsString:@"ControlCenter"] || [cn containsString:@"ContentModule"]) return NO;
+        if ([cn containsString:@"SystemAperture"]) return NO;
+        if ([cn containsString:@"NowPlayingViewController"] ||
+            [cn containsString:@"NowPlayingExpanded"] ||
+            [cn containsString:@"Expanded"]) return YES;
+        p = p.superview;
+    }
+    return NO;
+}
 static BOOL diTimeExpanded(UIView *v) {
     if (!v) return NO;
     /* 3.0.66: 478 用户: "只有 3×2 有律动/粒子, 其他布局没有"。
