@@ -7,7 +7,9 @@ FWK_DIR := Frameworks/_Simulator
 IPHONE_SIMULATOR_ROOT := $(shell devkit/sim-root.sh)
 else
 ARCHS ?= arm64 arm64e
-TARGET := iphone:clang:16.5:16.0
+# TVZ_SDK: Swift 目标需要与 runner 工具链匹配的 SDK(由 CI 设为 xcrun 版本)
+TVZ_SDK ?= 16.5
+TARGET := iphone:clang:$(TVZ_SDK):16.0
 INSTALL_TARGET_PROCESSES := SpringBoard
 FWK_DIR := Frameworks
 endif

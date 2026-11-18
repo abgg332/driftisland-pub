@@ -59,6 +59,16 @@ jobs:
           if [ "$ok" != "1" ]; then echo "SDK 下载失败, 稍后重跑"; exit 1; fi
           tar -xJf /tmp/sdk.tar.xz -C "$THEOS/sdks"
           ls "$THEOS/sdks"
+      # Swift 目标(TVZPrefs/TouchViz)需要与 runner 工具链匹配的 SDK:
+      # iOS16.5 SDK 的 SwiftUI.swiftinterface 由 Swift 5.8 生成, Swift 6.x 解析不了;
+      # 软链 Xcode 自带 SDK 并通过 TVZ_SDK 变量让 touchviz 子项目使用它。
+      - name: Use Xcode iOS SDK for Swift targets
+        run: |
+          SDKPATH="$(xcrun --sdk iphoneos --show-sdk-path)"
+          SDKVER="$(xcrun --sdk iphoneos --show-sdk-version)"
+          ln -sfn "$SDKPATH" "$THEOS/sdks/iPhoneOS$SDKVER.sdk"
+          echo "TVZ_SDK=$SDKVER" >> "$GITHUB_ENV"
+          ls -l "$THEOS/sdks"
 
       # 无根 rootless：arm64 + arm64e（多巴胺等无根越狱，装 /var/jb）
       - name: Fetch Touch-Viz pinned framework
@@ -112,6 +122,9 @@ jobs:
             [ "$ok" = "1" ] || { echo "roothide SDK 补齐失败"; exit 1; }
             tar -xJf /tmp/sdk2.tar.xz -C "$HOME/theos/sdks"
           fi
+          SDKPATH="$(xcrun --sdk iphoneos --show-sdk-path)"
+          SDKVER="$(xcrun --sdk iphoneos --show-sdk-version)"
+          ln -sfn "$SDKPATH" "$HOME/theos/sdks/iPhoneOS$SDKVER.sdk"
           ls "$HOME/theos/sdks"
 
       - name: Build roothide package

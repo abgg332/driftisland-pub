@@ -1,1 +1,5 @@
-I2ltcG9ydCA8Q29udHJvbENlbnRlclVJS2l0L0NDVUlUb2dnbGVNb2R1bGUuaD4KCkBpbnRlcmZhY2UgQ0NUb3VjaFZpeiA6IENDVUlUb2dnbGVNb2R1bGUKCkBlbmQK
+#import <ControlCenterUIKit/CCUIToggleModule.h>
+
+@interface CCTouchViz : CCUIToggleModule
+
+@end

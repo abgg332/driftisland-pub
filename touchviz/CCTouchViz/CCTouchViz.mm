@@ -1,1 +1,98 @@
-I2ltcG9ydCAiQ0NUb3VjaFZpei5oIgoKI2ltcG9ydCAiVFZaVXNlckRlZmF1bHRzLmgiCgpAaW1wbGVtZW50YXRpb24gQ0NUb3VjaFZpeiB7CiAgICBCT09MIF9nSXNBbnlTY3JlZW5DYXB0dXJlZDsKfQoKLSAoaW5zdGFuY2V0eXBlKWluaXQgewogICAgc2VsZiA9IFtzdXBlciBpbml0XTsKICAgIGlmIChzZWxmKSB7CiAgICAgICAgX2dJc0FueVNjcmVlbkNhcHR1cmVkID0gW3NlbGYgaXNBbnlTY3JlZW5DYXB0dXJlZF07CiAgICAgICAgW05TTm90aWZpY2F0aW9uQ2VudGVyLmRlZmF1bHRDZW50ZXIgYWRkT2JzZXJ2ZXI6c2VsZgogICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgIHNlbGVjdG9yOkBzZWxlY3RvcihzY3JlZW5DYXB0dXJlZERpZENoYW5nZTopCiAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgIG5hbWU6VUlTY3JlZW5DYXB0dXJlZERpZENoYW5nZU5vdGlmaWNhdGlvbgogICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgb2JqZWN0Om5pbF07CiAgICB9CiAgICByZXR1cm4gc2VsZjsKfQoKLSAoQk9PTClpc0FueVNjcmVlbkNhcHR1cmVkIHsKICAgIEJPT0wgaXNDYXB0dXJlZCA9IE5POwogICAgZm9yIChVSVNjcmVlbiAqc2NyZWVuIGluIFVJU2NyZWVuLnNjcmVlbnMpIHsKICAgICAgICBpZiAoc2NyZWVuLmlzQ2FwdHVyZWQpIHsKICAgICAgICAgICAgaXNDYXB0dXJlZCA9IFlFUzsKICAgICAgICAgICAgYnJlYWs7CiAgICAgICAgfQogICAgfQogICAgcmV0dXJuIGlzQ2FwdHVyZWQ7Cn0KCi0gKHZvaWQpc2NyZWVuQ2FwdHVyZWREaWRDaGFuZ2U6KE5TTm90aWZpY2F0aW9uICopbm90aWZpY2F0aW9uIHsKICAgIEJPT0wgaXNBbnlTY3JlZW5DYXB0dXJlZCA9IFtzZWxmIGlzQW55U2NyZWVuQ2FwdHVyZWRdOwoKICAgIGlmIChfZ0lzQW55U2NyZWVuQ2FwdHVyZWQgIT0gaXNBbnlTY3JlZW5DYXB0dXJlZCkgewogICAgICAgIF9nSXNBbnlTY3JlZW5DYXB0dXJlZCA9IGlzQW55U2NyZWVuQ2FwdHVyZWQ7CgogICAgICAgIGlmIChpc0FueVNjcmVlbkNhcHR1cmVkKSB7CiAgICAgICAgICAgIFtzZWxmIHNldFNlbGVjdGVkOllFUyBmb3JjZUVuYWJsZTpOT107CiAgICAgICAgfQoKICAgICAgICBbc2VsZiByZWZyZXNoU3RhdGVdOwogICAgfQp9CgotIChVSUltYWdlICopaWNvbkdseXBoIHsKICAgIHJldHVybiBbVUlJbWFnZSBpbWFnZU5hbWVkOkAiaWNvbiIKICAgICAgICAgICAgICAgICAgICAgaW5CdW5kbGU6W05TQnVuZGxlIGJ1bmRsZUZvckNsYXNzOltzZWxmIGNsYXNzXV0KY29tcGF0aWJsZVdpdGhUcmFpdENvbGxlY3Rpb246bmlsXTsKfQoKLSAoVUlDb2xvciAqKXNlbGVjdGVkQ29sb3IgewogICAgcmV0dXJuIFtVSUNvbG9yIGNvbG9yV2l0aFJlZDoyNTUuMCAvIDI1NSBncmVlbjo4OC4wIC8gMjU1IGJsdWU6ODguMCAvIDI1NSBhbHBoYToxLjBdOwp9CgotIChCT09MKWlzU2VsZWN0ZWQgewogICAgaWYgKCF0dnpCb29sKEAiaXNFbmFibGVkIikpIHsKICAgICAgICByZXR1cm4gTk87CiAgICB9CgogICAgaWYgKF9nSXNBbnlTY3JlZW5DYXB0dXJlZCkgewogICAgICAgIHJldHVybiAhdHZ6Qm9vbChAImRpc2FibGVPdmVycmlkZVdoZW5SZWNvcmRpbmciKTsKICAgIH0KCiAgICBpZiAodHZ6Qm9vbChAImlzUmVjb3JkaW5nT25seSIpKSB7CiAgICAgICAgcmV0dXJuIHR2ekJvb2woQCJlbmFibGVPdmVycmlkZSIpOwogICAgfQoKICAgIHJldHVybiAhdHZ6Qm9vbChAImRpc2FibGVPdmVycmlkZSIpOwp9CgotICh2b2lkKXNldFNlbGVjdGVkOihCT09MKXNlbGVjdGVkIHsKICAgIFtzZWxmIHNldFNlbGVjdGVkOnNlbGVjdGVkIGZvcmNlRW5hYmxlOllFU107Cn0KCi0gKHZvaWQpc2V0U2VsZWN0ZWQ6KEJPT0wpc2VsZWN0ZWQgZm9yY2VFbmFibGU6KEJPT0wpZm9yY2VFbmFibGUgewogICAgVFZaVXNlckRlZmF1bHRzICpkZWZhdWx0cyA9IFtUVlpVc2VyRGVmYXVsdHMgc3RhbmRhcmRVc2VyRGVmYXVsdHNdOwoKICAgIFtkZWZhdWx0cyBiZWdpblVwZGF0ZXNdOwoKICAgIGlmIChmb3JjZUVuYWJsZSkgewogICAgICAgIEJPT0wgaXNFbmFibGVkID0gdHZ6Qm9vbChAImlzRW5hYmxlZCIpOwogICAgICAgIGlmICghaXNFbmFibGVkKSB7CiAgICAgICAgICAgIFtkZWZhdWx0cyBzZXRCb29sOllFUyBmb3JLZXk6QCJpc0VuYWJsZWQiXTsKICAgICAgICB9CiAgICB9CgogICAgaWYgKF9nSXNBbnlTY3JlZW5DYXB0dXJlZCkgewogICAgICAgIFtkZWZhdWx0cyBzZXRCb29sOiFzZWxlY3RlZCBmb3JLZXk6QCJkaXNhYmxlT3ZlcnJpZGVXaGVuUmVjb3JkaW5nIl07CiAgICB9IGVsc2UgewogICAgICAgIFtkZWZhdWx0cyBzZXRCb29sOnNlbGVjdGVkIGZvcktleTpAImVuYWJsZU92ZXJyaWRlIl07CiAgICAgICAgW2RlZmF1bHRzIHNldEJvb2w6IXNlbGVjdGVkIGZvcktleTpAImRpc2FibGVPdmVycmlkZSJdOwogICAgfQoKICAgIFtkZWZhdWx0cyBlbmRVcGRhdGVzXTsKfQoKQGVuZAo=
+#import "CCTouchViz.h"
+
+#import "TVZUserDefaults.h"
+
+@implementation CCTouchViz {
+    BOOL _gIsAnyScreenCaptured;
+}
+
+- (instancetype)init {
+    self = [super init];
+    if (self) {
+        _gIsAnyScreenCaptured = [self isAnyScreenCaptured];
+        [NSNotificationCenter.defaultCenter addObserver:self
+                                               selector:@selector(screenCapturedDidChange:)
+                                                   name:UIScreenCapturedDidChangeNotification
+                                                 object:nil];
+    }
+    return self;
+}
+
+- (BOOL)isAnyScreenCaptured {
+    BOOL isCaptured = NO;
+    for (UIScreen *screen in UIScreen.screens) {
+        if (screen.isCaptured) {
+            isCaptured = YES;
+            break;
+        }
+    }
+    return isCaptured;
+}
+
+- (void)screenCapturedDidChange:(NSNotification *)notification {
+    BOOL isAnyScreenCaptured = [self isAnyScreenCaptured];
+
+    if (_gIsAnyScreenCaptured != isAnyScreenCaptured) {
+        _gIsAnyScreenCaptured = isAnyScreenCaptured;
+
+        if (isAnyScreenCaptured) {
+            [self setSelected:YES forceEnable:NO];
+        }
+
+        [self refreshState];
+    }
+}
+
+- (UIImage *)iconGlyph {
+    return [UIImage imageNamed:@"icon"
+                     inBundle:[NSBundle bundleForClass:[self class]]
+compatibleWithTraitCollection:nil];
+}
+
+- (UIColor *)selectedColor {
+    return [UIColor colorWithRed:255.0 / 255 green:88.0 / 255 blue:88.0 / 255 alpha:1.0];
+}
+
+- (BOOL)isSelected {
+    if (!tvzBool(@"isEnabled")) {
+        return NO;
+    }
+
+    if (_gIsAnyScreenCaptured) {
+        return !tvzBool(@"disableOverrideWhenRecording");
+    }
+
+    if (tvzBool(@"isRecordingOnly")) {
+        return tvzBool(@"enableOverride");
+    }
+
+    return !tvzBool(@"disableOverride");
+}
+
+- (void)setSelected:(BOOL)selected {
+    [self setSelected:selected forceEnable:YES];
+}
+
+- (void)setSelected:(BOOL)selected forceEnable:(BOOL)forceEnable {
+    TVZUserDefaults *defaults = [TVZUserDefaults standardUserDefaults];
+
+    [defaults beginUpdates];
+
+    if (forceEnable) {
+        BOOL isEnabled = tvzBool(@"isEnabled");
+        if (!isEnabled) {
+            [defaults setBool:YES forKey:@"isEnabled"];
+        }
+    }
+
+    if (_gIsAnyScreenCaptured) {
+        [defaults setBool:!selected forKey:@"disableOverrideWhenRecording"];
+    } else {
+        [defaults setBool:selected forKey:@"enableOverride"];
+        [defaults setBool:!selected forKey:@"disableOverride"];
+    }
+
+    [defaults endUpdates];
+}
+
+@end

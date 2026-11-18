@@ -4,7 +4,8 @@ TARGET := simulator:clang:latest:15.0
 IPHONE_SIMULATOR_ROOT := $(shell ../devkit/sim-root.sh)
 else
 ARCHS ?= arm64 arm64e
-TARGET := iphone:clang:16.5:16.0
+TVZ_SDK ?= 16.5
+TARGET := iphone:clang:$(TVZ_SDK):16.0
 INSTALL_TARGET_PROCESSES := Preferences
 endif
 
