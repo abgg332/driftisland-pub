@@ -1502,6 +1502,8 @@ static BOOL  gDIRhythmSkipDv = NO;     /* extras 里已经有 dv 的祖先 → d
 static __weak UIView *gDIRhythmDrive = nil;   /* 真正承载缩放的视图(封面外面可能还套着一层裁剪容器) */
 static BOOL playerMaskOn = NO;
 static BOOL gDIParticleColorDirty = YES;
+static BOOL musicPlaying = NO;
+static BOOL mrQueryOK = NO;
 /* ===== 3.1.6 修复(二): 3.1 重构丢失的函数, 从 3.0.119 按原序搬回 ===== */
 static NSString *diMruCacheDir(void) {
     return @"/var/mobile/Library/Caches/com.abgg332.driftisland";
@@ -4624,7 +4626,7 @@ static void diRhythmTickWithDelta(float dtIn) {
        岛(MRU)那条链路仍然读 gDIKick/beat.bin, 一行没动。 */
     diFxAdvanceEnergy(active, real, dt);
     // Reference detector uses spectrum energy, not the legacy PCM kick detector.
-    float referenceScale=diFxAdvanceBeat(active, diW17Using?diW17Energy:gDIFxEnergy, rhythmBeatScale, dt);
+    float referenceScale=diFxAdvanceBeat(active, gDIFxEnergy, rhythmBeatScale, dt);
     diSharedVisualPulse=gDIFxBeatPulse;
     diISPublishBeat(active);
     float fxBeatS=referenceScale;
