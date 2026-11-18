@@ -1739,11 +1739,17 @@ static void diWriteColors(NSArray<NSString *> *colors) {
 
 /* 强制在箭头位置显示当前素材名（valueLabel / detailTextLabel 双保险） */
 - (void)tableView:(UITableView *)tableView willDisplayCell:(UITableViewCell *)cell forRowAtIndexPath:(NSIndexPath *)indexPath {
-    /* 仅当父类真的实现了该回调时才转发，避免 unrecognized selector 闪退 */
-    if ([[self superclass] instancesRespondToSelector:@selector(tableView:willDisplayCell:forRowAtIndexPath:)])
+    /* This method belongs to DIPrefsController. Start super lookup from its
+       lexical superclass, not the runtime receiver's superclass: the legacy
+       DIRecordingTrailPage alias inherits this implementation and would otherwise
+       redispatch to this same method until the stack overflows. */
+    Class homeSuper = class_getSuperclass([DIPrefsController class]);
+    SEL callback = @selector(tableView:willDisplayCell:forRowAtIndexPath:);
+    if ([homeSuper instancesRespondToSelector:callback]) {
+        struct objc_super parent = { .receiver = self, .super_class = homeSuper };
         ((void (*)(struct objc_super *, SEL, UITableView *, UITableViewCell *, NSIndexPath *))objc_msgSendSuper)(
-            (struct objc_super *)&(struct objc_super){ .receiver = self, .super_class = class_getSuperclass(object_getClass(self)) },
-            @selector(tableView:willDisplayCell:forRowAtIndexPath:), tableView, cell, indexPath);
+            &parent, callback, tableView, cell, indexPath);
+    }
     /* 注意: PSGroupCell 是 section header 不占行, indexPath.row 是组内行号:
        section1(通知样式): 开关/色块/流光开关/(起始色/结束色)/背景开关 —— 行数随流光开关变化, 故按 specifier 判定;
        section2(小岛) / section3(展开) / section4(帧率) 结构固定 */
