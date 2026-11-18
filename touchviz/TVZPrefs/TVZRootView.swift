@@ -140,22 +140,6 @@ struct TVZRootView: View {
         mainBody
     }
 
-    var header: some View {
-        Section {
-            VStack(alignment: .leading, spacing: 4) {
-                Text(NSLocalizedString("Touch-Viz", bundle: Bundle.tvz_support, comment: ""))
-                    .font(.system(size: 42))
-                    .fontWeight(.bold)
-                    .foregroundColor(TVZ_COLOR)
-
-                Text(String(format: NSLocalizedString("v%@ - @Lessica", bundle: Bundle.tvz_support, comment: ""), Bundle.tvz_packageVersion))
-                    .font(.body)
-                    .fontWeight(.medium)
-                    .foregroundColor(.secondary)
-            }
-        }
-        .listRowBackground(Color.clear)
-    }
 
     var generalSection: some View {
         Section {
@@ -568,11 +552,6 @@ struct TVZRootView: View {
                 Label(NSLocalizedString("Reset to Default", bundle: Bundle.tvz_support, comment: ""), systemImage: "arrow.counterclockwise")
                     .foregroundColor(TVZ_COLOR)
             }
-        } footer: {
-            Text(String(format: "%@\n\n%@",
-                NSLocalizedString("Copyright © 2024-2025 OwnGoal Studio.", bundle: Bundle.tvz_support, comment: ""),
-                NSLocalizedString("Credits:\n@LeoNatan: LNTouchVisualizer (MIT License)\nIvan Izyumkin: MCEmojiPicker (MIT License)", bundle: Bundle.tvz_support, comment: "")))
-                .padding(.bottom, 8)
         }
     }
 
@@ -596,7 +575,6 @@ struct TVZRootView: View {
 
     var mainBody: some View {
         Form {
-            header
             generalSection
             colorsSection
             alphaSection

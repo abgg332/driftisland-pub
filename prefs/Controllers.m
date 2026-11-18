@@ -923,52 +923,19 @@ static Class diStepSliderClass(void) {
 @interface DIWidgetHidePage : DIMiniBaseController @end
 @interface DIWidgetAppsPage : DIMiniBaseController @end
 /* 3.0: 播放器入口 —— 组件隐藏下面同级, 开关写 com.local.playerexact(内置原生播放器域) */
-@interface DIRecordingTrailPage : PSListController @end
-@implementation DIRecordingTrailPage
-/* 3.1.9: 自救 —— 设备上若残留旧注册项, 会把「漂流岛」直接指向本类, 于是进设置
-   第一眼就是录屏轨迹设置(用户实测: 点漂流岛 → 直接是录屏轨迹页)。
-   判据: 整条导航栈里没有 DIPrefsController, 说明不是从「附加功能 → 原生播放 →
-   录屏轨迹」正常进来, 而是被当成了 bundle 根页 —— 这时把栈顶(自己这一层)换成
-   完整设置根页。返回 YES 表示已换页。 */
-- (BOOL)diEscapeIfUsedAsEntry {
-    UINavigationController *nav = self.navigationController;
-    if (!nav || nav.viewControllers.count == 0) return NO;
-    /* 模态弹出的场合(自己就是模态根)不算被劫持, 不能乱换 */
-    if (nav.viewControllers.count == 1 && nav.viewControllers.firstObject == self && nav.presentingViewController) return NO;
-    Class rootCls = NSClassFromString(@"DIPrefsController");
-    for (UIViewController *vc in nav.viewControllers) {
-        if (rootCls && [vc isKindOfClass:rootCls]) return NO;   /* 正常入口, 什么都不做 */
-    }
-    if (!rootCls) {   /* 本 bundle 尚未加载出根类 → 主动加载同目录的 DriftIslandPrefs.bundle */
-        NSString *dir = [[NSBundle bundleForClass:self.class].bundlePath stringByDeletingLastPathComponent];
-        NSBundle *rb = [NSBundle bundleWithPath:[dir stringByAppendingPathComponent:@"DriftIslandPrefs.bundle"]];
-        [rb load];
-        rootCls = NSClassFromString(@"DIPrefsController");
-    }
-    if (!rootCls) { diStep(@"[设置] 自救失败: 找不到 DIPrefsController"); return NO; }
-    diStep(@"[设置] 录屏轨迹页被当作顶层入口(栈=%lu), 已换回完整设置根页",
-           (unsigned long)nav.viewControllers.count);
-    UIViewController *rootVC = [[rootCls alloc] init];
-    NSMutableArray *vcs = [nav.viewControllers mutableCopy];
-    vcs[vcs.count - 1] = rootVC;
-    [nav setViewControllers:vcs animated:NO];
-    return YES;
-}
-
-- (void)viewWillAppear:(BOOL)animated {
-    /* Resolve legacy root-entry registration before this controller is displayed.
-       The former viewDidAppear replacement caused one committed blank frame. */
-    if ([self diEscapeIfUsedAsEntry]) return;
-    [super viewWillAppear:animated];
-}
-
+/* 3.1.12: 录屏轨迹设置页改名 DITVZPrefsPage —— 不再占用 DIRecordingTrailPage 这个名字。
+   原因: 设备上残留的旧注册项把「漂流岛」的 detail 写成 DIRecordingTrailPage, 于是点漂流岛
+   先打开录屏轨迹页、再靠自救换回完整列表 → 必然闪一下空白。现在:
+     · 正常路径: 完整列表 → 录屏轨迹 → DITVZPrefsPage(本类, 挂 TVZPrefs);
+     · 残留注册项: detail=DIRecordingTrailPage = 下面的兼容别名(= DIPrefsController), 打开
+       即完整设置列表, 第一帧就对, 零闪帧。 */
+@interface DITVZPrefsPage : PSListController @end
+@implementation DITVZPrefsPage
 - (void)viewDidLoad {
     [super viewDidLoad];
     self.title = @"录屏轨迹";
     diStep(@"[设置] 录屏轨迹页 viewDidLoad (导航栈=%lu)",
            (unsigned long)self.navigationController.viewControllers.count);
-    if ([self diEscapeIfUsedAsEntry]) return;
-    if (self.childViewControllers.count) return;
     NSString *root=[[NSBundle bundleForClass:self.class].bundlePath stringByDeletingLastPathComponent];
     NSArray<NSString *> *paths=@[[root stringByAppendingPathComponent:@"TVZPrefs.bundle"],
         @"/var/jb/Library/PreferenceBundles/TVZPrefs.bundle",
@@ -1002,12 +969,13 @@ static Class diStepSliderClass(void) {
         [page.view.bottomAnchor constraintEqualToAnchor:self.view.bottomAnchor]]];
     [page didMoveToParentViewController:self];
 }
-
-- (void)viewDidAppear:(BOOL)animated {
-    [super viewDidAppear:animated];
-    if ([self diEscapeIfUsedAsEntry]) return;
-}
 @end
+
+/* 兼容别名: 旧注册项 detail=DIRecordingTrailPage → 直接给完整设置根页(零闪帧) */
+@interface DIRecordingTrailPage : DIPrefsController @end
+@implementation DIRecordingTrailPage
+@end
+
 @interface DIPlayerEntryPage : DIMiniBaseController @end
 /* 3.0.45: 律动特效页 —— 总开关/封面律动/环/粒子/参数/渐变色全在这一页 */
 @interface DIFxPage : DIMiniBaseController
@@ -1710,7 +1678,7 @@ static void diWriteColors(NSArray<NSString *> *colors) {
         DI_ADD([self linkSpec:@"组件隐藏" detail:[DIWidgetHidePage class]]);
         /* 2.9.75: 播放器入口 —— 组件隐藏下面同级(不在里面); 内置原生播放器(控制中心播放器增强) */
         DI_ADD([self linkSpec:@"原生播放" detail:[DIPlayerEntryPage class]]);
-        DI_ADD([self linkSpec:@"录屏轨迹" detail:[DIRecordingTrailPage class]]);
+        DI_ADD([self linkSpec:@"录屏轨迹" detail:[DITVZPrefsPage class]]);
 
         _smallRow = _expandRow = -1;
         {
