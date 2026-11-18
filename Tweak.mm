@@ -254,6 +254,24 @@ static CFTimeInterval gDIClock = 0;
 static CFTimeInterval gDITargetAt = 0;
 
 /* ===== 3.1.6 修复(六): @interface/typedef/剩余静态 补齐 ===== */
+/* 3.1.6: 先用后定义 —— 前向声明(由闭包补齐引起, 统一放这里) */
+static void (*gDIArtOrigNPViewLayout)(id, SEL) = NULL;
+static void (*gDIArtOrigCCVCLayout)(id, SEL) = NULL;
+static NSString *diMruSelfDir(void);
+static void diMruFileLog(NSString *line);
+static BOOL diArtPrefOn(void);
+static void diArtStripSpin(CALayer *layer, int depth, int maxDepth);
+static void diArtDress(UIView *v);
+static void diArtInstallAVHook(void);   /* 3.0.17: 类级接管(定义在后) */
+static void diArtKillJitter(UIView *root);
+static void diArtPlayerPost(UIView *root);
+static BOOL diArtInExpandedPlayer(UIView *v);    /* 3.0.63: 同上 */
+static void diRhythmCollectExtras(UIView *dv);
+static void diISRegisterGlass(UIView *g);
+static BOOL diFxExpandedOrSuggestion(UIView *v);
+static void diISMRUApply(UIView *artwork, UIView *glass);
+static void diRhythmEnsure(void);
+
 typedef struct {
     float x, y;         /* 当前圆心(bars 坐标系) */
     float vy;           /* 上升速度 pt/s, 会随寿命略微加速 */
@@ -776,8 +794,6 @@ typedef struct {
 /* ---------- 鼓点快照: SB 写 beat.bin, 这里读 ---------- */
 typedef struct { double t; float kick, env, bass, playing, energy, extra; } DIBeatSnap;
 
-static void (*gDIArtOrigNPViewLayout)(id, SEL) = NULL;
-static void (*gDIArtOrigCCVCLayout)(id, SEL) = NULL;
 /* ===== 3.1.6 修复(四·重做): 从 3.1 前驱 b0ccd95 完整补齐(含 typedef 结构体起点修正) ===== */
 static const BOOL diIslandEffectsAvailable = NO; // source archived; original mask/rotation remain
 
