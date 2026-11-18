@@ -28,8 +28,8 @@ final class TVZRootController: UIHostingController<TVZRootView> {
     }
 }
 
-@objc(TVZRootListController)
-final class TVZRootListController: PSListController {
+@objc(DITouchVizEmbeddedController)
+final class DITouchVizEmbeddedController: PSListController {
 
     override func viewDidLoad() {
         super.viewDidLoad()
@@ -47,20 +47,6 @@ final class TVZRootListController: PSListController {
         view.addSubview(controller.view)
 
         controller.didMove(toParent: self)
-    }
-
-    private func addNavigationBarImage() {
-        guard let image = UIImage(named: "icon", in: Bundle.tvz_support, with: nil) else {
-            return
-        }
-        let imageView = UIImageView(image: image)
-        let bannerWidth: CGFloat = 32
-        let bannerHeight: CGFloat = 32
-        let bannerX = bannerWidth / 2 - image.size.width / 2
-        let bannerY = bannerHeight / 2 - image.size.height / 2
-        imageView.frame = CGRect(x: bannerX, y: bannerY, width: bannerWidth, height: bannerHeight)
-        imageView.contentMode = .scaleAspectFit
-        navigationItem.titleView = imageView
     }
 
     @objc var contentScrollView: UIScrollView? {
