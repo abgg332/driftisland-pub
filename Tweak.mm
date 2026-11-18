@@ -21,6 +21,269 @@
 #include "DIVersion.h"   /* 3.0.28: 版本号唯一来源(与 prefs 共用) */
 #include <vector>
 
+/* ===== 3.1.6 修复: 3.1 重构时丢失的定义区(日志基础设施 + 频谱/鼓点/律动状态) =====
+   3.1.6 的 Tweak.mm 从 1.26MB 精简到 155KB, 实现逻辑都在, 但这批 static 定义/
+   宏/日志函数被整段删掉了, 编译报 90+ 个 undeclared identifier。
+   本块从 3.0.119 完整版按原顺序搬回。 */
+/* 2.8.86: 构建戳 —— 之前横幅打的是 SpringBoard 自己的 CFBundleShortVersionString(恒 1.0),
+   日志里根本看不出装的是哪一版。所有诊断行都带这个戳, 下轮日志一眼定位。 */
+#define DI_BUILD_VER DI_VERSION   /* 3.0.28: 唯一来源 DIVersion.h */
+static BOOL gRecordingActive = NO; // 保留: 岛素材总闸条件
+static NSString *diElementId(UIView *host);
+static BOOL diMiniMusicActive(UIView *host); // 2.6.3: 前置(遮罩层使用)
+static os_log_t logHandle;
+
+/* ===== 3.0.18: 日志核心重写 —— iOS 17 卡死的根因 =====
+   旧实现每写一行日志都:
+     ① 新建一个 NSDateFormatter(创建一次要毫秒级, 是 Foundation 里最贵的对象之一);
+     ② fileHandleForWritingAtPath → seek → write → close(每行一次同步磁盘 I/O);
+     ③ DLog 还要 stat 一次文件大小。
+   在洪峰秒(iOS 17 上灵动岛相关路径一秒 60~190 行)里, 主线程全耗在日志 I/O 上,
+   表现就是"卡死很久 → 看门狗杀掉 → 注销"。现在:
+     · formatter 全局只建一个;
+     · 文件句柄常驻(不再每行开/关), 写失败才重开;
+     · 每秒最多落 25 行, 超出的只计数, 下一秒补一条"省略 N 行";
+     · 大小上限只每 10 秒检查一次, 超限时保留末尾 200KB(旧实现会用单行覆盖整个文件,
+       把引导判定等历史全冲掉 —— 之前几轮"日志被截断"的怪象就是它)。 */
+static NSDateFormatter *diLogDF(void) {
+    static NSDateFormatter *df = nil;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        df = [NSDateFormatter new];
+        df.dateFormat = @"yyyy-MM-dd HH:mm:ss";
+        df.locale = [[NSLocale alloc] initWithLocaleIdentifier:@"en_US_POSIX"];
+        df.timeZone = [NSTimeZone localTimeZone];
+    });
+    return df;
+}
+static NSString *diLogPath(void) {
+    static NSString *path = nil;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        NSFileManager *fm = [NSFileManager defaultManager];
+        [fm createDirectoryAtPath:kMaterialDir withIntermediateDirectories:YES attributes:@{NSFilePosixPermissions: @0777} error:NULL];
+        path = [kMaterialDir stringByAppendingPathComponent:@"driftisland.log"];
+        [fm setAttributes:@{NSFilePosixPermissions: @0666} ofItemAtPath:path error:NULL];
+    });
+    return path;
+}
+static NSFileHandle *gDILogHandle = nil;   /* 3.0.18: 常驻句柄(截断后置 nil 重开) */
+static NSFileHandle *diLogHandle(void) {
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{ gDILogHandle = [NSFileHandle fileHandleForWritingAtPath:diLogPath()]; });
+    if (!gDILogHandle) gDILogHandle = [NSFileHandle fileHandleForWritingAtPath:diLogPath()];   /* 文件被删后重开 */
+    return gDILogHandle;
+}
+/* 限流: 每秒 25 行; 溢出计数, 秒切换时补一条汇总.
+   3.0.22: 改成"先数数再格式化" —— 以前是先把整行拼出来再判断, 一旦某处在布局里刷屏
+   (435 日志出现过一秒 30213 次), 光是拼字符串就能把主线程按死。 */
+static void diLogWrite(NSString *out);   /* 下面定义 */
+/* 3.0.49: 刷屏源定位 —— 462 日志里"上一秒省略 40009 行", 但被折叠的到底是哪一句
+   打出来的完全看不出来, 排查死循环全靠猜。DLog/RLog 现在把格式串指针先存进来
+   (静态字面量, 存指针零开销), 第一条被挤掉的行记下它的格式串, 秒末汇总打出来。
+   另加诊断旁路: 崩溃回放/保险这类一次性诊断输出不再跟刷屏源抢 25 行配额。 */
+static NSString *gDILogCurFmt = nil;
+static NSString *gDILogDropFmt = nil;
+static BOOL gDILogBypass = NO;
+static BOOL diLogGate(void) {
+    static int n = 0; static int dropped = 0;
+    static CFAbsoluteTime sec = 0;
+    CFAbsoluteTime now = CFAbsoluteTimeGetCurrent();
+    if (now - sec >= 1.0) {
+        int d = dropped;
+        NSString *src = gDILogDropFmt;
+        dropped = 0;
+        gDILogDropFmt = nil;
+        sec = now;
+        n = 0;
+        if (d > 0) {
+            @try {
+                NSString *head = src.length > 120 ? [src substringToIndex:120] : src;
+                NSString *line = [NSString stringWithFormat:@"[%@] [现场] (上一秒省略 %d 行重复日志, 刷屏源格式串: %@)\n",
+                                  [diLogDF() stringFromDate:[NSDate date]], d, head ?: @"<空>"];
+                diLogWrite(line);
+            } @catch (__unused NSException *e) {}
+        }
+    }
+    if (gDILogBypass) return YES;
+    if (n >= 25) {
+        if (dropped == 0) gDILogDropFmt = gDILogCurFmt;
+        dropped++;
+        return NO;
+    }
+    n++;
+    return YES;
+}
+static void diLogWrite(NSString *out) {
+    NSFileHandle *h = diLogHandle();
+    NSData *d = [out dataUsingEncoding:NSUTF8StringEncoding];
+    if (!h) { [out writeToFile:diLogPath() atomically:YES encoding:NSUTF8StringEncoding error:NULL]; return; }
+    @try { [h seekToEndOfFile]; [h writeData:d]; } @catch (__unused NSException *e) { gDILogHandle = nil; }
+    /* 大小上限: 每 10 秒查一次; 超限保留末尾 200KB(不再用单行覆盖整个文件) */
+    static CFAbsoluteTime tCap = 0;
+    CFAbsoluteTime now = CFAbsoluteTimeGetCurrent();
+    if (now - tCap > 10.0) {
+        tCap = now;
+        NSDictionary *attr = [[NSFileManager defaultManager] attributesOfItemAtPath:diLogPath() error:NULL];
+        unsigned long long sz = attr ? [attr[NSFileSize] unsignedLongLongValue] : 0;
+        if (sz > 512 * 1024) {
+            unsigned long long keep = 200 * 1024;
+            NSFileHandle *rh = [NSFileHandle fileHandleForReadingAtPath:diLogPath()];
+            if (rh) {
+                @try {
+                    [rh seekToFileOffset:sz - keep];
+                    NSData *tail = [rh readDataToEndOfFile];
+                    [rh closeFile];
+                    NSString *mark = @"[日志] 超过 512KB, 已截断保留末尾 200KB\n";
+                    NSMutableData *nd = [NSMutableData data];
+                    [nd appendData:[mark dataUsingEncoding:NSUTF8StringEncoding]];
+                    if (tail) [nd appendData:tail];
+                    [nd writeToFile:diLogPath() atomically:YES];
+                    gDILogHandle = nil;   /* 旧句柄指向被替换的文件, 置空让下次重开 */
+                } @catch (__unused NSException *e) {}
+            }
+        }
+    }
+}
+
+// 运行日志: 写入 /var/mobile/Library/Logs/DriftIsland/driftisland.log (供"导出日志报告"抓取)
+static void DLog(NSString *fmt, ...) NS_FORMAT_FUNCTION(1,2);
+static void DLog(NSString *fmt, ...) {
+    if (!logEnabled) return; // 日志开关关闭时不生成
+    gDILogCurFmt = fmt;
+    if (!diLogGate()) return;
+    va_list args; va_start(args, fmt);
+    NSString *line = [[NSString alloc] initWithFormat:fmt arguments:args];
+    va_end(args);
+    NSString *out = [NSString stringWithFormat:@"[%@] %@\n", [diLogDF() stringFromDate:[NSDate date]], line];
+    diLogWrite(out);
+}
+
+/* 现场日志: 不受 logEnabled 开关控制, 崩溃/进安全模式时也要留痕。
+   固定写同一文件, 顶部标记 [现场], 排查时 grep "现场" 即可。 */
+static void RLog(NSString *fmt, ...) NS_FORMAT_FUNCTION(1,2);
+static void RLog(NSString *fmt, ...) {
+    gDILogCurFmt = fmt;
+    if (!diLogGate()) return;
+    va_list args; va_start(args, fmt);
+    NSString *line = [[NSString alloc] initWithFormat:fmt arguments:args];
+    va_end(args);
+    NSString *out = [NSString stringWithFormat:@"[%@] [现场] %@\n", [diLogDF() stringFromDate:[NSDate date]], line];
+    diLogWrite(out);
+}
+#define DI_STEP(fmt, ...) RLog(fmt, ##__VA_ARGS__)
+
+
+static NSHashTable *gDIArtRoots = nil;
+static NSHashTable *gDIArtKnown = nil; /* 3.0.17: 见过的封面(弱引用), 持续维护 */
+/* 3.0.57: 律动接管了哪一层的 transform(旋转+缩放)。这层暂时不挂 di.art.spin ——
+   两个写入者抢同一个属性时, 探针里 m11 会间歇变回 1.000, 旋转也会忽快忽慢。 */
+static __weak UIView *gDIArtSpinYield = nil;
+static int gDIStage = 3;              /* 功能档位: 3=全开 2=去掉传送栏setFrame钩子 1=再去掉模块背景/隐藏钩子 0=全关(旧保险态) */
+static UIImage *gDIBgImage = nil;
+static BOOL gDIHasNowPlaying = NO;
+static BOOL gDIInfoReady = NO;
+#define DI_AU_PORT   41235
+#define DI_AU_BANDS  24
+#define DI_AU_PKT    36          /* v1: 4 头 + 4 fast + 4 slow + 24 bands */
+#define DI_AU_PKT3   120
+static float gDIReferenceRaw[72], gDIReferenceCurrent[72];
+static BOOL gDIReferenceSeen = NO;
+#define DI_AU_PKT2   48          /* v2(3.0.71): 再 + 强度/年龄/序号/低频RMS */
+static float gDIBandRaw[DI_AU_BANDS];
+static float gDIBandSmooth[DI_AU_BANDS];
+static BOOL gDIBandSeen = NO;
+/* 3.0.71: 服务端(mediaserverd, 样本域)直接算好的"咚" —— 客户端不再自己猜鼓点 */
+static BOOL     gDIPcmKickSeen = NO;      /* 收到过 v2 包 */
+static uint32_t gDIPcmKickSerial = 0;     /* 服务端触发序号 */
+static float    gDIPcmKickAmp = 0.0f;     /* 0~1 */
+static uint16_t gDIPcmKickAgeMs = 0;      /* 这一包发出时距触发多久 */
+static float    gDIPcmLowRms = 0.0f;      /* 低频 RMS(探针用) */
+   看起来就是"一卡一卡"。CADisplayLink 严格跟屏幕刷新走, 120Hz 下每帧都更新。 */
+static CADisplayLink *gDIRhythmLink = nil;
+static id gDIRhythmTicker = nil;
+static __weak UIView *gDIRhythmTarget = nil;
+static __weak UIView *gDIRhythmHost = nil;
+static CALayer *gDIRhythmRingBox = nil;
+static CAGradientLayer *gDIRhythmRingGrad = nil;
+static CAShapeLayer *gDIRhythmRingMask = nil;
+static CAShapeLayer *gDIRhythmRingBack = nil;
+static BOOL gDIBeatStopped = NO;          /* 3.0.79: 暂停/停止后已硬停(粒子清零+层隐藏) */
+static CFAbsoluteTime gDIBeatStopAt = 0;  /* 3.0.88: 上次硬停的时刻(唤醒节流用) */
+static CAGradientLayer *gDIRhythmBarsGrad = nil;
+static CAShapeLayer *gDIRhythmBars = nil;      /* 条形的 mask 形状 */
+   键: SpectrumStyle(不分尺寸) —— Spectrum 前缀会被 diIsFxKey 认出来, 切换即时生效。 */
+/* (变量声明提前到文件前部 —— 偏好读取里就要用到) */
+static CATransform3D gDIRhythmBase;
+static BOOL gDIRhythmBaseValid = NO;
+static CGRect gDIRhythmRingFrame = {{0, 0}, {0, 0}};
+static NSString *gDIRhythmUsedA = nil;
+static NSString *gDIRhythmUsedB = nil;
+static int gDIBarsModeUsed = -1;
+static NSString *gDIBarsUsedA = nil;
+static NSString *gDIBarsUsedB = nil;
+static float gDIBeatEnv = 0.0f;      /* 视觉拍点(平滑后 0~1): 缩放/透明度用它 */
+static float gDISteady = 0.0f;       /* 整体响度 0~1 */
+static float gDIBassPrev = 0.0f;     /* 上一帧低音能量(算通量) */
+static float gDIBassPulse = 0.0f;    /* 物理冲击 0~1: 粒子外推用它 */
+static float gDIBeatRaw = 0.0f;      /* 起音瞬间的强度, 快速衰减 */
+static float gDIOnsetAvg = 0.0f;     /* 低音滑动均值(自适应阈值) */
+static float gDIOnsetVar = 0.0f;     /* 低音滑动方差 */
+static CFTimeInterval gDILastOnset = 0;
+static double gDIHuePhase = 0.0;     /* 3.0.54: 流光模式的色相相位 */
+static int gDIRingModeUsed = -1;     /* 3.0.54: 上次建环用的颜色模式 */
+static double gDISynPhase = 0.0;
+static CFTimeInterval gDIClock = 0;
+static CFTimeInterval gDITargetAt = 0;
+static BOOL gDIFxRealLogged = NO;
+/* 3.0.56 */
+static __weak UIView *gDIRhythmDrive = nil;   /* 真正承载缩放的视图(封面外面可能还套着一层裁剪容器) */
+   兄弟/叔伯视图。真正的专辑图落在哪一层, 都能被一起缩放。 */
+#define DI_RHYTHM_EXTRA_MAX 4
+static __weak UIView *gDIRhythmExtras[DI_RHYTHM_EXTRA_MAX];
+static int gDIRhythmExtraN = 0;
+static CGSize gDIRhythmBaseSize;       /* 记 base 时 dv 的尺寸 —— 变了说明展开/收起, base 作废 */
+static double gDILastAng = 0.0;        /* 3.0.61: 关掉旋转时把角度冻结在这个值上(不跳回 0°) */
+static BOOL gDIRhythmDriving = NO;     /* 上一帧我们是否在写 transform(用于"只还原一次") */
+static float gDIKick = 0.0f;           /* 视觉包络: 3.0.74 起由统一顺滑包络推进(45ms 顶/170ms 落) */
+static float gDIKickTarget = 0.0f;     /* 3.0.74: 本次咚的目标强度 */
+static CFTimeInterval gDIKickAtkT = 0; /* 3.0.74: 起音时刻(45ms 趋近窗口) */
+static float gDILowPrevK = 0.0f;       /* 上一帧低频归一值 */
+   再加 0.17s 不应期 + "必须回落到 0.3 以下才重新上膛", 保证一个鼓点只触发一次。 */
+static float gDILowFloor = 0.0f;
+static float gDILowPeak = 0.0f;
+static float gDILowN = 0.0f;
+static float gDILowNPrev = 0.0f;
+static BOOL  gDIKickArmed = YES;
+static CFTimeInterval gDILastKickT = 0;
+static float gDILowSm = 0.0f;          /* 12ms 平滑后的低频(压掉逐帧噪声) */
+static float gDILowHist[5];            /* 最近 4 帧(~66ms)的平滑值, 用来量"这一下冲了多高" */
+static int   gDILowHistW = 0;
+/* 3.0.68: "咚"的前沿检测 —— 前两帧(32ms)的最高点 + 低频占比 + 本次触发峰值 */
+static float gDILowP1 = 0.0f, gDILowP2 = 0.0f;
+static float gDILowShare = 0.0f;       /* 0~5 段能量 / 全谱能量(0~1) */
+static float gDIKickHoldN = 1.0f;      /* 本次触发的归一峰值, 掉到 72% 以下才重新上膛 */
+   所以鼓点从"大概在这附近"变成"就落在这一下上"。 */
+static float gDIKickPunchAmp = 0.0f;
+static CFTimeInterval gDIKickPunchT = 0.0;
+static uint32_t gDILastPcmSerial = 0;
+static BOOL  gDIRhythmSkipDv = NO;     /* extras 里已经有 dv 的祖先 → dv 不再单独写(否则缩两次) */
+static CFTimeInterval gDIDumpAt = 0;
+static float gDIMidLevel = 0.0f;              /* 当前中音能量(探针) */
+static CFTimeInterval gDIQuietAt = 0;         /* 频谱端"连着但没数据"的起点 */
+   自适应。底鼓/军鼓/拍手/人声起音都会在通量上留一个尖峰, 不依赖某一频段的绝对电平。 */
+static float gDIBandPrevFlux[DI_AU_BANDS];
+static float gDIFluxAvg = 0.0f;      /* 通量慢均值(自适应阈值) */
+static float gDIFluxNow = 0.0f;      /* 本帧通量(探针) */
+static float gDILowLevel = 0.0f;     /* 60~250Hz 能量(探针/低频呼吸) */
+static __weak UIView *gDICoverRounded = nil;
+static CGFloat gDICoverOrigRadius = 0;
+static BOOL gDICoverOrigClip = NO;
+/* 量出来的比例(见文件头): 刻度 80 根 / 宽 0.065R / 长 0.26R / 间距 0.045R */
+#define DI_TICK_N      72
+#define DI_TICK_W      0.065
+
+
 static NSString *const kDomain = @"com.abgg332.driftisland";
 static NSString *const kNotifyStr = @"com.abgg332.driftisland.reload";
 /* 3.0.71: 尺寸代次 —— 设置页改尺寸时 +1, 所有"按尺寸缓存"的读取看到代次变了就重读 */
