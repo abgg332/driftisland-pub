@@ -21,19 +21,18 @@
 #include "DIVersion.h"   /* 3.0.28: 版本号唯一来源(与 prefs 共用) */
 #include <vector>
 
-/* Forward declarations for the later audio/beat implementation block. The 3.1.10
-   source calls these from early boot helpers before their owning state section. */
-static void RLog(NSString *fmt, ...) NS_FORMAT_FUNCTION(1,2);
+/* 3.1.10 compile-order repair: canonical private audio/beat state must precede early helpers. */
 #define DI_AU_BANDS 24
-static double gDIHuePhase;
 static float gDIReferenceRaw[72],gDIReferenceCurrent[72];
-static BOOL gDIReferenceSeen;
+static BOOL gDIReferenceSeen=NO;
 static float gDIBandRaw[DI_AU_BANDS],gDIBandSmooth[DI_AU_BANDS];
-static float gDIKickPunchAmp,gDIKickTarget,gDILowNPrev,gDIKickHoldN;
-static CFTimeInterval gDIKickPunchT,gDIKickAtkT,gDILastKickT;
-static BOOL gDIKickArmed;
+static double gDIHuePhase=0.0;
+static float gDIKickTarget=0.0f,gDILowNPrev=0.0f,gDIKickHoldN=1.0f,gDIKickPunchAmp=0.0f;
+static CFTimeInterval gDIKickAtkT=0,gDILastKickT=0,gDIKickPunchT=0.0;
+static BOOL gDIKickArmed=YES;
 static void diRhythmAdvanceSpectrum(BOOL active,BOOL real,float dt);
 static float diKickPunchNow(void);
+
 
 static NSString *const kDomain = @"com.abgg332.driftisland";
 static NSString *const kNotifyStr = @"com.abgg332.driftisland.reload";
@@ -19497,8 +19496,6 @@ static void diSafeSpectrumRoundedRect(CGMutablePathRef path,const CGAffineTransf
 #define DI_AU_PORT   41235
 #define DI_AU_PKT    36          /* v1: 4 头 + 4 fast + 4 slow + 24 bands */
 #define DI_AU_PKT3   120
-static float gDIReferenceRaw[72], gDIReferenceCurrent[72];
-static BOOL gDIReferenceSeen = NO;
 
 #define DI_AU_PKT2   48          /* v2(3.0.71): 再 + 强度/年龄/序号/低频RMS */
 
@@ -19509,8 +19506,6 @@ static float gDIAuFast = 0.0f, gDIAuSlow = 0.0f;
 static CFAbsoluteTime gDIAuStamp = 0;
 static uint8_t gDIAuBuf[512];
 static int gDIAuLen = 0;
-static float gDIBandRaw[DI_AU_BANDS];
-static float gDIBandSmooth[DI_AU_BANDS];
 static BOOL gDIBandSeen = NO;
 static BOOL gDIAuLogged = NO, gDIAuFailLogged = NO;
 
@@ -19673,7 +19668,6 @@ static float gDIBeatRaw = 0.0f;      /* 起音瞬间的强度, 快速衰减 */
 static float gDIOnsetAvg = 0.0f;     /* 低音滑动均值(自适应阈值) */
 static float gDIOnsetVar = 0.0f;     /* 低音滑动方差 */
 static CFTimeInterval gDILastOnset = 0;
-static double gDIHuePhase = 0.0;     /* 3.0.54: 流光模式的色相相位 */
 static int gDIRingModeUsed = -1;     /* 3.0.54: 上次建环用的颜色模式 */
 static double gDISynPhase = 0.0;
 static CFTimeInterval gDIClock = 0;
@@ -19702,8 +19696,6 @@ static BOOL gDIRhythmDriving = NO;     /* 上一帧我们是否在写 transform(
    → 跳到 0~1 → 170ms 衰减。 */
 static float diSharedVisualPulse=0;
 static float gDIKick = 0.0f;           /* 视觉包络: 3.0.74 起由统一顺滑包络推进(45ms 顶/170ms 落) */
-static float gDIKickTarget = 0.0f;     /* 3.0.74: 本次咚的目标强度 */
-static CFTimeInterval gDIKickAtkT = 0; /* 3.0.74: 起音时刻(45ms 趋近窗口) */
 static float gDILowPrevK = 0.0f;       /* 上一帧低频归一值 */
 /* 3.0.64: 低频绝对值不可用 —— 音乐的低频段长期钉在 0.6~0.94(477 日志), 用固定阈值
    等于每帧都在起音, 于是"一下鼓点头像抖好几下"。改成**自适应归一**:
@@ -19715,16 +19707,12 @@ static float gDILowPrevK = 0.0f;       /* 上一帧低频归一值 */
 static float gDILowFloor = 0.0f;
 static float gDILowPeak = 0.0f;
 static float gDILowN = 0.0f;
-static float gDILowNPrev = 0.0f;
-static BOOL  gDIKickArmed = YES;
-static CFTimeInterval gDILastKickT = 0;
 static float gDILowSm = 0.0f;          /* 12ms 平滑后的低频(压掉逐帧噪声) */
 static float gDILowHist[5];            /* 最近 4 帧(~66ms)的平滑值, 用来量"这一下冲了多高" */
 static int   gDILowHistW = 0;
 /* 3.0.68: "咚"的前沿检测 —— 前两帧(32ms)的最高点 + 低频占比 + 本次触发峰值 */
 static float gDILowP1 = 0.0f, gDILowP2 = 0.0f;
 static float gDILowShare = 0.0f;       /* 0~5 段能量 / 全谱能量(0~1) */
-static float gDIKickHoldN = 1.0f;      /* 本次触发的归一峰值, 掉到 72% 以下才重新上膛 */
 
 /* ===== 3.0.71: 视觉上的"咚" =====
    481 用户: "粒子跟专辑头像的鼓点还是差点意思, 没有视频的效果节点"。
@@ -19735,8 +19723,6 @@ static float gDIKickHoldN = 1.0f;      /* 本次触发的归一峰值, 掉到 72
      · 之后 95ms 指数收回, 到 0.30s 彻底归零;
    时间和触发点由**样本域**(DIAudio 的 AudioUnitRender 钩子)给出, 还带年龄补偿,
    所以鼓点从"大概在这附近"变成"就落在这一下上"。 */
-static float gDIKickPunchAmp = 0.0f;
-static CFTimeInterval gDIKickPunchT = 0.0;
 static uint32_t gDILastPcmSerial = 0;
 
 static void diKickFire(float amp, CFTimeInterval at);
