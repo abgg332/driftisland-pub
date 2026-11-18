@@ -815,7 +815,6 @@ static void diNPMediaChanged(CFNotificationCenterRef c, void *obs, CFStringRef n
                              const void *obj, CFDictionaryRef info);
 static BOOL gDIMediaObserved = NO;
 static void diNPInstallMediaObserver(void);
-static void diNPInstallMediaObserver(void);
 static void diNPStartBgTimer(void);
 static void diNPModuleLayout(id self, SEL cmd);
 static void diArtAVLayout(id self, SEL cmd);
@@ -2210,17 +2209,6 @@ static void diNPHandleModuleVC(id vc) {
 static void diNPMediaChanged(CFNotificationCenterRef c, void *obs, CFStringRef name,
                              const void *obj, CFDictionaryRef info);   /* 定义在后面 */
 static BOOL gDIMediaObserved = NO;
-static void diNPInstallMediaObserver(void) {
-    if (gDIMediaObserved) return;
-    gDIMediaObserved = YES;
-    @try {
-        CFNotificationCenterAddObserver(CFNotificationCenterGetDarwinNotifyCenter(), NULL,
-            diNPMediaChanged, CFSTR("kMRMediaRemoteNowPlayingInfoDidChangeNotification"), NULL,
-            CFNotificationSuspensionBehaviorDeliverImmediately);
-        RLog(@"[背景] 换歌通知已监听");
-    } @catch (__unused NSException *e) { gDIMediaObserved = NO; }
-}
-/* 3.1.6 补 diNPInstallMediaObserver (b0 18900-18909) */
 static void diNPInstallMediaObserver(void) {
     if (gDIMediaObserved) return;
     gDIMediaObserved = YES;
