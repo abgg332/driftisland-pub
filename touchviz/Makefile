@@ -50,6 +50,7 @@ TouchViz_CFLAGS += -DIPHONE_SIMULATOR_ROOT=\"$(IPHONE_SIMULATOR_ROOT)\"
 endif
 
 TouchViz_CCFLAGS += -Wno-unused-variable
+TouchViz_CFLAGS += -Wno-error=deprecated-declarations
 TouchViz_CCFLAGS += -Wno-unused-function
 
 TouchViz_LDFLAGS += -F$(FWK_DIR)
