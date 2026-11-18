@@ -630,7 +630,6 @@ static CGSize gDIMruLastBox;
 
 static void diMruWriteExpandState(BOOL expanded, CGSize box) {
     static BOOL lastE; static int lastW = -1, lastH = -1; static CFAbsoluteTime lastT;
-        static CGFloat lastW, lastH; static NSString *lastCN;
     gDIMruExpandedFlag = expanded;   /* 文字调整也用它判形态, 比 root 尺寸可靠 */
     if (box.width > 0) gDIMruLastBox = box;
     int w = (int)lround(box.width), h = (int)lround(box.height);
@@ -1218,6 +1217,7 @@ static void diActivityApply(UIView *artwork) {
         state.glass.bounds = wantB;
         state.glass.center = wantC;
         state.glass.layer.cornerRadius = 0;
+        static CGFloat lastW, lastH; static NSString *lastCN;
         NSString *cn = NSStringFromClass(artwork.superview.class);
         if (fabs(lastW - box.size.width) > 0.5 || fabs(lastH - box.size.height) > 0.5 || ![lastCN isEqualToString:cn]) {
             lastW = box.size.width; lastH = box.size.height; lastCN = cn;
@@ -1633,6 +1633,7 @@ static BOOL diArtPrefOn(void) {
     return gDIArtOn;
 }
 
+
 static void diArtStripSpin(CALayer *layer, int depth, int maxDepth) {
     if (!layer || depth > maxDepth) return;
     NSArray<NSString *> *keys = [layer.animationKeys copy];
@@ -1747,8 +1748,8 @@ static BOOL diArtMaskWanted(void) {
     CFAbsoluteTime now = CFAbsoluteTimeGetCurrent();
     if (last == 0 || now - last > 0.35) {
         last = now;
-        cached = diPrefBoolNow(@"PlayerMaskOn", playerMaskOn);
 static BOOL playerMaskOn = NO;
+        cached = diPrefBoolNow(@"PlayerMaskOn", playerMaskOn);
     }
     return cached;
 }
@@ -1971,6 +1972,7 @@ static void diArtPlayerPost(UIView *root) {
     diArtFlushQueue();
 }
 
+
 static UIImage *diNPDownscaleImage(UIImage *img, CGFloat maxSide) {
     if (!img) return nil;
     CGSize s = img.size;
@@ -2013,8 +2015,8 @@ static void diNPQueryNowPlaying(void) {
         double duration=[meta[@"kMRMediaRemoteNowPlayingInfoDuration"] doubleValue];
         double rate=[meta[@"kMRMediaRemoteNowPlayingInfoPlaybackRate"] doubleValue];
         dispatch_async(dispatch_get_main_queue(), ^{
-            if(decoded){diFxArtworkData=art;diFxArtworkImage=decoded;gDIParticleColorDirty=YES;}
 static BOOL gDIParticleColorDirty = YES;
+            if(decoded){diFxArtworkData=art;diFxArtworkImage=decoded;gDIParticleColorDirty=YES;}
             if(!has){diFxArtworkData=nil;diFxArtworkImage=nil;}
             diRingElapsed=isfinite(elapsed)?fmax(0,elapsed):0;
             diRingDuration=isfinite(duration)?fmax(0,duration):0;
@@ -2237,13 +2239,13 @@ static void diRhythmRememberBase(UIView *v);
 static BOOL diViewIsSuggestions(UIView *v);      /* 3.0.62: 定义在后面, 这里先声明 */
 static BOOL diArtInExpandedPlayer(UIView *v);    /* 3.0.63: 同上 */
 static void diRhythmCollectExtras(UIView *dv) {
-    gDIRhythmExtraN = 0;
 static int gDIRhythmExtraN = 0;
-    gDIRhythmSkipDv = NO;
+    gDIRhythmExtraN = 0;
 static BOOL  gDIRhythmSkipDv = NO;     /* extras 里已经有 dv 的祖先 → dv 不再单独写(否则缩两次) */
-    for (int i = 0; i < DI_RHYTHM_EXTRA_MAX; i++) gDIRhythmExtras[i] = nil;
-static __weak UIView *gDIRhythmExtras[DI_RHYTHM_EXTRA_MAX];
+    gDIRhythmSkipDv = NO;
 #define DI_RHYTHM_EXTRA_MAX 4
+static __weak UIView *gDIRhythmExtras[DI_RHYTHM_EXTRA_MAX];
+    for (int i = 0; i < DI_RHYTHM_EXTRA_MAX; i++) gDIRhythmExtras[i] = nil;
     if (!dv) return;
     UIView *space = dv.superview ?: dv;
     NSMutableArray<UIView *> *pool = [NSMutableArray array];
@@ -2395,8 +2397,8 @@ static CATransform3D diRhythmNeutral(CATransform3D cur) {
 
 static CATransform3D diRhythmBaseOf(UIView *v) {
     if (!v) return CATransform3DIdentity;
-    if (v == gDIRhythmDrive) return gDIRhythmBase;
 static __weak UIView *gDIRhythmDrive = nil;   /* 真正承载缩放的视图(封面外面可能还套着一层裁剪容器) */
+    if (v == gDIRhythmDrive) return gDIRhythmBase;
     NSValue *nv = objc_getAssociatedObject(v, "di.rhythm.base");
     if ([nv isKindOfClass:NSValue.class]) return nv.CATransform3DValue;
     return v.layer.transform;
@@ -4641,7 +4643,7 @@ static void diRhythmTickWithDelta(float dtIn) {
        岛(MRU)那条链路仍然读 gDIKick/beat.bin, 一行没动。 */
     diFxAdvanceEnergy(active, real, dt);
     // Reference detector uses spectrum energy, not the legacy PCM kick detector.
-    float referenceScale=diFxAdvanceBeat(active, gDIFxEnergy, rhythmBeatScale, dt);
+    float referenceScale=diFxAdvanceBeat(active, diW17Using?diW17Energy:gDIFxEnergy, rhythmBeatScale, dt);
     diSharedVisualPulse=gDIFxBeatPulse;
     diISPublishBeat(active);
     float fxBeatS=referenceScale;
