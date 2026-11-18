@@ -4,7 +4,8 @@ TARGET := simulator:clang:latest:15.0
 IPHONE_SIMULATOR_ROOT := $(shell ../devkit/sim-root.sh)
 else
 ARCHS ?= arm64 arm64e
-TARGET := iphone:clang:16.5:16.0
+TVZ_SDK ?= 16.5
+TARGET := iphone:clang:$(TVZ_SDK):16.0
 INSTALL_TARGET_PROCESSES := Preferences
 endif
 
@@ -25,6 +26,11 @@ endif
 TVZPrefs_CFLAGS += -fobjc-arc
 TVZPrefs_CFLAGS += -I..
 TVZPrefs_CFLAGS += -DPACKAGE_VERSION=\"$(PACKAGE_VERSION)\"
+ifneq ($(THEOS_DEVICE_SIMULATOR),1)
+# SwiftUI module interfaces in the downloaded iOS16.5 SDK were built by Swift5.8;
+# this runner uses Swift6. Use its matching Xcode SDK while retaining iOS16 deployment.
+TVZPrefs_SWIFTFLAGS += -sdk $(shell xcrun --sdk iphoneos --show-sdk-path)
+endif
 
 ifeq ($(THEOS_DEVICE_SIMULATOR),1)
 TVZPrefs_CFLAGS += -DIPHONE_SIMULATOR_ROOT=\"$(IPHONE_SIMULATOR_ROOT)\"
