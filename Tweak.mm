@@ -25,13 +25,13 @@
    source calls these from early boot helpers before their owning state section. */
 static void RLog(NSString *fmt, ...) NS_FORMAT_FUNCTION(1,2);
 #define DI_AU_BANDS 24
-extern double gDIHuePhase;
-extern float gDIReferenceRaw[72],gDIReferenceCurrent[72];
-extern BOOL gDIReferenceSeen;
-extern float gDIBandRaw[DI_AU_BANDS],gDIBandSmooth[DI_AU_BANDS];
-extern float gDIKickPunchAmp,gDIKickTarget,gDILowNPrev,gDIKickHoldN;
-extern CFTimeInterval gDIKickPunchT,gDIKickAtkT,gDILastKickT;
-extern BOOL gDIKickArmed;
+static double gDIHuePhase;
+static float gDIReferenceRaw[72],gDIReferenceCurrent[72];
+static BOOL gDIReferenceSeen;
+static float gDIBandRaw[DI_AU_BANDS],gDIBandSmooth[DI_AU_BANDS];
+static float gDIKickPunchAmp,gDIKickTarget,gDILowNPrev,gDIKickHoldN;
+static CFTimeInterval gDIKickPunchT,gDIKickAtkT,gDILastKickT;
+static BOOL gDIKickArmed;
 static void diRhythmAdvanceSpectrum(BOOL active,BOOL real,float dt);
 static float diKickPunchNow(void);
 
