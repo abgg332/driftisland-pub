@@ -11,4 +11,9 @@ DriftIslandPrefs_PRIVATE_FRAMEWORKS = Preferences
 DriftIslandPrefs_INSTALL_PATH = /Library/PreferenceBundles
 DriftIslandPrefs_BUNDLE_RESOURCES = Root.plist icon.png
 
+# Install explicit bundle metadata. A bare Mach-O + Root.plist does not provide
+# NSBundle with the correct root controller; never inherit the Touch-Viz principal.
+after-stage::
+	@cp Resources/Info.plist "$(THEOS_STAGING_DIR)/Library/PreferenceBundles/DriftIslandPrefs.bundle/Info.plist"
+
 include $(THEOS_MAKE_PATH)/bundle.mk
