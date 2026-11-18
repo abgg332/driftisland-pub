@@ -927,6 +927,21 @@ static Class diStepSliderClass(void) {
 @implementation DIRecordingTrailPage
 - (void)viewDidLoad {
     [super viewDidLoad];self.title=@"录屏轨迹";
+    /* 3.1.8: 诊断 + 自愈 —— 若本页被当成"漂流岛"入口直接打开(位于导航栈底),
+       说明设备上是旧 plist 把漂流岛指向了本类, 这里直接换成完整设置根页。 */
+    UINavigationController *nav=self.navigationController;
+    diStep(@"[设置] 录屏轨迹页 viewDidLoad (导航栈=%lu, 是否栈底=%d)",
+           (unsigned long)nav.viewControllers.count, (int)(nav.viewControllers.firstObject==self));
+    if(nav.viewControllers.firstObject==self){
+        Class rootCls=NSClassFromString(@"DIPrefsController");
+        if(rootCls){
+            UIViewController *vc=[[rootCls alloc]init];
+            NSMutableArray *vcs=[nav.viewControllers mutableCopy];
+            if(vcs.count){vcs[vcs.count-1]=vc;}
+            [nav setViewControllers:vcs animated:NO];
+            return;
+        }
+    }
     NSString *root=[[NSBundle bundleForClass:self.class].bundlePath stringByDeletingLastPathComponent];
     NSBundle *bundle=[NSBundle bundleWithPath:[root stringByAppendingPathComponent:@"TVZPrefs.bundle"]];
     NSError *error=nil;
@@ -1009,7 +1024,16 @@ static void diPrefsReloadCB(CFNotificationCenterRef center, void *observer, CFSt
 
 /* 2.7.20: +load 保持极简, 只写一行日志 —— 与 2.7.13 一致(那版无 +load) */
 + (void)load {
-    diStep(@"漂流岛设置 2.7.20 bundle 已加载, DIPrefsController 已注册");
+    /* 3.1.8: 带上版本与包路径 —— 用来确认设备上真正生效的设置包是哪一份 */
+    diStep(@"漂流岛设置 %@ bundle 已加载, DIPrefsController 已注册, 包=%@", DI_VERSION_STR,
+           [[NSBundle bundleForClass:self] bundlePath] ?: @"(未知)");
+}
+
+/* 3.1.8: 根页诊断 —— 进入设置先打一行日志, 区分"根列表没构建"和"根本不是这个类" */
+- (void)viewDidLoad {
+    diStep(@"[设置] DIPrefsController viewDidLoad (类=%@)", NSStringFromClass(self.class));
+    [super viewDidLoad];
+    if (!self.title.length) self.title = @"漂流岛";
 }
 
 - (instancetype)init {
