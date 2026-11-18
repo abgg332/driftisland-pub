@@ -1495,6 +1495,13 @@ static CAShapeLayer *diProgressBack=nil, *diProgressFront=nil;
 
 static float diSharedVisualPulse=0;
 
+#define DI_RHYTHM_EXTRA_MAX 4
+static __weak UIView *gDIRhythmExtras[DI_RHYTHM_EXTRA_MAX];
+static int gDIRhythmExtraN = 0;
+static BOOL  gDIRhythmSkipDv = NO;     /* extras 里已经有 dv 的祖先 → dv 不再单独写(否则缩两次) */
+static __weak UIView *gDIRhythmDrive = nil;   /* 真正承载缩放的视图(封面外面可能还套着一层裁剪容器) */
+static BOOL playerMaskOn = NO;
+static BOOL gDIParticleColorDirty = YES;
 /* ===== 3.1.6 修复(二): 3.1 重构丢失的函数, 从 3.0.119 按原序搬回 ===== */
 static NSString *diMruCacheDir(void) {
     return @"/var/mobile/Library/Caches/com.abgg332.driftisland";
@@ -1748,7 +1755,6 @@ static BOOL diArtMaskWanted(void) {
     CFAbsoluteTime now = CFAbsoluteTimeGetCurrent();
     if (last == 0 || now - last > 0.35) {
         last = now;
-static BOOL playerMaskOn = NO;
         cached = diPrefBoolNow(@"PlayerMaskOn", playerMaskOn);
     }
     return cached;
@@ -2015,7 +2021,6 @@ static void diNPQueryNowPlaying(void) {
         double duration=[meta[@"kMRMediaRemoteNowPlayingInfoDuration"] doubleValue];
         double rate=[meta[@"kMRMediaRemoteNowPlayingInfoPlaybackRate"] doubleValue];
         dispatch_async(dispatch_get_main_queue(), ^{
-static BOOL gDIParticleColorDirty = YES;
             if(decoded){diFxArtworkData=art;diFxArtworkImage=decoded;gDIParticleColorDirty=YES;}
             if(!has){diFxArtworkData=nil;diFxArtworkImage=nil;}
             diRingElapsed=isfinite(elapsed)?fmax(0,elapsed):0;
@@ -2239,12 +2244,8 @@ static void diRhythmRememberBase(UIView *v);
 static BOOL diViewIsSuggestions(UIView *v);      /* 3.0.62: 定义在后面, 这里先声明 */
 static BOOL diArtInExpandedPlayer(UIView *v);    /* 3.0.63: 同上 */
 static void diRhythmCollectExtras(UIView *dv) {
-static int gDIRhythmExtraN = 0;
     gDIRhythmExtraN = 0;
-static BOOL  gDIRhythmSkipDv = NO;     /* extras 里已经有 dv 的祖先 → dv 不再单独写(否则缩两次) */
     gDIRhythmSkipDv = NO;
-#define DI_RHYTHM_EXTRA_MAX 4
-static __weak UIView *gDIRhythmExtras[DI_RHYTHM_EXTRA_MAX];
     for (int i = 0; i < DI_RHYTHM_EXTRA_MAX; i++) gDIRhythmExtras[i] = nil;
     if (!dv) return;
     UIView *space = dv.superview ?: dv;
@@ -2397,7 +2398,6 @@ static CATransform3D diRhythmNeutral(CATransform3D cur) {
 
 static CATransform3D diRhythmBaseOf(UIView *v) {
     if (!v) return CATransform3DIdentity;
-static __weak UIView *gDIRhythmDrive = nil;   /* 真正承载缩放的视图(封面外面可能还套着一层裁剪容器) */
     if (v == gDIRhythmDrive) return gDIRhythmBase;
     NSValue *nv = objc_getAssociatedObject(v, "di.rhythm.base");
     if ([nv isKindOfClass:NSValue.class]) return nv.CATransform3DValue;
@@ -2533,14 +2533,6 @@ static CFAbsoluteTime gDIBarPeakT = 0;
    泡泡是纯状态 + 每帧重画路径, 不新增图层: 依然挂在同一个渐变遮罩里,
    所以颜色照旧跟随封面/固定色/流光。 */
 #define DI_BUBBLE_MAX 120
-typedef struct {
-    float x, y;         /* 当前圆心(bars 坐标系) */
-    float vy;           /* 上升速度 pt/s, 会随寿命略微加速 */
-    float r0;           /* 初始半径 */
-    float life, maxLife;
-    float swayPh, swayAmp;   /* 横向摆动的相位与幅度 */
-    int alive;
-} DIBubble;
 static DIBubble gDIBubbles[DI_BUBBLE_MAX];
 static float gDIBubbleLastV[64];    /* 上一帧各柱的频谱值, 用来抓"起音" */
 static double gDIBubbleNextAt[64];  /* 各柱下次允许冒泡的时间(持续冒泡节流) */
@@ -2590,16 +2582,6 @@ static UIColor *diRhythmHexColor(NSString *hex, UIColor *def) {
    ③ 时间常数化: 摆动、冲量衰减全部用 dt 计算, 60/120Hz 手感一致。
    ④ 出生/消失都带淡入淡出, 不会凭空出现或突然消失。 */
 #define DI_DOT_CAP 64
-typedef struct {
-    float ang, rad;          /* 极坐标位置 */
-    float spin, drift;       /* 角速度 / 恒定向外速度(px/s) */
-    float push;              /* 鼓点冲量(px/s), 指数衰减 */
-    float sway, swayAmp, swayPhase;   /* 横向自然摆动 */
-    float size, rot, rotSpd;
-    float life, maxLife, phase, beatGain;
-    int   shape;             /* 0 实心点 1 空心菱形 2 空心方块 3 空心三角 */
-    float tint;              /* 0~1: 在粒子起始色/结束色之间插值的位置 */
-} DIDot;
 
 static DIDot gDIDots[DI_DOT_CAP];
 static CALayer *gDIDotLayer[DI_DOT_CAP];
@@ -4364,7 +4346,6 @@ static void diFxHardStop(void) {
    岛专辑特效在 MediaRemoteUI 进程里跑, 它自己连频谱端当然也能算, 但那样就是"另一份
    包络、另一个鼓点", 和播放器不可能严丝合缝。这里把**已经在算的**这一份(gDIKick/
    gDIBeatEnv/gDIBassPulse)30Hz 落成 24 字节, MRU 直接读 —— 岛上和播放器永远是同一拍。 */
-typedef struct { double t; float kick, env, bass, playing, energy, extra; } DIBeatSnapOut;
 static void diISPublishBeat(BOOL playing) {
     if(!diIslandEffectsAvailable)return; // no retired island IPC writes
 
@@ -4902,11 +4883,6 @@ static double gDIISMAmp = 0.70, gDIISMDotN = 25.0, gDIISMDotA = 0.74,
               gDIISMDotS = 1.0, gDIISMDotP = 1.0;
 static int gDIISMMode = 0;
 
-typedef struct {
-    float ang, rad, drift, push, sway, swayAmp, swayPhase;
-    float size, rot, rotSpd, life, maxLife, phase, tint, beatGain;
-    int shape;
-} DIISMDot;
 static DIISMDot gDIISMDots[DI_IS_DOT_MAX];
 
 @interface DIISMRUTicker : NSObject
@@ -4920,7 +4896,6 @@ static float diISMRand01(void) {
 }
 
 /* ---------- 鼓点快照: SB 写 beat.bin, 这里读 ---------- */
-typedef struct { double t; float kick, env, bass, playing, energy, extra; } DIBeatSnap;
 static int gDIISMBeatFd = -2;
 static CFAbsoluteTime gDIISMBeatTryAt = 0;
 static DIBeatSnap gDIISMBeatSnap;
