@@ -796,6 +796,82 @@ typedef struct {
 /* ---------- 鼓点快照: SB 写 beat.bin, 这里读 ---------- */
 typedef struct { double t; float kick, env, bass, playing, energy, extra; } DIBeatSnap;
 
+/* 3.1.6: 补块区域的前向声明/前移变量 */
+static inline void diPhase(const char *p);
+static void diCrumb(NSString *s);
+static void diArtScheduleDress(UIView *v);
+static NSMutableDictionary<NSString *, NSNumber *> *diNPPrefCache(void);
+static BOOL diNPPrefFlagRaw(NSString *key, BOOL def);
+static void diNPPrefCachePut(NSString *key, BOOL v);
+static void diNPTickPrefs(void);
+static void diNPFetchArtwork(void);
+static void diNPGeometryFor(UIView *host, CGRect *outRect, CGFloat *outR, NSString **outSrc);
+static void diNPApplyBackgroundTo(UIView *host, BOOL on);
+static void diNPRefreshBackgrounds(void);
+static void diNPHideNotPlayingLabels(UIView *root, BOOL hide);
+static void diNPApplyHideTime(void);
+static void diNPHandleModuleVC(id vc);
+static void diNPMediaChanged(CFNotificationCenterRef c, void *obs, CFStringRef name,
+                             const void *obj, CFDictionaryRef info);
+static BOOL gDIMediaObserved = NO;
+static void diNPInstallMediaObserver(void);
+static void diNPInstallMediaObserver(void);
+static void diNPStartBgTimer(void);
+static void diNPModuleLayout(id self, SEL cmd);
+static void diArtAVLayout(id self, SEL cmd);
+static void diTraceCaller(const char *tag);
+static BOOL diTBShouldLog(void);
+static void diTBSetFrame(id self, SEL cmd, CGRect f);
+static void diTBSetTransform(id self, SEL cmd, CGAffineTransform t);
+static void diTBSetHighlighted(id self, SEL cmd, BOOL h);
+static void diArtInstallTBHook(void);
+
+static volatile const char *gDIPhase = "启动";
+static int gDIStage = 3;              /* 功能档位: 3=全开 2=去掉传送栏setFrame钩子 1=再去掉模块背景/隐藏钩子 0=全关(旧保险态) */
+static CFTimeInterval gDILoadTS = 0;   /* 引导时间戳: 高危钩子推迟到引导 8 秒后再装 */
+static NSHashTable *gDIArtDressPending = nil;   /* 待挂蒙版的封面 */
+static const void *kDIBgIVKey  = &kDIBgIVKey;
+static const void *kDIBgDimKey = &kDIBgDimKey;
+static const void *kDIBgLastKey = &kDIBgLastKey;   /* 3.0.10: 模块 VC 处理节流 */
+static const void *kDIBgRKey    = &kDIBgRKey;      /* 3.0.15: 缓存圆角 */
+static const void *kDIBgSizeKey = &kDIBgSizeKey;   /* 3.0.15: 缓存 host 尺寸 */
+static const void *kDIBgRectKey = &kDIBgRectKey;   /* 3.0.15: 缓存背景矩形 */
+static NSHashTable *gDIBgHosts = nil;       /* 模块内容容器(隐藏未在播放用) */
+static NSHashTable *gDIBgPlayers = nil;     /* 3.0.15: 背景宿主 = 播放器视图(各尺寸的可见卡片) */
+static UIImage *gDIBgImage = nil;
+static NSData *gDIBgData = nil;          /* 3.0.14: 专辑图原始数据, 换曲判定用 */
+static CFTimeInterval gDIBgFetchTS = 0;
+static CFTimeInterval gDIBgLastReqTS = 0;   /* 3.0.15: 取图请求节流 */
+static CFTimeInterval gDIBgPrefTS = 0;
+static BOOL gDIBgOnCache = YES;
+static BOOL gDIHideNP = NO;
+static BOOL gDIHideTime = NO;   /* 3.0.41: 未播放时隐藏进度条与两侧时间 */
+static dispatch_source_t gDIBgTimer = NULL; /* 3.0.15: 换曲轮询(通知不可靠时的兜底) */
+static CFStringRef *gMRArtworkKeyPtr = NULL;
+static CFStringRef *gMRRateKeyPtr = NULL;      /* 3.0.17: 播放速率, 判断"暂停/停止" */
+static CFStringRef *gMRTitleKeyPtr = NULL;
+static int gDIBgSlowCount = 0;
+static BOOL gDIBgStopped = NO;      /* 3.0.21: 本进程内停用专辑背景(连续超时保护) */
+static NSHashTable *gDIHiddenNPLabels = nil;
+static BOOL gDIHasNowPlaying = NO;
+static void (*gDIOrigModuleLayout)(id, SEL) = NULL;
+static BOOL gDIMediaObserved = NO;
+static void (*gDIOrigAVLayout)(id, SEL) = NULL;
+static BOOL gDIArtAVTried = NO;
+static void (*gDIOrigTBSetFrame)(id, SEL, CGRect) = NULL;
+static void (*gDIOrigTBSetTransform)(id, SEL, CGAffineTransform) = NULL;
+static void (*gDIOrigTBSetHighlighted)(id, SEL, BOOL) = NULL;
+static int gDITBLogs = 0;
+static BOOL gDITBHookTried = NO;
+static BOOL gDIStageHooksDone = NO;
+static BOOL diArtIs3x2(void);
+static void diNoImplicitActions(CALayer *l);
+static BOOL diArtMaskWanted(void);
+static void diArtFlushQueue(void);
+static UIImage *diNPDownscaleImage(UIImage *img, CGFloat maxSide);
+static void diNPQueryNowPlaying(void);
+static CATransform3D diRhythmNeutral(CATransform3D cur);
+
 /* ===== 3.1.6 修复(四·重做): 从 3.1 前驱 b0ccd95 完整补齐(含 typedef 结构体起点修正) ===== */
 static const BOOL diIslandEffectsAvailable = NO; // source archived; original mask/rotation remain
 
@@ -1699,6 +1775,580 @@ static void diRhythmRememberBase(UIView *v) {
                              OBJC_ASSOCIATION_RETAIN_NONATOMIC);
 }
 
+/* 3.1.6: diArt/diNP 区依赖闭包(b0 定向提取, 按 b0 原序) */
+/* 3.1.6 补 diPhase (b0 325-325) */
+static inline void diPhase(const char *p) { gDIPhase = p; }
+/* 3.1.6 补 diCrumb (b0 17319-17335) */
+static void diCrumb(NSString *s) {
+    /* 面包屑: 不走缓冲, 直接落盘 —— 崩了也在, 下次日志就能看到死在哪一步 */
+    @try {
+        RLog(@"[足迹] %@", s);
+        NSString *p = @"/var/mobile/Library/Logs/driftisland-crumb.log";
+        NSString *line = [NSString stringWithFormat:@"%@ %@\n",
+                          [NSDate date], s];
+        NSFileHandle *h = [NSFileHandle fileHandleForWritingAtPath:p];
+        if (h) {
+            [h seekToEndOfFile];
+            [h writeData:[line dataUsingEncoding:NSUTF8StringEncoding]];
+            [h closeFile];
+        } else {
+            [line writeToFile:p atomically:YES encoding:NSUTF8StringEncoding error:NULL];
+        }
+    } @catch (__unused NSException *e) {}
+}
+/* 3.1.6 补 diArtScheduleDress (b0 17865-17870) */
+static void diArtScheduleDress(UIView *v) {
+    if (!v) return;
+    if (!gDIArtDressPending) gDIArtDressPending = [NSHashTable weakObjectsHashTable];
+    [gDIArtDressPending addObject:v];
+    diArtFlushQueue();
+}
+/* 3.1.6 补 diNPPrefCache (b0 18043-18047) */
+static NSMutableDictionary<NSString *, NSNumber *> *diNPPrefCache(void) {
+    static NSMutableDictionary *d; static dispatch_once_t once;
+    dispatch_once(&once, ^{ d = [NSMutableDictionary dictionary]; });
+    return d;
+}
+/* 3.1.6 补 diNPPrefFlagRaw (b0 18048-18052) */
+static BOOL diNPPrefFlagRaw(NSString *key, BOOL def) {
+    id v = CFBridgingRelease(CFPreferencesCopyAppValue((__bridge CFStringRef)key,
+                                                      CFSTR("com.local.playerexact")));
+    return [v isKindOfClass:NSNumber.class] ? [v boolValue] : def;
+}
+/* 3.1.6 补 diNPPrefCachePut (b0 18053-18055) */
+static void diNPPrefCachePut(NSString *key, BOOL v) {
+    @synchronized (diNPPrefCache()) { diNPPrefCache()[key] = @(v); }
+}
+/* 3.1.6 补 diNPTickPrefs (b0 18085-18107) */
+static void diNPTickPrefs(void) {
+    CFTimeInterval now = CFAbsoluteTimeGetCurrent();
+    if (now - gDIBgPrefTS < 1.0) return;
+    gDIBgPrefTS = now;
+    static dispatch_queue_t q; static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        q = dispatch_queue_create("com.abgg332.di.npflag", DISPATCH_QUEUE_SERIAL);
+        dispatch_set_target_queue(q, dispatch_get_global_queue(QOS_CLASS_UTILITY, 0));
+    });
+    dispatch_async(q, ^{
+        BOOL on = diNPPrefFlagRaw(@"MusicArtworkGradientEnabled", YES);
+        BOOL hid = diNPPrefFlagRaw(@"HideNotPlaying", NO);
+        BOOL hidT = diNPPrefFlagRaw(@"HideTimeWhenIdle", NO);
+        diNPPrefCachePut(@"MusicArtworkGradientEnabled", on);
+        diNPPrefCachePut(@"HideNotPlaying", hid);
+        diNPPrefCachePut(@"HideTimeWhenIdle", hidT);
+        dispatch_async(dispatch_get_main_queue(), ^{
+            gDIBgOnCache = on;
+            gDIHideNP = hid;
+            gDIHideTime = hidT;
+        });
+    });
+}
+/* 3.1.6 补 diNPFetchArtwork (b0 18162-18236) */
+static void diNPFetchArtwork(void) {
+    if (gDIStage < 1) return;   /* 档位 0: 不取图 */
+    CFTimeInterval rnow = CFAbsoluteTimeGetCurrent();
+    if (rnow - gDIBgLastReqTS < 0.8) return;   /* 3.0.15: 通知+轮询+布局三路都会来, 合并 */
+    gDIBgLastReqTS = rnow;
+    diNPLoadMediaRemote();
+    if (!gMRGetNowPlayingInfo) { diCrumb(@"取图: 符号缺失, 放弃"); return; }
+    gMRGetNowPlayingInfo(dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^(CFDictionaryRef info) {
+        /* 3.0.10: 回调在后台队列, 整体兜 @try + autoreleasepool —— 这里出任何异常
+           都不能带崩 SpringBoard */
+        @autoreleasepool { @try {
+            NSData *data = nil;
+            if (info) {
+                CFStringRef key = (gMRArtworkKeyPtr && *gMRArtworkKeyPtr) ? *gMRArtworkKeyPtr : NULL;
+                if (key) {
+                    id v = (__bridge id)CFDictionaryGetValue(info, key);
+                    if ([v isKindOfClass:NSData.class] && [((NSData *)v) length] > 64) data = v;
+                }
+            }
+            /* 3.0.17: 「背景要跟专辑头像一样」—— 歌曲暂停/停止后背景必须回到默认。
+               以前只认 artworkData, 而暂停时这首曲子的图还在, 于是背景一直挂着。
+               现在读 PlaybackRate: 有值且 <= 0 就是停/暂停, 直接清空。 */
+            BOOL playing = YES;
+            if (info) {
+                if (gMRRateKeyPtr && *gMRRateKeyPtr) {
+                    id rv = (__bridge id)CFDictionaryGetValue(info, *gMRRateKeyPtr);
+                    if ([rv isKindOfClass:NSNumber.class]) playing = ([rv doubleValue] > 0.01);
+                } else if (gMRTitleKeyPtr && *gMRTitleKeyPtr) {
+                    id tv = (__bridge id)CFDictionaryGetValue(info, *gMRTitleKeyPtr);
+                    playing = (tv != NULL);
+                }
+            } else {
+                playing = NO;   /* 连 now playing 都没有 = 没有在放 */
+            }
+            if (!playing) {
+                dispatch_async(dispatch_get_main_queue(), ^{
+                    @try {
+                        if (!gDIBgImage && !gDIBgData) return;
+                        gDIBgImage = nil;
+                        gDIBgData = nil;
+                        diNPRefreshBackgrounds();
+                        RLog(@"[背景] 暂停/停止 → 收起专辑背景, 恢复默认外观");
+                    } @catch (__unused NSException *e) {}
+                });
+                return;
+            }
+            /* 3.0.16: 先比数据再解码 —— 轮询变快以后每次都解一张 600x600 太重 */
+            NSData *prev = gDIBgData;
+            BOOL same = (data && prev && [data isEqualToData:prev]);
+            UIImage *img = (data && !same) ? diNPDownscaleImage([UIImage imageWithData:data], 640.0) : nil;
+            dispatch_async(dispatch_get_main_queue(), ^{
+                @try {
+                    if (!img) {
+                        /* 3.0.14: 取不到图(该曲无封面/未播放) → 保留现有背景, 不清空 */
+                        static CFTimeInterval lastNone = 0;
+                        if (!gDIBgImage && CFAbsoluteTimeGetCurrent() - lastNone > 30.0) {
+                            lastNone = CFAbsoluteTimeGetCurrent();
+                            RLog(@"[背景] 取不到专辑图(未播放/无封面), 保持当前背景");
+                        }
+                        return;
+                    }
+                    if (data && gDIBgData && [data isEqualToData:gDIBgData]) {
+                        return;   /* 同一张专辑图, 不重铺 */
+                    }
+                    gDIBgData = data;
+                    gDIBgImage = img;
+                    diNPRefreshBackgrounds();
+                    RLog(@"[背景] 专辑图 %@ (数据 %lu 字节)", [NSString stringWithFormat:@"%.0fx%.0f", img.size.width, img.size.height],
+                         (unsigned long)data.length);
+                } @catch (NSException *e) { diCrumb([NSString stringWithFormat:@"取图: 主线程异常 %@", e.reason]); }
+            });
+        } @catch (NSException *e) { diCrumb([NSString stringWithFormat:@"取图: 回调异常 %@", e.reason]); } }
+    });
+    /* 3.0.15: 这条路径现在每 1.5 秒跑一次, 不再写足迹文件(每次 4 行会拖慢主线程) */
+}
+/* 3.1.6 补 diNPGeometryFor (b0 18247-18306) */
+static void diNPGeometryFor(UIView *host, CGRect *outRect, CGFloat *outR, NSString **outSrc) {
+    CGRect rect = host.bounds;
+    CGFloat r = host.layer.cornerRadius;
+    NSString *src = (r >= 6.0) ? NSStringFromClass(host.class) : nil;
+    CGFloat hostArea = host.bounds.size.width * host.bounds.size.height;
+    /* ① 最近的、把宿主整个包住、而且只比宿主大一点点的祖先 = 卡片本体。
+          用它的矩形+圆角(播放器常有几 pt 内边距, 背景要铺到卡片边才算对)。 */
+    UIView *a = host.superview;
+    for (int i = 0; a && i < 4; i++, a = a.superview) {
+        CGFloat cr = a.layer.cornerRadius;
+        CGSize s = a.bounds.size;
+        CGFloat area = s.width * s.height;
+        if (cr >= 6.0 && hostArea > 1
+            && area >= hostArea * 0.9 && area <= hostArea * 1.45) {
+            rect = [a convertRect:a.bounds toView:host];
+            r = cr;
+            src = NSStringFromClass(a.class);
+            break;
+        }
+    }
+    /* ② 祖先太大(整块 CC 面板) → 只借圆角, 矩形还是用宿主自己的 */
+    if (!src) {
+        UIView *b = host.superview;
+        for (int i = 0; b && i < 4; i++, b = b.superview) {
+            CGFloat cr = b.layer.cornerRadius;
+            CGSize s = b.bounds.size;
+            if (cr >= 6.0 && (hostArea <= 1 || s.width * s.height >= hostArea * 0.9)) {
+                r = cr;
+                src = NSStringFromClass(b.class);
+                break;
+            }
+        }
+    }
+    if (!src) {
+        /* ② 卡片把圆角挂在内层材质视图(MTMaterialView 之类)上 */
+        NSMutableArray *q = [NSMutableArray arrayWithObject:host];
+        int budget = 200;
+        while (q.count && budget-- > 0) {
+            UIView *v = q.firstObject; [q removeObjectAtIndex:0];
+            if (v != host && !v.hidden) {
+                CGFloat cr = v.layer.cornerRadius;
+                CGSize s = v.bounds.size;
+                if (cr >= 6.0 && hostArea > 1 && s.width * s.height >= hostArea * 0.85) {
+                    r = cr;
+                    src = NSStringFromClass(v.class);
+                    break;
+                }
+            }
+            for (UIView *c in v.subviews) [q addObject:c];
+        }
+    }
+    if (!src || r < 6.0) {
+        CGFloat side = MIN(host.bounds.size.width, host.bounds.size.height);
+        r = MIN(MAX(side * 0.16, 18.0), 40.0);
+        src = @"估算";
+    }
+    *outRect = rect;
+    *outR = r;
+    if (outSrc) *outSrc = src;
+}
+/* 3.1.6 补 diNPApplyBackgroundTo (b0 18310-18404) */
+static void diNPApplyBackgroundTo(UIView *host, BOOL on) {
+    if (gDIBgStopped && on) return;
+    static BOOL writing=NO;
+    if(writing)return;
+    struct DIBgScope {BOOL *flag;DIBgScope(BOOL *f):flag(f){*flag=YES;}~DIBgScope(){*flag=NO;}} scope(&writing);
+    diPhase("bgwrite");
+    CFTimeInterval tBG = CFAbsoluteTimeGetCurrent();
+    @try {
+        if (![host isKindOfClass:UIView.class] || !host.window) return;
+        CALayer *bg = objc_getAssociatedObject(host, kDIBgIVKey);
+        CALayer *dim = objc_getAssociatedObject(host, kDIBgDimKey);
+        if (!on || !gDIBgImage) {
+            bg.hidden = YES;
+            dim.hidden = YES;
+            return;
+        }
+        CGRect rect = host.bounds;
+        if (rect.size.width < 40 || rect.size.height < 40) return;   /* 占位尺寸不铺 */
+
+        /* 3.0.15: 几何(矩形+圆角)只在"尺寸变了 / 还没有层"时重算并缓存 —— 尺寸没变时
+           反复量只会让背景跟着布局抖动反复改。 */
+        NSValue *sz = objc_getAssociatedObject(host, kDIBgSizeKey);
+        CGFloat r = [objc_getAssociatedObject(host, kDIBgRKey) doubleValue];
+        BOOL needGeo = (!bg || !sz || !CGSizeEqualToSize(sz.CGSizeValue, rect.size));
+        NSString *srcName = nil;
+        NSValue *rv = objc_getAssociatedObject(host, kDIBgRectKey);
+        if (!needGeo && rv) rect = rv.CGRectValue;   /* 尺寸没变就沿用上次量的矩形 */
+        if (needGeo) {
+            @try { diNPGeometryFor(host, &rect, &r, &srcName); }
+            @catch (__unused NSException *e) { rect = host.bounds; r = 22.0; srcName = @"兜底"; }
+            objc_setAssociatedObject(host, kDIBgRKey, @(r), OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+            objc_setAssociatedObject(host, kDIBgSizeKey, [NSValue valueWithCGSize:host.bounds.size],
+                                     OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+            objc_setAssociatedObject(host, kDIBgRectKey, [NSValue valueWithCGRect:rect],
+                                     OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+            static int geoLogs = 0;
+            if (geoLogs < 10) {
+                geoLogs++;
+                RLog(@"[背景] 几何: 宿主 %.0fx%.0f → %.0fx%.0f@(%.0f,%.0f) 圆角%.1f (来源 %@, %@)",
+                     host.bounds.size.width, host.bounds.size.height,
+                     rect.size.width, rect.size.height, rect.origin.x, rect.origin.y,
+                     r, srcName ?: @"?", NSStringFromClass(host.class));
+            }
+        }
+        if (r < 6.0) r = 22.0;
+
+        if (!bg) {
+            diCrumb([NSString stringWithFormat:@"背景: 创建子层 %@ %.0fx%.0f 圆角%.1f",
+                     NSStringFromClass(host.class), rect.size.width, rect.size.height, r]);
+            bg = [CALayer layer];
+            bg.contentsGravity = kCAGravityResizeAspectFill;
+            /* 3.0.23: 必须 1.0 —— 默认跟着屏幕 3x, 600pt 的图会被撑成 1800x1800 的
+               backing store(iOS17 上这一手直接几十 MB 一次)。 */
+            bg.contentsScale = 1.0;
+            bg.masksToBounds = YES;
+            diNoImplicitActions(bg);
+            [host.layer insertSublayer:bg atIndex:0];
+            objc_setAssociatedObject(host, kDIBgIVKey, bg, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+
+            dim = [CALayer layer];
+            dim.backgroundColor = [UIColor colorWithWhite:0 alpha:0.22].CGColor;
+            dim.masksToBounds = YES;
+            diNoImplicitActions(dim);
+            [host.layer insertSublayer:dim above:bg];
+            objc_setAssociatedObject(host, kDIBgDimKey, dim, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        }
+        if(bg.hidden)bg.hidden=NO;
+        if(dim.hidden)dim.hidden=NO;
+        if(fabs(bg.cornerRadius-r)>.01)bg.cornerRadius=r;
+        if(fabs(dim.cornerRadius-r)>.01)dim.cornerRadius=r;
+        if (!CGRectEqualToRect(bg.frame, rect)) {
+            bg.frame = rect;
+            dim.frame = rect;
+        }
+        if (bg.contents != (__bridge id)gDIBgImage.CGImage)
+            bg.contents = (__bridge id)gDIBgImage.CGImage;
+    } @catch (NSException *e) { diCrumb([NSString stringWithFormat:@"背景: 异常 %@", e.reason]); }
+    /* 3.0.21: 这一手在 iOS17 上曾经把主线程按死(日志最后一行就是"专辑图 600x600",
+       紧接着 65 秒空白 + watchdog 注销)。现在给它计时: 单次超过 300ms 就记一笔, 连续
+       三次直接本进程内停用背景 —— 宁可这次不显示背景, 也不能把 SpringBoard 拖死。 */
+    CFTimeInterval used = CFAbsoluteTimeGetCurrent() - tBG;
+    if (used > 0.25 && !gDIBgStopped) {
+        gDIBgSlowCount++;
+        RLog(@"[卡死] 铺背景耗时 %.0f ms (第 %d 次, 宿主 %@)",
+             used * 1000.0, gDIBgSlowCount, NSStringFromClass(host.class));
+        /* 3.0.23: 从"连续 3 次"改成"单次就停"。一次 400ms 的主线程卡顿已经足以
+           让用户在控制中心里"顿住", 而连按三次才停意味着用户要先被卡三次。
+           停用只影响本进程, 注销后自动恢复; 下次日志里会有一行"已停用"。 */
+        if (used > 0.4 || gDIBgSlowCount >= 3) {
+            gDIBgStopped = YES;
+            for (UIView *h in gDIBgPlayers.allObjects) diNPApplyBackgroundTo(h, NO);
+            RLog(@"[卡死] 专辑背景已在本进程内停用(单次 %.0f ms)", used * 1000.0);
+        }
+    }
+}
+/* 3.1.6 补 diNPRefreshBackgrounds (b0 18436-18456) */
+static void diNPRefreshBackgrounds(void) {
+    diNPTickPrefs();
+    /* 3.0.23(iOS17 卡死): 以前是一次性把所有宿主铺完。4×2 有 4 个格子 + 展开卡,
+       同一轮 runloop 里连做 5 次"插层 + 设内容", 主线程直接被按住(436 日志里
+       开关拨下去那一秒之后就是 61 秒空白 + 重启)。现在一个一个来, 每次隔 24ms,
+       每个之间还给主线程留机会跑布局 —— 用户最多觉得"背景淡入晚了半拍"。 */
+    NSArray<UIView *> *hosts = gDIBgPlayers.allObjects;
+    NSUInteger idx = 0;
+    for (UIView *host in hosts) {
+        __weak UIView *w = host;
+        NSUInteger k = idx++;
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.024 * k * NSEC_PER_SEC)),
+                       dispatch_get_main_queue(), ^{
+            @try {
+                UIView *h = w;
+                if (!h || !h.window) return;
+                diNPApplyBackgroundTo(h, gDIBgOnCache && gDIBgImage != nil);
+            } @catch (__unused NSException *e) {}
+        });
+    }
+}
+/* 3.1.6 补 diNPHideNotPlayingLabels (b0 18463-18497) */
+static void diNPHideNotPlayingLabels(UIView *root, BOOL hide) {
+    if (!root) return;
+    if (!gDIHiddenNPLabels) gDIHiddenNPLabels = [NSHashTable weakObjectsHashTable];
+    NSMutableArray *stack = [NSMutableArray arrayWithObject:root];
+    int budget = 2500;
+    while (stack.count && budget-- > 0) {
+        UIView *v = stack.lastObject; [stack removeLastObject];
+        if ([v isKindOfClass:UILabel.class]) {
+            UILabel *lb = (UILabel *)v;
+            NSMutableString *t = [NSMutableString string];
+            if (lb.text.length) [t appendString:lb.text];
+            if (lb.attributedText.length) [t appendString:lb.attributedText.string];
+            if (t.length && ([t containsString:@"未在播放"] || [t containsString:@"Not Playing"]
+                             || [t containsString:@"Nothing Playing"])) {
+                if (v.hidden != hide) v.hidden = hide;
+                if (hide) [gDIHiddenNPLabels addObject:v];
+                else [gDIHiddenNPLabels removeObject:v];
+            }
+        }
+        for (UIView *c in v.subviews) {
+            /* 3.0.17: 不往传送栏/音量/进度这些控件子树里钻 —— 在那里写 hidden 会让
+               系统判定需要重排, 3×2 的 5 个按钮就跟着"抖一下"。这些子树里也不会有
+               "未在播放"文案。 */
+            NSString *cn = NSStringFromClass(c.class);
+            /* 3.0.21: 去掉 "Header" / "Button" 两条跳过 —— "未在播放" 这行字就在
+               标题区里, 跳过 Header 等于把开关关掉了(用户 433 反馈"打开也不隐藏了")。
+               这里本来就只对**文案匹配的 UILabel** 写 hidden, 而且只在值真的变化时写,
+               写一次之后就是空操作, 不会再触发重排。 */
+            if ([cn containsString:@"Transport"] || [cn containsString:@"Stepper"]
+                || [cn containsString:@"Slider"] || [cn containsString:@"VolumeControls"]
+                || [cn containsString:@"TimeControls"] || [cn containsString:@"CAPackage"]) continue;
+            [stack addObject:c];
+        }
+    }
+}
+/* 3.1.6 补 diNPApplyHideTime (b0 18701-18708) */
+static void diNPApplyHideTime(void) {
+    static CFAbsoluteTime lastScan = 0;
+    CFTimeInterval now = CFAbsoluteTimeGetCurrent();
+    if (now - lastScan < 0.4) return;
+    lastScan = now;
+
+    diNPQueryNowPlaying();   /* 律动那边还靠 gDIHasNowPlaying 判"到底有没有歌" */
+}
+/* 3.1.6 补 diNPHandleModuleVC (b0 18832-18893) */
+static void diNPHandleModuleVC(id vc) {
+    if (gDIStage < 1) return;
+    NSString *ident = nil;
+    @try { ident = [vc valueForKey:@"moduleIdentifier"]; } @catch (__unused NSException *e) {}
+    if (![ident isKindOfClass:NSString.class] || ![ident containsString:@"nowplaying"]) return;
+
+    /* 模块内容视图(播放器视图的父级)最底层: 与播放器平级, 又不插进播放器自己的树 ——
+       3.0.8 直接把背景插进播放器视图, 它每次 layout 都重排子视图, 整块布局被带崩。 */
+    UIView *card = nil;
+    @try {
+        id cv = [vc valueForKey:@"moduleContentView"];
+        if ([cv isKindOfClass:UIView.class]) card = cv;
+    } @catch (__unused NSException *e) {}
+    if (!card) {
+        @try {
+            id cv = [vc valueForKey:@"containerView"];
+            if ([cv isKindOfClass:UIView.class]) card = cv;
+        } @catch (__unused NSException *e) {}
+    }
+    if (!card) card = [(UIViewController *)vc view];
+    if (![card isKindOfClass:UIView.class]) return;
+    if (!card.window) return;
+    /* 3.0.10: 启动早期卡片的占位尺寸(0x0 / 极小)一律不处理, 等真正排出来再说 */
+    CGSize cs = card.bounds.size;
+    if (cs.width < 40 || cs.height < 40) return;
+    static int cardLogs = 0;
+    if (cardLogs < 3) {
+        cardLogs++;
+        diCrumb([NSString stringWithFormat:@"模块: 卡片 %@ %.0fx%.0f",
+                 NSStringFromClass(card.class), cs.width, cs.height]);
+    }
+
+    if (!gDIBgHosts) gDIBgHosts = [NSHashTable weakObjectsHashTable];
+    [gDIBgHosts addObject:card];
+
+    diNPTickPrefs();
+    diNPStartBgTimer();
+    diNPHideNotPlayingLabels(card, gDIHideNP);
+    /* 3.0.42: 模块每次排版都顺手把"该不该藏时间条"算一遍 —— 呼出控制中心的第一帧
+       就已经有正确结论, 不用等 0.5 秒的巡检。 */
+    @try { diNPApplyHideTime(); } @catch (__unused NSException *e) {}
+
+    if (gDIBgOnCache) {
+        /* 3.0.15: 取图交给 1.5 秒轮询 + 通知, 这里只做兜底(没有播放器宿主时才铺容器) */
+        CFTimeInterval fnow = CFAbsoluteTimeGetCurrent();
+        if (fnow - gDIBgFetchTS > 2.0) {
+            gDIBgFetchTS = fnow;
+            diNPFetchArtwork();
+        }
+        if (!gDIBgPlayers || gDIBgPlayers.count == 0) {
+            CGFloat ratio = cs.height > 1 ? cs.width / cs.height : 1.0;
+            /* 容器可能比可见卡片高很多(展开态整条), 只有形状像卡片时才兜底铺 */
+            if (ratio > 0.4 && ratio < 2.6 && cs.width <= 460 && cs.height <= 460) {
+                diCrumb(@"模块: 铺背景前(容器兜底)");
+                diNPApplyBackgroundTo(card, YES);
+                diCrumb(@"模块: 铺背景后");
+            }
+        }
+    } else {
+        diNPApplyBackgroundTo(card, NO);
+    }
+}
+/* 3.1.6 补 diNPMediaChanged (b0 18897-18909) */
+static void diNPMediaChanged(CFNotificationCenterRef c, void *obs, CFStringRef name,
+                             const void *obj, CFDictionaryRef info);   /* 定义在后面 */
+static BOOL gDIMediaObserved = NO;
+static void diNPInstallMediaObserver(void) {
+    if (gDIMediaObserved) return;
+    gDIMediaObserved = YES;
+    @try {
+        CFNotificationCenterAddObserver(CFNotificationCenterGetDarwinNotifyCenter(), NULL,
+            diNPMediaChanged, CFSTR("kMRMediaRemoteNowPlayingInfoDidChangeNotification"), NULL,
+            CFNotificationSuspensionBehaviorDeliverImmediately);
+        RLog(@"[背景] 换歌通知已监听");
+    } @catch (__unused NSException *e) { gDIMediaObserved = NO; }
+}
+/* 3.1.6 补 diNPInstallMediaObserver (b0 18900-18909) */
+static void diNPInstallMediaObserver(void) {
+    if (gDIMediaObserved) return;
+    gDIMediaObserved = YES;
+    @try {
+        CFNotificationCenterAddObserver(CFNotificationCenterGetDarwinNotifyCenter(), NULL,
+            diNPMediaChanged, CFSTR("kMRMediaRemoteNowPlayingInfoDidChangeNotification"), NULL,
+            CFNotificationSuspensionBehaviorDeliverImmediately);
+        RLog(@"[背景] 换歌通知已监听");
+    } @catch (__unused NSException *e) { gDIMediaObserved = NO; }
+}
+/* 3.1.6 补 diNPStartBgTimer (b0 18914-18936) */
+static void diNPStartBgTimer(void) {
+    if (gDIBgTimer) return;
+    if (gDIStage < 1) return;
+    dispatch_source_t t = dispatch_source_create(DISPATCH_SOURCE_TYPE_TIMER, 0, 0,
+                                                dispatch_get_main_queue());
+    if (!t) return;
+    dispatch_source_set_timer(t,
+                              dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.8 * NSEC_PER_SEC)),
+                              (uint64_t)(0.8 * NSEC_PER_SEC),
+                              (uint64_t)(0.2 * NSEC_PER_SEC));
+    dispatch_source_set_event_handler(t, ^{
+        @try {
+            if (gDIStage < 1) return;
+            diNPTickPrefs();
+            if (!gDIBgOnCache) return;
+            if (!gDIBgPlayers || gDIBgPlayers.count == 0) return;
+            diNPFetchArtwork();
+        } @catch (__unused NSException *e) {}
+    });
+    gDIBgTimer = t;
+    dispatch_resume(t);
+    RLog(@"[背景] 换曲轮询已启动(0.8s)");
+}
+/* 3.1.6 补 diNPModuleLayout (b0 18938-18954) */
+static void diNPModuleLayout(id self, SEL cmd) {
+    if (gDIOrigModuleLayout) gDIOrigModuleLayout(self, cmd);
+    /* 3.0.10: 绝不在 viewWillLayoutSubviews 里同步改视图树/发 XPC —— 挪到下一轮
+       runloop, 且每个 VC 节流 0.5s。 */
+    @try {
+        CFTimeInterval now = CFAbsoluteTimeGetCurrent();
+        NSNumber *last = objc_getAssociatedObject(self, kDIBgLastKey);
+        if (last && now - last.doubleValue < 0.5) return;
+        objc_setAssociatedObject(self, kDIBgLastKey, @(now), OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        static int crumbLeft = 12;   /* 3.0.11: 足迹只记前 12 次, 防刷盘 */
+        if (crumbLeft > 0) { crumbLeft--; diCrumb(@"模块: 容器布局节流通过"); }
+        id vc = self;
+        dispatch_async(dispatch_get_main_queue(), ^{
+            @try { diNPHandleModuleVC(vc); } @catch (NSException *e) { diCrumb([NSString stringWithFormat:@"模块: 异常 %@", e.reason]); }
+        });
+    } @catch (__unused NSException *e) {}
+}
+/* 3.1.6 补 diArtAVLayout (b0 19006-19022) */
+static void diArtAVLayout(id self, SEL cmd) {
+    if (gDIOrigAVLayout) gDIOrigAVLayout(self, cmd);
+    @try {
+        if (gDIStage < 1) return;
+        /* 3.0.19: 去掉 diArtIs3x2() 限制 —— 3×2 只是"要不要动传送栏"的判据, 与封面
+           无关。用户实测 3×2 展开已经正常, 但 4×2 / 其他尺寸的展开不转, 就是因为
+           这里把非 3×2 全挡掉了。 */
+        if (!diArtPrefOn()) return;
+        UIView *v = (UIView *)self;
+        if (!v.window || v.hidden || v.alpha < 0.05) return;
+        if (!diArtInControlCenter(v)) return;   /* 锁屏 / 灵动岛不碰 */
+        /* 3.0.20: 不在 layoutSubviews 里挂 mask/加动画 —— 那会让系统在**同一帧**里
+           把父视图再排一次(3×2 的传送栏就是这么抖的)。丢到主队列, 同一 runloop
+           内合并执行, 一定在本次布局之后、CA 提交之前 —— 视觉上还是这一帧。 */
+        diArtScheduleDress(v);
+    } @catch (__unused NSException *e) {}
+}
+/* 3.1.6 补 diTraceCaller (b0 19038-19059) */
+static void diTraceCaller(const char *tag) {
+    void *bt[16];
+    int n = backtrace(bt, 16);
+    NSMutableString *chain = [NSMutableString string];
+    int shown = 0;
+    for (int i = 1; i < n && shown < 4; i++) {
+        Dl_info di;
+        if (!dladdr(bt[i], &di)) continue;
+        const char *fn = di.dli_fname ? di.dli_fname : "?";
+        const char *base = strrchr(fn, '/');
+        NSString *fnS = [NSString stringWithUTF8String:(base ? base + 1 : fn)];
+        NSString *symS = di.dli_sname ? [NSString stringWithUTF8String:di.dli_sname] : nil;
+        if (symS && [symS containsString:@"diTrace"]) continue;
+        uintptr_t off = di.dli_fbase ? ((uintptr_t)bt[i] - (uintptr_t)di.dli_fbase) : 0;
+        if (shown) [chain appendString:@" ← "];
+        [chain appendFormat:@"%@+0x%lx", fnS ?: @"?", (unsigned long)off];
+        if (symS.length) [chain appendFormat:@"(%@)", symS];
+        shown++;
+    }
+    NSString *tagS = tag ? [NSString stringWithUTF8String:tag] : @"?";
+    RLog(@"[抖动3] %@ ← %@", tagS, chain.length ? chain : @"(无)");
+}
+/* 3.1.6 补 diTBShouldLog (b0 19063-19068) */
+static BOOL diTBShouldLog(void) {
+    if (gDITBLogs >= 40) return NO;
+    if (gDILoadTS <= 0) return NO;
+    if (CFAbsoluteTimeGetCurrent() - gDILoadTS < 10.0) return NO;
+    return diArtIs3x2();
+}
+/* 3.1.6 补 diTBSetFrame (b0 19069-19072) */
+static void diTBSetFrame(id self, SEL cmd, CGRect f) {
+    if (diTBShouldLog()) { gDITBLogs++; diTraceCaller("TB.setFrame"); }
+    if (gDIOrigTBSetFrame) gDIOrigTBSetFrame(self, cmd, f);
+}
+/* 3.1.6 补 diTBSetTransform (b0 19073-19076) */
+static void diTBSetTransform(id self, SEL cmd, CGAffineTransform t) {
+    if (diTBShouldLog()) { gDITBLogs++; diTraceCaller("TB.setTransform"); }
+    if (gDIOrigTBSetTransform) gDIOrigTBSetTransform(self, cmd, t);
+}
+/* 3.1.6 补 diTBSetHighlighted (b0 19077-19080) */
+static void diTBSetHighlighted(id self, SEL cmd, BOOL h) {
+    if (diTBShouldLog()) { gDITBLogs++; diTraceCaller("TB.setHighlighted"); }
+    if (gDIOrigTBSetHighlighted) gDIOrigTBSetHighlighted(self, cmd, h);
+}
+/* 3.1.6 补 diArtInstallTBHook (b0 19083-19094) */
+static void diArtInstallTBHook(void) {
+    if (gDITBHookTried) return;
+    Class tb = NSClassFromString(@"MRUTransportButton");
+    if (!tb) return;
+    gDITBHookTried = YES;
+    @try {
+        MSHookMessageEx(tb, @selector(setFrame:), (IMP)diTBSetFrame, (IMP *)&gDIOrigTBSetFrame);
+        MSHookMessageEx(tb, @selector(setTransform:), (IMP)diTBSetTransform, (IMP *)&gDIOrigTBSetTransform);
+        MSHookMessageEx(tb, @selector(setHighlighted:), (IMP)diTBSetHighlighted, (IMP *)&gDIOrigTBSetHighlighted);
+        RLog(@"[抖动3] MRUTransportButton 定位钩子已装(只读)");
+    } @catch (__unused NSException *e) {}
+}
 /* ===== 3.1.6 修复(二): 3.1 重构丢失的函数, 从 3.0.119 按原序搬回 ===== */
 static NSString *diMruCacheDir(void) {
     return @"/var/mobile/Library/Caches/com.abgg332.driftisland";
