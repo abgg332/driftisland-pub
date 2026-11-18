@@ -21,7 +21,7 @@ jobs:
     # 换 macos-15, 构建工具链(brew/theos/ldid)完全一致。
     # macos-15 ARM64 capacity has repeatedly failed to acquire a hosted runner.
     # The Intel macOS 15 label is an official GitHub-hosted runner.
-    runs-on: macos-15-intel
+    runs-on: macos-15
     steps:
       - name: Checkout
         uses: actions/checkout@v4

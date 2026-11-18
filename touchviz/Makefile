@@ -7,7 +7,10 @@ FWK_DIR := Frameworks/_Simulator
 IPHONE_SIMULATOR_ROOT := $(shell devkit/sim-root.sh)
 else
 ARCHS ?= arm64 arm64e
-TARGET := iphone:clang:16.5:16.0
+# TVZ_SDK: Swift 目标必须与 runner 工具链匹配的 SDK(CI 设为 xcrun 的版本),
+# 否则 Swift6 编译器加载不了 iOS16.5 SDK 里 Swift5.8 编的 SwiftUI interface。
+TVZ_SDK ?= 16.5
+TARGET := iphone:clang:$(TVZ_SDK):16.0
 INSTALL_TARGET_PROCESSES := SpringBoard
 FWK_DIR := Frameworks
 endif
@@ -42,6 +45,7 @@ TouchViz_CFLAGS += -I.
 TouchViz_CFLAGS += -ILNTouchVisualizer
 TouchViz_CFLAGS += -ILNTouchVisualizer/Private
 TouchViz_CFLAGS += -DPACKAGE_VERSION=\"$(PACKAGE_VERSION)\"
+TouchViz_CFLAGS += -Wno-error=deprecated-declarations
 
 ifeq ($(THEOS_DEVICE_SIMULATOR),1)
 TouchViz_CFLAGS += -DIPHONE_SIMULATOR_ROOT=\"$(IPHONE_SIMULATOR_ROOT)\"
