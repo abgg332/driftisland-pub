@@ -253,6 +253,8 @@ static double gDISynPhase = 0.0;
 static CFTimeInterval gDIClock = 0;
 static CFTimeInterval gDITargetAt = 0;
 
+#import <sys/socket.h>
+#import <netinet/in.h>
 /* ===== 3.1.6 修复(六): @interface/typedef/剩余静态 补齐 ===== */
 /* 3.1.6: 先用后定义 —— 前向声明(由闭包补齐引起, 统一放这里) */
 static void (*gDIArtOrigNPViewLayout)(id, SEL) = NULL;
@@ -628,6 +630,7 @@ static CGSize gDIMruLastBox;
 
 static void diMruWriteExpandState(BOOL expanded, CGSize box) {
     static BOOL lastE; static int lastW = -1, lastH = -1; static CFAbsoluteTime lastT;
+        static CGFloat lastW, lastH; static NSString *lastCN;
     gDIMruExpandedFlag = expanded;   /* 文字调整也用它判形态, 比 root 尺寸可靠 */
     if (box.width > 0) gDIMruLastBox = box;
     int w = (int)lround(box.width), h = (int)lround(box.height);
@@ -1215,7 +1218,6 @@ static void diActivityApply(UIView *artwork) {
         state.glass.bounds = wantB;
         state.glass.center = wantC;
         state.glass.layer.cornerRadius = 0;
-        static CGFloat lastW, lastH; static NSString *lastCN;
         NSString *cn = NSStringFromClass(artwork.superview.class);
         if (fabs(lastW - box.size.width) > 0.5 || fabs(lastH - box.size.height) > 0.5 || ![lastCN isEqualToString:cn]) {
             lastW = box.size.width; lastH = box.size.height; lastCN = cn;
@@ -1746,6 +1748,7 @@ static BOOL diArtMaskWanted(void) {
     if (last == 0 || now - last > 0.35) {
         last = now;
         cached = diPrefBoolNow(@"PlayerMaskOn", playerMaskOn);
+static BOOL playerMaskOn = NO;
     }
     return cached;
 }
@@ -2011,6 +2014,7 @@ static void diNPQueryNowPlaying(void) {
         double rate=[meta[@"kMRMediaRemoteNowPlayingInfoPlaybackRate"] doubleValue];
         dispatch_async(dispatch_get_main_queue(), ^{
             if(decoded){diFxArtworkData=art;diFxArtworkImage=decoded;gDIParticleColorDirty=YES;}
+static BOOL gDIParticleColorDirty = YES;
             if(!has){diFxArtworkData=nil;diFxArtworkImage=nil;}
             diRingElapsed=isfinite(elapsed)?fmax(0,elapsed):0;
             diRingDuration=isfinite(duration)?fmax(0,duration):0;
@@ -2234,8 +2238,12 @@ static BOOL diViewIsSuggestions(UIView *v);      /* 3.0.62: 定义在后面, 这
 static BOOL diArtInExpandedPlayer(UIView *v);    /* 3.0.63: 同上 */
 static void diRhythmCollectExtras(UIView *dv) {
     gDIRhythmExtraN = 0;
+static int gDIRhythmExtraN = 0;
     gDIRhythmSkipDv = NO;
+static BOOL  gDIRhythmSkipDv = NO;     /* extras 里已经有 dv 的祖先 → dv 不再单独写(否则缩两次) */
     for (int i = 0; i < DI_RHYTHM_EXTRA_MAX; i++) gDIRhythmExtras[i] = nil;
+static __weak UIView *gDIRhythmExtras[DI_RHYTHM_EXTRA_MAX];
+#define DI_RHYTHM_EXTRA_MAX 4
     if (!dv) return;
     UIView *space = dv.superview ?: dv;
     NSMutableArray<UIView *> *pool = [NSMutableArray array];
@@ -2388,6 +2396,7 @@ static CATransform3D diRhythmNeutral(CATransform3D cur) {
 static CATransform3D diRhythmBaseOf(UIView *v) {
     if (!v) return CATransform3DIdentity;
     if (v == gDIRhythmDrive) return gDIRhythmBase;
+static __weak UIView *gDIRhythmDrive = nil;   /* 真正承载缩放的视图(封面外面可能还套着一层裁剪容器) */
     NSValue *nv = objc_getAssociatedObject(v, "di.rhythm.base");
     if ([nv isKindOfClass:NSValue.class]) return nv.CATransform3DValue;
     return v.layer.transform;
@@ -2441,10 +2450,6 @@ static void diRhythmWriteAll(CGFloat s, CGFloat dy, BOOL spin, double ang, BOOL 
 }
 static BOOL gDIFxRealLogged = NO;
 /* 3.0.56 */
-static __weak UIView *gDIRhythmDrive = nil;   /* 真正承载缩放的视图(封面外面可能还套着一层裁剪容器) */
-#define DI_RHYTHM_EXTRA_MAX 4
-static __weak UIView *gDIRhythmExtras[DI_RHYTHM_EXTRA_MAX];
-static int gDIRhythmExtraN = 0;
 static CGSize gDIRhythmBaseSize;       /* 记 base 时 dv 的尺寸 —— 变了说明展开/收起, base 作废 */
 static double gDILastAng = 0.0;        /* 3.0.61: 关掉旋转时把角度冻结在这个值上(不跳回 0°) */
 static BOOL gDIRhythmDriving = NO;     /* 上一帧我们是否在写 transform(用于"只还原一次") */
@@ -2468,7 +2473,6 @@ static float gDIKickHoldN = 1.0f;      /* 本次触发的归一峰值, 掉到 72
 static float gDIKickPunchAmp = 0.0f;
 static CFTimeInterval gDIKickPunchT = 0.0;
 static uint32_t gDILastPcmSerial = 0;
-static BOOL  gDIRhythmSkipDv = NO;     /* extras 里已经有 dv 的祖先 → dv 不再单独写(否则缩两次) */
 static CFTimeInterval gDIDumpAt = 0;
 static float gDIMidLevel = 0.0f;              /* 当前中音能量(探针) */
 static CFTimeInterval gDIQuietAt = 0;         /* 频谱端"连着但没数据"的起点 */
@@ -2503,7 +2507,6 @@ static NSString *maskAnimFolder;  // 遮罩素材文件夹(帧率素材下的子
    岛: maskOn + diAlbumMaskAsset + mask.png
    播放器: PlayerMaskOn + PlayerMaskAsset + player_mask.png
    以前两者共用 maskOn/mask.png, 改一个另一个跟着变(用户明确要求分开)。 */
-static BOOL playerMaskOn = NO;
 static NSString *playerMaskAsset;   // 相对 kMaskDir 的文件名
 /* 3.0.45: 控制中心播放器专辑的「律动特效」(真音频驱动, 见文件末尾模块注释) */
 static BOOL rhythmFxOn = YES;                  // 特效总开关(AlbumEffectsOn)
@@ -2564,7 +2567,6 @@ static NSString *rhythmColorB = nil;           // 渐变结束色(#948FFF)
 static UIColor *gDIParticleColA = nil;
 static UIColor *gDIParticleColB = nil;
 /* 3.0.56: 粒子颜色/模式变了 → 已存在的粒子立刻换色(定义提前, 偏好读取里就要用到) */
-static BOOL gDIParticleColorDirty = YES;
 static UIColor *diRhythmHexColor(NSString *hex, UIColor *def) {
     if(![hex isKindOfClass:NSString.class])return def;
     NSString *v=[hex stringByReplacingOccurrencesOfString:@"#" withString:@""];
