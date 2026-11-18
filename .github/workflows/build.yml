@@ -19,7 +19,9 @@ jobs:
   build:
     # 2026-11-02 macOS 14 runner 退役, 期间处于 brownout(任务在启动前被撤销);
     # 换 macos-15, 构建工具链(brew/theos/ldid)完全一致。
-    runs-on: macos-15
+    # macos-15 ARM64 capacity has repeatedly failed to acquire a hosted runner.
+    # The Intel macOS 15 label is an official GitHub-hosted runner.
+    runs-on: macos-15-intel
     steps:
       - name: Checkout
         uses: actions/checkout@v4
