@@ -6,12 +6,7 @@
 #include <stdlib.h>
 #include <string.h>
 
-#if THEOS_PACKAGE_SCHEME_ROOTHIDE
-/* roothide 新版 headers 的 libroot.h 在 roothide scheme 下直接 #error, 改用新路径 */
-#include <libroot/libroot.h>
-#else
 #include <libroot.h>
-#endif
 
 #if THEOS_PACKAGE_SCHEME_ROOTHIDE
 #include <roothide.h>

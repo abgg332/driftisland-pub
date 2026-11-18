@@ -25,8 +25,6 @@ CCTouchViz_FILES += ../libroot/dyn.c
 endif
 
 CCTouchViz_CFLAGS += -fobjc-arc
-# UIScreen.screens 在 iOS16 弃用但 upstream 仍使用, 不作为错误
-CCTouchViz_CFLAGS += -Wno-error=deprecated-declarations
 CCTouchViz_CFLAGS += -I../TVZPrefs
 CCTouchViz_CFLAGS += -DPACKAGE_VERSION=\"$(PACKAGE_VERSION)\"
 

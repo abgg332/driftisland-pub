@@ -955,31 +955,57 @@ static Class diStepSliderClass(void) {
     return YES;
 }
 
+- (void)viewWillAppear:(BOOL)animated {
+    /* Resolve legacy root-entry registration before this controller is displayed.
+       The former viewDidAppear replacement caused one committed blank frame. */
+    if ([self diEscapeIfUsedAsEntry]) return;
+    [super viewWillAppear:animated];
+}
+
 - (void)viewDidLoad {
     [super viewDidLoad];
     self.title = @"录屏轨迹";
     diStep(@"[设置] 录屏轨迹页 viewDidLoad (导航栈=%lu)",
            (unsigned long)self.navigationController.viewControllers.count);
+    if ([self diEscapeIfUsedAsEntry]) return;
+    if (self.childViewControllers.count) return;
+    NSString *root=[[NSBundle bundleForClass:self.class].bundlePath stringByDeletingLastPathComponent];
+    NSArray<NSString *> *paths=@[[root stringByAppendingPathComponent:@"TVZPrefs.bundle"],
+        @"/var/jb/Library/PreferenceBundles/TVZPrefs.bundle",
+        @"/.jbroot/var/jb/Library/PreferenceBundles/TVZPrefs.bundle",
+        @"/Library/PreferenceBundles/TVZPrefs.bundle"];
+    NSBundle *bundle=nil; NSError *error=nil;
+    for(NSString *path in paths){
+        NSBundle *candidate=[NSBundle bundleWithPath:path];
+        if(candidate && [candidate loadAndReturnError:&error]){bundle=candidate;break;}
+    }
+    if(!bundle){
+        UILabel *label=[[UILabel alloc]initWithFrame:self.view.bounds];
+        label.autoresizingMask=UIViewAutoresizingFlexibleWidth|UIViewAutoresizingFlexibleHeight;
+        label.numberOfLines=0;label.textAlignment=NSTextAlignmentCenter;
+        label.text=[NSString stringWithFormat:@"录屏轨迹设置加载失败：%@",error.localizedDescription?:@"找不到 TVZPrefs.bundle"];
+        [self.view addSubview:label];return;
+    }
+    Class cls=NSClassFromString(@"TVZRootListController");
+    if(!cls){
+        UILabel *label=[[UILabel alloc]initWithFrame:self.view.bounds];label.autoresizingMask=UIViewAutoresizingFlexibleWidth|UIViewAutoresizingFlexibleHeight;
+        label.text=@"录屏轨迹设置加载失败：控制器类未注册";label.textAlignment=NSTextAlignmentCenter;label.numberOfLines=0;[self.view addSubview:label];return;
+    }
+    UIViewController *page=[[cls alloc]init];
+    if(![page isKindOfClass:UIViewController.class])return;
+    [self addChildViewController:page];
+    page.view.translatesAutoresizingMaskIntoConstraints=NO;
+    [self.view addSubview:page.view];
+    [NSLayoutConstraint activateConstraints:@[[page.view.leadingAnchor constraintEqualToAnchor:self.view.leadingAnchor],
+        [page.view.trailingAnchor constraintEqualToAnchor:self.view.trailingAnchor],
+        [page.view.topAnchor constraintEqualToAnchor:self.view.topAnchor],
+        [page.view.bottomAnchor constraintEqualToAnchor:self.view.bottomAnchor]]];
+    [page didMoveToParentViewController:self];
 }
 
 - (void)viewDidAppear:(BOOL)animated {
     [super viewDidAppear:animated];
-    /* 先判断是不是被旧注册项当成了根页(是的话直接换页, 连 TVZ 界面都不建, 不闪) */
     if ([self diEscapeIfUsedAsEntry]) return;
-    if (self.childViewControllers.count) return;   /* 已经建过 */
-    NSString *root=[[NSBundle bundleForClass:self.class].bundlePath stringByDeletingLastPathComponent];
-    NSBundle *bundle=[NSBundle bundleWithPath:[root stringByAppendingPathComponent:@"TVZPrefs.bundle"]];
-    NSError *error=nil;
-    if(![bundle loadAndReturnError:&error]){
-        UILabel *label=[[UILabel alloc]initWithFrame:self.view.bounds];label.numberOfLines=0;label.textAlignment=NSTextAlignmentCenter;
-        label.text=[NSString stringWithFormat:@"录屏轨迹设置加载失败：%@",error.localizedDescription?:@"缺少设置组件"];
-        [self.view addSubview:label];return;
-    }
-    Class cls=NSClassFromString(@"TVZRootListController");
-    if(!cls)return;
-    UIViewController *page=[[cls alloc]init];[self addChildViewController:page];
-    page.view.frame=self.view.bounds;page.view.autoresizingMask=UIViewAutoresizingFlexibleWidth|UIViewAutoresizingFlexibleHeight;
-    [self.view addSubview:page.view];[page didMoveToParentViewController:self];
 }
 @end
 @interface DIPlayerEntryPage : DIMiniBaseController @end

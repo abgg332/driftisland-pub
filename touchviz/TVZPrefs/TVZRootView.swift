@@ -568,6 +568,11 @@ struct TVZRootView: View {
                 Label(NSLocalizedString("Reset to Default", bundle: Bundle.tvz_support, comment: ""), systemImage: "arrow.counterclockwise")
                     .foregroundColor(TVZ_COLOR)
             }
+        } footer: {
+            Text(String(format: "%@\n\n%@",
+                NSLocalizedString("Copyright © 2024-2025 OwnGoal Studio.", bundle: Bundle.tvz_support, comment: ""),
+                NSLocalizedString("Credits:\n@LeoNatan: LNTouchVisualizer (MIT License)\nIvan Izyumkin: MCEmojiPicker (MIT License)", bundle: Bundle.tvz_support, comment: "")))
+                .padding(.bottom, 8)
         }
     }
 
@@ -591,6 +596,7 @@ struct TVZRootView: View {
 
     var mainBody: some View {
         Form {
+            header
             generalSection
             colorsSection
             alphaSection

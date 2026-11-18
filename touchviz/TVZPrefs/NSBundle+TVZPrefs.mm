@@ -5,12 +5,7 @@
 #import <Foundation/NSUUID.h>
 #import <HBLog.h>
 
-#if THEOS_PACKAGE_SCHEME_ROOTHIDE
-/* roothide 新版 headers 的 libroot.h 在 roothide scheme 下直接 #error, 改用新路径 */
-#import <libroot/libroot.h>
-#else
 #import <libroot.h>
-#endif
 
 @implementation NSBundle (TouchViz)
 
