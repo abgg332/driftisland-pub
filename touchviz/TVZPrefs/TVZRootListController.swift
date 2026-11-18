@@ -51,8 +51,8 @@ final class TVZRootListController: PSListController {
 
     // 3.1.9: 若本页被旧注册项当成「漂流岛」根页直接打开(导航栈里没有 DriftIslandPrefs
     // 的 DIPrefsController / DIRecordingTrailPage), 把栈顶换成完整设置根页。
-    override func viewWillAppear(_ animated: Bool) {
-        super.viewWillAppear(animated)
+    override func viewDidAppear(_ animated: Bool) {
+        super.viewDidAppear(animated)
         guard let nav = navigationController, !nav.viewControllers.isEmpty else { return }
         let names = nav.viewControllers.map { NSStringFromClass(type(of: $0)) }
         if names.contains("DIPrefsController") || names.contains("DIRecordingTrailPage") { return }

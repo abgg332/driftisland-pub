@@ -926,17 +926,18 @@ static Class diStepSliderClass(void) {
 @interface DIRecordingTrailPage : PSListController @end
 @implementation DIRecordingTrailPage
 /* 3.1.9: 自救 —— 设备上若残留旧注册项, 会把「漂流岛」直接指向本类, 于是进设置
-   第一眼就是录屏轨迹设置。判据: 整条导航栈里没有 DIPrefsController, 说明不是
-   从「附加功能 → 原生播放 → 录屏轨迹」正常进来, 而是被当成了 bundle 根页。
-   这时把栈顶(自己这一层)换成完整设置根页, 用户立刻看到全部原有条目。 */
-- (void)diEscapeIfUsedAsEntry {
+   第一眼就是录屏轨迹设置(用户实测: 点漂流岛 → 直接是录屏轨迹页)。
+   判据: 整条导航栈里没有 DIPrefsController, 说明不是从「附加功能 → 原生播放 →
+   录屏轨迹」正常进来, 而是被当成了 bundle 根页 —— 这时把栈顶(自己这一层)换成
+   完整设置根页。返回 YES 表示已换页。 */
+- (BOOL)diEscapeIfUsedAsEntry {
     UINavigationController *nav = self.navigationController;
-    if (!nav || nav.viewControllers.count == 0) return;
-    /* 模态弹出的场面(自己就是模态根)不算被劫持, 别乱换 */
-    if (nav.viewControllers.count == 1 && nav.viewControllers.firstObject == self && nav.presentingViewController) return;
+    if (!nav || nav.viewControllers.count == 0) return NO;
+    /* 模态弹出的场合(自己就是模态根)不算被劫持, 不能乱换 */
+    if (nav.viewControllers.count == 1 && nav.viewControllers.firstObject == self && nav.presentingViewController) return NO;
     Class rootCls = NSClassFromString(@"DIPrefsController");
     for (UIViewController *vc in nav.viewControllers) {
-        if (rootCls && [vc isKindOfClass:rootCls]) return;   /* 正常入口, 什么都不做 */
+        if (rootCls && [vc isKindOfClass:rootCls]) return NO;   /* 正常入口, 什么都不做 */
     }
     if (!rootCls) {   /* 本 bundle 尚未加载出根类 → 主动加载同目录的 DriftIslandPrefs.bundle */
         NSString *dir = [[NSBundle bundleForClass:self.class].bundlePath stringByDeletingLastPathComponent];
@@ -944,24 +945,28 @@ static Class diStepSliderClass(void) {
         [rb load];
         rootCls = NSClassFromString(@"DIPrefsController");
     }
-    if (!rootCls) { diStep(@"[设置] 自救失败: 找不到 DIPrefsController"); return; }
+    if (!rootCls) { diStep(@"[设置] 自救失败: 找不到 DIPrefsController"); return NO; }
     diStep(@"[设置] 录屏轨迹页被当作顶层入口(栈=%lu), 已换回完整设置根页",
            (unsigned long)nav.viewControllers.count);
     UIViewController *rootVC = [[rootCls alloc] init];
     NSMutableArray *vcs = [nav.viewControllers mutableCopy];
     vcs[vcs.count - 1] = rootVC;
     [nav setViewControllers:vcs animated:NO];
-}
-
-- (void)viewWillAppear:(BOOL)animated {
-    [super viewWillAppear:animated];
-    [self diEscapeIfUsedAsEntry];
+    return YES;
 }
 
 - (void)viewDidLoad {
-    [super viewDidLoad];self.title=@"录屏轨迹";
+    [super viewDidLoad];
+    self.title = @"录屏轨迹";
     diStep(@"[设置] 录屏轨迹页 viewDidLoad (导航栈=%lu)",
            (unsigned long)self.navigationController.viewControllers.count);
+}
+
+- (void)viewDidAppear:(BOOL)animated {
+    [super viewDidAppear:animated];
+    /* 先判断是不是被旧注册项当成了根页(是的话直接换页, 连 TVZ 界面都不建, 不闪) */
+    if ([self diEscapeIfUsedAsEntry]) return;
+    if (self.childViewControllers.count) return;   /* 已经建过 */
     NSString *root=[[NSBundle bundleForClass:self.class].bundlePath stringByDeletingLastPathComponent];
     NSBundle *bundle=[NSBundle bundleWithPath:[root stringByAppendingPathComponent:@"TVZPrefs.bundle"]];
     NSError *error=nil;
