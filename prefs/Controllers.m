@@ -925,23 +925,43 @@ static Class diStepSliderClass(void) {
 /* 3.0: 播放器入口 —— 组件隐藏下面同级, 开关写 com.local.playerexact(内置原生播放器域) */
 @interface DIRecordingTrailPage : PSListController @end
 @implementation DIRecordingTrailPage
+/* 3.1.9: 自救 —— 设备上若残留旧注册项, 会把「漂流岛」直接指向本类, 于是进设置
+   第一眼就是录屏轨迹设置。判据: 整条导航栈里没有 DIPrefsController, 说明不是
+   从「附加功能 → 原生播放 → 录屏轨迹」正常进来, 而是被当成了 bundle 根页。
+   这时把栈顶(自己这一层)换成完整设置根页, 用户立刻看到全部原有条目。 */
+- (void)diEscapeIfUsedAsEntry {
+    UINavigationController *nav = self.navigationController;
+    if (!nav || nav.viewControllers.count == 0) return;
+    /* 模态弹出的场面(自己就是模态根)不算被劫持, 别乱换 */
+    if (nav.viewControllers.count == 1 && nav.viewControllers.firstObject == self && nav.presentingViewController) return;
+    Class rootCls = NSClassFromString(@"DIPrefsController");
+    for (UIViewController *vc in nav.viewControllers) {
+        if (rootCls && [vc isKindOfClass:rootCls]) return;   /* 正常入口, 什么都不做 */
+    }
+    if (!rootCls) {   /* 本 bundle 尚未加载出根类 → 主动加载同目录的 DriftIslandPrefs.bundle */
+        NSString *dir = [[NSBundle bundleForClass:self.class].bundlePath stringByDeletingLastPathComponent];
+        NSBundle *rb = [NSBundle bundleWithPath:[dir stringByAppendingPathComponent:@"DriftIslandPrefs.bundle"]];
+        [rb load];
+        rootCls = NSClassFromString(@"DIPrefsController");
+    }
+    if (!rootCls) { diStep(@"[设置] 自救失败: 找不到 DIPrefsController"); return; }
+    diStep(@"[设置] 录屏轨迹页被当作顶层入口(栈=%lu), 已换回完整设置根页",
+           (unsigned long)nav.viewControllers.count);
+    UIViewController *rootVC = [[rootCls alloc] init];
+    NSMutableArray *vcs = [nav.viewControllers mutableCopy];
+    vcs[vcs.count - 1] = rootVC;
+    [nav setViewControllers:vcs animated:NO];
+}
+
+- (void)viewWillAppear:(BOOL)animated {
+    [super viewWillAppear:animated];
+    [self diEscapeIfUsedAsEntry];
+}
+
 - (void)viewDidLoad {
     [super viewDidLoad];self.title=@"录屏轨迹";
-    /* 3.1.8: 诊断 + 自愈 —— 若本页被当成"漂流岛"入口直接打开(位于导航栈底),
-       说明设备上是旧 plist 把漂流岛指向了本类, 这里直接换成完整设置根页。 */
-    UINavigationController *nav=self.navigationController;
-    diStep(@"[设置] 录屏轨迹页 viewDidLoad (导航栈=%lu, 是否栈底=%d)",
-           (unsigned long)nav.viewControllers.count, (int)(nav.viewControllers.firstObject==self));
-    if(nav.viewControllers.firstObject==self){
-        Class rootCls=NSClassFromString(@"DIPrefsController");
-        if(rootCls){
-            UIViewController *vc=[[rootCls alloc]init];
-            NSMutableArray *vcs=[nav.viewControllers mutableCopy];
-            if(vcs.count){vcs[vcs.count-1]=vc;}
-            [nav setViewControllers:vcs animated:NO];
-            return;
-        }
-    }
+    diStep(@"[设置] 录屏轨迹页 viewDidLoad (导航栈=%lu)",
+           (unsigned long)self.navigationController.viewControllers.count);
     NSString *root=[[NSBundle bundleForClass:self.class].bundlePath stringByDeletingLastPathComponent];
     NSBundle *bundle=[NSBundle bundleWithPath:[root stringByAppendingPathComponent:@"TVZPrefs.bundle"]];
     NSError *error=nil;

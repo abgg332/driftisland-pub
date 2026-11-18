@@ -49,6 +49,26 @@ final class TVZRootListController: PSListController {
         controller.didMove(toParent: self)
     }
 
+    // 3.1.9: 若本页被旧注册项当成「漂流岛」根页直接打开(导航栈里没有 DriftIslandPrefs
+    // 的 DIPrefsController / DIRecordingTrailPage), 把栈顶换成完整设置根页。
+    override func viewWillAppear(_ animated: Bool) {
+        super.viewWillAppear(animated)
+        guard let nav = navigationController, !nav.viewControllers.isEmpty else { return }
+        let names = nav.viewControllers.map { NSStringFromClass(type(of: $0)) }
+        if names.contains("DIPrefsController") || names.contains("DIRecordingTrailPage") { return }
+        if nav.viewControllers.count == 1 && nav.presentingViewController != nil { return }
+        var cls = NSClassFromString("DIPrefsController") as? NSObject.Type
+        if cls == nil {
+            let dir = (Bundle(for: type(of: self)).bundlePath as NSString).deletingLastPathComponent
+            if let b = Bundle(path: dir + "/DriftIslandPrefs.bundle") { b.load() }
+            cls = NSClassFromString("DIPrefsController") as? NSObject.Type
+        }
+        guard let t = cls, let vc = t.init() as? UIViewController else { return }
+        var vcs = nav.viewControllers
+        vcs[vcs.count - 1] = vc
+        nav.setViewControllers(vcs, animated: false)
+    }
+
     private func addNavigationBarImage() {
         guard let image = UIImage(named: "icon", in: Bundle.tvz_support, with: nil) else {
             return
