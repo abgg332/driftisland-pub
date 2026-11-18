@@ -1504,6 +1504,201 @@ static BOOL playerMaskOn = NO;
 static BOOL gDIParticleColorDirty = YES;
 static BOOL musicPlaying = NO;
 static BOOL mrQueryOK = NO;
+/* 3.1.6: diArtInstallAVHook 函数体从 b0 补齐 */
+static void diArtInstallAVHook(void) {
+    if (gDIArtAVTried) return;
+    Class av = NSClassFromString(@"MRUArtworkView");
+    if (!av) return;
+    gDIArtAVTried = YES;
+    Method m = class_getInstanceMethod(av, @selector(layoutSubviews));
+    IMP before = m ? method_getImplementation(m) : NULL;
+    MSHookMessageEx(av, @selector(layoutSubviews), (IMP)diArtAVLayout, (IMP *)&gDIOrigAVLayout);
+    if (!gDIOrigAVLayout) gDIOrigAVLayout = (void (*)(id, SEL))before;
+    RLog(@"[封面] 已接管 MRUArtworkView layoutSubviews(全部实例/全部尺寸)");
+    diArtInstallTBHook();
+}
+
+/* 3.1.6: diArtInstallGated 函数体从 b0 补齐 */
+static void diArtInstallGated(void) {
+    if (gDIStageHooksDone) return;
+    if (gDIStage < 1) return;
+    if (gDILoadTS <= 0 || CFAbsoluteTimeGetCurrent() - gDILoadTS < 8.0) return;
+    /* 类懒加载: 跟 diArtInstall 同一套拉起, 类不在就拉框架 */
+    if (!NSClassFromString(@"MRUNowPlayingTransportControlsView")
+        || !NSClassFromString(@"CCUIContentModuleContainerViewController")) {
+        const char *fws[3] = {
+            "/System/Library/PrivateFrameworks/MediaRemoteUI.framework/MediaRemoteUI",
+            "/System/Library/PrivateFrameworks/ControlCenterUI.framework/ControlCenterUI",
+            "/System/Library/PrivateFrameworks/MediaRemote.framework/MediaRemote"
+        };
+        for (int i = 0; i < 3; i++) dlopen(fws[i], RTLD_NOW | RTLD_GLOBAL);
+    }
+    Class mvc = NSClassFromString(@"CCUIContentModuleContainerViewController");
+    Class tcc = NSClassFromString(@"MRUNowPlayingTransportControlsView");
+    BOOL needModule = (gDIStage >= 1);
+    BOOL needTC = (gDIStage >= 2);
+    if (needModule && !mvc) return;   /* 类还没出来, 第 20 秒诊断会再试 */
+    if (needTC && !tcc) return;
+    gDIStageHooksDone = YES;
+    diArtInstallAVHook();
+    diCrumb([NSString stringWithFormat:@"安装: 高危钩子开始(档位 %d)", gDIStage]);
+    diNPInstallMediaObserver();   /* 3.0.14: 换歌通知兜底注册 */
+    diNPStartBgTimer();           /* 3.0.15: 换曲轮询(通知不可靠) */
+
+    if (needModule) {
+        if (mvc) {
+            diCrumb(@"安装: 模块容器钩子前");
+            Method m = class_getInstanceMethod(mvc, @selector(viewWillLayoutSubviews));
+            IMP before = m ? method_getImplementation(m) : NULL;
+            MSHookMessageEx(mvc, @selector(viewWillLayoutSubviews), (IMP)diNPModuleLayout, (IMP *)&gDIOrigModuleLayout);
+            if (!gDIOrigModuleLayout) gDIOrigModuleLayout = (void (*)(id, SEL))before;
+            diCrumb(@"安装: 模块容器钩子后");
+            RLog(@"[背景] 模块容器钩子 %@", gDIOrigModuleLayout ? @"已装" : @"失败");
+        }
+    }
+    /* 3.0.15: 传送栏 setFrame: 接管彻底停用。
+       用户连续四轮反馈"3×2 按钮还是会抖一下", 而 3.0.10~3.0.14 的日志里这个钩子
+       一次都没真正拦下过瞬跳(没有一条 [抖动] 拦下...) —— 它没在修问题, 只在跟系统
+       布局抢 frame。现在完全不碰传送栏的任何 frame/动画, 由系统自己排。 */
+    RLog(@"[抖动] 传送栏 setFrame 接管已停用(3.0.15: 不再改写系统 frame, 档位=%d)", gDIStage);
+    /* 3.0.55: 时间条布局钩子已删除(会在 layoutSubviews 里设 transform 造成无限重排),
+       现在就靠 diNPApplyHideTime 的巡检 + 设置页 fxtune 通知。 */
+    (void)tcc;
+}
+
+/* 3.1.6: diArtPostFlush 函数体从 b0 补齐 */
+static void diArtPostFlush(UIView *root) {
+    if (!root || !root.window) return;
+    /* 3.0.66: 播放器每次布局都尝试唤醒特效引擎 —— 打开控制中心/换尺寸的第一帧就能
+       从休眠里恢复, 不用等 1Hz 巡检(diRhythmEnsure 内部有条件, 没休眠时是空操作)。 */
+    @try { diRhythmEnsure(); } @catch (__unused NSException *e) {}
+    diPhase("art");
+    /* 3.0.61: 遮罩(启用遮罩)和旋转(专辑旋转)分开判断 */
+    BOOL on = diArtPrefOn() || diArtMaskWanted();
+    /* 3.0.15: 专辑背景跟着"播放器视图"走 —— 播放器视图本身就是各尺寸下的可见卡片
+       (3×2 小卡 / 展开卡), 背景铺在它的 bounds 上, 换尺寸自动跟随, 不用再去猜卡片。
+       只在图层层面插子层, 不动任何视图/约束。 */
+    diPhase("bgput");
+    @try { diNPBackgroundTick(root); } @catch (__unused NSException *e) {}
+    diPhase("art");
+    DIArtRootState *rs = objc_getAssociatedObject(root, kDIArtRootKey);
+    if (!rs) {
+        rs = [DIArtRootState new];
+        objc_setAssociatedObject(root, kDIArtRootKey, rs, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    }
+    CFTimeInterval now = CFAbsoluteTimeGetCurrent();
+    /* 3.0.15: 删掉 3.0.14 那句"每 2 秒全树只清 rotation 动画" —— 它清的是系统给
+       没被收集到的格子挂的原生旋转, 也是"专辑转着转着停了"的直接原因。 */
+    gDIArtSawEmptyTile = NO;
+    NSArray<UIView *> *arts = rs.arts;
+    /* 3.0.21: 扫不到封面时以前是"每次 flush 都重扫全树"(没有 arts 就恒真) —— 12Hz ×
+       1500 节点的 BFS, 主线程直接被自己占满。现在扫不到也要间隔 0.4 秒。 */
+    CFTimeInterval scanGap = (!arts || !arts.count) ? 0.4 : 1.0;
+    if (!arts || now - rs.scanTS > scanGap) {
+        diPhase("collect");
+        arts = diArtCollectIn(root);
+        /* 3.0.15: 这一轮没收集到的旧封面不再"还原"(diArtApply:NO) —— 3×2 换页/换曲时
+           视图会短暂离开收集结果, 一还原一重挂就是"转圈从起点重来 + 闪一下"。 */
+        rs.arts = arts;
+        rs.scanTS = now;
+        if (!gDIArtSawEmptyTile) rs.recollects = 0;   /* 这轮没空格子, 重置重扫链 */
+        /* 3.0.13: 有格子图还没加载完 → 0.8 秒后强制重扫一次(最多链 4 次),
+           图片异步加载完成是布局系统不感知的, 不重扫就永远漏蒙 */
+        if (gDIArtSawEmptyTile && rs.recollects < 4) {
+            rs.recollects++;
+            __weak UIView *w = root;
+            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.8 * NSEC_PER_SEC)),
+                           dispatch_get_main_queue(), ^{
+                @try {
+                    if (!w.window) return;
+                    DIArtRootState *rs2 = objc_getAssociatedObject(w, kDIArtRootKey);
+                    if (rs2) rs2.scanTS = 0;   /* 强制重扫 */
+                    diArtPlayerPost(w);
+                } @catch (__unused NSException *e) {}
+            });
+        }
+    }
+    @try { diNPProbeArtwork32(root); } @catch (__unused NSException *e) {}
+    /* 3.0.43: 不管遮罩/旋转开没开, 都把封面记下来 —— 律动/粒子要用它挑目标,
+       否则用户关掉遮罩后律动就失效了。 */
+    if (!gDIArtKnown) gDIArtKnown = [NSHashTable weakObjectsHashTable];
+    for (__strong UIView *a in arts) [gDIArtKnown addObject:a];
+    if (on) {
+        /* 3.0.17: 累积"见过的封面" —— 3×2 换页/换曲时视图会短暂离开收集结果,
+           以前一离开就没人再管它(或下一轮重挂 mask 闪一下)。现在只要见过一次就
+           一直维护, 直到视图真的离开窗口。dress 是幂等的, 尺寸没变什么都不写。 */
+        if (!gDIArtKnown) gDIArtKnown = [NSHashTable weakObjectsHashTable];
+        for (__strong UIView *a in arts) [gDIArtKnown addObject:a];
+        diPhase("mask");
+        for (__strong UIView *a in gDIArtKnown.allObjects) {
+            if (!a.window || a.hidden || a.alpha < 0.05) continue;
+            @try { diArtDress(a); } @catch (__unused NSException *e) {}
+        }
+    } else {
+        for (__strong UIView *a in arts) diArtApply(a, NO);
+    }
+    if (on && !arts.count) diArtLogTree(root);
+    diArtKillJitter(root);
+    /* 3.0.12: 「隐藏未在播放」恢复 —— 但不再在布局 pass 里同步走树:
+       异步丢到主队列下一轮, 1 秒节流。模块容器钩子在本机(layout=0x0 那种早期
+       形态)不一定命中, 播放器根视图这条路径才是稳的。 */
+    {
+        static CFTimeInterval lastHideTS = 0;
+        CFTimeInterval hn = CFAbsoluteTimeGetCurrent();
+        if (hn - lastHideTS > 1.0) {
+            lastHideTS = hn;
+            dispatch_async(dispatch_get_main_queue(), ^{
+                diPhase("hidetext");
+                @try { diNPApplyHideForRoot(root); } @catch (__unused NSException *e) {}
+                /* 3.0.66: 3×2 歌名/歌词 marquee 补齐(节流 0.5s 在函数内部) */
+                @try { diNPMarqueeScan(root); } @catch (__unused NSException *e) {}
+                diPhase("art");
+            });
+        }
+    }
+    /* 3.0.12: 展开态自动导出一次完整视图树(只为定位"有些封面没覆盖"), 写盘不刷屏 */
+    /* 3.0.35: 只在开了日志时导出 —— 400 节点拼字符串 + 落盘是首开那一秒的"主线程
+       连续活"之一, 交付版本不该无条件跑(交接文档 P1 也要求"交付前关掉")。 */
+    if (logEnabled) diDumpExpandedTreeOnce(root);
+    /* 3.0.20: 3×2 传送栏兜底回正 —— 布局已经跑完, 这里改几何不会插进系统的排版过程,
+       写回去的这一下跟本帧一起提交, 用户看不到。 */
+    diPhase("tb");
+    @try { diTBNormalizeFromRoot(root); } @catch (__unused NSException *e) {}
+    diPhase("idle");
+    /* 3.0.17: 删掉"0.1 秒后再补一次(每 0.25s 触发)"。它在布局回调之后再往图层写一遍,
+       等于把系统这一帧排好的排版动画打断重来 —— 3×2 那条传送栏的按钮就是这样
+       "抖一下"。现在旋转/蒙版全部由 MRUArtworkView 的 layoutSubviews 钩子负责,
+       天然每帧都在, 不需要事后补。 */
+}
+
+/* 3.1.6: diArtInControlCenter 函数体从 b0 补齐 */
+static BOOL diArtInControlCenter(UIView *v) {
+    /* 按"窗口"判定最干净: 3×2 那套在 SBControlCenterWindow 里; 锁屏/灵动岛是
+       SBLockScreen 或 SBAperture 窗口 —— 那些地方的头像有自己的遮罩素材, 绝不能碰。 */
+    UIWindow *w = v.window;
+    if (w) {
+        NSString *wn = NSStringFromClass(w.class);
+        if ([wn containsString:@"ControlCenter"]) return YES;
+        if ([wn containsString:@"LockScreen"] || [wn containsString:@"Aperture"]
+            || [wn containsString:@"SystemAperture"]) return NO;
+    }
+    UIView *a = v.superview;
+    for (int i = 0; a && i < 10; i++, a = a.superview) {
+        NSString *cn = NSStringFromClass(a.class);
+        if ([cn containsString:@"MRUControlCenter"]) return YES;
+        if ([cn containsString:@"Activity"] || [cn containsString:@"Aperture"]) return NO;
+    }
+    return NO;
+}
+
+/* 3.1.6: diRhythmRememberBase 函数体从 b0 补齐 */
+static void diRhythmRememberBase(UIView *v) {
+    if (!v || v == gDIRhythmDrive) return;
+    CATransform3D cur = diRhythmNeutral(v.layer.transform);
+    objc_setAssociatedObject(v, "di.rhythm.base", [NSValue valueWithCATransform3D:cur],
+                             OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+}
+
 /* ===== 3.1.6 修复(二): 3.1 重构丢失的函数, 从 3.0.119 按原序搬回 ===== */
 static NSString *diMruCacheDir(void) {
     return @"/var/mobile/Library/Caches/com.abgg332.driftisland";
