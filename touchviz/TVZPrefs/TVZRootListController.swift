@@ -28,8 +28,8 @@ final class TVZRootController: UIHostingController<TVZRootView> {
     }
 }
 
-@objc(TVZRootListController)
-final class TVZRootListController: PSListController {
+@objc(DIRecordingTrailSettings314)
+final class DIRecordingTrailSettings314: PSListController {
 
     override func viewDidLoad() {
         super.viewDidLoad()

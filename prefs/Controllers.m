@@ -923,14 +923,10 @@ static Class diStepSliderClass(void) {
 @interface DIWidgetHidePage : DIMiniBaseController @end
 @interface DIWidgetAppsPage : DIMiniBaseController @end
 /* 3.0: 播放器入口 —— 组件隐藏下面同级, 开关写 com.local.playerexact(内置原生播放器域) */
-/* 3.1.12: 录屏轨迹设置页改名 DITVZPrefsPage —— 不再占用 DIRecordingTrailPage 这个名字。
-   原因: 设备上残留的旧注册项把「漂流岛」的 detail 写成 DIRecordingTrailPage, 于是点漂流岛
-   先打开录屏轨迹页、再靠自救换回完整列表 → 必然闪一下空白。现在:
-     · 正常路径: 完整列表 → 录屏轨迹 → DITVZPrefsPage(本类, 挂 TVZPrefs);
-     · 残留注册项: detail=DIRecordingTrailPage = 下面的兼容别名(= DIPrefsController), 打开
-       即完整设置列表, 第一帧就对, 零闪帧。 */
-@interface DITVZPrefsPage : PSListController @end
-@implementation DITVZPrefsPage
+/* The embedded Touch-Viz page must never be registered as the bundle root.
+   Legacy top-level names below render the original home directly. */
+@interface DIRecordingTrailEmbeddedPage314 : PSListController @end
+@implementation DIRecordingTrailEmbeddedPage314
 - (void)viewDidLoad {
     [super viewDidLoad];
     self.title = @"录屏轨迹";
@@ -953,7 +949,7 @@ static Class diStepSliderClass(void) {
         label.text=[NSString stringWithFormat:@"录屏轨迹设置加载失败：%@",error.localizedDescription?:@"找不到 TVZPrefs.bundle"];
         [self.view addSubview:label];return;
     }
-    Class cls=NSClassFromString(@"TVZRootListController");
+    Class cls=NSClassFromString(@"DIRecordingTrailSettings314");
     if(!cls){
         UILabel *label=[[UILabel alloc]initWithFrame:self.view.bounds];label.autoresizingMask=UIViewAutoresizingFlexibleWidth|UIViewAutoresizingFlexibleHeight;
         label.text=@"录屏轨迹设置加载失败：控制器类未注册";label.textAlignment=NSTextAlignmentCenter;label.numberOfLines=0;[self.view addSubview:label];return;
@@ -971,11 +967,14 @@ static Class diStepSliderClass(void) {
 }
 @end
 
-/* 兼容别名: 旧注册项 detail=DIRecordingTrailPage → 直接给完整设置根页(零闪帧) */
+/* Preserve legacy class names used by PreferenceLoader caches, but make every
+   former top-level page render the real home without replacing navigation stacks. */
 @interface DIRecordingTrailPage : DIPrefsController @end
 @implementation DIRecordingTrailPage
 @end
-
+@interface DITVZPrefsPage : DIPrefsController @end
+@implementation DITVZPrefsPage
+@end
 @interface DIPlayerEntryPage : DIMiniBaseController @end
 /* 3.0.45: 律动特效页 —— 总开关/封面律动/环/粒子/参数/渐变色全在这一页 */
 @interface DIFxPage : DIMiniBaseController
@@ -1678,7 +1677,7 @@ static void diWriteColors(NSArray<NSString *> *colors) {
         DI_ADD([self linkSpec:@"组件隐藏" detail:[DIWidgetHidePage class]]);
         /* 2.9.75: 播放器入口 —— 组件隐藏下面同级(不在里面); 内置原生播放器(控制中心播放器增强) */
         DI_ADD([self linkSpec:@"原生播放" detail:[DIPlayerEntryPage class]]);
-        DI_ADD([self linkSpec:@"录屏轨迹" detail:[DITVZPrefsPage class]]);
+        DI_ADD([self linkSpec:@"录屏轨迹" detail:[DIRecordingTrailEmbeddedPage314 class]]);
 
         _smallRow = _expandRow = -1;
         {
