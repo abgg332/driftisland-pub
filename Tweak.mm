@@ -253,6 +253,531 @@ static double gDISynPhase = 0.0;
 static CFTimeInterval gDIClock = 0;
 static CFTimeInterval gDITargetAt = 0;
 
+/* ===== 3.1.6 修复(六): @interface/typedef/剩余静态 补齐 ===== */
+typedef struct {
+    float x, y;         /* 当前圆心(bars 坐标系) */
+    float vy;           /* 上升速度 pt/s, 会随寿命略微加速 */
+    float r0;           /* 初始半径 */
+    float life, maxLife;
+    float swayPh, swayAmp;   /* 横向摆动的相位与幅度 */
+    int alive;
+} DIBubble;
+
+#define DI_BUILD_VER DI_VERSION   /* 3.0.28: 唯一来源 DIVersion.h */
+
+@interface DIMaskView : UIView
+@property (nonatomic, strong) CADisplayLink *link;
+@property (nonatomic, assign) NSInteger miss;
+@property (nonatomic, copy) NSString *loadedPath;
+@property (nonatomic, strong) UIImage *maskImg;
+@property (nonatomic, assign) CGFloat rotDeg;
+@property (nonatomic, assign) double lastTS;
+@property (nonatomic, assign) NSInteger lastSide;
+@property (nonatomic, assign) BOOL loggedShow;
+@property (nonatomic, weak) UIView *coverV;      /* 当前挂了 mask 的那张专辑 */
+@property (nonatomic, strong) NSHashTable *targets;  /* weak: 实际挂了 mask 的那些层 */
+/* 2.7.29: 自绘玻璃 —— 探针自己画一张"专辑图 + 形状蒙版", 不再依赖系统那层肯不肯被裁 */
+/* 2.8.15: 被我们藏起来的系统专辑层(弱引用表 + 各层原始 alpha 挂关联对象)。
+   小岛态藏门户(26x22), 展开态藏专辑方块层(36x36)/图片视图 ——
+   Album 中心(玻璃半径+6pt)内、12~64pt 的本地方层全藏(含任何重复画专辑的层,
+   即用户报的"多了一个显示"), teardown 时统一还原。
+   2.8.14 的黑色盖布(coverLayer)已删除 —— 它本身就是用户看到的"多了一个显示",
+   而且盖不死系统那张方形专辑。 */
+@property (nonatomic, strong) NSHashTable *hiddenViews;
+@property (nonatomic, strong) UIView *artView;
+@property (nonatomic, strong) UIImage *artImg;
+@property (nonatomic, assign) double artTS;
+@property (nonatomic, assign) BOOL artBusy;
+@property (nonatomic, assign) BOOL loggedPaint;
+@property (nonatomic, assign) BOOL loggedNoArt;
+/* 2.8.13: 自绘玻璃模式(拿到专辑图时) —— 玻璃 = 专辑图 + 遮罩形状,
+   旋转由一个内部子视图承载(外层玻璃不转, 展开态靠盖布盖住远程专辑) */
+@property (nonatomic, assign) BOOL glassOn;
+@property (nonatomic, assign) NSInteger glassMiss;
+@property (nonatomic, assign) BOOL loggedNoArtTip;
+
+/* ===== 2.8.16: 流畅度 & 形态闸门 =====
+   286 反馈: "小岛到展开明显掉帧, 一卡一卡"。
+   根因是我们每帧(60fps × 两个探针实例)都在做全树遍历(找封面/找方块层/藏层)、
+   每帧改 subview 顺序(bringSubviewToFront 会触发系统岛容器整棵重排)、
+   每帧给玻璃设 transform(打断 CoreAnimation 合成)。这些在展开动画里叠加起来
+   就是肉眼可见的卡顿, 而且会把系统那边的动画一起拽慢。
+   2.8.16 的改法:
+     · 展开态**完全不参与**(用户明确要求删掉展开岛遮罩) → 展开全程零开销;
+     · 尺寸连续变化时(动画中)直接 return, 只做一次 bounds 比较;
+     · 旋转交给 CABasicAnimation 无限循环(GPU 合成), 不再每帧写 transform;
+     · 找封面/找方块层结果按宿主尺寸缓存, 尺寸不变就不重算。 */
+@property (nonatomic, assign) BOOL expandLock;      /* 保留字段(2.8.17 起不再用于跳过展开态) */
+@property (nonatomic, assign) NSInteger stableFrm;  /* 尺寸连续不变的帧数 */
+@property (nonatomic, assign) CGFloat lastBW, lastBH;
+/* ===== 2.8.20: 宿主内容指纹 =====
+   290 反馈: "打电话岛第一时间还是显示那个蒙版, 后面才隐藏"。
+   来电/充电/通知岛出现时系统是把这个宿主的内容整体换掉(尺寸可能仍停在
+   小岛的 185x52 一小会儿), 玻璃贴在原地就会在来电卡片上闪一帧。
+   指纹 = 除自己以外的子视图数量 + 首/末子视图指针, 每帧只做两次指针比较
+   (零遍历、零字符串), 一变就立刻收玻璃并还原系统专辑。 */
+@property (nonatomic, assign) NSUInteger fpCount;
+@property (nonatomic, weak) UIView *fpFirst;
+@property (nonatomic, weak) UIView *fpLast;
+/* 2.8.20: 展开结构缓存(2.8.21 起停用 —— 该闸门对音乐岛自身恒成立, 已改
+   "尺寸稳定帧 + 收紧窗口", 见 step 里 ① 形态闸门重写。字段保留兼容)。 */
+@property (nonatomic, assign) CFAbsoluteTime bigT;
+@property (nonatomic, assign) BOOL bigCache;
+@property (nonatomic, assign) CFAbsoluteTime scanT;  /* 上次重扫封面的时间(实例级, 别用 static) */
+@property (nonatomic, weak) UIView *cacheCoverV;
+@property (nonatomic, weak) UIView *cacheSqView;
+@property (nonatomic, assign) CGRect cacheCoverRect;
+/* 2.9.70: 小岛态确认过的封面槽位 —— 收缩瞬间缓存里还是展开态的大框,
+   照它画会把小圆铺到偏右 30pt 处(用户: "小岛专辑从其他地方显示再显示正常")。
+   小岛态只接受"尺寸合理且在宿主内"的候选, 其余一律沿用这个槽位。 */
+@property (nonatomic, assign) CGRect miniCoverRect;
+@property (nonatomic, assign) CGRect cacheSqRect;
+@property (nonatomic, assign) CGFloat cacheBW, cacheBH;
+@property (nonatomic, assign) BOOL rotInstalled;    /* 旋转 CA 动画已装 */
+@property (nonatomic, assign) CGFloat rotInstalledSpeed;
+@property (nonatomic, assign) BOOL rotInstalledRev;
+@property (nonatomic, assign) CGFloat lastGlassSide; /* 上次画玻璃的边长, 用于藏层节流 */
+@property (nonatomic, assign) CGPoint lastGlassCenter;
+/* 3.0.84: 岛专辑律动的缩放倍率 —— diPaintGlassAt 每帧会重置 transform, 不能在外面写,
+   改成由它带着这个倍率一起写(默认 1.0 = 原行为)。 */
+@property (nonatomic, assign) CGFloat fxScale;
+/* 2.9.65: 过渡帧锁定的玻璃边长(0=不锁) —— 见 diPaintGlassAt 里的说明 */
+@property (nonatomic, assign) CGFloat freezeSide;
+/* 2.9.67: 连续"在变大"的帧数 —— 长按展开起手用, 见 isMini/挂载守卫 */
+@property (nonatomic, assign) NSInteger growStreak;
+@property (nonatomic, assign) CFAbsoluteTime paintT;     /* 上次真正画玻璃的时间, 稳定态短路用 */
+/* 2.8.39: 上次确认"正在播放"的时间 —— 遮罩锁死用(308 反馈: 切歌/门户重建时
+   判定瞬断就拆玻璃, 用户看到"先方形后遮罩"; 播放中或 30s 内播放过就永不拆)。 */
+@property (nonatomic, assign) CFAbsoluteTime lastPlayT;
+/* ===== 2.9.74: 交接给 MRU 之后的"闭嘴期" =====
+   404 日志+视频实锤: 展开那一下这边确实按"MRU 已确认展开"让位了, 但**下一个
+   layout 又把玻璃挂回来**了 —— 日志里"立即让位"之后还跟着四十多条
+   "遮罩挂上(玻璃) … 旋转=开 角度-336°→-59°"。这颗 25pt 的圆还带着旋转动画,
+   而它所在的小岛容器在展开时被系统淡出/放大 —— 用户看到的就是
+   "展开大岛里有个小专辑在环绕转圈, 过一下才正常"。
+   所以让位要记时间: 交接窗口内(mruHoldT>0)一律不再新挂, 直到 MRU 那边
+   连续 0.3 秒都说"不是展开态"才放开。 */
+@property (nonatomic, assign) CFAbsoluteTime mruHoldT;
+@property (nonatomic, assign) CFAbsoluteTime mruClearT;
+/* 2.7.45: 素材指纹状态改成实例属性 ——
+   2.7.42~2.7.44 用函数内 static, 而小岛/展开岛各有一个 DIMaskView 实例,
+   两个实例抢同一组 static: A 刚记录完指纹, B 立刻判"变了"→ 又重建,
+   日志里"遮罩素材换图"每秒刷好几次就是这么来的, 遮罩自然挂不稳。
+   状态归属到实例后, 每个探针各自记自己的, 只有真换了素材才会重建。 */
+@property (nonatomic, copy) NSString *fpSel;
+@property (nonatomic, assign) double fpMtime;
+@property (nonatomic, assign) NSInteger fpGen;
+@property (nonatomic, assign) NSInteger fpMiss;   /* 连续命中次数, 首次立即生效 */
+- (NSInteger)diLiveTargetCount;
+@end
+
+//      防止系统裁剪把 mask 形状切掉); 原值存 state, 停用时恢复。
+@interface DIActivityMaskState : NSObject
+@property(nonatomic,strong) UIImageView *mask;
+@property(nonatomic,strong) UIView *originalMask;
+@property(nonatomic,weak) UIView *shadow;
+@property(nonatomic,assign) BOOL originalShadowHidden;
+@property(nonatomic,weak) UIView *imageView;              // 2.8.77 artworkImageView 原值保存
+@property(nonatomic,assign) BOOL originalImageClips;
+@property(nonatomic,assign) BOOL originalSelfClips;
+/* ===== 2.8.82: 自绘玻璃(与小岛同一套观感) =====
+   328 反馈: "改到图层了, 变小了, 我要跟小岛一样用同样的遮罩跟旋转"。
+   用 maskView 直接裁系统那张专辑有两个死结:
+     ① 系统专辑图是**按原比例居中绘制**的, 用 artworkFrame 当遮罩区域就等于把
+        形状缩到那个小矩形里 → 看起来"专辑变小了";
+     ② 系统专辑层不跟着我们的角度转 → 只有形状转、图不转。
+   所以改成小岛 2.8.13 的做法: 把专辑图取出来自己画一层(图+遮罩同一视图),
+   转的是这整张玻璃; 系统那张层只负责藏起来。 */
+@property(nonatomic,strong) UIView *glass;
+@property(nonatomic,strong) UIImageView *glassImage;
+@property(nonatomic,strong) UIImageView *glassMask;
+@property(nonatomic,weak) CALayer *systemLayer;
+@property(nonatomic,assign) BOOL systemLayerHidden;
+/* ===== 2.8.83: 把系统那张专辑"彻底"藏掉 =====
+   329 反馈: "有旋转有遮罩了, 但是还有个底的遮罩显示, 重复了; 下面还有个蒙版, 多余的"。
+   日志实锤: `glass 创建 ... 系统层=无` —— MRUActivityArtworkView 没有 artworkLayer,
+   2.8.82 的隐藏完全没生效, 系统原图(圆角方块)就一直留在我们玻璃底下,
+   于是同一张头像被画了两遍。这里改成逐子视图隐藏 + 清系统 mask/圆角,
+   teardown 时按原值全部还原(不动功能, 只动显示)。 */
+@property(nonatomic,strong) NSMutableArray<UIView *> *hiddenViews;
+@property(nonatomic,strong) NSMutableArray<NSNumber *> *hiddenStates;
+@property(nonatomic,assign) BOOL maskSaved;
+@property(nonatomic,strong) UIView *savedMaskView;
+@property(nonatomic,strong) CALayer *savedLayerMask;
+@property(nonatomic,assign) BOOL savedClips;
+@property(nonatomic,assign) CGFloat savedCorner;
+@property(nonatomic,strong) UIImage *lastArt;
+@property(nonatomic,assign) CGFloat spinSpeed;
+@property(nonatomic,assign) BOOL spinRev;
+/* 2.9.74: 这颗玻璃是否经历过"小岛↔展开"的半途(过渡区)。
+   经历过 → 它已经淡到 0, 收缩态里就**保持隐藏**, 不走 teardown
+   (还原系统层就是那块"多出来的蒙版"); 没经历过(冷启动/切歌残留) → 照旧拆。 */
+@property(nonatomic,assign) BOOL wasMid;
+@end
+
+static char kDIActivityMaskState;
+static NSHashTable<UIView *> *gDIActivityArtworks;
+
+static UIImage *gDIActivityShape;
+static BOOL gDIActivityEnabled;
+static int gDIActivityHit;   /* 2.8.79: 成功接管次数, 0 说明整条链路没走到 */
+
+/* 2.8.82: 旋转参数 —— 与小岛同一份设置(SpringBoard 每次导出时写好) */
+static void diMruRotParams(BOOL *on, BOOL *rev, double *speed) {
+    static BOOL cOn; static BOOL cRev; static double cSpeed = 45.0;
+    static CFAbsoluteTime last; static NSString *lastSig;
+    CFAbsoluteTime now = CFAbsoluteTimeGetCurrent();
+    if (last == 0 || now - last > 1.0) {
+        last = now;
+        NSString *p = [diMruSelfDir() stringByAppendingPathComponent:@"params.plist"];
+        NSDictionary *attr = [[NSFileManager defaultManager] attributesOfItemAtPath:p error:NULL];
+        NSString *sig = [NSString stringWithFormat:@"%@_%@", attr[NSFileModificationDate], attr[NSFileSize]];
+        if (![sig isEqual:lastSig]) {
+            lastSig = sig;
+            NSDictionary *d = [NSDictionary dictionaryWithContentsOfFile:p];
+            if ([d isKindOfClass:NSDictionary.class]) {
+                cOn = [d[@"rot"] boolValue];
+                cRev = [d[@"rev"] boolValue];
+                double s = [d[@"speed"] doubleValue];
+                cSpeed = (s > 1.0) ? MIN(s, 720.0) : 45.0;
+            }
+        }
+    }
+    *on = cOn; *rev = cRev; *speed = cSpeed;
+}
+
+static void diMruReport(NSString *tag, NSString *detail) {
+    /* 同 tag 3 秒内只报一次 —— 这些函数在每帧布局里被调用, 不能刷屏 */
+    static NSMutableDictionary<NSString *, NSNumber *> *lastT;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{ lastT = [NSMutableDictionary dictionary]; });
+    CFAbsoluteTime now = CFAbsoluteTimeGetCurrent();
+    NSNumber *prev = lastT[tag];
+    if (prev && now - prev.doubleValue < 3.0) return;
+    lastT[tag] = @(now);
+    NSString *name = [@"com.abgg332.driftisland.mru." stringByAppendingString:tag];
+    CFNotificationCenterPostNotification(CFNotificationCenterGetDarwinNotifyCenter(),
+        (__bridge CFStringRef)name, NULL, NULL, true);
+    diMruFileLog(detail.length ? [NSString stringWithFormat:@"%@ %@", tag, detail] : tag);
+}
+
+static void diMruPostPayload(NSString *tag, NSString *payload) {
+    NSString *safe = payload.length ? payload : @"-";
+    if (safe.length > 240) safe = [safe substringToIndex:240];
+    NSCharacterSet *bad = [[NSCharacterSet characterSetWithCharactersInString:
+        @"abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789._-"] invertedSet];
+    safe = [[safe componentsSeparatedByCharactersInSet:bad] componentsJoinedByString:@"_"];
+    NSString *name = [NSString stringWithFormat:@"com.abgg332.driftisland.mru.%@.%@", tag, safe];
+    CFNotificationCenterPostNotification(CFNotificationCenterGetDarwinNotifyCenter(),
+        (__bridge CFStringRef)name, NULL, NULL, true);
+}
+
+static UIViewController *diActivityAncestorVC(UIView *view) {
+    SEL vcSel = NSSelectorFromString(@"_viewControllerForAncestor");
+    if (!vcSel || ![view respondsToSelector:vcSel]) return nil;
+    @try {
+        return ((UIViewController *(*)(id, SEL))objc_msgSend)(view, vcSel);
+    } @catch (__unused NSException *e) { return nil; }
+}
+static BOOL diActivityInNowPlaying(UIView *view) {
+    Class target = NSClassFromString(@"MRUActivityNowPlayingViewController");
+    if (!target) return NO;
+    UIViewController *vc = diActivityAncestorVC(view);
+    return vc && [vc isKindOfClass:target];
+}
+
+/* 2.8.82: 取这张专辑视图正在显示的图 —— 优先 artworkImage, 再退 layer.contents */
+static UIImage *diActivityArtworkImage(UIView *view) {
+    SEL sel = NSSelectorFromString(@"artworkImage");
+    if ([view respondsToSelector:sel]) {
+        @try {
+            id v = ((id (*)(id, SEL))objc_msgSend)(view, sel);
+            if ([v isKindOfClass:UIImage.class]) return (UIImage *)v;
+        } @catch (__unused NSException *e) {}
+    }
+    SEL lsel = NSSelectorFromString(@"artworkLayer");
+    if ([view respondsToSelector:lsel]) {
+        @try {
+            id l = ((id (*)(id, SEL))objc_msgSend)(view, lsel);
+            if ([l isKindOfClass:CALayer.class]) {
+                id c = ((CALayer *)l).contents;
+                if (c && CFGetTypeID((__bridge CFTypeRef)c) == CGImageGetTypeID())
+                    return [UIImage imageWithCGImage:(__bridge CGImageRef)c];
+            }
+        } @catch (__unused NSException *e) {}
+    }
+    return nil;
+}
+
+static BOOL diIsIOS17Up(void) {
+    static int major = -1;
+    if (major < 0) major = (int)NSProcessInfo.processInfo.operatingSystemVersion.majorVersion;
+    return major >= 17;
+}
+
+static CGRect diAspectFitRect(CGSize src, CGRect box) {
+    if (src.width <= 0.5 || src.height <= 0.5 || box.size.width <= 0.5 || box.size.height <= 0.5)
+        return box;
+    CGFloat k = MIN(box.size.width / src.width, box.size.height / src.height);
+    CGFloat w = src.width * k, h = src.height * k;
+    return CGRectMake(box.origin.x + (box.size.width - w) * 0.5,
+                      box.origin.y + (box.size.height - h) * 0.5, w, h);
+}
+
+static CGRect diActivityVisibleRect(UIView *artwork, NSMutableString *diag) {
+    if (!artwork) return CGRectZero;
+    CGRect rect = artwork.bounds;
+    UIView *v = artwork.superview;
+    int guard = 0;
+    while (v && guard++ < 12) {
+        if (v == artwork.window) break;
+        CGRect r = [artwork convertRect:v.bounds fromView:v];
+        CGRect i = CGRectIntersection(rect, r);
+        BOOL ok = !CGRectIsNull(i) && !CGRectIsEmpty(i)
+                  && i.size.width > 2 && i.size.height > 2;
+        BOOL shrunk = ok && (rect.size.width - i.size.width > 1.0 || rect.size.height - i.size.height > 1.0);
+        if (diag) {
+            [diag appendFormat:@"%@[%.0fx%.0f%@%@]", NSStringFromClass(v.class),
+             v.bounds.size.width, v.bounds.size.height,
+             (v.clipsToBounds || v.layer.masksToBounds) ? @"C" : @"",
+             v.layer.mask ? @"M" : @""];
+            if (shrunk) [diag appendFormat:@"→%.0fx%.0f", i.size.width, i.size.height];
+            [diag appendString:@" "];
+        }
+        if (shrunk) rect = i;
+        v = v.superview;
+    }
+    if (CGRectIsNull(rect) || rect.size.width < 4 || rect.size.height < 4) return artwork.bounds;
+    return rect;
+}
+
+static void diActivityTeardown(UIView *artwork, DIActivityMaskState *state) {
+    if (!state) return;
+    [state.glass.layer removeAllAnimations];
+    state.glassImage.maskView = nil;
+    [state.glass removeFromSuperview];
+    state.glass = nil; state.glassImage = nil; state.glassMask = nil;
+    if (state.systemLayer) state.systemLayer.hidden = state.systemLayerHidden;
+    state.systemLayer = nil;
+    if (state.shadow) state.shadow.hidden = state.originalShadowHidden;
+    /* 2.8.83: 按原值还原被我们藏起来的系统子视图 / mask / 圆角 */
+    for (NSUInteger i = 0; i < state.hiddenViews.count; i++) {
+        UIView *v = state.hiddenViews[i];
+        NSNumber *h = (i < state.hiddenStates.count) ? state.hiddenStates[i] : nil;
+        if (h) v.hidden = h.boolValue;
+    }
+    state.hiddenViews = nil; state.hiddenStates = nil;
+    if (state.maskSaved) {
+        artwork.maskView = state.savedMaskView;
+        artwork.layer.mask = state.savedLayerMask;
+        artwork.clipsToBounds = state.savedClips;
+        artwork.layer.cornerRadius = state.savedCorner;
+        state.maskSaved = NO;
+        state.savedMaskView = nil; state.savedLayerMask = nil;
+    }
+    if (artwork.maskView == state.mask) artwork.maskView = state.originalMask;
+    objc_setAssociatedObject(artwork, &kDIActivityMaskState, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+}
+
+static void diActivityHideSystem(UIView *artwork, DIActivityMaskState *state) {
+    if (!state) return;
+    if (!state.hiddenViews) {
+        state.hiddenViews = [NSMutableArray array];
+        state.hiddenStates = [NSMutableArray array];
+    }
+    for (UIView *sub in artwork.subviews) {
+        if (sub == state.glass) continue;
+        if ([state.hiddenViews containsObject:sub]) continue;
+        [state.hiddenViews addObject:sub];
+        [state.hiddenStates addObject:@(sub.hidden)];
+        sub.hidden = YES;
+    }
+    if (!state.maskSaved) {
+        state.maskSaved = YES;
+        state.savedMaskView = artwork.maskView;
+        state.savedLayerMask = artwork.layer.mask;
+        state.savedClips = artwork.clipsToBounds;
+        state.savedCorner = artwork.layer.cornerRadius;
+    }
+    if (artwork.maskView) artwork.maskView = nil;
+    if (artwork.layer.mask) artwork.layer.mask = nil;
+    if (artwork.clipsToBounds) artwork.clipsToBounds = NO;
+    if (artwork.layer.cornerRadius != 0) artwork.layer.cornerRadius = 0;
+}
+/* 2.8.86: MRU 自己记的形态标志 —— 头像 66pt 即展开 */
+static BOOL gDIMruExpandedFlag;
+static CGSize gDIMruLastBox;
+
+static void diMruWriteExpandState(BOOL expanded, CGSize box) {
+    static BOOL lastE; static int lastW = -1, lastH = -1; static CFAbsoluteTime lastT;
+    gDIMruExpandedFlag = expanded;   /* 文字调整也用它判形态, 比 root 尺寸可靠 */
+    if (box.width > 0) gDIMruLastBox = box;
+    int w = (int)lround(box.width), h = (int)lround(box.height);
+    CFAbsoluteTime now = CFAbsoluteTimeGetCurrent();
+    if (now - lastT < 0.8 && expanded == lastE && w == lastW && h == lastH) return;
+    lastT = now; lastE = expanded; lastW = w; lastH = h;
+    NSString *dir = diMruSelfDir();
+    if (!dir.length) return;
+    NSDictionary *d = @{@"expanded": @(expanded), @"w": @(w), @"h": @(h),
+                        @"t": @(now), @"v": DI_BUILD_VER};
+    @try { [d writeToFile:[dir stringByAppendingPathComponent:@"state.plist"] atomically:YES]; }
+    @catch (__unused NSException *e) {}
+}
+
+static void diMruWriteExpandSmart(int formNow, BOOL collapsed, CGSize box) {
+    BOOL exp;
+    if (formNow == 1) exp = NO;
+    else if (formNow == 0 || formNow == -1) exp = YES;
+    else exp = !collapsed;
+    diMruWriteExpandState(exp, box);
+}
+
+static BOOL diMruIslandCompact(UIView *artwork) {
+    static CGSize sSize; static BOOL sHave; static CFAbsoluteTime sAt, sChecked;
+    CFAbsoluteTime now = CFAbsoluteTimeGetCurrent();
+    if (now - sChecked > 0.5) {
+        sChecked = now;
+        NSString *dir = diMruSelfDir();
+        NSDictionary *d = dir.length
+            ? [NSDictionary dictionaryWithContentsOfFile:[dir stringByAppendingPathComponent:@"island.plist"]]
+            : nil;
+        if ([d isKindOfClass:NSDictionary.class]) {
+            CGFloat w = [d[@"w"] doubleValue], h = [d[@"h"] doubleValue];
+            if (w > 1.0 && h > 1.0) { sSize = CGSizeMake(w, h); sHave = YES; sAt = now; }
+        }
+    }
+    if (sHave && now - sAt < 6.0)
+        return (sSize.height < 70.0 || sSize.width < 240.0);
+    /* 兜底: 祖先链上先碰到"明显小于展开宿主"的容器 → 收缩态 */
+    for (UIView *v = artwork.superview; v && v != artwork.window; v = v.superview) {
+        CGSize sz = v.bounds.size;
+        if (sz.height >= 120.0 && sz.width >= 240.0) return NO;
+        if (sz.height > 0.0 && sz.height < 55.0) return YES;
+    }
+    return NO;
+}
+
+static CGFloat gDIFormW = 0, gDIFormH = 0;   /* 2.9.67: 播报的宿主尺寸(过渡帧判向用) */
+/* 2.9.70: 上一次的播报尺寸 —— 用来判"这一拍是在缩小", 收缩途中立刻让位 */
+static CGFloat gDIFormPW = 0, gDIFormPH = 0;
+static int gDIFormSB = 0;                    /* 2.9.68: SpringBoard 是否正画着小岛玻璃 */
+
+static int diMruFormFromIsland(void) {
+    static int cForm = -2; static CFAbsoluteTime cChecked;
+    CFAbsoluteTime now = CFAbsoluteTimeGetCurrent();
+    /* 2.9.64: 读盘缓存 0.5 → 0.15 秒 —— 395: 展开第一帧可能还读到 0.5 秒前的
+       "收缩", 白白拆一次玻璃("偶尔先方再圆"的残党)。
+       2.9.65: 0.1 秒 —— 播报端过渡帧已经放到 16Hz, 这里跟上。
+       2.9.68: 0.05 秒 —— sb 交接标志(SpringBoard 是否还画着)一变就要立刻看到,
+       否则展开起手的 0.2 秒窗口会被读盘延迟吃掉。 */
+    if (now - cChecked < 0.05) return cForm;
+    cChecked = now;
+    NSString *dir = diMruSelfDir();
+    NSDictionary *d = dir.length
+        ? [NSDictionary dictionaryWithContentsOfFile:[dir stringByAppendingPathComponent:@"island.plist"]]
+        : nil;
+    if (![d isKindOfClass:NSDictionary.class]) { cForm = -2; gDIFormW = gDIFormH = 0; gDIFormSB = 0; return cForm; }
+    double t = [d[@"t"] doubleValue];
+    CGFloat w = [d[@"w"] doubleValue], h = [d[@"h"] doubleValue];
+    if (w < 1.0 || h < 1.0 || fabs(now - t) > 3.0) { cForm = -2; gDIFormW = gDIFormH = 0; gDIFormSB = 0; return cForm; }
+    gDIFormPW = gDIFormW; gDIFormPH = gDIFormH;
+    gDIFormW = w; gDIFormH = h;
+    gDIFormSB = [d[@"sb"] intValue] ? 1 : 0;
+    /* ===== 2.9.62: 认播报的形态位, 不再按 w/h 反推 =====
+       393 日志实锤: 展开动画中间帧(227x44 之类)按 w/h 反推会被判成"小岛",
+       展开确认期被清零 → 玻璃要等动画结束再 +1.2 秒才铺(用户: "展开先显示
+       一下方形的, 一会才显示圆的")。播报端本来就写了 mini/expand 两位:
+       展开动画中间帧两位都是 0 → 返回 -1(未知), 不清确认期也不确认。
+       2.9.65: 再细分一层 —— -2=文件缺失/过期(真没信号), -1=文件是新鲜的、
+       但尺寸正好卡在形态中间(展开/收起的动画帧)。两种情况在 MRU 侧处理不同:
+       过渡帧要"保留现有玻璃", 没信号才按"拆掉"处理。 */
+    int mini = [d[@"mini"] intValue], exp = [d[@"expand"] intValue];
+    if (exp == 1 && (h >= 70.0 && w >= 240.0)) { cForm = 0; return cForm; }
+    if (mini == 1 && (h < 70.0 || w < 240.0))  { cForm = 1; return cForm; }
+    cForm = -1;
+    return cForm;
+}
+
+static BOOL diMruCompactSiblingExists(UIView *artwork) {
+    if (!gDIActivityArtworks) return NO;
+    for (UIView *v in gDIActivityArtworks.allObjects) {
+        if (v == artwork || ![v isKindOfClass:UIView.class]) continue;
+        if (!v.window || v.hidden || v.alpha < 0.05) continue;
+        CGSize s = v.bounds.size;
+        CGFloat side = MIN(s.width, s.height);
+        if (side < 8.0 || side > 30.0) continue;
+        BOOL sawHost = NO, hostCompact = NO;
+        for (UIView *a = v.superview; a && a != v.window; a = a.superview) {
+            if ([NSStringFromClass(a.class) containsString:@"NowPlaying"]) {
+                sawHost = YES;
+                hostCompact = (a.bounds.size.height < 70.0);
+                break;
+            }
+        }
+        /* 找不到 NowPlaying 宿主时也认(头像自己 ≤30 就是收缩那颗) */
+        if (!sawHost || hostCompact) return YES;
+    }
+    return NO;
+}
+
+static CGFloat diActivityHostHeight(UIView *artwork) {
+    for (UIView *a = artwork.superview; a && a != artwork.window; a = a.superview) {
+        if ([NSStringFromClass(a.class) containsString:@"NowPlaying"]) {
+            CALayer *pl = a.layer.presentationLayer;
+            return pl ? pl.bounds.size.height : a.bounds.size.height;
+        }
+    }
+    return 0;
+}
+
+@interface DIArtMaskState : NSObject
+@property (nonatomic, strong) CAShapeLayer *mask;
+@property (nonatomic, strong) CALayer *origMask;   /* 必须强引用: 换掉后系统层没人持有, 弱引用会变 nil 还原不回去 */
+@property (nonatomic, assign) CGFloat origRadius;
+@property (nonatomic, assign) BOOL origClip;
+@property (nonatomic, assign) CATransform3D origTransform;
+@property (nonatomic, assign) CGPoint origAnchor;      /* 3.0.19: 原始锚点(不居中会"绕外围转") */
+@property (nonatomic, assign) CGSize lastSize;
+@property (nonatomic, assign) CFTimeInterval spinTS;   /* 3.0.15: 旋转起始时刻, 重挂时按相位续上 */
+@property (nonatomic, assign) BOOL assetOn;                /* 3.0.39: 当前蒙版是"遮罩素材"而不是内切圆 */
+@property (nonatomic, weak) UIImage *assetImg;             /* 3.0.39: 上次贴上去的那张素材(换素材要重贴) */
+@end
+
+static BOOL gDIArtHooked = NO;
+
+static void diArtNPLayout(id self, SEL cmd) {
+    if (gDIArtOrigNPViewLayout) gDIArtOrigNPViewLayout(self, cmd);
+    @try { diArtPlayerPost((UIView *)self); } @catch (__unused NSException *e) {}
+}
+static void diArtCCLayout(id self, SEL cmd) {
+    if (gDIArtOrigCCVCLayout) gDIArtOrigCCVCLayout(self, cmd);
+    @try { diArtPlayerPost((UIView *)self); } @catch (__unused NSException *e) {}
+}
+
+typedef struct {
+    float ang, rad;          /* 极坐标位置 */
+    float spin, drift;       /* 角速度 / 恒定向外速度(px/s) */
+    float push;              /* 鼓点冲量(px/s), 指数衰减 */
+    float sway, swayAmp, swayPhase;   /* 横向自然摆动 */
+    float size, rot, rotSpd;
+    float life, maxLife, phase, beatGain;
+    int   shape;             /* 0 实心点 1 空心菱形 2 空心方块 3 空心三角 */
+    float tint;              /* 0~1: 在粒子起始色/结束色之间插值的位置 */
+} DIDot;
+
+typedef struct { double t; float kick, env, bass, playing, energy, extra; } DIBeatSnapOut;
+
+typedef struct {
+    float ang, rad, drift, push, sway, swayAmp, swayPhase;
+    float size, rot, rotSpd, life, maxLife, phase, tint, beatGain;
+    int shape;
+} DIISMDot;
+
+/* ---------- 鼓点快照: SB 写 beat.bin, 这里读 ---------- */
+typedef struct { double t; float kick, env, bass, playing, energy, extra; } DIBeatSnap;
+
+static void (*gDIArtOrigNPViewLayout)(id, SEL) = NULL;
+static void (*gDIArtOrigCCVCLayout)(id, SEL) = NULL;
 /* ===== 3.1.6 修复(四·重做): 从 3.1 前驱 b0ccd95 完整补齐(含 typedef 结构体起点修正) ===== */
 static const BOOL diIslandEffectsAvailable = NO; // source archived; original mask/rotation remain
 
