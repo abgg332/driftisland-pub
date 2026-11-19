@@ -1068,6 +1068,9 @@ static void diFxLoadPrefs(void) {
     rhythmBeatScale = fxDouble(@"AlbumBeatScale", 0.70);
     if (rhythmBeatScale < 0.0) rhythmBeatScale = 0.0;
     if (rhythmBeatScale > 2.5) rhythmBeatScale = 2.5;
+    diAlbumGroupSize = fxDouble(@"AlbumGroupSize", 1.0);
+    if (diAlbumGroupSize < 0.5) diAlbumGroupSize = 0.5;
+    if (diAlbumGroupSize > 1.5) diAlbumGroupSize = 1.5;
     rhythmRoundCover = YES;   /* 3.0.61: 开关已从律动页移除(与「启用遮罩」重复), 恒为圆形 */
     rhythmBarsOn = fxBool(@"AlbumBarsOn", YES);
     {
@@ -19961,7 +19964,7 @@ static void diRhythmRestoreScale(UIView *v,CATransform3D base){
     if(!group && !(state&&state.mask))layer.transform=base;
 }
 static void diRhythmApplyScale(UIView *v,CGFloat scale,CATransform3D transform){
-    if(!v)return;CALayer *layer=v.layer;
+    if(!v)return;scale*=diAlbumGroupSize;CALayer *layer=v.layer;
     objc_setAssociatedObject(layer,&diBeatOwnsTransform,@YES,OBJC_ASSOCIATION_RETAIN_NONATOMIC);
     [layer removeAnimationForKey:@"di.rhythm.tf"];
     if([layer animationForKey:@"di.art.spin"])[layer removeAnimationForKey:@"di.art.spin"];
