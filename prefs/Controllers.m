@@ -981,6 +981,13 @@ static Class diStepSliderClass(void) {
 /* 3.0.57: 颜色行用系统取色盘; 这几个方法在 @implementation 内部前后互相调用, 先声明一遍 */
 - (void)diPickFxColor:(PSSpecifier *)sp;
 - (void)diOpenFxPickerKeyA:(NSString *)a keyB:(NSString *)b title:(NSString *)t;
+- (double)diFXStepForKey:(NSString *)key;
+- (NSArray<NSArray<PSSpecifier *> *> *)diFXSections;
+- (PSSpecifier *)diFXSpecifier:(NSIndexPath *)ip;
+- (PSSpecifier *)diFXHeader:(NSInteger)section;
+- (void)diFXWrite:(id)value specifier:(PSSpecifier *)sp;
+- (void)diFXDrag:(UISlider *)slider;
+- (void)diFXCommit:(UISlider *)slider;
 @end
 /* 3.0.1: 尺寸选择页自建 —— 不再走系统的 PSListItemsController(点进去闪退) */
 @interface DIPlayerSizePage : DIMiniBaseController @end
@@ -6552,6 +6559,146 @@ static id gDIFxColorBridge = nil;
 @end
 
 @implementation DIFxPage
+/* Scoped to DIFxPage: native UIKit controls avoid private PSTableCell subclasses.
+   Existing specifiers remain the configuration schema and all keys stay intact. */
+- (NSArray<NSArray<PSSpecifier *> *> *)diFXSections {
+    NSMutableArray *sections=[NSMutableArray array];
+    NSMutableArray *rows=nil;
+    for(id obj in self.specifiers){
+        if(![obj isKindOfClass:PSSpecifier.class])continue;
+        PSSpecifier *sp=obj;
+        if(sp.cellType==PSGroupCell){rows=[NSMutableArray array];[sections addObject:rows];}
+        else{if(!rows){rows=[NSMutableArray array];[sections addObject:rows];}[rows addObject:sp];}
+    }
+    return sections;
+}
+- (PSSpecifier *)diFXSpecifier:(NSIndexPath *)ip {
+    NSArray *sections=[self diFXSections];
+    if(ip.section>=sections.count)return nil;
+    NSArray *rows=sections[ip.section];return ip.row<rows.count?rows[ip.row]:nil;
+}
+- (PSSpecifier *)diFXHeader:(NSInteger)section {
+    NSInteger i=-1;
+    for(PSSpecifier *sp in self.specifiers)if(sp.cellType==PSGroupCell && ++i==section)return sp;
+    return nil;
+}
+- (void)viewDidLoad {
+    diStep(@"[律动设置315] viewDidLoad begin class=%@",NSStringFromClass(self.class));
+    [super viewDidLoad];self.title=@"律动特效";
+    diStep(@"[律动设置315] viewDidLoad complete rows=%lu",(unsigned long)self.specifiers.count);
+}
+- (NSArray *)specifiers {
+    if(!_specifiers){
+        @try{
+            diStep(@"[律动设置315] build begin");
+            _specifiers=[[self buildSpecifiers] mutableCopy];
+            diStep(@"[律动设置315] build complete rows=%lu",(unsigned long)_specifiers.count);
+        }@catch(NSException *e){
+            diStep(@"[律动设置315] build exception %@: %@",e.name,e.reason?:@"");
+            PSSpecifier *g=[PSSpecifier groupSpecifierWithName:@"律动特效"];
+            [g setProperty:[NSString stringWithFormat:@"设置构建失败：%@",e.reason?:e.name] forKey:@"footerText"];
+            _specifiers=[NSMutableArray arrayWithObject:g];
+        }
+    }
+    return _specifiers;
+}
+- (NSInteger)numberOfSectionsInTableView:(UITableView *)tv {return [self diFXSections].count;}
+- (NSInteger)tableView:(UITableView *)tv numberOfRowsInSection:(NSInteger)section {
+    NSArray *groups=[self diFXSections];return section<groups.count?[groups[section] count]:0;
+}
+- (NSString *)tableView:(UITableView *)tv titleForHeaderInSection:(NSInteger)section {return [self diFXHeader:section].name;}
+- (NSString *)tableView:(UITableView *)tv titleForFooterInSection:(NSInteger)section {return [[self diFXHeader:section] propertyForKey:@"footerText"];}
+- (CGFloat)tableView:(UITableView *)tv heightForRowAtIndexPath:(NSIndexPath *)ip {
+    return [[self diFXSpecifier:ip] propertyForKey:@"range"]?62:54;
+}
+- (UITableViewCell *)tableView:(UITableView *)tv cellForRowAtIndexPath:(NSIndexPath *)ip {
+    PSSpecifier *sp=[self diFXSpecifier:ip];
+    UITableViewCell *cell=[[UITableViewCell alloc]initWithStyle:UITableViewCellStyleValue1 reuseIdentifier:nil];
+    if(!sp)return cell;
+    cell.textLabel.text=sp.name;cell.textLabel.textColor=UIColor.labelColor;
+    cell.textLabel.font=[UIFont systemFontOfSize:16];cell.selectionStyle=UITableViewCellSelectionStyleNone;
+    NSString *key=[sp propertyForKey:@"key"];
+    @try{
+        if([sp propertyForKey:@"diMode315"]){
+            UISegmentedControl *control=[[UISegmentedControl alloc]initWithItems:@[@"自定义",@"跟随",@"渐变"]];
+            id value=diFxReadSized(key);NSInteger mode=[value respondsToSelector:@selector(integerValue)]?[value integerValue]:2;
+            control.selectedSegmentIndex=MAX(0,MIN(2,mode));
+            control.frame=CGRectMake(0,0,MIN(250,tv.bounds.size.width*.57),32);
+            objc_setAssociatedObject(control,"diFXSp",sp,OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+            [control addTarget:self action:@selector(diFXMode:) forControlEvents:UIControlEventValueChanged];cell.accessoryView=control;
+        }else if(sp.cellType==PSSwitchCell){
+            UISwitch *control=[UISwitch new];id value=diFxReadSized(key)?:[sp propertyForKey:@"default"];
+            control.on=[value respondsToSelector:@selector(boolValue)]?[value boolValue]:NO;
+            objc_setAssociatedObject(control,"diFXSp",sp,OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+            [control addTarget:self action:@selector(diFXSwitch:) forControlEvents:UIControlEventValueChanged];cell.accessoryView=control;
+        }else if([sp propertyForKey:@"range"]){
+            NSDictionary *range=[sp propertyForKey:@"range"];
+            UIView *box=[[UIView alloc]initWithFrame:CGRectMake(0,0,MAX(280,tv.bounds.size.width-40),62)];
+            box.autoresizingMask=UIViewAutoresizingFlexibleWidth;
+            CGFloat width=box.bounds.size.width;
+            UILabel *title=[[UILabel alloc]initWithFrame:CGRectMake(8,0,135,62)];title.font=[UIFont systemFontOfSize:14];title.text=sp.name;
+            UISlider *slider=[[UISlider alloc]initWithFrame:CGRectMake(168,12,MAX(40,width-248),38)];slider.tag=1;
+            slider.minimumValue=[range[@"min"] floatValue];slider.maximumValue=[range[@"max"] floatValue];
+            id value=diFxReadSized(key)?:[sp propertyForKey:@"default"];slider.value=[value respondsToSelector:@selector(floatValue)]?[value floatValue]:slider.minimumValue;
+            UILabel *number=[[UILabel alloc]initWithFrame:CGRectMake(width-52,0,48,62)];number.tag=2;number.font=[UIFont monospacedDigitSystemFontOfSize:13 weight:UIFontWeightRegular];number.textAlignment=NSTextAlignmentRight;
+            double step=[self diFXStepForKey:key];number.text=[NSString stringWithFormat:step>=1?@"%.0f":@"%.2f",slider.value];
+            for(NSNumber *sign in @[@(-1),@1]){
+                UIButton *button=[UIButton buttonWithType:UIButtonTypeSystem];button.tag=sign.integerValue<0?3:4;
+                button.frame=CGRectMake(sign.integerValue<0?140:width-78,12,28,38);
+                [button setTitle:sign.integerValue<0?@"−":@"+" forState:UIControlStateNormal];button.titleLabel.font=[UIFont systemFontOfSize:23];
+                objc_setAssociatedObject(button,"diFXSp",sp,OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+                [button addTarget:self action:@selector(diFXStep:) forControlEvents:UIControlEventTouchUpInside];[box addSubview:button];
+            }
+            objc_setAssociatedObject(slider,"diFXSp",sp,OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+            [slider addTarget:self action:@selector(diFXDrag:) forControlEvents:UIControlEventValueChanged];
+            [slider addTarget:self action:@selector(diFXCommit:) forControlEvents:UIControlEventTouchUpInside|UIControlEventTouchUpOutside|UIControlEventTouchCancel];
+            [box addSubview:title];[box addSubview:slider];[box addSubview:number];[cell.contentView addSubview:box];cell.textLabel.text=nil;
+        }else if([sp propertyForKey:@"diColorKey"]){
+            NSString *hex=[sp propertyForKey:@"diColorHex"];UIColor *color=diColorFromHexStr(hex,UIColor.whiteColor);
+            UIView *chip=[[UIView alloc]initWithFrame:CGRectMake(0,0,28,28)];chip.backgroundColor=color;chip.layer.cornerRadius=14;chip.layer.borderWidth=.5;chip.layer.borderColor=UIColor.separatorColor.CGColor;cell.accessoryView=chip;
+            cell.textLabel.text=[sp propertyForKey:@"diColorTitle315"]?:sp.name;cell.textLabel.textColor=UIColor.systemBlueColor;
+            CGFloat a=CGColorGetAlpha(color.CGColor);cell.detailTextLabel.text=[NSString stringWithFormat:@"%@ · %.0f%%",hex?:@"",a*100];cell.detailTextLabel.font=[UIFont systemFontOfSize:12];cell.selectionStyle=UITableViewCellSelectionStyleDefault;
+        }else{cell.accessoryType=UITableViewCellAccessoryDisclosureIndicator;cell.textLabel.textColor=UIColor.systemBlueColor;cell.selectionStyle=UITableViewCellSelectionStyleDefault;}
+    }@catch(NSException *e){diStep(@"[律动设置315] cell exception row=%ld section=%ld %@ %@",(long)ip.row,(long)ip.section,e.name,e.reason?:@"");cell.detailTextLabel.text=@"加载失败";}
+    return cell;
+}
+- (void)tableView:(UITableView *)tv willDisplayCell:(UITableViewCell *)cell forRowAtIndexPath:(NSIndexPath *)ip {
+    // This page uses its own native controls. Do not run the legacy slider-cell renderer.
+}
+- (void)tableView:(UITableView *)tv didSelectRowAtIndexPath:(NSIndexPath *)ip {
+    PSSpecifier *sp=[self diFXSpecifier:ip];[tv deselectRowAtIndexPath:ip animated:YES];
+    if([sp propertyForKey:@"diColorKey"]){[self diPickFxColor:sp];return;}
+    SEL action=sp.buttonAction;
+    if(action && [self respondsToSelector:action])((void(*)(id,SEL,id))objc_msgSend)(self,action,sp);
+}
+- (double)diFXStepForKey:(NSString *)key {
+    if([key containsString:@"Count"])return 1;
+    if([key hasPrefix:@"RhythmParticleAlpha"])return .01;
+    return .05;
+}
+- (void)diFXWrite:(id)value specifier:(PSSpecifier *)sp {
+    NSString *key=[sp propertyForKey:@"key"];if(![key isKindOfClass:NSString.class]||!key.length)return;
+    CFPreferencesSetAppValue((__bridge CFStringRef)key,(__bridge CFPropertyListRef)value,(__bridge CFStringRef)kDomain);
+    CFPreferencesAppSynchronize((__bridge CFStringRef)kDomain);diPostFxTune();
+}
+- (void)diFXSwitch:(UISwitch *)control {[self diFXWrite:@(control.on) specifier:objc_getAssociatedObject(control,"diFXSp")];}
+- (void)diFXMode:(UISegmentedControl *)control {[self diFXWrite:@(control.selectedSegmentIndex) specifier:objc_getAssociatedObject(control,"diFXSp")];}
+- (void)diFXDrag:(UISlider *)slider {
+    PSSpecifier *sp=objc_getAssociatedObject(slider,"diFXSp");double step=[self diFXStepForKey:[sp propertyForKey:@"key"]];
+    double value=MAX(slider.minimumValue,MIN(slider.maximumValue,round(slider.value/step)*step));
+    ((UILabel *)[slider.superview viewWithTag:2]).text=[NSString stringWithFormat:step>=1?@"%.0f":@"%.2f",value];
+}
+- (void)diFXCommit:(UISlider *)slider {
+    PSSpecifier *sp=objc_getAssociatedObject(slider,"diFXSp");double step=[self diFXStepForKey:[sp propertyForKey:@"key"]];
+    double value=MAX(slider.minimumValue,MIN(slider.maximumValue,round(slider.value/step)*step));slider.value=value;
+    [self diFXWrite:@(value) specifier:sp];[self diFXDrag:slider];
+}
+- (void)diFXStep:(UIButton *)button {
+    UISlider *slider=[button.superview viewWithTag:1];if(![slider isKindOfClass:UISlider.class])return;
+    PSSpecifier *sp=objc_getAssociatedObject(button,"diFXSp");double step=[self diFXStepForKey:[sp propertyForKey:@"key"]];
+    slider.value=MAX(slider.minimumValue,MIN(slider.maximumValue,slider.value+(button.tag==3?-step:step)));[self diFXCommit:slider];
+}
+
 
 /* 3.0.57: 颜色不再"三态循环锁死"。
    只有两个来源: 跟随封面 / 自定义颜色; 「流光」是独立开关。
@@ -6650,9 +6797,9 @@ static BOOL diBarStyleOK(int s) {
     PSSpecifier *sp = [PSSpecifier preferenceSpecifierNamed:[NSString stringWithFormat:@"%@   %@", title, upper]
                                                      target:self set:NULL get:NULL detail:nil cell:PSButtonCell edit:nil];
     [sp setProperty:key forKey:@"diColorKey"];
-    [sp setProperty:mk forKey:@"diColorModeKey"];
+    if ([mk isKindOfClass:NSString.class] && mk.length) [sp setProperty:mk forKey:@"diColorModeKey"];
     [sp setProperty:upper forKey:@"diColorHex"];    /* 3.0.58: 行尾色块用 */
-    [sp setProperty:NSClassFromString(@"DIFxColorCell") forKey:@"cellClass"];
+    [sp setProperty:title forKey:@"diColorTitle315"];
     sp.buttonAction = @selector(diPickFxColor:);
     return sp;
 }
@@ -6708,8 +6855,8 @@ static BOOL diBarStyleOK(int s) {
     PSSpecifier *sp = [PSSpecifier preferenceSpecifierNamed:label target:self
         set:@selector(npSetValue:specifier:) get:@selector(npReadValue:)
         detail:nil cell:PSSliderCell edit:nil];
-    Class sc = diStepSliderClass();
-    if (sc) [sp setProperty:[sc description] forKey:@"cellClass"];
+    Class sc = Nil;
+    (void)sc; // native UIKit controls on this page
     [sp setProperty:self forKey:@"diTarget"];
     [sp setProperty:label forKey:@"diLabel"];
     [sp setProperty:key forKey:@"key"];
@@ -6831,13 +6978,13 @@ static BOOL diBarStyleOK(int s) {
 - (PSSpecifier *)referenceModeSpec:(NSString *)title key:(NSString *)key {
     PSSpecifier *sp=[PSSpecifier preferenceSpecifierNamed:title target:self set:@selector(setRingMode:specifier:) get:@selector(readRingMode:) detail:nil cell:PSStaticTextCell edit:nil];
     [sp setProperty:diFxSizedKey(key) forKey:@"key"];
-    [sp setProperty:@"DIReferenceModeCell" forKey:@"cellClass"];
+    [sp setProperty:@YES forKey:@"diMode315"];
     [sp setProperty:@[@0,@1,@2] forKey:@"values"];
     [sp setProperty:@[@"自定义",@"跟随",@"渐变"] forKey:@"titlesValues"];
     return sp;
 }
 - (id)readRingMode:(PSSpecifier *)sp {
-    id v=diFxReadSized([sp propertyForKey:@"key"]);return v?:@2;
+    id v=diFxReadSized([sp propertyForKey:@"key"]);return [v respondsToSelector:@selector(integerValue)]?@(MAX(0,MIN(2,[v integerValue]))):@2;
 }
 - (void)setRingMode:(id)value specifier:(PSSpecifier *)sp {
     NSString *key=[sp propertyForKey:@"key"];

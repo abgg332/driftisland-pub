@@ -1136,7 +1136,7 @@ static void diFxLoadPrefs(void) {
     rhythmParticleAlpha = fxDouble(@"RhythmParticleAlpha", 0.74);
     if (rhythmParticleAlpha < 0.1) rhythmParticleAlpha = 0.1;
     if (rhythmParticleAlpha > 1.5) rhythmParticleAlpha = 1.5;
-    rhythmRingFollowAlpha = fxDouble(@"RhythmRingFollowAlpha", 1.0);
+    rhythmRingFollowAlpha = fxDouble(@"RhythmRingFollowAlpha", 0.88);
     if (rhythmRingFollowAlpha < 0.1) rhythmRingFollowAlpha = 0.1;
     if (rhythmRingFollowAlpha > 1.5) rhythmRingFollowAlpha = 1.5;
     /* 3.0.47 换了刻度/粒子的画法, 旧值(4.2 / 25)会让新视觉走形, 改用新键重来 */
@@ -19570,7 +19570,20 @@ static void diAuParse(void) {
     }
 }
 
+#include "DIWaveform17.h"
+static BOOL diW17Using=NO;
 static void diAuPoll(void) {
+    float wave[72],energy=0;
+    if(diW17Read(wave,&energy)){
+        if(gDIAuFd>=0)diAuClose();
+        memcpy(gDIReferenceRaw,wave,sizeof(wave));gDIReferenceSeen=YES;diW17Energy=energy;
+        gDIAuStamp=CFAbsoluteTimeGetCurrent();gDIBandSeen=YES;
+        for(int i=0;i<DI_AU_BANDS;i++)gDIBandRaw[i]=wave[i*3];
+        if(!diW17Using)RLog(@"[律动输入315] iOS17系统波形适配已接通");
+        diW17Using=YES;return;
+    }
+    if(diW17Using)RLog(@"[律动输入315] 波形过期，降级PCM");
+    diW17Using=NO;
     if (gDIAuFd < 0) {
         int fd = socket(AF_INET, SOCK_STREAM, 0);
         if (fd < 0) return;
@@ -19619,7 +19632,7 @@ static void diAuPoll(void) {
 }
 
 static BOOL diAuAlive(void) {
-    return (gDIAuFd >= 0 && !gDIAuConnecting &&
+    return ((diW17Using || (gDIAuFd >= 0 && !gDIAuConnecting)) &&
             CFAbsoluteTimeGetCurrent() - gDIAuStamp < 1.5);
 }
 
@@ -19781,81 +19794,26 @@ static void diRhythmRememberBase(UIView *v);
 static BOOL diViewIsSuggestions(UIView *v);      /* 3.0.62: 定义在后面, 这里先声明 */
 static BOOL diArtInExpandedPlayer(UIView *v);    /* 3.0.63: 同上 */
 static void diRhythmCollectExtras(UIView *dv) {
-    gDIRhythmExtraN = 0;
-    gDIRhythmSkipDv = NO;
-    for (int i = 0; i < DI_RHYTHM_EXTRA_MAX; i++) gDIRhythmExtras[i] = nil;
-    if (!dv) return;
-    UIView *space = dv.superview ?: dv;
-    NSMutableArray<UIView *> *pool = [NSMutableArray array];
-    if (dv.superview) [pool addObjectsFromArray:dv.superview.subviews];
-    UIView *gp = dv.superview.superview;
-    if (gp) [pool addObjectsFromArray:gp.subviews];
-    /* 3.0.62: 474/475 连着两版都是 图=无 —— 真正的封面内容既不在兄弟层也不在叔伯层,
-       极可能就画在**父容器自己**身上(MRUArtworkView 只是盖在上面的空壳)。
-       把父/祖父自身也放进候选(放最后, 倒序遍历时最先被取到)。 */
-    if (dv.superview) [pool addObject:dv.superview];
-    if (gp) [pool addObject:gp];
-    /* 3.0.62: 控制中心 / 灵动岛 / 锁屏可能各有一份封面视图, 我们无法可靠判断用户
-       此刻看的是哪一个(475 日志: 57x57 与 60x60 交替出现)。把**所有同尺寸的已知
-       封面候选**都加进来一起驱动 —— 屏幕上那个一定在里面。 */
-    if (gDIArtKnown) {
-        for (UIView *v in gDIArtKnown.allObjects) {
-            if (!v || v == dv) continue;
-            if (!v.window || v.hidden || v.alpha < 0.3) continue;
-            if (diViewIsSuggestions(v)) continue;
-            if (diArtInExpandedPlayer(v)) continue;    /* 3.0.63: 展开页不参与 */
-            CGFloat vw = v.bounds.size.width;
-            if (vw < 30 || vw > 260) continue;
-            CGFloat dw = dv.bounds.size.width;
-            if (dw < 1.0f) continue;
-            CGFloat kr = vw / dw;
-            if (kr < 0.70f || kr > 1.35f) continue;      /* 尺寸差太多就不是同一张封面 */
-            [pool addObject:v];
+    gDIRhythmExtraN=0;gDIRhythmSkipDv=NO;
+    for(int i=0;i<DI_RHYTHM_EXTRA_MAX;i++)gDIRhythmExtras[i]=nil;
+    if(!dv || !dv.window)return;
+    UIView *space=dv.window;
+    NSMutableArray *pool=[NSMutableArray array];
+    if(dv.superview)[pool addObjectsFromArray:dv.superview.subviews];
+    if(gDIArtKnown)[pool addObjectsFromArray:gDIArtKnown.allObjects];
+    for(UIView *v in pool){
+        if(v==dv || v.window!=dv.window || v.hidden || v.alpha<.05)continue;
+        if([v isDescendantOfView:dv] || [dv isDescendantOfView:v])continue;
+        if(diViewIsSuggestions(v) || diArtInExpandedPlayer(v))continue;
+        if(!diSameCoverRect(dv,v,space) || !diViewHasArt(v))continue;
+        BOOL nested=NO;
+        for(int i=0;i<gDIRhythmExtraN;i++){
+            UIView *e=gDIRhythmExtras[i];
+            if(e==v || [v isDescendantOfView:e] || [e isDescendantOfView:v]){nested=YES;break;}
         }
-    }
-    /* 后加入的(更上层)优先 —— 用户要的是"最上面那张真的专辑图"。
-       3.0.62: 分两轮。第一轮只收"看得出有画面"的; 一个都没有的话, 第二轮把
-       同区域同尺寸的全部收下(门户层/空壳也算) —— 写 transform 到空壳没有副作用,
-       但漏掉真正那一层就是"专辑一点都不动"。 */
-    for (int pass = 0; pass < 2 && gDIRhythmExtraN == 0; pass++) {
-        BOOL needArt = (pass == 0);
-        for (UIView *s in [pool reverseObjectEnumerator]) {
-            if (gDIRhythmExtraN >= DI_RHYTHM_EXTRA_MAX) break;
-            if (s == dv) continue;
-            BOOL known = (gDIArtKnown && [gDIArtKnown containsObject:s]);
-            if (!known && !diSameCoverRect(dv, s, space)) continue;
-            if (known && s.superview) {
-                /* 跨容器时中心会不同, 只要求尺寸接近 */
-                CGFloat wa = dv.bounds.size.width, wb = s.bounds.size.width;
-                if (wa < 8.0f || wb < 8.0f) continue;
-                CGFloat kk = wa / wb;
-                if (kk < 0.70f || kk > 1.35f) continue;
-            }
-            if (diArtInExpandedPlayer(s)) continue;   /* 3.0.63: 展开页的层一律不写 */
-            if (needArt && !diViewHasArt(s)) continue;
-            /* 已经是某个已选视图的子孙 → 会缩两次, 跳过 */
-            BOOL nested = NO;
-            for (int i = 0; i < gDIRhythmExtraN; i++) {
-                UIView *e = gDIRhythmExtras[i];
-                if (e && ([s isDescendantOfView:e] || [e isDescendantOfView:s])) { nested = YES; break; }
-            }
-            if (nested) continue;
-            /* 3.0.61: 兄弟层里"真的专辑图"如果排在黑壳下面, 提到壳上面 ——
-               用户 474: "专辑头像应该在最上层吧? 你抓到没有?"。
-               只在自己这一层内调整, 绝不动更上层的系统控件。 */
-            if (s.superview == dv.superview) {
-                @try { [s.superview bringSubviewToFront:s]; } @catch (__unused NSException *e) {}
-            }
-            diRhythmRememberBase(s);
-            gDIRhythmExtras[gDIRhythmExtraN++] = s;
-        }
-    }
-    /* 如果选中的 extras 里有 dv 的祖先(父/祖父), 那 dv 会跟着祖先一起被缩放 ——
-       再单独写 dv 就是缩两次。 */
-    gDIRhythmSkipDv = NO;
-    for (int i = 0; i < gDIRhythmExtraN; i++) {
-        UIView *e = gDIRhythmExtras[i];
-        if (e && [dv isDescendantOfView:e]) { gDIRhythmSkipDv = YES; break; }
+        if(nested)continue;
+        diRhythmRememberBase(v);gDIRhythmExtras[gDIRhythmExtraN++]=v;
+        if(gDIRhythmExtraN>=DI_RHYTHM_EXTRA_MAX)break;
     }
 }
 
@@ -19991,7 +19949,7 @@ static void diRhythmWriteAll(CGFloat s, CGFloat dy, BOOL spin, double ang, BOOL 
     for (int i = 0; i < 1 + gDIRhythmExtraN; i++) {
         UIView *v = (i == 0) ? dv : gDIRhythmExtras[i - 1];
         if (!v) continue;
-        if (i > 0 && !restored) continue;    /* 3.0.62: 由祖先代劳, 避免缩两次 */
+        /* Additional roots are co-located, same-window non-ancestors; apply the same scale once. */
         if (restored) { diRhythmWriteTransform(v, diRhythmBaseOf(v)); continue; }
         CATransform3D tr = diRhythmBaseOf(v);
         if (spin) tr = CATransform3DConcat(tr, CATransform3DMakeRotation((CGFloat)ang, 0, 0, 1));
@@ -20925,6 +20883,12 @@ static void diRhythmLayoutRing(CGRect cover, const float *bands, BOOL active) {
         CGPathMoveToPoint(tp, NULL, c.x + cos(a) * r0, c.y + sin(a) * r0);
         CGPathAddLineToPoint(tp, NULL, c.x + cos(a) * (r0 + len), c.y + sin(a) * (r0 + len));
     }
+    CGFloat beatScale=rhythmOn?MAX(1.0f,gDICoverScaleNow):1.0f;
+    CATransform3D shared=CATransform3DIdentity;
+    shared=CATransform3DTranslate(shared,c.x,c.y,0);
+    shared=CATransform3DScale(shared,beatScale,beatScale,1);
+    shared=CATransform3DTranslate(shared,-c.x,-c.y,0);
+    gDIRhythmRingBox.sublayerTransform=shared;
     gDIRhythmRingMask.path = tp;
     if (gDIRhythmRingBack) gDIRhythmRingBack.path = tp;
     CGPathRelease(tp);
@@ -21433,6 +21397,16 @@ static void diRhythmReset(void) {
     diAuClose();
     UIView *t = gDIRhythmTarget;
     UIView *dv = gDIRhythmDrive ?: t;
+    static CFTimeInterval recollectAt=0;
+    if(CACurrentMediaTime()-recollectAt>2.0 && !diFxExpandedOrSuggestion(t)){
+        recollectAt=CACurrentMediaTime();
+        // Restore previous extra roots before collecting to avoid accumulating their base scale.
+        for(int i=0;i<gDIRhythmExtraN;i++){
+            UIView *v=gDIRhythmExtras[i];if(v)diRhythmWriteTransform(v,diRhythmBaseOf(v));
+        }
+        diRhythmCollectExtras(dv);
+    }
+
     if (dv && gDIRhythmBaseValid) {
         [CATransaction begin];
         [CATransaction setDisableActions:YES];
@@ -22103,7 +22077,7 @@ static void diRhythmTickWithDelta(float dtIn) {
        岛(MRU)那条链路仍然读 gDIKick/beat.bin, 一行没动。 */
     diFxAdvanceEnergy(active, real, dt);
     // Reference detector uses spectrum energy, not the legacy PCM kick detector.
-    float referenceScale=diFxAdvanceBeat(active, gDIFxEnergy, rhythmBeatScale, dt);
+    float referenceScale=diFxAdvanceBeat(active, diW17Using?diW17Energy:gDIFxEnergy, rhythmBeatScale, dt);
     diSharedVisualPulse=gDIFxBeatPulse;
     diISPublishBeat(active);
     float fxBeatS=referenceScale;

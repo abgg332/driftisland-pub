@@ -524,7 +524,7 @@ struct TVZRootView: View {
             Button {
                 isPresentingFillImagePicker.toggle()
             } label: {
-                Label(NSLocalizedString("Select Image", bundle: Bundle.tvz_support, comment: ""), systemImage: "doc.badge.plus")
+                Label(NSLocalizedString("Select Image", bundle: Bundle.tvz_support, comment: ""), systemImage: "photo.on.rectangle")
                     .foregroundColor(TVZ_COLOR)
             }
         } header: {
@@ -608,12 +608,21 @@ struct TVZRootView: View {
         .animation(.easeIn, value: useImageEffect)
         .animation(.easeIn, value: hasFillImage)
         .alert(isPresented: $isPresentingResetPrompt) { resetPrompt }
-        .fileImporter(
-            isPresented: $isPresentingFillImagePicker,
-            allowedContentTypes: [.image],
-            allowsMultipleSelection: false,
-            onCompletion: fileImporterResultHandler
-        )
+        .sheet(isPresented: $isPresentingFillImagePicker) {
+            DIRecordingPhotoPicker { image in
+                isPresentingFillImagePicker = false
+                guard let image = image else { return }
+                DispatchQueue.main.async {
+                    if let saved = Bundle.tvz_saveFillImage(with: image) {
+                        imageFillName = saved
+                        TVZUserDefaults.standard.darwinNotify()
+                        reload()
+                    } else {
+                        feedbackGenerator.notificationOccurred(.error)
+                    }
+                }
+            }
+        }
         .onAppear {
             reload()
             reloadOverrides()
@@ -631,25 +640,4 @@ struct TVZRootView: View {
         }
     }
 
-    private func fileImporterResultHandler(result: Result<[URL], Error>) {
-        do {
-            switch result {
-            case .success(let urls):
-                guard let url = urls.first else {
-                    return
-                }
-                DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) {
-                    withAnimation {
-                        imageFillName = Bundle.tvz_saveFillImage(withPath: url.path) ?? Self.defaultFillImageName
-                        TVZUserDefaults.standard.darwinNotify()
-                        reload()
-                    }
-                }
-            case .failure(let error):
-                throw error
-            }
-        } catch {
-            feedbackGenerator.notificationOccurred(.error)
-        }
-    }
 }

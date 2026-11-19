@@ -1,13 +1,24 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0"><dict>
-<key>CFBundleDevelopmentRegion</key><string>English</string>
-<key>CFBundleExecutable</key><string>DriftIslandPrefs</string>
-<key>CFBundleIdentifier</key><string>com.abgg332.driftislandprefs</string>
-<key>CFBundleInfoDictionaryVersion</key><string>6.0</string>
-<key>CFBundleName</key><string>DriftIslandPrefs</string>
-<key>CFBundlePackageType</key><string>BNDL</string>
-<key>CFBundleShortVersionString</key><string>3.1.14</string>
-<key>CFBundleVersion</key><string>3.1.14</string>
-<key>NSPrincipalClass</key><string>DIPrefsController</string>
-</dict></plist>
+<plist version="1.0">
+<dict>
+	<key>CFBundleDevelopmentRegion</key>
+	<string>English</string>
+	<key>CFBundleExecutable</key>
+	<string>DriftIslandPrefs</string>
+	<key>CFBundleIdentifier</key>
+	<string>com.abgg332.driftislandprefs</string>
+	<key>CFBundleInfoDictionaryVersion</key>
+	<string>6.0</string>
+	<key>CFBundleName</key>
+	<string>DriftIslandPrefs</string>
+	<key>CFBundlePackageType</key>
+	<string>BNDL</string>
+	<key>CFBundleShortVersionString</key>
+	<string>3.1.15</string>
+	<key>CFBundleVersion</key>
+	<string>3.1.15</string>
+	<key>NSPrincipalClass</key>
+	<string>DIPrefsController</string>
+</dict>
+</plist>
