@@ -6321,8 +6321,6 @@ static void diNPEnsureActivation(void) {
     /* 3.0.24: 「禁止 N95 修改专辑图」删除(用不上); 「隐藏投送图标」改名「隐藏投送」。 */
     [specs addObject:[self npSwitch:@"隐藏投送" key:@"HideRoutingIcon" def:NO]];
     /* 3.0.41: 播放器遮罩 —— 按用户要求就地展开, 开关 + 素材直接排在这一页, 不再进二级页 */
-    [specs addObject:[self switchSpec:@"启用遮罩" key:kDIPlayerMaskOnKey def:@NO]];
-    [specs addObject:[self linkSpec:@"遮罩素材" detail:[DIPlayerMaskPicker class]]];
     /* 3.0.45: 律动特效 —— 设置全部收进一个入口页(用户要求) */
     [specs addObject:[self linkSpec:@"律动特效" detail:[DIFxPage class]]];
 
@@ -7019,6 +7017,11 @@ static BOOL diBarStyleOK(int s) {
     [specs addObject:[self fxColorSpec:@"渐变起始色" key:diFxSizedKey(@"ParticleColorA") def:@"#FFFFBC" modeKey:nil]];
     [specs addObject:[self fxColorSpec:@"渐变结束色" key:diFxSizedKey(@"ParticleColorB") def:@"#BFCDF8" modeKey:nil]];
 
+    [specs addObject:[self groupSpec:@"专辑头像遮罩" footer:@"可选内置圆形、圆角方形、菱形，或使用自定义遮罩素材。"]];
+    [specs addObject:[self switchSpec:@"启用头像遮罩" key:kDIPlayerMaskOnKey def:@NO]];
+    [specs addObject:[self segmentedSpec:@"遮罩形状" key:@"PlayerMaskPreset" titles:@[@"自定义",@"圆形",@"圆角方形",@"菱形"] values:@[@0,@1,@2,@3] def:@"0"]];
+    [specs addObject:[self linkSpec:@"自定义遮罩素材" detail:[DIPlayerMaskPicker class]]];
+    [specs addObject:[self npSlider:@"头像/律动环整体大小" key:diFxSizedKey(@"AlbumGroupSize") def:1.0 mn:0.65 mx:1.15]];
     [specs addObject:[self groupSpec:@"专辑进度环" footer:@"根据歌曲实际播放进度绘制，暂停保留位置；没有时长的直播不显示。"]];
     [specs addObject:[self switchSpec:@"启用专辑进度环" key:diFxSizedKey(@"ArtworkProgressRingEnabled") def:@NO]];
     [specs addObject:[self npSlider:@"进度环宽度" key:diFxSizedKey(@"ArtworkRingWidth") def:3.0 mn:0.5 mx:10.0]];

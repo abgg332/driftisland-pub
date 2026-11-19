@@ -127,7 +127,8 @@ static double rhythmParticleAlpha = 1.0;       // 3.0.48: 粒子透明度
 static double rhythmRingFollowAlpha = 1.0;     // 3.0.48: 环跟随透明度
 static int  rhythmParticleCount = 12;          // 3.0.47: 参考视频里只有十几颗
 static double rhythmStrength = 0.90;           // 律动强度(刻度最长值的比例)
-static double rhythmBeatScale = 0.70;          // 专辑律动幅度
+static double rhythmBeatScale = 0.70;
+static double diAlbumGroupSize=1.0;          // 专辑律动幅度
 static double rhythmRingWidth = 2.2;           // 3.0.47: 刻度粗细(参考约 2pt)
 static NSString *rhythmColorA = nil;           // 渐变起始色(#E59971)
 static NSString *rhythmColorB = nil;           // 渐变结束色(#948FFF)
@@ -11695,35 +11696,18 @@ static NSString *diWallpaperRelAny(NSString *full) {
 }
 
 
-/* ===== 2.7.28 ② 声音开关 =====
-
-   要求: "音频跟视频不要跟其他冲突"。做法是三件事一起做 ——
-     ① 出声时才**不剥音轨**(静音时仍然剥掉, 和岛上视频一样零音频占用);
-     ② AVAudioSession 用 **Ambient + MixWithOthers**: 既不打断正在放的音乐,
-        也不会被音乐/来电打断, 两边叠着放;
-     ③ 控制中心**收起立刻 deactivate** 并带 NotifyOthersOnDeactivation,
-        把音频会话完整还给系统, 不留残余。
-   这样灵动岛视频(剥音轨 + muted, 独立 player)与控制中心声音互不干扰。 */
-static BOOL gCCAudioActive = NO;
-
-static void diCCAudioSession(BOOL on) {
-    @try {
-        AVAudioSession *s = [AVAudioSession sharedInstance];
-        if (on) {
-            if (gCCAudioActive) return;
-            [s setCategory:AVAudioSessionCategoryAmbient
-               withOptions:AVAudioSessionCategoryOptionMixWithOthers
-                     error:NULL];
-            if ([s setActive:YES error:NULL]) {
-                gCCAudioActive = YES;
-                DLog(@"[控制中心] 音频会话已激活(ambient 混入, 不打断其它声音)");
-            }
-        } else {
-            if (!gCCAudioActive) return;
-            [s setActive:NO withOptions:AVAudioSessionSetActiveOptionNotifyOthersOnDeactivation error:NULL];
-            gCCAudioActive = NO;
-        }
-    } @catch (__unused NSException *e) {}
+/* AudioSession is process-global. Keep ambient mixing when audio is explicitly requested,
+   but never activate/deactivate the shared session from a wallpaper view lifecycle. */
+static BOOL gCCAudioActive=NO;
+static void diCCAudioSession(BOOL on){
+    if(!on){gCCAudioActive=NO;return;}
+    @try{
+        AVAudioSession *session=AVAudioSession.sharedInstance;
+        BOOL mix=(session.categoryOptions & AVAudioSessionCategoryOptionMixWithOthers)!=0;
+        if(![session.category isEqualToString:AVAudioSessionCategoryAmbient] || !mix)
+            [session setCategory:AVAudioSessionCategoryAmbient withOptions:AVAudioSessionCategoryOptionMixWithOthers error:NULL];
+        gCCAudioActive=YES;
+    }@catch(__unused NSException *e){}
 }
 
 /* ===== 2.7.32 循环播放 / 背景模糊 ===== */
@@ -17046,6 +17030,7 @@ static const CFTimeInterval kDISpinDur = 10.0;
 /* 3.0.57: 律动接管了哪一层的 transform(旋转+缩放)。这层暂时不挂 di.art.spin ——
    两个写入者抢同一个属性时, 探针里 m11 会间歇变回 1.000, 旋转也会忽快忽慢。 */
 static __weak UIView *gDIArtSpinYield = nil;
+static char diBeatOwnsTransform,diBeatChildBaseKey,diMaskPresetCache;
 
 /* ===== 3.0.39: 播放器专辑图重新铺「遮罩素材」 =====
    3.0.24 曾把素材直接铺成封面 contents(把专辑图整个换掉), 3.0.28 删掉了。现在改成
@@ -17149,11 +17134,18 @@ static void diArtDress(UIView *v) {
         diNoImplicitActions(st.mask);
     }
     /* 3.0.39: 有遮罩素材就贴素材(alpha 蒙版), 没有就退回内切圆 */
-    UIImage *mk = diArtMaskWanted() ? diArtMaskImage() : nil;
+    BOOL wantedMask=diArtMaskWanted();
+    static CFTimeInterval presetAt=0;static NSInteger presetValue=0;
+    CFTimeInterval presetNow=CACurrentMediaTime();
+    if(presetAt==0 || presetNow-presetAt>.35){presetAt=presetNow;presetValue=pInt(@"PlayerMaskPreset",0);}
+    NSInteger maskPreset=wantedMask?MAX(0,MIN(3,presetValue)):0;
+    UIImage *mk = wantedMask && maskPreset==0 ? diArtMaskImage() : nil;
+    BOOL presetChanged=![(NSNumber *)objc_getAssociatedObject(st.mask,&diMaskPresetCache) isEqual:@(maskPreset)];
     BOOL wantAsset = (mk.CGImage != NULL);
     /* 只有"尺寸真的变了" / "系统把我们那片 mask 换掉了" / "素材换了或开关变了"才重建 */
     if (layer.mask != st.mask || !CGSizeEqualToSize(st.lastSize, b.size)
-        || st.assetOn != wantAsset || (wantAsset && st.assetImg != mk)) {
+        || presetChanged || st.assetOn != wantAsset || (wantAsset && st.assetImg != mk)) {
+        objc_setAssociatedObject(st.mask,&diMaskPresetCache,@(maskPreset),OBJC_ASSOCIATION_RETAIN_NONATOMIC);
         st.lastSize = b.size;
         st.mask.frame = b;
         if (wantAsset) {
@@ -17166,7 +17158,15 @@ static void diArtDress(UIView *v) {
             CGFloat side = MIN(b.size.width, b.size.height);
             CGRect circle = CGRectMake((b.size.width - side) / 2.0, (b.size.height - side) / 2.0, side, side);
             st.mask.contents = nil;
-            st.mask.path = [UIBezierPath bezierPathWithOvalInRect:CGRectInset(circle, 0.5, 0.5)].CGPath;
+            CGRect shape=CGRectInset(circle,.5,.5);UIBezierPath *shapePath=nil;
+            if(maskPreset==2)shapePath=[UIBezierPath bezierPathWithRoundedRect:shape cornerRadius:side*.22];
+            else if(maskPreset==3){shapePath=[UIBezierPath bezierPath];
+                [shapePath moveToPoint:CGPointMake(CGRectGetMidX(shape),CGRectGetMinY(shape))];
+                [shapePath addLineToPoint:CGPointMake(CGRectGetMaxX(shape),CGRectGetMidY(shape))];
+                [shapePath addLineToPoint:CGPointMake(CGRectGetMidX(shape),CGRectGetMaxY(shape))];
+                [shapePath addLineToPoint:CGPointMake(CGRectGetMinX(shape),CGRectGetMidY(shape))];[shapePath closePath];}
+            else shapePath=[UIBezierPath bezierPathWithOvalInRect:shape];
+            st.mask.path=shapePath.CGPath;
         }
         st.assetOn = wantAsset;
         st.assetImg = wantAsset ? mk : nil;
@@ -17186,7 +17186,7 @@ static void diArtDress(UIView *v) {
     if (![layer animationForKey:@"di.art.spin"]) {
         /* 3.0.57: 律动正在接管这层的 transform(旋转+缩放一起算), 这时再挂 CA 动画
            就是两个写入者抢同一个属性 —— 旋转会忽快忽慢、缩放会被顶掉。直接跳过。 */
-        if (gDIArtSpinYield == v) return;
+        if (gDIArtSpinYield == v || objc_getAssociatedObject(layer,&diBeatOwnsTransform)) return;
         CFTimeInterval tn = CACurrentMediaTime();
         if (gDISpinEpoch <= 0) gDISpinEpoch = tn;
         CABasicAnimation *sp = [CABasicAnimation animationWithKeyPath:@"transform.rotation.z"];
@@ -19928,27 +19928,52 @@ static void diRhythmRememberBase(UIView *v) {
    Retain system view hierarchy; applying the same matrix to separate render branches
    is the coordinate-equivalent adaptation, not a recovered original container. */
 static char diCoverSublayerBaseKey;
-static void diRhythmRestoreScale(UIView *v, CATransform3D base) {
-    if(!v)return;
-    CALayer *l=v.layer;
-    NSValue *saved=objc_getAssociatedObject(l,&diCoverSublayerBaseKey);
-    if(saved){l.sublayerTransform=saved.CATransform3DValue;objc_setAssociatedObject(l,&diCoverSublayerBaseKey,nil,OBJC_ASSOCIATION_RETAIN_NONATOMIC);}
-    if([l animationForKey:@"di.rhythm.scale.hold"])[l removeAnimationForKey:@"di.rhythm.scale.hold"];
-    if([l animationForKey:@"di.rhythm.tf"])[l removeAnimationForKey:@"di.rhythm.tf"];
-    if(!saved)l.transform=base;
-}
-static void diRhythmApplyScale(UIView *v, CGFloat scale, CATransform3D tr) {
-    CALayer *l=v.layer;
-    if(!l.contents && l.sublayers.count){
-        NSValue *saved=objc_getAssociatedObject(l,&diCoverSublayerBaseKey);
-        if(!saved){saved=[NSValue valueWithCATransform3D:l.sublayerTransform];objc_setAssociatedObject(l,&diCoverSublayerBaseKey,saved,OBJC_ASSOCIATION_RETAIN_NONATOMIC);}
-        // Scale the rendered child content, not the transform being animated by artwork rotation.
-        l.sublayerTransform=CATransform3DScale(saved.CATransform3DValue,scale,scale,1);
-    } else {
-        NSValue *saved=objc_getAssociatedObject(l,&diCoverSublayerBaseKey);
-        if(saved)diRhythmRestoreScale(v,diRhythmBaseOf(v));
-        l.transform=tr;
+static void diRhythmRestoreContentLayers(CALayer *root,CALayer *mask,int depth){
+    if(!root||depth>5)return;
+    for(CALayer *child in [root.sublayers copy]){
+        if(child==mask)continue;
+        NSValue *base=objc_getAssociatedObject(child,&diBeatChildBaseKey);
+        if(base){child.transform=base.CATransform3DValue;objc_setAssociatedObject(child,&diBeatChildBaseKey,nil,OBJC_ASSOCIATION_RETAIN_NONATOMIC);}
+        diRhythmRestoreContentLayers(child,mask,depth+1);
     }
+}
+static void diRhythmScaleContentLayers(CALayer *root,CALayer *mask,CGFloat scale,int depth){
+    if(!root||depth>5)return;
+    CGFloat parentArea=root.bounds.size.width*root.bounds.size.height;
+    for(CALayer *child in [root.sublayers copy]){
+        if(child==mask)continue;
+        CGFloat area=child.bounds.size.width*child.bounds.size.height;
+        if(child.contents && parentArea>1 && area>=parentArea*.12 && area<=parentArea*1.4){
+            NSValue *base=objc_getAssociatedObject(child,&diBeatChildBaseKey);
+            if(!base){base=[NSValue valueWithCATransform3D:child.transform];objc_setAssociatedObject(child,&diBeatChildBaseKey,base,OBJC_ASSOCIATION_RETAIN_NONATOMIC);}
+            child.transform=CATransform3DScale(base.CATransform3DValue,scale,scale,1);
+        }else diRhythmScaleContentLayers(child,mask,scale,depth+1);
+    }
+}
+static void diRhythmRestoreScale(UIView *v,CATransform3D base){
+    if(!v)return;CALayer *layer=v.layer;
+    NSValue *group=objc_getAssociatedObject(layer,&diCoverSublayerBaseKey);
+    if(group){layer.sublayerTransform=group.CATransform3DValue;objc_setAssociatedObject(layer,&diCoverSublayerBaseKey,nil,OBJC_ASSOCIATION_RETAIN_NONATOMIC);}
+    diRhythmRestoreContentLayers(layer,layer.mask,0);
+    DIArtMaskState *state=objc_getAssociatedObject(v,kDIArtStateKey);
+    if(state&&state.mask){NSValue *m=objc_getAssociatedObject(state.mask,&diBeatOwnsTransform);if(m){state.mask.transform=m.CATransform3DValue;objc_setAssociatedObject(state.mask,&diBeatOwnsTransform,nil,OBJC_ASSOCIATION_RETAIN_NONATOMIC);}}
+    [layer removeAnimationForKey:@"di.rhythm.scale.hold"];[layer removeAnimationForKey:@"di.rhythm.tf"];
+    if(!group && !(state&&state.mask))layer.transform=base;
+}
+static void diRhythmApplyScale(UIView *v,CGFloat scale,CATransform3D transform){
+    if(!v)return;CALayer *layer=v.layer;
+    objc_setAssociatedObject(layer,&diBeatOwnsTransform,@YES,OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    [layer removeAnimationForKey:@"di.rhythm.tf"];
+    if([layer animationForKey:@"di.art.spin"])[layer removeAnimationForKey:@"di.art.spin"];
+    DIArtMaskState *state=objc_getAssociatedObject(v,kDIArtStateKey);
+    if(state&&layer.mask==state.mask){
+        NSValue *base=objc_getAssociatedObject(state.mask,&diBeatChildBaseKey);
+        if(!base){base=[NSValue valueWithCATransform3D:state.mask.transform];objc_setAssociatedObject(state.mask,&diBeatChildBaseKey,base,OBJC_ASSOCIATION_RETAIN_NONATOMIC);}
+        state.mask.transform=CATransform3DScale(base.CATransform3DValue,scale,scale,1);
+        diRhythmScaleContentLayers(layer,state.mask,scale,0);
+    }else if(!layer.contents&&layer.sublayers.count){
+        diRhythmScaleContentLayers(layer,layer.mask,scale,0);
+    }else layer.transform=transform;
 }
 
 /* 把同一个 tr 写到封面壳 + 所有"有图像内容"的同区域视图上(最多 3 个额外视图) */
@@ -20812,7 +20837,7 @@ static void diRhythmBuildRing(UIView *host, UIColor *ca, UIColor *cb) {
     back.lineCap = kCALineCapRound;
     back.opacity = 0.0f;
     back.shadowColor = ca.CGColor;
-    back.shadowOpacity = 0.5f;
+    back.shadowOpacity = 0.0f;
     back.shadowRadius = 3.0;
     back.shadowOffset = CGSizeZero;
     [box addSublayer:back];
