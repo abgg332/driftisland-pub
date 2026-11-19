@@ -923,14 +923,10 @@ static Class diStepSliderClass(void) {
 @interface DIWidgetHidePage : DIMiniBaseController @end
 @interface DIWidgetAppsPage : DIMiniBaseController @end
 /* 3.0: 播放器入口 —— 组件隐藏下面同级, 开关写 com.local.playerexact(内置原生播放器域) */
-/* 3.1.12: 录屏轨迹设置页改名 DITVZPrefsPage —— 不再占用 DIRecordingTrailPage 这个名字。
-   原因: 设备上残留的旧注册项把「漂流岛」的 detail 写成 DIRecordingTrailPage, 于是点漂流岛
-   先打开录屏轨迹页、再靠自救换回完整列表 → 必然闪一下空白。现在:
-     · 正常路径: 完整列表 → 录屏轨迹 → DITVZPrefsPage(本类, 挂 TVZPrefs);
-     · 残留注册项: detail=DIRecordingTrailPage = 下面的兼容别名(= DIPrefsController), 打开
-       即完整设置列表, 第一帧就对, 零闪帧。 */
-@interface DITVZPrefsPage : PSListController @end
-@implementation DITVZPrefsPage
+/* The embedded Touch-Viz page must never be registered as the bundle root.
+   Legacy top-level names below render the original home directly. */
+@interface DIRecordingTrailEmbeddedPage314 : PSListController @end
+@implementation DIRecordingTrailEmbeddedPage314
 - (void)viewDidLoad {
     [super viewDidLoad];
     self.title = @"录屏轨迹";
@@ -953,7 +949,7 @@ static Class diStepSliderClass(void) {
         label.text=[NSString stringWithFormat:@"录屏轨迹设置加载失败：%@",error.localizedDescription?:@"找不到 TVZPrefs.bundle"];
         [self.view addSubview:label];return;
     }
-    Class cls=NSClassFromString(@"TVZRootListController");
+    Class cls=NSClassFromString(@"DIRecordingTrailSettings314");
     if(!cls){
         UILabel *label=[[UILabel alloc]initWithFrame:self.view.bounds];label.autoresizingMask=UIViewAutoresizingFlexibleWidth|UIViewAutoresizingFlexibleHeight;
         label.text=@"录屏轨迹设置加载失败：控制器类未注册";label.textAlignment=NSTextAlignmentCenter;label.numberOfLines=0;[self.view addSubview:label];return;
@@ -971,17 +967,27 @@ static Class diStepSliderClass(void) {
 }
 @end
 
-/* 兼容别名: 旧注册项 detail=DIRecordingTrailPage → 直接给完整设置根页(零闪帧) */
+/* Preserve legacy class names used by PreferenceLoader caches, but make every
+   former top-level page render the real home without replacing navigation stacks. */
 @interface DIRecordingTrailPage : DIPrefsController @end
 @implementation DIRecordingTrailPage
 @end
-
+@interface DITVZPrefsPage : DIPrefsController @end
+@implementation DITVZPrefsPage
+@end
 @interface DIPlayerEntryPage : DIMiniBaseController @end
 /* 3.0.45: 律动特效页 —— 总开关/封面律动/环/粒子/参数/渐变色全在这一页 */
 @interface DIFxPage : DIMiniBaseController
 /* 3.0.57: 颜色行用系统取色盘; 这几个方法在 @implementation 内部前后互相调用, 先声明一遍 */
 - (void)diPickFxColor:(PSSpecifier *)sp;
 - (void)diOpenFxPickerKeyA:(NSString *)a keyB:(NSString *)b title:(NSString *)t;
+- (double)diFXStepForKey:(NSString *)key;
+- (NSArray<NSArray<PSSpecifier *> *> *)diFXSections;
+- (PSSpecifier *)diFXSpecifier:(NSIndexPath *)ip;
+- (PSSpecifier *)diFXHeader:(NSInteger)section;
+- (void)diFXWrite:(id)value specifier:(PSSpecifier *)sp;
+- (void)diFXDrag:(UISlider *)slider;
+- (void)diFXCommit:(UISlider *)slider;
 @end
 /* 3.0.1: 尺寸选择页自建 —— 不再走系统的 PSListItemsController(点进去闪退) */
 @interface DIPlayerSizePage : DIMiniBaseController @end
@@ -1678,7 +1684,7 @@ static void diWriteColors(NSArray<NSString *> *colors) {
         DI_ADD([self linkSpec:@"组件隐藏" detail:[DIWidgetHidePage class]]);
         /* 2.9.75: 播放器入口 —— 组件隐藏下面同级(不在里面); 内置原生播放器(控制中心播放器增强) */
         DI_ADD([self linkSpec:@"原生播放" detail:[DIPlayerEntryPage class]]);
-        DI_ADD([self linkSpec:@"录屏轨迹" detail:[DITVZPrefsPage class]]);
+        DI_ADD([self linkSpec:@"录屏轨迹" detail:[DIRecordingTrailEmbeddedPage314 class]]);
 
         _smallRow = _expandRow = -1;
         {
@@ -1739,11 +1745,17 @@ static void diWriteColors(NSArray<NSString *> *colors) {
 
 /* 强制在箭头位置显示当前素材名（valueLabel / detailTextLabel 双保险） */
 - (void)tableView:(UITableView *)tableView willDisplayCell:(UITableViewCell *)cell forRowAtIndexPath:(NSIndexPath *)indexPath {
-    /* 仅当父类真的实现了该回调时才转发，避免 unrecognized selector 闪退 */
-    if ([[self superclass] instancesRespondToSelector:@selector(tableView:willDisplayCell:forRowAtIndexPath:)])
+    /* This method belongs to DIPrefsController. Start super lookup from its
+       lexical superclass, not the runtime receiver's superclass: the legacy
+       DIRecordingTrailPage alias inherits this implementation and would otherwise
+       redispatch to this same method until the stack overflows. */
+    Class homeSuper = class_getSuperclass([DIPrefsController class]);
+    SEL callback = @selector(tableView:willDisplayCell:forRowAtIndexPath:);
+    if ([homeSuper instancesRespondToSelector:callback]) {
+        struct objc_super parent = { .receiver = self, .super_class = homeSuper };
         ((void (*)(struct objc_super *, SEL, UITableView *, UITableViewCell *, NSIndexPath *))objc_msgSendSuper)(
-            (struct objc_super *)&(struct objc_super){ .receiver = self, .super_class = class_getSuperclass(object_getClass(self)) },
-            @selector(tableView:willDisplayCell:forRowAtIndexPath:), tableView, cell, indexPath);
+            &parent, callback, tableView, cell, indexPath);
+    }
     /* 注意: PSGroupCell 是 section header 不占行, indexPath.row 是组内行号:
        section1(通知样式): 开关/色块/流光开关/(起始色/结束色)/背景开关 —— 行数随流光开关变化, 故按 specifier 判定;
        section2(小岛) / section3(展开) / section4(帧率) 结构固定 */
@@ -6309,8 +6321,6 @@ static void diNPEnsureActivation(void) {
     /* 3.0.24: 「禁止 N95 修改专辑图」删除(用不上); 「隐藏投送图标」改名「隐藏投送」。 */
     [specs addObject:[self npSwitch:@"隐藏投送" key:@"HideRoutingIcon" def:NO]];
     /* 3.0.41: 播放器遮罩 —— 按用户要求就地展开, 开关 + 素材直接排在这一页, 不再进二级页 */
-    [specs addObject:[self switchSpec:@"启用遮罩" key:kDIPlayerMaskOnKey def:@NO]];
-    [specs addObject:[self linkSpec:@"遮罩素材" detail:[DIPlayerMaskPicker class]]];
     /* 3.0.45: 律动特效 —— 设置全部收进一个入口页(用户要求) */
     [specs addObject:[self linkSpec:@"律动特效" detail:[DIFxPage class]]];
 
@@ -6547,6 +6557,146 @@ static id gDIFxColorBridge = nil;
 @end
 
 @implementation DIFxPage
+/* Scoped to DIFxPage: native UIKit controls avoid private PSTableCell subclasses.
+   Existing specifiers remain the configuration schema and all keys stay intact. */
+- (NSArray<NSArray<PSSpecifier *> *> *)diFXSections {
+    NSMutableArray *sections=[NSMutableArray array];
+    NSMutableArray *rows=nil;
+    for(id obj in self.specifiers){
+        if(![obj isKindOfClass:PSSpecifier.class])continue;
+        PSSpecifier *sp=obj;
+        if(sp.cellType==PSGroupCell){rows=[NSMutableArray array];[sections addObject:rows];}
+        else{if(!rows){rows=[NSMutableArray array];[sections addObject:rows];}[rows addObject:sp];}
+    }
+    return sections;
+}
+- (PSSpecifier *)diFXSpecifier:(NSIndexPath *)ip {
+    NSArray *sections=[self diFXSections];
+    if(ip.section>=sections.count)return nil;
+    NSArray *rows=sections[ip.section];return ip.row<rows.count?rows[ip.row]:nil;
+}
+- (PSSpecifier *)diFXHeader:(NSInteger)section {
+    NSInteger i=-1;
+    for(PSSpecifier *sp in self.specifiers)if(sp.cellType==PSGroupCell && ++i==section)return sp;
+    return nil;
+}
+- (void)viewDidLoad {
+    diStep(@"[律动设置315] viewDidLoad begin class=%@",NSStringFromClass(self.class));
+    [super viewDidLoad];self.title=@"律动特效";
+    diStep(@"[律动设置315] viewDidLoad complete rows=%lu",(unsigned long)self.specifiers.count);
+}
+- (NSArray *)specifiers {
+    if(!_specifiers){
+        @try{
+            diStep(@"[律动设置315] build begin");
+            _specifiers=[[self buildSpecifiers] mutableCopy];
+            diStep(@"[律动设置315] build complete rows=%lu",(unsigned long)_specifiers.count);
+        }@catch(NSException *e){
+            diStep(@"[律动设置315] build exception %@: %@",e.name,e.reason?:@"");
+            PSSpecifier *g=[PSSpecifier groupSpecifierWithName:@"律动特效"];
+            [g setProperty:[NSString stringWithFormat:@"设置构建失败：%@",e.reason?:e.name] forKey:@"footerText"];
+            _specifiers=[NSMutableArray arrayWithObject:g];
+        }
+    }
+    return _specifiers;
+}
+- (NSInteger)numberOfSectionsInTableView:(UITableView *)tv {return [self diFXSections].count;}
+- (NSInteger)tableView:(UITableView *)tv numberOfRowsInSection:(NSInteger)section {
+    NSArray *groups=[self diFXSections];return section<groups.count?[groups[section] count]:0;
+}
+- (NSString *)tableView:(UITableView *)tv titleForHeaderInSection:(NSInteger)section {return [self diFXHeader:section].name;}
+- (NSString *)tableView:(UITableView *)tv titleForFooterInSection:(NSInteger)section {return [[self diFXHeader:section] propertyForKey:@"footerText"];}
+- (CGFloat)tableView:(UITableView *)tv heightForRowAtIndexPath:(NSIndexPath *)ip {
+    return [[self diFXSpecifier:ip] propertyForKey:@"range"]?62:54;
+}
+- (UITableViewCell *)tableView:(UITableView *)tv cellForRowAtIndexPath:(NSIndexPath *)ip {
+    PSSpecifier *sp=[self diFXSpecifier:ip];
+    UITableViewCell *cell=[[UITableViewCell alloc]initWithStyle:UITableViewCellStyleValue1 reuseIdentifier:nil];
+    if(!sp)return cell;
+    cell.textLabel.text=sp.name;cell.textLabel.textColor=UIColor.labelColor;
+    cell.textLabel.font=[UIFont systemFontOfSize:16];cell.selectionStyle=UITableViewCellSelectionStyleNone;
+    NSString *key=[sp propertyForKey:@"key"];
+    @try{
+        if([sp propertyForKey:@"diMode315"]){
+            UISegmentedControl *control=[[UISegmentedControl alloc]initWithItems:@[@"自定义",@"跟随",@"渐变"]];
+            id value=diFxReadSized(key);NSInteger mode=[value respondsToSelector:@selector(integerValue)]?[value integerValue]:2;
+            control.selectedSegmentIndex=MAX(0,MIN(2,mode));
+            control.frame=CGRectMake(0,0,MIN(250,tv.bounds.size.width*.57),32);
+            objc_setAssociatedObject(control,"diFXSp",sp,OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+            [control addTarget:self action:@selector(diFXMode:) forControlEvents:UIControlEventValueChanged];cell.accessoryView=control;
+        }else if(sp.cellType==PSSwitchCell){
+            UISwitch *control=[UISwitch new];id value=diFxReadSized(key)?:[sp propertyForKey:@"default"];
+            control.on=[value respondsToSelector:@selector(boolValue)]?[value boolValue]:NO;
+            objc_setAssociatedObject(control,"diFXSp",sp,OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+            [control addTarget:self action:@selector(diFXSwitch:) forControlEvents:UIControlEventValueChanged];cell.accessoryView=control;
+        }else if([sp propertyForKey:@"range"]){
+            NSDictionary *range=[sp propertyForKey:@"range"];
+            UIView *box=[[UIView alloc]initWithFrame:CGRectMake(0,0,MAX(280,tv.bounds.size.width-40),62)];
+            box.autoresizingMask=UIViewAutoresizingFlexibleWidth;
+            CGFloat width=box.bounds.size.width;
+            UILabel *title=[[UILabel alloc]initWithFrame:CGRectMake(8,0,135,62)];title.font=[UIFont systemFontOfSize:14];title.text=sp.name;
+            UISlider *slider=[[UISlider alloc]initWithFrame:CGRectMake(168,12,MAX(40,width-248),38)];slider.tag=1;
+            slider.minimumValue=[range[@"min"] floatValue];slider.maximumValue=[range[@"max"] floatValue];
+            id value=diFxReadSized(key)?:[sp propertyForKey:@"default"];slider.value=[value respondsToSelector:@selector(floatValue)]?[value floatValue]:slider.minimumValue;
+            UILabel *number=[[UILabel alloc]initWithFrame:CGRectMake(width-52,0,48,62)];number.tag=2;number.font=[UIFont monospacedDigitSystemFontOfSize:13 weight:UIFontWeightRegular];number.textAlignment=NSTextAlignmentRight;
+            double step=[self diFXStepForKey:key];number.text=[NSString stringWithFormat:step>=1?@"%.0f":@"%.2f",slider.value];
+            for(NSNumber *sign in @[@(-1),@1]){
+                UIButton *button=[UIButton buttonWithType:UIButtonTypeSystem];button.tag=sign.integerValue<0?3:4;
+                button.frame=CGRectMake(sign.integerValue<0?140:width-78,12,28,38);
+                [button setTitle:sign.integerValue<0?@"−":@"+" forState:UIControlStateNormal];button.titleLabel.font=[UIFont systemFontOfSize:23];
+                objc_setAssociatedObject(button,"diFXSp",sp,OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+                [button addTarget:self action:@selector(diFXStep:) forControlEvents:UIControlEventTouchUpInside];[box addSubview:button];
+            }
+            objc_setAssociatedObject(slider,"diFXSp",sp,OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+            [slider addTarget:self action:@selector(diFXDrag:) forControlEvents:UIControlEventValueChanged];
+            [slider addTarget:self action:@selector(diFXCommit:) forControlEvents:UIControlEventTouchUpInside|UIControlEventTouchUpOutside|UIControlEventTouchCancel];
+            [box addSubview:title];[box addSubview:slider];[box addSubview:number];[cell.contentView addSubview:box];cell.textLabel.text=nil;
+        }else if([sp propertyForKey:@"diColorKey"]){
+            NSString *hex=[sp propertyForKey:@"diColorHex"];UIColor *color=diColorFromHexStr(hex,UIColor.whiteColor);
+            UIView *chip=[[UIView alloc]initWithFrame:CGRectMake(0,0,28,28)];chip.backgroundColor=color;chip.layer.cornerRadius=14;chip.layer.borderWidth=.5;chip.layer.borderColor=UIColor.separatorColor.CGColor;cell.accessoryView=chip;
+            cell.textLabel.text=[sp propertyForKey:@"diColorTitle315"]?:sp.name;cell.textLabel.textColor=UIColor.systemBlueColor;
+            CGFloat a=CGColorGetAlpha(color.CGColor);cell.detailTextLabel.text=[NSString stringWithFormat:@"%@ · %.0f%%",hex?:@"",a*100];cell.detailTextLabel.font=[UIFont systemFontOfSize:12];cell.selectionStyle=UITableViewCellSelectionStyleDefault;
+        }else{cell.accessoryType=UITableViewCellAccessoryDisclosureIndicator;cell.textLabel.textColor=UIColor.systemBlueColor;cell.selectionStyle=UITableViewCellSelectionStyleDefault;}
+    }@catch(NSException *e){diStep(@"[律动设置315] cell exception row=%ld section=%ld %@ %@",(long)ip.row,(long)ip.section,e.name,e.reason?:@"");cell.detailTextLabel.text=@"加载失败";}
+    return cell;
+}
+- (void)tableView:(UITableView *)tv willDisplayCell:(UITableViewCell *)cell forRowAtIndexPath:(NSIndexPath *)ip {
+    // This page uses its own native controls. Do not run the legacy slider-cell renderer.
+}
+- (void)tableView:(UITableView *)tv didSelectRowAtIndexPath:(NSIndexPath *)ip {
+    PSSpecifier *sp=[self diFXSpecifier:ip];[tv deselectRowAtIndexPath:ip animated:YES];
+    if([sp propertyForKey:@"diColorKey"]){[self diPickFxColor:sp];return;}
+    SEL action=sp.buttonAction;
+    if(action && [self respondsToSelector:action])((void(*)(id,SEL,id))objc_msgSend)(self,action,sp);
+}
+- (double)diFXStepForKey:(NSString *)key {
+    if([key containsString:@"Count"])return 1;
+    if([key hasPrefix:@"RhythmParticleAlpha"])return .01;
+    return .05;
+}
+- (void)diFXWrite:(id)value specifier:(PSSpecifier *)sp {
+    NSString *key=[sp propertyForKey:@"key"];if(![key isKindOfClass:NSString.class]||!key.length)return;
+    CFPreferencesSetAppValue((__bridge CFStringRef)key,(__bridge CFPropertyListRef)value,(__bridge CFStringRef)kDomain);
+    CFPreferencesAppSynchronize((__bridge CFStringRef)kDomain);diPostFxTune();
+}
+- (void)diFXSwitch:(UISwitch *)control {[self diFXWrite:@(control.on) specifier:objc_getAssociatedObject(control,"diFXSp")];}
+- (void)diFXMode:(UISegmentedControl *)control {[self diFXWrite:@(control.selectedSegmentIndex) specifier:objc_getAssociatedObject(control,"diFXSp")];}
+- (void)diFXDrag:(UISlider *)slider {
+    PSSpecifier *sp=objc_getAssociatedObject(slider,"diFXSp");double step=[self diFXStepForKey:[sp propertyForKey:@"key"]];
+    double value=MAX(slider.minimumValue,MIN(slider.maximumValue,round(slider.value/step)*step));
+    ((UILabel *)[slider.superview viewWithTag:2]).text=[NSString stringWithFormat:step>=1?@"%.0f":@"%.2f",value];
+}
+- (void)diFXCommit:(UISlider *)slider {
+    PSSpecifier *sp=objc_getAssociatedObject(slider,"diFXSp");double step=[self diFXStepForKey:[sp propertyForKey:@"key"]];
+    double value=MAX(slider.minimumValue,MIN(slider.maximumValue,round(slider.value/step)*step));slider.value=value;
+    [self diFXWrite:@(value) specifier:sp];[self diFXDrag:slider];
+}
+- (void)diFXStep:(UIButton *)button {
+    UISlider *slider=[button.superview viewWithTag:1];if(![slider isKindOfClass:UISlider.class])return;
+    PSSpecifier *sp=objc_getAssociatedObject(button,"diFXSp");double step=[self diFXStepForKey:[sp propertyForKey:@"key"]];
+    slider.value=MAX(slider.minimumValue,MIN(slider.maximumValue,slider.value+(button.tag==3?-step:step)));[self diFXCommit:slider];
+}
+
 
 /* 3.0.57: 颜色不再"三态循环锁死"。
    只有两个来源: 跟随封面 / 自定义颜色; 「流光」是独立开关。
@@ -6645,9 +6795,9 @@ static BOOL diBarStyleOK(int s) {
     PSSpecifier *sp = [PSSpecifier preferenceSpecifierNamed:[NSString stringWithFormat:@"%@   %@", title, upper]
                                                      target:self set:NULL get:NULL detail:nil cell:PSButtonCell edit:nil];
     [sp setProperty:key forKey:@"diColorKey"];
-    [sp setProperty:mk forKey:@"diColorModeKey"];
+    if ([mk isKindOfClass:NSString.class] && mk.length) [sp setProperty:mk forKey:@"diColorModeKey"];
     [sp setProperty:upper forKey:@"diColorHex"];    /* 3.0.58: 行尾色块用 */
-    [sp setProperty:NSClassFromString(@"DIFxColorCell") forKey:@"cellClass"];
+    [sp setProperty:title forKey:@"diColorTitle315"];
     sp.buttonAction = @selector(diPickFxColor:);
     return sp;
 }
@@ -6703,8 +6853,8 @@ static BOOL diBarStyleOK(int s) {
     PSSpecifier *sp = [PSSpecifier preferenceSpecifierNamed:label target:self
         set:@selector(npSetValue:specifier:) get:@selector(npReadValue:)
         detail:nil cell:PSSliderCell edit:nil];
-    Class sc = diStepSliderClass();
-    if (sc) [sp setProperty:[sc description] forKey:@"cellClass"];
+    Class sc = Nil;
+    (void)sc; // native UIKit controls on this page
     [sp setProperty:self forKey:@"diTarget"];
     [sp setProperty:label forKey:@"diLabel"];
     [sp setProperty:key forKey:@"key"];
@@ -6826,13 +6976,13 @@ static BOOL diBarStyleOK(int s) {
 - (PSSpecifier *)referenceModeSpec:(NSString *)title key:(NSString *)key {
     PSSpecifier *sp=[PSSpecifier preferenceSpecifierNamed:title target:self set:@selector(setRingMode:specifier:) get:@selector(readRingMode:) detail:nil cell:PSStaticTextCell edit:nil];
     [sp setProperty:diFxSizedKey(key) forKey:@"key"];
-    [sp setProperty:@"DIReferenceModeCell" forKey:@"cellClass"];
+    [sp setProperty:@YES forKey:@"diMode315"];
     [sp setProperty:@[@0,@1,@2] forKey:@"values"];
     [sp setProperty:@[@"自定义",@"跟随",@"渐变"] forKey:@"titlesValues"];
     return sp;
 }
 - (id)readRingMode:(PSSpecifier *)sp {
-    id v=diFxReadSized([sp propertyForKey:@"key"]);return v?:@2;
+    id v=diFxReadSized([sp propertyForKey:@"key"]);return [v respondsToSelector:@selector(integerValue)]?@(MAX(0,MIN(2,[v integerValue]))):@2;
 }
 - (void)setRingMode:(id)value specifier:(PSSpecifier *)sp {
     NSString *key=[sp propertyForKey:@"key"];
@@ -6867,6 +7017,15 @@ static BOOL diBarStyleOK(int s) {
     [specs addObject:[self fxColorSpec:@"渐变起始色" key:diFxSizedKey(@"ParticleColorA") def:@"#FFFFBC" modeKey:nil]];
     [specs addObject:[self fxColorSpec:@"渐变结束色" key:diFxSizedKey(@"ParticleColorB") def:@"#BFCDF8" modeKey:nil]];
 
+    [specs addObject:[self groupSpec:@"专辑头像遮罩" footer:@"可选内置圆形、圆角方形、菱形，或使用自定义遮罩素材。"]];
+    [specs addObject:[self switchSpec:@"启用头像遮罩" key:kDIPlayerMaskOnKey def:@NO]];
+    {PSSpecifier *seg=[PSSpecifier preferenceSpecifierNamed:@"遮罩形状" target:self set:@selector(setPreferenceValue:specifier:) get:@selector(readPreferenceValue:) detail:nil cell:PSSegmentCell edit:nil];
+    [seg setProperty:@"PlayerMaskPreset" forKey:@"key"];[seg setProperty:@"0" forKey:@"default"];
+    [seg setProperty:@[@"自定义",@"圆形",@"圆角方形",@"菱形"] forKey:@"titlesValues"];
+    [seg setProperty:@[@0,@1,@2,@3] forKey:@"values"];
+    [specs addObject:seg];}
+    [specs addObject:[self linkSpec:@"自定义遮罩素材" detail:[DIPlayerMaskPicker class]]];
+    [specs addObject:[self npSlider:@"头像/律动环整体大小" key:diFxSizedKey(@"AlbumGroupSize") def:1.0 mn:0.65 mx:1.15]];
     [specs addObject:[self groupSpec:@"专辑进度环" footer:@"根据歌曲实际播放进度绘制，暂停保留位置；没有时长的直播不显示。"]];
     [specs addObject:[self switchSpec:@"启用专辑进度环" key:diFxSizedKey(@"ArtworkProgressRingEnabled") def:@NO]];
     [specs addObject:[self npSlider:@"进度环宽度" key:diFxSizedKey(@"ArtworkRingWidth") def:3.0 mn:0.5 mx:10.0]];

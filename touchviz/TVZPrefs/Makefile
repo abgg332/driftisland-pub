@@ -52,7 +52,7 @@ TVZPrefs_SWIFTFLAGS += -FFrameworks/MCEmojiPicker.xcframework/ios-arm64_arm64e -
 TVZPrefs_SWIFTFLAGS += -FFrameworks/SwiftUIIntrospect.xcframework/ios-arm64_arm64e -framework SwiftUIIntrospect
 endif
 
-TVZPrefs_FRAMEWORKS += UIKit
+TVZPrefs_FRAMEWORKS += UIKit PhotosUI
 TVZPrefs_PRIVATE_FRAMEWORKS += Preferences
 
 TVZPrefs_SWIFT_BRIDGING_HEADER += TVZPrefs-Bridging-Header.h

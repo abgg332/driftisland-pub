@@ -127,7 +127,8 @@ static double rhythmParticleAlpha = 1.0;       // 3.0.48: 粒子透明度
 static double rhythmRingFollowAlpha = 1.0;     // 3.0.48: 环跟随透明度
 static int  rhythmParticleCount = 12;          // 3.0.47: 参考视频里只有十几颗
 static double rhythmStrength = 0.90;           // 律动强度(刻度最长值的比例)
-static double rhythmBeatScale = 0.70;          // 专辑律动幅度
+static double rhythmBeatScale = 0.70;
+static double diAlbumGroupSize=1.0;          // 专辑律动幅度
 static double rhythmRingWidth = 2.2;           // 3.0.47: 刻度粗细(参考约 2pt)
 static NSString *rhythmColorA = nil;           // 渐变起始色(#E59971)
 static NSString *rhythmColorB = nil;           // 渐变结束色(#948FFF)
@@ -1067,6 +1068,9 @@ static void diFxLoadPrefs(void) {
     rhythmBeatScale = fxDouble(@"AlbumBeatScale", 0.70);
     if (rhythmBeatScale < 0.0) rhythmBeatScale = 0.0;
     if (rhythmBeatScale > 2.5) rhythmBeatScale = 2.5;
+    diAlbumGroupSize = fxDouble(@"AlbumGroupSize", 1.0);
+    if (diAlbumGroupSize < 0.5) diAlbumGroupSize = 0.5;
+    if (diAlbumGroupSize > 1.5) diAlbumGroupSize = 1.5;
     rhythmRoundCover = YES;   /* 3.0.61: 开关已从律动页移除(与「启用遮罩」重复), 恒为圆形 */
     rhythmBarsOn = fxBool(@"AlbumBarsOn", YES);
     {
@@ -1136,7 +1140,7 @@ static void diFxLoadPrefs(void) {
     rhythmParticleAlpha = fxDouble(@"RhythmParticleAlpha", 0.74);
     if (rhythmParticleAlpha < 0.1) rhythmParticleAlpha = 0.1;
     if (rhythmParticleAlpha > 1.5) rhythmParticleAlpha = 1.5;
-    rhythmRingFollowAlpha = fxDouble(@"RhythmRingFollowAlpha", 1.0);
+    rhythmRingFollowAlpha = fxDouble(@"RhythmRingFollowAlpha", 0.88);
     if (rhythmRingFollowAlpha < 0.1) rhythmRingFollowAlpha = 0.1;
     if (rhythmRingFollowAlpha > 1.5) rhythmRingFollowAlpha = 1.5;
     /* 3.0.47 换了刻度/粒子的画法, 旧值(4.2 / 25)会让新视觉走形, 改用新键重来 */
@@ -11695,35 +11699,18 @@ static NSString *diWallpaperRelAny(NSString *full) {
 }
 
 
-/* ===== 2.7.28 ② 声音开关 =====
-
-   要求: "音频跟视频不要跟其他冲突"。做法是三件事一起做 ——
-     ① 出声时才**不剥音轨**(静音时仍然剥掉, 和岛上视频一样零音频占用);
-     ② AVAudioSession 用 **Ambient + MixWithOthers**: 既不打断正在放的音乐,
-        也不会被音乐/来电打断, 两边叠着放;
-     ③ 控制中心**收起立刻 deactivate** 并带 NotifyOthersOnDeactivation,
-        把音频会话完整还给系统, 不留残余。
-   这样灵动岛视频(剥音轨 + muted, 独立 player)与控制中心声音互不干扰。 */
-static BOOL gCCAudioActive = NO;
-
-static void diCCAudioSession(BOOL on) {
-    @try {
-        AVAudioSession *s = [AVAudioSession sharedInstance];
-        if (on) {
-            if (gCCAudioActive) return;
-            [s setCategory:AVAudioSessionCategoryAmbient
-               withOptions:AVAudioSessionCategoryOptionMixWithOthers
-                     error:NULL];
-            if ([s setActive:YES error:NULL]) {
-                gCCAudioActive = YES;
-                DLog(@"[控制中心] 音频会话已激活(ambient 混入, 不打断其它声音)");
-            }
-        } else {
-            if (!gCCAudioActive) return;
-            [s setActive:NO withOptions:AVAudioSessionSetActiveOptionNotifyOthersOnDeactivation error:NULL];
-            gCCAudioActive = NO;
-        }
-    } @catch (__unused NSException *e) {}
+/* AudioSession is process-global. Keep ambient mixing when audio is explicitly requested,
+   but never activate/deactivate the shared session from a wallpaper view lifecycle. */
+static BOOL gCCAudioActive=NO;
+static void diCCAudioSession(BOOL on){
+    if(!on){gCCAudioActive=NO;return;}
+    @try{
+        AVAudioSession *session=AVAudioSession.sharedInstance;
+        BOOL mix=(session.categoryOptions & AVAudioSessionCategoryOptionMixWithOthers)!=0;
+        if(![session.category isEqualToString:AVAudioSessionCategoryAmbient] || !mix)
+            [session setCategory:AVAudioSessionCategoryAmbient withOptions:AVAudioSessionCategoryOptionMixWithOthers error:NULL];
+        gCCAudioActive=YES;
+    }@catch(__unused NSException *e){}
 }
 
 /* ===== 2.7.32 循环播放 / 背景模糊 ===== */
@@ -17046,6 +17033,7 @@ static const CFTimeInterval kDISpinDur = 10.0;
 /* 3.0.57: 律动接管了哪一层的 transform(旋转+缩放)。这层暂时不挂 di.art.spin ——
    两个写入者抢同一个属性时, 探针里 m11 会间歇变回 1.000, 旋转也会忽快忽慢。 */
 static __weak UIView *gDIArtSpinYield = nil;
+static char diBeatOwnsTransform,diBeatChildBaseKey,diMaskPresetCache;
 
 /* ===== 3.0.39: 播放器专辑图重新铺「遮罩素材」 =====
    3.0.24 曾把素材直接铺成封面 contents(把专辑图整个换掉), 3.0.28 删掉了。现在改成
@@ -17149,11 +17137,18 @@ static void diArtDress(UIView *v) {
         diNoImplicitActions(st.mask);
     }
     /* 3.0.39: 有遮罩素材就贴素材(alpha 蒙版), 没有就退回内切圆 */
-    UIImage *mk = diArtMaskWanted() ? diArtMaskImage() : nil;
+    BOOL wantedMask=diArtMaskWanted();
+    static CFTimeInterval presetAt=0;static NSInteger presetValue=0;
+    CFTimeInterval presetNow=CACurrentMediaTime();
+    if(presetAt==0 || presetNow-presetAt>.35){presetAt=presetNow;presetValue=pInt(@"PlayerMaskPreset",0);}
+    NSInteger maskPreset=wantedMask?MAX(0,MIN(3,presetValue)):0;
+    UIImage *mk = wantedMask && maskPreset==0 ? diArtMaskImage() : nil;
+    BOOL presetChanged=![(NSNumber *)objc_getAssociatedObject(st.mask,&diMaskPresetCache) isEqual:@(maskPreset)];
     BOOL wantAsset = (mk.CGImage != NULL);
     /* 只有"尺寸真的变了" / "系统把我们那片 mask 换掉了" / "素材换了或开关变了"才重建 */
     if (layer.mask != st.mask || !CGSizeEqualToSize(st.lastSize, b.size)
-        || st.assetOn != wantAsset || (wantAsset && st.assetImg != mk)) {
+        || presetChanged || st.assetOn != wantAsset || (wantAsset && st.assetImg != mk)) {
+        objc_setAssociatedObject(st.mask,&diMaskPresetCache,@(maskPreset),OBJC_ASSOCIATION_RETAIN_NONATOMIC);
         st.lastSize = b.size;
         st.mask.frame = b;
         if (wantAsset) {
@@ -17166,7 +17161,15 @@ static void diArtDress(UIView *v) {
             CGFloat side = MIN(b.size.width, b.size.height);
             CGRect circle = CGRectMake((b.size.width - side) / 2.0, (b.size.height - side) / 2.0, side, side);
             st.mask.contents = nil;
-            st.mask.path = [UIBezierPath bezierPathWithOvalInRect:CGRectInset(circle, 0.5, 0.5)].CGPath;
+            CGRect shape=CGRectInset(circle,.5,.5);UIBezierPath *shapePath=nil;
+            if(maskPreset==2)shapePath=[UIBezierPath bezierPathWithRoundedRect:shape cornerRadius:side*.22];
+            else if(maskPreset==3){shapePath=[UIBezierPath bezierPath];
+                [shapePath moveToPoint:CGPointMake(CGRectGetMidX(shape),CGRectGetMinY(shape))];
+                [shapePath addLineToPoint:CGPointMake(CGRectGetMaxX(shape),CGRectGetMidY(shape))];
+                [shapePath addLineToPoint:CGPointMake(CGRectGetMidX(shape),CGRectGetMaxY(shape))];
+                [shapePath addLineToPoint:CGPointMake(CGRectGetMinX(shape),CGRectGetMidY(shape))];[shapePath closePath];}
+            else shapePath=[UIBezierPath bezierPathWithOvalInRect:shape];
+            st.mask.path=shapePath.CGPath;
         }
         st.assetOn = wantAsset;
         st.assetImg = wantAsset ? mk : nil;
@@ -17186,7 +17189,7 @@ static void diArtDress(UIView *v) {
     if (![layer animationForKey:@"di.art.spin"]) {
         /* 3.0.57: 律动正在接管这层的 transform(旋转+缩放一起算), 这时再挂 CA 动画
            就是两个写入者抢同一个属性 —— 旋转会忽快忽慢、缩放会被顶掉。直接跳过。 */
-        if (gDIArtSpinYield == v) return;
+        if (gDIArtSpinYield == v || objc_getAssociatedObject(layer,&diBeatOwnsTransform)) return;
         CFTimeInterval tn = CACurrentMediaTime();
         if (gDISpinEpoch <= 0) gDISpinEpoch = tn;
         CABasicAnimation *sp = [CABasicAnimation animationWithKeyPath:@"transform.rotation.z"];
@@ -19570,7 +19573,20 @@ static void diAuParse(void) {
     }
 }
 
+#include "DIWaveform17.h"
+static BOOL diW17Using=NO;
 static void diAuPoll(void) {
+    float wave[72],energy=0;
+    if(diW17Read(wave,&energy)){
+        if(gDIAuFd>=0)diAuClose();
+        memcpy(gDIReferenceRaw,wave,sizeof(wave));gDIReferenceSeen=YES;diW17Energy=energy;
+        gDIAuStamp=CFAbsoluteTimeGetCurrent();gDIBandSeen=YES;
+        for(int i=0;i<DI_AU_BANDS;i++)gDIBandRaw[i]=wave[i*3];
+        if(!diW17Using)RLog(@"[律动输入315] iOS17系统波形适配已接通");
+        diW17Using=YES;return;
+    }
+    if(diW17Using)RLog(@"[律动输入315] 波形过期，降级PCM");
+    diW17Using=NO;
     if (gDIAuFd < 0) {
         int fd = socket(AF_INET, SOCK_STREAM, 0);
         if (fd < 0) return;
@@ -19619,7 +19635,7 @@ static void diAuPoll(void) {
 }
 
 static BOOL diAuAlive(void) {
-    return (gDIAuFd >= 0 && !gDIAuConnecting &&
+    return ((diW17Using || (gDIAuFd >= 0 && !gDIAuConnecting)) &&
             CFAbsoluteTimeGetCurrent() - gDIAuStamp < 1.5);
 }
 
@@ -19633,7 +19649,9 @@ static __weak UIView *gDIRhythmTarget = nil;
 static __weak UIView *gDIRhythmHost = nil;
 static CAShapeLayer *diProgressBack=nil, *diProgressFront=nil;
 static CALayer *gDIRhythmRingBox = nil;
-static CAGradientLayer *gDIRhythmRingGrad = nil;
+static CALayer *gDIRhythmRingGrad = nil; // container of directly colored paths
+static NSArray<CAShapeLayer *> *gDIRingStrokes;
+static UIColor *gDIRingA,*gDIRingB;
 static CAShapeLayer *gDIRhythmRingMask = nil;
 static CAShapeLayer *gDIRhythmRingBack = nil;
 static BOOL gDIBeatStopped = NO;          /* 3.0.79: 暂停/停止后已硬停(粒子清零+层隐藏) */
@@ -19781,81 +19799,26 @@ static void diRhythmRememberBase(UIView *v);
 static BOOL diViewIsSuggestions(UIView *v);      /* 3.0.62: 定义在后面, 这里先声明 */
 static BOOL diArtInExpandedPlayer(UIView *v);    /* 3.0.63: 同上 */
 static void diRhythmCollectExtras(UIView *dv) {
-    gDIRhythmExtraN = 0;
-    gDIRhythmSkipDv = NO;
-    for (int i = 0; i < DI_RHYTHM_EXTRA_MAX; i++) gDIRhythmExtras[i] = nil;
-    if (!dv) return;
-    UIView *space = dv.superview ?: dv;
-    NSMutableArray<UIView *> *pool = [NSMutableArray array];
-    if (dv.superview) [pool addObjectsFromArray:dv.superview.subviews];
-    UIView *gp = dv.superview.superview;
-    if (gp) [pool addObjectsFromArray:gp.subviews];
-    /* 3.0.62: 474/475 连着两版都是 图=无 —— 真正的封面内容既不在兄弟层也不在叔伯层,
-       极可能就画在**父容器自己**身上(MRUArtworkView 只是盖在上面的空壳)。
-       把父/祖父自身也放进候选(放最后, 倒序遍历时最先被取到)。 */
-    if (dv.superview) [pool addObject:dv.superview];
-    if (gp) [pool addObject:gp];
-    /* 3.0.62: 控制中心 / 灵动岛 / 锁屏可能各有一份封面视图, 我们无法可靠判断用户
-       此刻看的是哪一个(475 日志: 57x57 与 60x60 交替出现)。把**所有同尺寸的已知
-       封面候选**都加进来一起驱动 —— 屏幕上那个一定在里面。 */
-    if (gDIArtKnown) {
-        for (UIView *v in gDIArtKnown.allObjects) {
-            if (!v || v == dv) continue;
-            if (!v.window || v.hidden || v.alpha < 0.3) continue;
-            if (diViewIsSuggestions(v)) continue;
-            if (diArtInExpandedPlayer(v)) continue;    /* 3.0.63: 展开页不参与 */
-            CGFloat vw = v.bounds.size.width;
-            if (vw < 30 || vw > 260) continue;
-            CGFloat dw = dv.bounds.size.width;
-            if (dw < 1.0f) continue;
-            CGFloat kr = vw / dw;
-            if (kr < 0.70f || kr > 1.35f) continue;      /* 尺寸差太多就不是同一张封面 */
-            [pool addObject:v];
+    gDIRhythmExtraN=0;gDIRhythmSkipDv=NO;
+    for(int i=0;i<DI_RHYTHM_EXTRA_MAX;i++)gDIRhythmExtras[i]=nil;
+    if(!dv || !dv.window)return;
+    UIView *space=dv.window;
+    NSMutableArray *pool=[NSMutableArray array];
+    if(dv.superview)[pool addObjectsFromArray:dv.superview.subviews];
+    if(gDIArtKnown)[pool addObjectsFromArray:gDIArtKnown.allObjects];
+    for(UIView *v in pool){
+        if(v==dv || v.window!=dv.window || v.hidden || v.alpha<.05)continue;
+        if([v isDescendantOfView:dv] || [dv isDescendantOfView:v])continue;
+        if(diViewIsSuggestions(v) || diArtInExpandedPlayer(v))continue;
+        if(!diSameCoverRect(dv,v,space) || !diViewHasArt(v))continue;
+        BOOL nested=NO;
+        for(int i=0;i<gDIRhythmExtraN;i++){
+            UIView *e=gDIRhythmExtras[i];
+            if(e==v || [v isDescendantOfView:e] || [e isDescendantOfView:v]){nested=YES;break;}
         }
-    }
-    /* 后加入的(更上层)优先 —— 用户要的是"最上面那张真的专辑图"。
-       3.0.62: 分两轮。第一轮只收"看得出有画面"的; 一个都没有的话, 第二轮把
-       同区域同尺寸的全部收下(门户层/空壳也算) —— 写 transform 到空壳没有副作用,
-       但漏掉真正那一层就是"专辑一点都不动"。 */
-    for (int pass = 0; pass < 2 && gDIRhythmExtraN == 0; pass++) {
-        BOOL needArt = (pass == 0);
-        for (UIView *s in [pool reverseObjectEnumerator]) {
-            if (gDIRhythmExtraN >= DI_RHYTHM_EXTRA_MAX) break;
-            if (s == dv) continue;
-            BOOL known = (gDIArtKnown && [gDIArtKnown containsObject:s]);
-            if (!known && !diSameCoverRect(dv, s, space)) continue;
-            if (known && s.superview) {
-                /* 跨容器时中心会不同, 只要求尺寸接近 */
-                CGFloat wa = dv.bounds.size.width, wb = s.bounds.size.width;
-                if (wa < 8.0f || wb < 8.0f) continue;
-                CGFloat kk = wa / wb;
-                if (kk < 0.70f || kk > 1.35f) continue;
-            }
-            if (diArtInExpandedPlayer(s)) continue;   /* 3.0.63: 展开页的层一律不写 */
-            if (needArt && !diViewHasArt(s)) continue;
-            /* 已经是某个已选视图的子孙 → 会缩两次, 跳过 */
-            BOOL nested = NO;
-            for (int i = 0; i < gDIRhythmExtraN; i++) {
-                UIView *e = gDIRhythmExtras[i];
-                if (e && ([s isDescendantOfView:e] || [e isDescendantOfView:s])) { nested = YES; break; }
-            }
-            if (nested) continue;
-            /* 3.0.61: 兄弟层里"真的专辑图"如果排在黑壳下面, 提到壳上面 ——
-               用户 474: "专辑头像应该在最上层吧? 你抓到没有?"。
-               只在自己这一层内调整, 绝不动更上层的系统控件。 */
-            if (s.superview == dv.superview) {
-                @try { [s.superview bringSubviewToFront:s]; } @catch (__unused NSException *e) {}
-            }
-            diRhythmRememberBase(s);
-            gDIRhythmExtras[gDIRhythmExtraN++] = s;
-        }
-    }
-    /* 如果选中的 extras 里有 dv 的祖先(父/祖父), 那 dv 会跟着祖先一起被缩放 ——
-       再单独写 dv 就是缩两次。 */
-    gDIRhythmSkipDv = NO;
-    for (int i = 0; i < gDIRhythmExtraN; i++) {
-        UIView *e = gDIRhythmExtras[i];
-        if (e && [dv isDescendantOfView:e]) { gDIRhythmSkipDv = YES; break; }
+        if(nested)continue;
+        diRhythmRememberBase(v);gDIRhythmExtras[gDIRhythmExtraN++]=v;
+        if(gDIRhythmExtraN>=DI_RHYTHM_EXTRA_MAX)break;
     }
 }
 
@@ -19967,20 +19930,53 @@ static void diRhythmRememberBase(UIView *v) {
    CABasicAnimation interpolation that delays only artwork relative to particles.
    Retain system view hierarchy; applying the same matrix to separate render branches
    is the coordinate-equivalent adaptation, not a recovered original container. */
-static void diRhythmWriteTransform(UIView *v, CATransform3D tr) {
-    if (!v) return;
-    CALayer *l=v.layer;
-    [l removeAnimationForKey:@"di.rhythm.tf"];
-    l.transform=tr;
-    // Rotation animation/system layout may replace the model transform.
-    // Hold only the already-smoothed scale component; no second interpolation.
-    CGFloat sc=sqrt(tr.m11*tr.m11+tr.m12*tr.m12);
-    if(fabs(sc-1)>0.00005){
-        CABasicAnimation *hold=[CABasicAnimation animationWithKeyPath:@"transform.scale"];
-        hold.fromValue=@(sc);hold.toValue=@(sc);hold.duration=1;
-        hold.repeatCount=HUGE_VALF;hold.removedOnCompletion=NO;
-        [l addAnimation:hold forKey:@"di.rhythm.scale.hold"];
-    }else [l removeAnimationForKey:@"di.rhythm.scale.hold"];
+static char diCoverSublayerBaseKey;
+static void diRhythmRestoreContentLayers(CALayer *root,CALayer *mask,int depth){
+    if(!root||depth>5)return;
+    for(CALayer *child in [root.sublayers copy]){
+        if(child==mask)continue;
+        NSValue *base=objc_getAssociatedObject(child,&diBeatChildBaseKey);
+        if(base){child.transform=base.CATransform3DValue;objc_setAssociatedObject(child,&diBeatChildBaseKey,nil,OBJC_ASSOCIATION_RETAIN_NONATOMIC);}
+        diRhythmRestoreContentLayers(child,mask,depth+1);
+    }
+}
+static void diRhythmScaleContentLayers(CALayer *root,CALayer *mask,CGFloat scale,int depth){
+    if(!root||depth>5)return;
+    CGFloat parentArea=root.bounds.size.width*root.bounds.size.height;
+    for(CALayer *child in [root.sublayers copy]){
+        if(child==mask)continue;
+        CGFloat area=child.bounds.size.width*child.bounds.size.height;
+        if(child.contents && parentArea>1 && area>=parentArea*.12 && area<=parentArea*1.4){
+            NSValue *base=objc_getAssociatedObject(child,&diBeatChildBaseKey);
+            if(!base){base=[NSValue valueWithCATransform3D:child.transform];objc_setAssociatedObject(child,&diBeatChildBaseKey,base,OBJC_ASSOCIATION_RETAIN_NONATOMIC);}
+            child.transform=CATransform3DScale(base.CATransform3DValue,scale,scale,1);
+        }else diRhythmScaleContentLayers(child,mask,scale,depth+1);
+    }
+}
+static void diRhythmRestoreScale(UIView *v,CATransform3D base){
+    if(!v)return;CALayer *layer=v.layer;
+    NSValue *group=objc_getAssociatedObject(layer,&diCoverSublayerBaseKey);
+    if(group){layer.sublayerTransform=group.CATransform3DValue;objc_setAssociatedObject(layer,&diCoverSublayerBaseKey,nil,OBJC_ASSOCIATION_RETAIN_NONATOMIC);}
+    diRhythmRestoreContentLayers(layer,layer.mask,0);
+    DIArtMaskState *state=objc_getAssociatedObject(v,kDIArtStateKey);
+    if(state&&state.mask){NSValue *m=objc_getAssociatedObject(state.mask,&diBeatOwnsTransform);if(m){state.mask.transform=m.CATransform3DValue;objc_setAssociatedObject(state.mask,&diBeatOwnsTransform,nil,OBJC_ASSOCIATION_RETAIN_NONATOMIC);}}
+    [layer removeAnimationForKey:@"di.rhythm.scale.hold"];[layer removeAnimationForKey:@"di.rhythm.tf"];
+    if(!group && !(state&&state.mask))layer.transform=base;
+}
+static void diRhythmApplyScale(UIView *v,CGFloat scale,CATransform3D transform){
+    if(!v)return;scale*=diAlbumGroupSize;CALayer *layer=v.layer;
+    objc_setAssociatedObject(layer,&diBeatOwnsTransform,@YES,OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    [layer removeAnimationForKey:@"di.rhythm.tf"];
+    if([layer animationForKey:@"di.art.spin"])[layer removeAnimationForKey:@"di.art.spin"];
+    DIArtMaskState *state=objc_getAssociatedObject(v,kDIArtStateKey);
+    if(state&&layer.mask==state.mask){
+        NSValue *base=objc_getAssociatedObject(state.mask,&diBeatChildBaseKey);
+        if(!base){base=[NSValue valueWithCATransform3D:state.mask.transform];objc_setAssociatedObject(state.mask,&diBeatChildBaseKey,base,OBJC_ASSOCIATION_RETAIN_NONATOMIC);}
+        state.mask.transform=CATransform3DScale(base.CATransform3DValue,scale,scale,1);
+        diRhythmScaleContentLayers(layer,state.mask,scale,0);
+    }else if(!layer.contents&&layer.sublayers.count){
+        diRhythmScaleContentLayers(layer,layer.mask,scale,0);
+    }else layer.transform=transform;
 }
 
 /* 把同一个 tr 写到封面壳 + 所有"有图像内容"的同区域视图上(最多 3 个额外视图) */
@@ -19991,12 +19987,12 @@ static void diRhythmWriteAll(CGFloat s, CGFloat dy, BOOL spin, double ang, BOOL 
     for (int i = 0; i < 1 + gDIRhythmExtraN; i++) {
         UIView *v = (i == 0) ? dv : gDIRhythmExtras[i - 1];
         if (!v) continue;
-        if (i > 0 && !restored) continue;    /* 3.0.62: 由祖先代劳, 避免缩两次 */
-        if (restored) { diRhythmWriteTransform(v, diRhythmBaseOf(v)); continue; }
+        /* Additional roots are co-located, same-window non-ancestors; apply the same scale once. */
+        if (restored) { diRhythmRestoreScale(v, diRhythmBaseOf(v)); continue; }
         CATransform3D tr = diRhythmBaseOf(v);
         if (spin) tr = CATransform3DConcat(tr, CATransform3DMakeRotation((CGFloat)ang, 0, 0, 1));
         tr = CATransform3DConcat(tr, CATransform3DMakeTranslation(0, dy, 0));
-        diRhythmWriteTransform(v, CATransform3DConcat(tr, CATransform3DMakeScale(s, s, 1)));
+        diRhythmApplyScale(v, s, CATransform3DConcat(tr, CATransform3DMakeScale(s, s, 1)));
     }
     [CATransaction commit];
 }
@@ -20793,7 +20789,7 @@ static void diRhythmDetach(void) {
     if (gDIRhythmDrive && gDIRhythmBaseValid && gDIRhythmDrive.window) {
         [CATransaction begin];
         [CATransaction setDisableActions:YES];
-        gDIRhythmDrive.layer.transform = gDIRhythmBase;
+        diRhythmRestoreScale(gDIRhythmDrive, gDIRhythmBase);
         [CATransaction commit];
     }
     if (gDIArtSpinYield) {
@@ -20806,7 +20802,7 @@ static void diRhythmDetach(void) {
         [CATransaction setDisableActions:YES];
         for (int i = 0; i < gDIRhythmExtraN; i++)
             if (gDIRhythmExtras[i])
-                { [gDIRhythmExtras[i].layer removeAnimationForKey:@"di.rhythm.scale.hold"]; gDIRhythmExtras[i].layer.transform = diRhythmBaseOf(gDIRhythmExtras[i]); }
+                { diRhythmRestoreScale(gDIRhythmExtras[i],diRhythmBaseOf(gDIRhythmExtras[i])); }
         [CATransaction commit];
     }
     /* 3.0.67: 摘掉壳和额外视图上遗留的 di.rhythm.tf 兜底动画 —— 它是
@@ -20844,26 +20840,21 @@ static void diRhythmBuildRing(UIView *host, UIColor *ca, UIColor *cb) {
     back.lineCap = kCALineCapRound;
     back.opacity = 0.0f;
     back.shadowColor = ca.CGColor;
-    back.shadowOpacity = 0.5f;
+    back.shadowOpacity = 0.0f;
     back.shadowRadius = 3.0;
     back.shadowOffset = CGSizeZero;
     [box addSublayer:back];
 
-    CAGradientLayer *g = [CAGradientLayer layer];
-    @try { [g setValue:@"conical" forKey:@"type"]; } @catch (__unused NSException *e) {}
-    g.colors = @[ (__bridge id)ca.CGColor,
-                  (__bridge id)cb.CGColor,
-                  (__bridge id)ca.CGColor ];
-    g.locations = @[ @0.0, @0.5, @1.0 ];
-    g.startPoint = CGPointMake(0.5, 0.5);
-    g.endPoint = CGPointMake(0.5, 0.0);
-
-    CAShapeLayer *mask = [CAShapeLayer layer];
-    mask.fillColor = UIColor.clearColor.CGColor;
-    mask.strokeColor = UIColor.whiteColor.CGColor;
-    mask.lineWidth = 2.0;
-    mask.lineCap = kCALineCapRound;
-    g.mask = mask;
+    CALayer *g=[CALayer layer]; diNoImplicitActions(g);
+    NSMutableArray *strokes=[NSMutableArray array];
+    for(int j=0;j<12;j++){
+        CAShapeLayer *stroke=[CAShapeLayer layer];stroke.fillColor=nil;
+        stroke.lineCap=kCALineCapRound;diNoImplicitActions(stroke);
+        [g addSublayer:stroke];[strokes addObject:stroke];
+    }
+    gDIRingStrokes=strokes;
+    gDIRingA=ca;gDIRingB=cb;
+    CAShapeLayer *mask=[CAShapeLayer layer]; // diagnostic path, not a mask
     [box addSublayer:g];
 
     gDIRhythmRingBox = box;
@@ -20878,8 +20869,7 @@ static void diRhythmLayoutRing(CGRect cover, const float *bands, BOOL active) {
     if (!gDIRhythmRingBox) return;
     CGFloat R = cover.size.width * 0.5f;
     CGFloat gap = 1.25 * (cover.size.width / 57.0);
-    CGFloat maxLen = 8.5 * (cover.size.width / 57.0) * MAX(0.3, rhythmStrength);
-    if (maxLen < 2.5) maxLen = 2.5;
+    CGFloat maxLen = MIN(5.2, 4.2 * MAX(0.3, rhythmStrength)) * (cover.size.width / 57.0);
     CGFloat tickW = MAX(1.4, R * DI_TICK_W) * (CGFloat)(rhythmRingWidth / 2.2);
     /* Reference keeps stroke width stable; energy changes length, not thickness. */
     gDIRhythmRingMask.lineWidth = tickW;
@@ -20902,6 +20892,7 @@ static void diRhythmLayoutRing(CGRect cover, const float *bands, BOOL active) {
     /* 3.0.55: 取消 30Hz 降频 —— 120Hz 屏上 30Hz 更新就是"每四帧才动一下"的顿感。
        80 段直线路径的构建开销很小, 每帧重建肉眼才连得上。 */
     CGMutablePathRef tp = CGPathCreateMutable();
+    CGMutablePathRef colored[12];for(int j=0;j<12;j++)colored[j]=CGPathCreateMutable();
     for (int i = 0; i < DI_TICK_N; i++) {
         CGFloat a = (CGFloat)i / (CGFloat)DI_TICK_N * M_PI * 2.0 - M_PI_2;
         /* 3.0.50: 左右对称 —— 以竖轴为镜面, 顶部(中轴)是最低频、最长的刻度,
@@ -20922,8 +20913,25 @@ static void diRhythmLayoutRing(CGRect cover, const float *bands, BOOL active) {
         if (band < 0) band = 0;
         if (band > 1) band = 1;
         CGFloat len = active ? (gap + 0.25*(cover.size.width/57.0) + maxLen*band) : 0;
+        int bucket=i*12/DI_TICK_N;
+        CGPathMoveToPoint(colored[bucket],NULL,c.x+cos(a)*r0,c.y+sin(a)*r0);
+        CGPathAddLineToPoint(colored[bucket],NULL,c.x+cos(a)*(r0+len),c.y+sin(a)*(r0+len));
         CGPathMoveToPoint(tp, NULL, c.x + cos(a) * r0, c.y + sin(a) * r0);
         CGPathAddLineToPoint(tp, NULL, c.x + cos(a) * (r0 + len), c.y + sin(a) * (r0 + len));
+    }
+    CGFloat beatScale=rhythmOn?MAX(1.0f,gDICoverScaleNow):1.0f;
+    CATransform3D shared=CATransform3DIdentity;
+    shared=CATransform3DTranslate(shared,c.x,c.y,0);
+    shared=CATransform3DScale(shared,beatScale,beatScale,1);
+    shared=CATransform3DTranslate(shared,-c.x,-c.y,0);
+    gDIRhythmRingBox.sublayerTransform=shared;
+    for(int j=0;j<12;j++){
+        CAShapeLayer *stroke=gDIRingStrokes[j];
+        stroke.frame=gDIRhythmRingGrad.bounds;
+        stroke.lineWidth=tickW;stroke.path=colored[j];
+        UIColor *color=diFxParticleColorBetween(gDIRingA,gDIRingB,1-fabsf(2*(j+.5f)/12-1));
+        stroke.strokeColor=color.CGColor;
+        CGPathRelease(colored[j]);
     }
     gDIRhythmRingMask.path = tp;
     if (gDIRhythmRingBack) gDIRhythmRingBack.path = tp;
@@ -21433,11 +21441,17 @@ static void diRhythmReset(void) {
     diAuClose();
     UIView *t = gDIRhythmTarget;
     UIView *dv = gDIRhythmDrive ?: t;
+    [CATransaction begin];[CATransaction setDisableActions:YES];
+    for(int i=0;i<gDIRhythmExtraN;i++){
+        UIView *v=gDIRhythmExtras[i];if(v)diRhythmRestoreScale(v,diRhythmBaseOf(v));
+    }
+    [CATransaction commit];
+
     if (dv && gDIRhythmBaseValid) {
         [CATransaction begin];
         [CATransaction setDisableActions:YES];
         [dv.layer removeAnimationForKey:@"di.rhythm.scale.hold"];
-        dv.layer.transform = gDIRhythmBase;
+        diRhythmRestoreScale(dv, gDIRhythmBase);
         [CATransaction commit];
     }
     gDIRhythmDrive = nil;
@@ -21907,9 +21921,9 @@ static void diRhythmTickWithDelta(float dtIn) {
         if (oldDrive && gDIRhythmBaseValid && oldDrive.window) {
             [CATransaction begin];
             [CATransaction setDisableActions:YES];
-            [oldDrive.layer removeAnimationForKey:@"di.rhythm.scale.hold"]; oldDrive.layer.transform = gDIRhythmBase;
+            diRhythmRestoreScale(oldDrive,gDIRhythmBase);
             for (int i = 0; i < gDIRhythmExtraN; i++)
-                if (gDIRhythmExtras[i]) { [gDIRhythmExtras[i].layer removeAnimationForKey:@"di.rhythm.scale.hold"]; gDIRhythmExtras[i].layer.transform = diRhythmBaseOf(gDIRhythmExtras[i]); }
+                if (gDIRhythmExtras[i]) { diRhythmRestoreScale(gDIRhythmExtras[i],diRhythmBaseOf(gDIRhythmExtras[i])); }
             [CATransaction commit];
         }
         for (int i = 0; i < DI_RHYTHM_EXTRA_MAX; i++) gDIRhythmExtras[i] = nil;
@@ -22047,8 +22061,14 @@ static void diRhythmTickWithDelta(float dtIn) {
             diRhythmBuildRing(gDIRhythmHost, ringA, ringB);
             RLog(@"[专辑环] 已创建 host=%@ 开关=%d", NSStringFromClass(gDIRhythmHost.class), rhythmRingOn);
         }
-        gDIRhythmRingGrad.colors=@[(__bridge id)ringA.CGColor,
-            (__bridge id)ringB.CGColor,(__bridge id)ringA.CGColor];
+        // Artwork matching may legitimately sample a nearly black jacket. Retain its hue
+        // while imposing a visibility floor, without changing user-selected gradient colors.
+        if(ringColorMode==0){
+            CGFloat h=0, sat=0, value=0, alpha=0;
+            if([ringA getHue:&h saturation:&sat brightness:&value alpha:&alpha] && value<.68)
+                ringA=ringB=[UIColor colorWithHue:h saturation:sat brightness:.68 alpha:alpha];
+        }
+        gDIRingA=ringA;gDIRingB=ringB;
         gDIRhythmRingBack.strokeColor=ringA.CGColor;
         gDIRhythmRingBox.hidden=NO;
         gDIRhythmRingBox.opacity=1;
@@ -22103,7 +22123,7 @@ static void diRhythmTickWithDelta(float dtIn) {
        岛(MRU)那条链路仍然读 gDIKick/beat.bin, 一行没动。 */
     diFxAdvanceEnergy(active, real, dt);
     // Reference detector uses spectrum energy, not the legacy PCM kick detector.
-    float referenceScale=diFxAdvanceBeat(active, gDIFxEnergy, rhythmBeatScale, dt);
+    float referenceScale=diFxAdvanceBeat(active, diW17Using?diW17Energy:gDIFxEnergy, rhythmBeatScale, dt);
     diSharedVisualPulse=gDIFxBeatPulse;
     diISPublishBeat(active);
     float fxBeatS=referenceScale;
@@ -22264,7 +22284,7 @@ static void diRhythmTickWithDelta(float dtIn) {
            用户说的"还在动"里就有它)。 */
         float baseA = active ? 1.0f : 0.0f; // no unrelated legacy beat dimming
         gDIRhythmRingGrad.opacity = baseA * (float)rhythmRingFollowAlpha;
-        if (gDIRhythmRingBack) gDIRhythmRingBack.opacity = active ? 0.18f : 0.0f;
+        if (gDIRhythmRingBack) gDIRhythmRingBack.opacity = 0.0f;
         [CATransaction commit];
         static CFTimeInterval ringProbeAt=0;
         CFTimeInterval ringNow=CACurrentMediaTime();

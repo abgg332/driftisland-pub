@@ -6,10 +6,12 @@ import UIKit
 final class TVZRootController: UIHostingController<TVZRootView> {
 
     private let primaryScrollViewSubject = CurrentValueSubject<UIScrollView?, Never>(nil)
+    private let photoPicker = DIRecordingPhotoPicker()
     private var cancellables = Set<AnyCancellable>()
 
     init() {
-        super.init(rootView: TVZRootView(scrollViewSubject: primaryScrollViewSubject))
+        super.init(rootView: TVZRootView(scrollViewSubject: primaryScrollViewSubject, photoPicker: photoPicker))
+        photoPicker.host = self
 
         primaryScrollViewSubject
             .compactMap { $0 }
@@ -28,8 +30,8 @@ final class TVZRootController: UIHostingController<TVZRootView> {
     }
 }
 
-@objc(TVZRootListController)
-final class TVZRootListController: PSListController {
+@objc(DIRecordingTrailSettings314)
+final class DIRecordingTrailSettings314: PSListController {
 
     override func viewDidLoad() {
         super.viewDidLoad()

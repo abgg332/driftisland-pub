@@ -103,11 +103,13 @@ struct TVZRootView: View {
     @State var hasFillImage = false
     @State var fillImage: UIImage?
 
+    private let photoPicker: DIRecordingPhotoPicker
     private let scrollViewSubject: CurrentValueSubject<UIScrollView?, Never>
     private let timer = Timer.publish(every: 1, on: .main, in: .default).autoconnect()
     private let feedbackGenerator: UINotificationFeedbackGenerator = UINotificationFeedbackGenerator()
 
-    init(scrollViewSubject: CurrentValueSubject<UIScrollView?, Never>) {
+    init(scrollViewSubject: CurrentValueSubject<UIScrollView?, Never>, photoPicker: DIRecordingPhotoPicker) {
+        self.photoPicker = photoPicker
         self.scrollViewSubject = scrollViewSubject
     }
 
@@ -522,9 +524,23 @@ struct TVZRootView: View {
             }
 
             Button {
-                isPresentingFillImagePicker.toggle()
+                photoPicker.present { image in
+                    guard let image = image, let saved = Bundle.tvz_saveFillImage(with: image) else {
+                        feedbackGenerator.notificationOccurred(.error)
+                        return
+                    }
+                    imageFillName = saved
+                    TVZUserDefaults.standard.darwinNotify()
+                    reload()
+                }
             } label: {
-                Label(NSLocalizedString("Select Image", bundle: Bundle.tvz_support, comment: ""), systemImage: "doc.badge.plus")
+                Label("从系统相册选图", systemImage: "photo.on.rectangle")
+                    .foregroundColor(TVZ_COLOR)
+            }
+            Button {
+                isPresentingFillImagePicker = true
+            } label: {
+                Label("从系统文件选图", systemImage: "folder")
                     .foregroundColor(TVZ_COLOR)
             }
         } header: {
@@ -631,6 +647,7 @@ struct TVZRootView: View {
         }
     }
 
+
     private func fileImporterResultHandler(result: Result<[URL], Error>) {
         do {
             switch result {
@@ -638,12 +655,14 @@ struct TVZRootView: View {
                 guard let url = urls.first else {
                     return
                 }
-                DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) {
-                    withAnimation {
-                        imageFillName = Bundle.tvz_saveFillImage(withPath: url.path) ?? Self.defaultFillImageName
-                        TVZUserDefaults.standard.darwinNotify()
-                        reload()
-                    }
+                let accessed = url.startAccessingSecurityScopedResource()
+                defer { if accessed { url.stopAccessingSecurityScopedResource() } }
+                if let saved = Bundle.tvz_saveFillImage(withPath: url.path) {
+                    imageFillName = saved
+                    TVZUserDefaults.standard.darwinNotify()
+                    reload()
+                } else {
+                    feedbackGenerator.notificationOccurred(.error)
                 }
             case .failure(let error):
                 throw error
