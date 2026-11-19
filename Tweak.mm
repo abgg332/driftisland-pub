@@ -19646,7 +19646,9 @@ static __weak UIView *gDIRhythmTarget = nil;
 static __weak UIView *gDIRhythmHost = nil;
 static CAShapeLayer *diProgressBack=nil, *diProgressFront=nil;
 static CALayer *gDIRhythmRingBox = nil;
-static CAGradientLayer *gDIRhythmRingGrad = nil;
+static CALayer *gDIRhythmRingGrad = nil; // container of directly colored paths
+static NSArray<CAShapeLayer *> *gDIRingStrokes;
+static UIColor *gDIRingA,*gDIRingB;
 static CAShapeLayer *gDIRhythmRingMask = nil;
 static CAShapeLayer *gDIRhythmRingBack = nil;
 static BOOL gDIBeatStopped = NO;          /* 3.0.79: 暂停/停止后已硬停(粒子清零+层隐藏) */
@@ -19925,20 +19927,28 @@ static void diRhythmRememberBase(UIView *v) {
    CABasicAnimation interpolation that delays only artwork relative to particles.
    Retain system view hierarchy; applying the same matrix to separate render branches
    is the coordinate-equivalent adaptation, not a recovered original container. */
-static void diRhythmWriteTransform(UIView *v, CATransform3D tr) {
-    if (!v) return;
+static char diCoverSublayerBaseKey;
+static void diRhythmRestoreScale(UIView *v, CATransform3D base) {
+    if(!v)return;
     CALayer *l=v.layer;
-    [l removeAnimationForKey:@"di.rhythm.tf"];
-    l.transform=tr;
-    // Rotation animation/system layout may replace the model transform.
-    // Hold only the already-smoothed scale component; no second interpolation.
-    CGFloat sc=sqrt(tr.m11*tr.m11+tr.m12*tr.m12);
-    if(fabs(sc-1)>0.00005){
-        CABasicAnimation *hold=[CABasicAnimation animationWithKeyPath:@"transform.scale"];
-        hold.fromValue=@(sc);hold.toValue=@(sc);hold.duration=1;
-        hold.repeatCount=HUGE_VALF;hold.removedOnCompletion=NO;
-        [l addAnimation:hold forKey:@"di.rhythm.scale.hold"];
-    }else [l removeAnimationForKey:@"di.rhythm.scale.hold"];
+    NSValue *saved=objc_getAssociatedObject(l,&diCoverSublayerBaseKey);
+    if(saved){l.sublayerTransform=saved.CATransform3DValue;objc_setAssociatedObject(l,&diCoverSublayerBaseKey,nil,OBJC_ASSOCIATION_RETAIN_NONATOMIC);}
+    if([l animationForKey:@"di.rhythm.scale.hold"])[l removeAnimationForKey:@"di.rhythm.scale.hold"];
+    if([l animationForKey:@"di.rhythm.tf"])[l removeAnimationForKey:@"di.rhythm.tf"];
+    if(!saved)l.transform=base;
+}
+static void diRhythmApplyScale(UIView *v, CGFloat scale, CATransform3D tr) {
+    CALayer *l=v.layer;
+    if(!l.contents && l.sublayers.count){
+        NSValue *saved=objc_getAssociatedObject(l,&diCoverSublayerBaseKey);
+        if(!saved){saved=[NSValue valueWithCATransform3D:l.sublayerTransform];objc_setAssociatedObject(l,&diCoverSublayerBaseKey,saved,OBJC_ASSOCIATION_RETAIN_NONATOMIC);}
+        // Scale the rendered child content, not the transform being animated by artwork rotation.
+        l.sublayerTransform=CATransform3DScale(saved.CATransform3DValue,scale,scale,1);
+    } else {
+        NSValue *saved=objc_getAssociatedObject(l,&diCoverSublayerBaseKey);
+        if(saved)diRhythmRestoreScale(v,diRhythmBaseOf(v));
+        l.transform=tr;
+    }
 }
 
 /* 把同一个 tr 写到封面壳 + 所有"有图像内容"的同区域视图上(最多 3 个额外视图) */
@@ -19950,11 +19960,11 @@ static void diRhythmWriteAll(CGFloat s, CGFloat dy, BOOL spin, double ang, BOOL 
         UIView *v = (i == 0) ? dv : gDIRhythmExtras[i - 1];
         if (!v) continue;
         /* Additional roots are co-located, same-window non-ancestors; apply the same scale once. */
-        if (restored) { diRhythmWriteTransform(v, diRhythmBaseOf(v)); continue; }
+        if (restored) { diRhythmRestoreScale(v, diRhythmBaseOf(v)); continue; }
         CATransform3D tr = diRhythmBaseOf(v);
         if (spin) tr = CATransform3DConcat(tr, CATransform3DMakeRotation((CGFloat)ang, 0, 0, 1));
         tr = CATransform3DConcat(tr, CATransform3DMakeTranslation(0, dy, 0));
-        diRhythmWriteTransform(v, CATransform3DConcat(tr, CATransform3DMakeScale(s, s, 1)));
+        diRhythmApplyScale(v, s, CATransform3DConcat(tr, CATransform3DMakeScale(s, s, 1)));
     }
     [CATransaction commit];
 }
@@ -20751,7 +20761,7 @@ static void diRhythmDetach(void) {
     if (gDIRhythmDrive && gDIRhythmBaseValid && gDIRhythmDrive.window) {
         [CATransaction begin];
         [CATransaction setDisableActions:YES];
-        gDIRhythmDrive.layer.transform = gDIRhythmBase;
+        diRhythmRestoreScale(gDIRhythmDrive, gDIRhythmBase);
         [CATransaction commit];
     }
     if (gDIArtSpinYield) {
@@ -20764,7 +20774,7 @@ static void diRhythmDetach(void) {
         [CATransaction setDisableActions:YES];
         for (int i = 0; i < gDIRhythmExtraN; i++)
             if (gDIRhythmExtras[i])
-                { [gDIRhythmExtras[i].layer removeAnimationForKey:@"di.rhythm.scale.hold"]; gDIRhythmExtras[i].layer.transform = diRhythmBaseOf(gDIRhythmExtras[i]); }
+                { diRhythmRestoreScale(gDIRhythmExtras[i],diRhythmBaseOf(gDIRhythmExtras[i])); }
         [CATransaction commit];
     }
     /* 3.0.67: 摘掉壳和额外视图上遗留的 di.rhythm.tf 兜底动画 —— 它是
@@ -20807,21 +20817,16 @@ static void diRhythmBuildRing(UIView *host, UIColor *ca, UIColor *cb) {
     back.shadowOffset = CGSizeZero;
     [box addSublayer:back];
 
-    CAGradientLayer *g = [CAGradientLayer layer];
-    @try { [g setValue:@"conical" forKey:@"type"]; } @catch (__unused NSException *e) {}
-    g.colors = @[ (__bridge id)ca.CGColor,
-                  (__bridge id)cb.CGColor,
-                  (__bridge id)ca.CGColor ];
-    g.locations = @[ @0.0, @0.5, @1.0 ];
-    g.startPoint = CGPointMake(0.5, 0.5);
-    g.endPoint = CGPointMake(0.5, 0.0);
-
-    CAShapeLayer *mask = [CAShapeLayer layer];
-    mask.fillColor = UIColor.clearColor.CGColor;
-    mask.strokeColor = UIColor.whiteColor.CGColor;
-    mask.lineWidth = 2.0;
-    mask.lineCap = kCALineCapRound;
-    g.mask = mask;
+    CALayer *g=[CALayer layer]; diNoImplicitActions(g);
+    NSMutableArray *strokes=[NSMutableArray array];
+    for(int j=0;j<12;j++){
+        CAShapeLayer *stroke=[CAShapeLayer layer];stroke.fillColor=nil;
+        stroke.lineCap=kCALineCapRound;diNoImplicitActions(stroke);
+        [g addSublayer:stroke];[strokes addObject:stroke];
+    }
+    gDIRingStrokes=strokes;
+    gDIRingA=ca;gDIRingB=cb;
+    CAShapeLayer *mask=[CAShapeLayer layer]; // diagnostic path, not a mask
     [box addSublayer:g];
 
     gDIRhythmRingBox = box;
@@ -20836,8 +20841,7 @@ static void diRhythmLayoutRing(CGRect cover, const float *bands, BOOL active) {
     if (!gDIRhythmRingBox) return;
     CGFloat R = cover.size.width * 0.5f;
     CGFloat gap = 1.25 * (cover.size.width / 57.0);
-    CGFloat maxLen = 8.5 * (cover.size.width / 57.0) * MAX(0.3, rhythmStrength);
-    if (maxLen < 2.5) maxLen = 2.5;
+    CGFloat maxLen = MIN(5.2, 4.2 * MAX(0.3, rhythmStrength)) * (cover.size.width / 57.0);
     CGFloat tickW = MAX(1.4, R * DI_TICK_W) * (CGFloat)(rhythmRingWidth / 2.2);
     /* Reference keeps stroke width stable; energy changes length, not thickness. */
     gDIRhythmRingMask.lineWidth = tickW;
@@ -20860,6 +20864,7 @@ static void diRhythmLayoutRing(CGRect cover, const float *bands, BOOL active) {
     /* 3.0.55: 取消 30Hz 降频 —— 120Hz 屏上 30Hz 更新就是"每四帧才动一下"的顿感。
        80 段直线路径的构建开销很小, 每帧重建肉眼才连得上。 */
     CGMutablePathRef tp = CGPathCreateMutable();
+    CGMutablePathRef colored[12];for(int j=0;j<12;j++)colored[j]=CGPathCreateMutable();
     for (int i = 0; i < DI_TICK_N; i++) {
         CGFloat a = (CGFloat)i / (CGFloat)DI_TICK_N * M_PI * 2.0 - M_PI_2;
         /* 3.0.50: 左右对称 —— 以竖轴为镜面, 顶部(中轴)是最低频、最长的刻度,
@@ -20880,6 +20885,9 @@ static void diRhythmLayoutRing(CGRect cover, const float *bands, BOOL active) {
         if (band < 0) band = 0;
         if (band > 1) band = 1;
         CGFloat len = active ? (gap + 0.25*(cover.size.width/57.0) + maxLen*band) : 0;
+        int bucket=i*12/DI_TICK_N;
+        CGPathMoveToPoint(colored[bucket],NULL,c.x+cos(a)*r0,c.y+sin(a)*r0);
+        CGPathAddLineToPoint(colored[bucket],NULL,c.x+cos(a)*(r0+len),c.y+sin(a)*(r0+len));
         CGPathMoveToPoint(tp, NULL, c.x + cos(a) * r0, c.y + sin(a) * r0);
         CGPathAddLineToPoint(tp, NULL, c.x + cos(a) * (r0 + len), c.y + sin(a) * (r0 + len));
     }
@@ -20889,6 +20897,14 @@ static void diRhythmLayoutRing(CGRect cover, const float *bands, BOOL active) {
     shared=CATransform3DScale(shared,beatScale,beatScale,1);
     shared=CATransform3DTranslate(shared,-c.x,-c.y,0);
     gDIRhythmRingBox.sublayerTransform=shared;
+    for(int j=0;j<12;j++){
+        CAShapeLayer *stroke=gDIRingStrokes[j];
+        stroke.frame=gDIRhythmRingGrad.bounds;
+        stroke.lineWidth=tickW;stroke.path=colored[j];
+        UIColor *color=diFxParticleColorBetween(gDIRingA,gDIRingB,1-fabsf(2*(j+.5f)/12-1));
+        stroke.strokeColor=color.CGColor;
+        CGPathRelease(colored[j]);
+    }
     gDIRhythmRingMask.path = tp;
     if (gDIRhythmRingBack) gDIRhythmRingBack.path = tp;
     CGPathRelease(tp);
@@ -21397,21 +21413,17 @@ static void diRhythmReset(void) {
     diAuClose();
     UIView *t = gDIRhythmTarget;
     UIView *dv = gDIRhythmDrive ?: t;
-    static CFTimeInterval recollectAt=0;
-    if(CACurrentMediaTime()-recollectAt>2.0 && !diFxExpandedOrSuggestion(t)){
-        recollectAt=CACurrentMediaTime();
-        // Restore previous extra roots before collecting to avoid accumulating their base scale.
-        for(int i=0;i<gDIRhythmExtraN;i++){
-            UIView *v=gDIRhythmExtras[i];if(v)diRhythmWriteTransform(v,diRhythmBaseOf(v));
-        }
-        diRhythmCollectExtras(dv);
+    [CATransaction begin];[CATransaction setDisableActions:YES];
+    for(int i=0;i<gDIRhythmExtraN;i++){
+        UIView *v=gDIRhythmExtras[i];if(v)diRhythmRestoreScale(v,diRhythmBaseOf(v));
     }
+    [CATransaction commit];
 
     if (dv && gDIRhythmBaseValid) {
         [CATransaction begin];
         [CATransaction setDisableActions:YES];
         [dv.layer removeAnimationForKey:@"di.rhythm.scale.hold"];
-        dv.layer.transform = gDIRhythmBase;
+        diRhythmRestoreScale(dv, gDIRhythmBase);
         [CATransaction commit];
     }
     gDIRhythmDrive = nil;
@@ -21881,9 +21893,9 @@ static void diRhythmTickWithDelta(float dtIn) {
         if (oldDrive && gDIRhythmBaseValid && oldDrive.window) {
             [CATransaction begin];
             [CATransaction setDisableActions:YES];
-            [oldDrive.layer removeAnimationForKey:@"di.rhythm.scale.hold"]; oldDrive.layer.transform = gDIRhythmBase;
+            diRhythmRestoreScale(oldDrive,gDIRhythmBase);
             for (int i = 0; i < gDIRhythmExtraN; i++)
-                if (gDIRhythmExtras[i]) { [gDIRhythmExtras[i].layer removeAnimationForKey:@"di.rhythm.scale.hold"]; gDIRhythmExtras[i].layer.transform = diRhythmBaseOf(gDIRhythmExtras[i]); }
+                if (gDIRhythmExtras[i]) { diRhythmRestoreScale(gDIRhythmExtras[i],diRhythmBaseOf(gDIRhythmExtras[i])); }
             [CATransaction commit];
         }
         for (int i = 0; i < DI_RHYTHM_EXTRA_MAX; i++) gDIRhythmExtras[i] = nil;
@@ -22021,8 +22033,14 @@ static void diRhythmTickWithDelta(float dtIn) {
             diRhythmBuildRing(gDIRhythmHost, ringA, ringB);
             RLog(@"[专辑环] 已创建 host=%@ 开关=%d", NSStringFromClass(gDIRhythmHost.class), rhythmRingOn);
         }
-        gDIRhythmRingGrad.colors=@[(__bridge id)ringA.CGColor,
-            (__bridge id)ringB.CGColor,(__bridge id)ringA.CGColor];
+        // Artwork matching may legitimately sample a nearly black jacket. Retain its hue
+        // while imposing a visibility floor, without changing user-selected gradient colors.
+        if(ringColorMode==0){
+            CGFloat h=0, sat=0, value=0, alpha=0;
+            if([ringA getHue:&h saturation:&sat brightness:&value alpha:&alpha] && value<.68)
+                ringA=ringB=[UIColor colorWithHue:h saturation:sat brightness:.68 alpha:alpha];
+        }
+        gDIRingA=ringA;gDIRingB=ringB;
         gDIRhythmRingBack.strokeColor=ringA.CGColor;
         gDIRhythmRingBox.hidden=NO;
         gDIRhythmRingBox.opacity=1;
@@ -22238,7 +22256,7 @@ static void diRhythmTickWithDelta(float dtIn) {
            用户说的"还在动"里就有它)。 */
         float baseA = active ? 1.0f : 0.0f; // no unrelated legacy beat dimming
         gDIRhythmRingGrad.opacity = baseA * (float)rhythmRingFollowAlpha;
-        if (gDIRhythmRingBack) gDIRhythmRingBack.opacity = active ? 0.18f : 0.0f;
+        if (gDIRhythmRingBack) gDIRhythmRingBack.opacity = 0.0f;
         [CATransaction commit];
         static CFTimeInterval ringProbeAt=0;
         CFTimeInterval ringNow=CACurrentMediaTime();
