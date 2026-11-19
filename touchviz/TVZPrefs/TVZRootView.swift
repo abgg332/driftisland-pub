@@ -100,6 +100,7 @@ struct TVZRootView: View {
     @State var isPresentingEmojiPicker = false
 
     @State var isPresentingFillImagePicker = false
+    @State var isPresentingPhotoPicker = false
     @State var hasFillImage = false
     @State var fillImage: UIImage?
 
@@ -521,8 +522,17 @@ struct TVZRootView: View {
                     .foregroundColor(TVZ_COLOR)
             }
 
-            Button {
-                isPresentingFillImagePicker.toggle()
+            Menu {
+                Button {
+                    isPresentingFillImagePicker = true
+                } label: {
+                    Label(NSLocalizedString("Choose from Files", bundle: Bundle.tvz_support, comment: ""), systemImage: "folder")
+                }
+                Button {
+                    isPresentingPhotoPicker = true
+                } label: {
+                    Label(NSLocalizedString("Choose from Photos", bundle: Bundle.tvz_support, comment: ""), systemImage: "photo.on.rectangle")
+                }
             } label: {
                 Label(NSLocalizedString("Select Image", bundle: Bundle.tvz_support, comment: ""), systemImage: "photo.on.rectangle")
                     .foregroundColor(TVZ_COLOR)
@@ -608,9 +618,15 @@ struct TVZRootView: View {
         .animation(.easeIn, value: useImageEffect)
         .animation(.easeIn, value: hasFillImage)
         .alert(isPresented: $isPresentingResetPrompt) { resetPrompt }
-        .sheet(isPresented: $isPresentingFillImagePicker) {
+        .fileImporter(
+            isPresented: $isPresentingFillImagePicker,
+            allowedContentTypes: [.image],
+            allowsMultipleSelection: false,
+            onCompletion: fileImporterResultHandler
+        )
+        .sheet(isPresented: $isPresentingPhotoPicker) {
             DIRecordingPhotoPicker { image in
-                isPresentingFillImagePicker = false
+                isPresentingPhotoPicker = false
                 guard let image = image else { return }
                 DispatchQueue.main.async {
                     if let saved = Bundle.tvz_saveFillImage(with: image) {
@@ -640,4 +656,26 @@ struct TVZRootView: View {
         }
     }
 
+
+    private func fileImporterResultHandler(result: Result<[URL], Error>) {
+        do {
+            switch result {
+            case .success(let urls):
+                guard let url = urls.first else {
+                    return
+                }
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) {
+                    withAnimation {
+                        imageFillName = Bundle.tvz_saveFillImage(withPath: url.path) ?? Self.defaultFillImageName
+                        TVZUserDefaults.standard.darwinNotify()
+                        reload()
+                    }
+                }
+            case .failure(let error):
+                throw error
+            }
+        } catch {
+            feedbackGenerator.notificationOccurred(.error)
+        }
+    }
 }
