@@ -37,13 +37,25 @@ static NSHashTable *diBackgrounds324;
 @property(nonatomic,assign) CGRect lastGeometry;
 @property(nonatomic,assign) CGFloat lastRadius;
 @property(nonatomic,assign) CFAbsoluteTime diagnosticAt;
+@property(nonatomic,assign) BOOL syncing326;
+@property(nonatomic,assign) CFTimeInterval lastSync326;
+@property(nonatomic,assign) CFTimeInterval lastDisplay326;
+@property(nonatomic,assign) double worstGap326;
+@property(nonatomic,assign) NSUInteger ticks326;
+@property(nonatomic,assign) NSUInteger late326;
 - (void)refresh;
 - (void)sync;
 - (void)startBurst;
 - (void)stop;
 @end
 @implementation DIBackgroundTicker324
-- (void)tick:(CADisplayLink *)link {DIIslandBackground324 *o=self.owner;if(o)[o sync];else [link invalidate];}
+- (void)tick:(CADisplayLink *)link {
+    DIIslandBackground324 *o=self.owner;if(!o){[link invalidate];return;}
+    CFTimeInterval now=link.timestamp;
+    if(o.lastDisplay326>0){double gap=now-o.lastDisplay326;o.worstGap326=MAX(o.worstGap326,gap);double expected=link.targetTimestamp-link.timestamp;if(expected>0 && gap>expected*1.8)o.late326++;}
+    o.lastDisplay326=now;o.ticks326++;
+    [o sync];
+}
 @end
 @implementation DIIslandBackground324
 - (instancetype)initWithFrame:(CGRect)frame {
@@ -66,13 +78,14 @@ static NSHashTable *diBackgrounds324;
     if(!self.link){self.link=[CADisplayLink displayLinkWithTarget:self.ticker selector:@selector(tick:)];
         // Geometry runs at 60Hz, video decoding is independent. Avoid two live
         // decoders plus 120Hz background layout on ProMotion during collapse.
-        self.link.preferredFrameRateRange=CAFrameRateRangeMake(30,60,60);
+        NSInteger hz=MAX(60,UIScreen.mainScreen.maximumFramesPerSecond);
+        self.link.preferredFrameRateRange=CAFrameRateRangeMake(60,hz,hz);
         [self.link addToRunLoop:NSRunLoop.mainRunLoop forMode:NSRunLoopCommonModes];}
     self.link.paused=NO;
 }
 - (void)stop {
     [self.compactPlayer pause];[self.expandedPlayer pause];
-    self.hidden=YES;self.link.paused=YES;
+    self.hidden=YES;self.link.paused=YES;self.lastDisplay326=0;
 }
 - (void)loadPath:(NSString *)path expanded:(BOOL)expanded {
     NSString *old=expanded?self.expandedPath:self.compactPath;
@@ -147,20 +160,31 @@ static NSHashTable *diBackgrounds324;
     [self sync];
 }
 - (void)sync {
+    // layoutSubviews, heartbeat and display link can all arrive in one run loop.
+    // Coalesce near-identical updates and prevent child layout re-entrancy.
+    CFTimeInterval now326=CACurrentMediaTime();
+    if(self.syncing326 || now326-self.lastSync326<.002)return;
+    self.lastSync326=now326;
     UIView *host=self.host;
     if(![self visibleHost]){[self stop];return;}
     CALayer *present=(CALayer *)host.layer.presentationLayer;
     CGRect bounds=present?present.bounds:host.bounds;
     if(bounds.size.width<=1 || bounds.size.height<=1)bounds=host.bounds;
     if(!isfinite(bounds.size.width) || !isfinite(bounds.size.height))return;
-    CGFloat radius=present?present.cornerRadius:host.layer.cornerRadius;
+    CGFloat modelRadius=host.layer.cornerRadius;
+    CGFloat rawRadius=present?present.cornerRadius:modelRadius;
+    CGFloat radius=rawRadius;
     if(radius<.1)radius=MIN(bounds.size.width,bounds.size.height)*.5;
-    BOOL moving=present && (fabs(present.bounds.size.width-host.bounds.size.width)>.35 || fabs(present.bounds.size.height-host.bounds.size.height)>.35 || fabs(radius-host.layer.cornerRadius)>.35);
-    BOOL changed=!CGRectEqualToRect(self.frame,bounds) || fabs(self.layer.cornerRadius-radius)>.1;
+    // Compare raw radii: a synthetic capsule fallback versus model radius=0
+    // previously reported 'moving' forever and prevented stable decoder sleep.
+    BOOL moving=present && (fabs(present.bounds.size.width-host.bounds.size.width)>.35 || fabs(present.bounds.size.height-host.bounds.size.height)>.35 || fabs(rawRadius-modelRadius)>.35);
+    CGFloat epsilon=.1/MAX(1.0,UIScreen.mainScreen.scale);
+    BOOL changed=fabs(self.frame.origin.x-bounds.origin.x)>epsilon || fabs(self.frame.origin.y-bounds.origin.y)>epsilon || fabs(self.frame.size.width-bounds.size.width)>epsilon || fabs(self.frame.size.height-bounds.size.height)>epsilon || fabs(self.layer.cornerRadius-radius)>.1;
     CGFloat height=bounds.size.height;
     // Retain DriftIsland's compact/expanded material split, with a small hysteresis.
     if(!self.modeKnown){self.expandedMode=height>60;self.modeKnown=YES;}
     else if(height>62)self.expandedMode=YES;else if(height<58)self.expandedMode=NO;
+    self.syncing326=YES;
     [CATransaction begin];[CATransaction setDisableActions:YES];
     // Avoid no-op geometry writes that can invalidate layout every display tick.
     if(!CGRectEqualToRect(self.frame,bounds))self.frame=bounds;
@@ -170,29 +194,36 @@ static NSHashTable *diBackgrounds324;
     // Small overscan avoids subpixel seams without moving the visual center.
     CGFloat pixel=1.0/MAX(1.0,UIScreen.mainScreen.scale);
     CGRect video=CGRectInset(b,-pixel,-pixel);
-    if(!CGRectEqualToRect(self.compactLayer.frame,video))self.compactLayer.frame=video;
-    if(!CGRectEqualToRect(self.expandedLayer.frame,video))self.expandedLayer.frame=video;
-    if(!CGRectEqualToRect(self.compactImage.frame,video))self.compactImage.frame=video;
-    if(!CGRectEqualToRect(self.expandedImage.frame,video))self.expandedImage.frame=video;
+    AVPlayerLayer *visibleLayer=self.expandedMode?self.expandedLayer:self.compactLayer;
+    UIImageView *visibleImage=self.expandedMode?self.expandedImage:self.compactImage;
+    if(!CGRectEqualToRect(visibleLayer.frame,video))visibleLayer.frame=video;
+    if(visibleImage.image && !CGRectEqualToRect(visibleImage.frame,video))visibleImage.frame=video;
     self.compactLayer.hidden=self.expandedMode || !smallOn;
     self.expandedLayer.hidden=!self.expandedMode || !expandOn;
     self.compactImage.hidden=self.expandedMode || !smallOn;
     self.expandedImage.hidden=!self.expandedMode || !expandOn;
     self.hidden=NO;
     [CATransaction commit];
-    // Keep both selected clips warm while the island is visible. Merely hide
-    // the noncurrent layer: collapse must not wait for a paused decoder to start.
-    if(smallOn && self.compactPlayer && self.compactPlayer.rate==0)[self.compactPlayer play];
-    if(expandOn && self.expandedPlayer && self.expandedPlayer.rate==0)[self.expandedPlayer play];
-    if(!smallOn)[self.compactPlayer pause];
-    if(!expandOn)[self.expandedPlayer pause];
+    // Warm both only while geometry is transitioning. After settling, pause
+    // the invisible decoder but retain item/looper and its last rendered frame.
+    BOOL warm=moving || self.stableTicks<6;
+    BOOL wantCompact=smallOn && (!self.expandedMode || warm);
+    BOOL wantExpanded=expandOn && (self.expandedMode || warm);
+    if(wantCompact){if(self.compactPlayer && self.compactPlayer.rate==0)[self.compactPlayer play];}
+    else if(self.compactPlayer.rate!=0)[self.compactPlayer pause];
+    if(wantExpanded){if(self.expandedPlayer && self.expandedPlayer.rate==0)[self.expandedPlayer play];}
+    else if(self.expandedPlayer.rate!=0)[self.expandedPlayer pause];
     if(CFAbsoluteTimeGetCurrent()-self.diagnosticAt>3 && (changed || !self.geometryKnown)){
         self.diagnosticAt=CFAbsoluteTimeGetCurrent();
         RLog(@"[铺满325] model=%@ presentation=%@ surface=%@ video=%@ legacyScale=%.2f legacyOffset=%.1f,%.1f(不应用背景) mode=%d",NSStringFromCGRect(host.bounds),NSStringFromCGRect(bounds),NSStringFromCGRect(self.frame),NSStringFromCGRect(video),animScale,animOffsetX,animOffsetY,self.expandedMode);
     }
     self.geometryKnown=YES;
+    self.syncing326=NO;
     if(changed || moving)self.stableTicks=0;else self.stableTicks++;
-    if(self.stableTicks>=30)self.link.paused=YES; // video keeps playing in compositor
+    if(self.stableTicks>=30){
+        self.link.paused=YES;self.lastDisplay326=0;
+        if(self.ticks326){RLog(@"[转场326] ticks=%lu late=%lu worstGap=%.2fms screenHz=%ld（回调间隔非视频解码FPS）",(unsigned long)self.ticks326,(unsigned long)self.late326,self.worstGap326*1000,(long)UIScreen.mainScreen.maximumFramesPerSecond);self.ticks326=0;self.late326=0;self.worstGap326=0;}
+    } // video keeps playing in compositor
 }
 - (void)didMoveToWindow {[super didMoveToWindow];if(!self.window)[self stop];}
 - (void)dealloc {[_link invalidate];[_compactPlayer pause];[_expandedPlayer pause];}
@@ -204,7 +235,13 @@ static void diDirectBackgroundHost324(UIView *host){
     if(![NSStringFromClass(host.class) isEqualToString:@"SBSystemApertureContainerView"])return;
     DIIslandBackground324 *surface=objc_getAssociatedObject(host,&kDIBackground324);
     if(!host.window || !enabled || gLocked){[surface stop];return;}
-    if(surface){[surface startBurst];[surface sync];}
+    if(surface){
+        [surface startBurst];
+        // Display link owns transition geometry; no refresh/asset discovery here.
+        // Initial alignment is needed only if resuming a hidden surface.
+        if(surface.hidden)[surface sync];
+        return;
+    }
     if([objc_getAssociatedObject(host,&kDIBackgroundPending324) boolValue])return;
     objc_setAssociatedObject(host,&kDIBackgroundPending324,@YES,OBJC_ASSOCIATION_RETAIN_NONATOMIC);
     __weak UIView *weak=host;
