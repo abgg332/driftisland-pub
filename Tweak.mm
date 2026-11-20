@@ -1069,8 +1069,8 @@ static void diFxLoadPrefs(void) {
     if (rhythmBeatScale < 0.0) rhythmBeatScale = 0.0;
     if (rhythmBeatScale > 2.5) rhythmBeatScale = 2.5;
     diAlbumGroupSize = fxDouble(@"AlbumGroupSize", 1.0);
-    if (diAlbumGroupSize < 0.5) diAlbumGroupSize = 0.5;
-    if (diAlbumGroupSize > 1.5) diAlbumGroupSize = 1.5;
+    if(!isfinite(diAlbumGroupSize))diAlbumGroupSize=1;
+    diAlbumGroupSize=MAX(.65,MIN(1.15,diAlbumGroupSize));
     rhythmRoundCover = YES;   /* 3.0.61: 开关已从律动页移除(与「启用遮罩」重复), 恒为圆形 */
     rhythmBarsOn = fxBool(@"AlbumBarsOn", YES);
     {
@@ -17033,7 +17033,7 @@ static const CFTimeInterval kDISpinDur = 10.0;
 /* 3.0.57: 律动接管了哪一层的 transform(旋转+缩放)。这层暂时不挂 di.art.spin ——
    两个写入者抢同一个属性时, 探针里 m11 会间歇变回 1.000, 旋转也会忽快忽慢。 */
 static __weak UIView *gDIArtSpinYield = nil;
-static char diBeatOwnsTransform,diBeatChildBaseKey,diMaskPresetCache;
+static char diBeatOwnsTransform,diMaskPresetCache;
 
 /* ===== 3.0.39: 播放器专辑图重新铺「遮罩素材」 =====
    3.0.24 曾把素材直接铺成封面 contents(把专辑图整个换掉), 3.0.28 删掉了。现在改成
@@ -17145,6 +17145,8 @@ static void diArtDress(UIView *v) {
     UIImage *mk = wantedMask && maskPreset==0 ? diArtMaskImage() : nil;
     BOOL presetChanged=![(NSNumber *)objc_getAssociatedObject(st.mask,&diMaskPresetCache) isEqual:@(maskPreset)];
     BOOL wantAsset = (mk.CGImage != NULL);
+    if(wantedMask){layer.cornerRadius=0;layer.masksToBounds=NO;}
+
     /* 只有"尺寸真的变了" / "系统把我们那片 mask 换掉了" / "素材换了或开关变了"才重建 */
     if (layer.mask != st.mask || !CGSizeEqualToSize(st.lastSize, b.size)
         || presetChanged || st.assetOn != wantAsset || (wantAsset && st.assetImg != mk)) {
@@ -17189,7 +17191,7 @@ static void diArtDress(UIView *v) {
     if (![layer animationForKey:@"di.art.spin"]) {
         /* 3.0.57: 律动正在接管这层的 transform(旋转+缩放一起算), 这时再挂 CA 动画
            就是两个写入者抢同一个属性 —— 旋转会忽快忽慢、缩放会被顶掉。直接跳过。 */
-        if (gDIArtSpinYield == v || objc_getAssociatedObject(layer,&diBeatOwnsTransform)) return;
+        if (gDIArtSpinYield == v) return;
         CFTimeInterval tn = CACurrentMediaTime();
         if (gDISpinEpoch <= 0) gDISpinEpoch = tn;
         CABasicAnimation *sp = [CABasicAnimation animationWithKeyPath:@"transform.rotation.z"];
@@ -19930,53 +19932,30 @@ static void diRhythmRememberBase(UIView *v) {
    CABasicAnimation interpolation that delays only artwork relative to particles.
    Retain system view hierarchy; applying the same matrix to separate render branches
    is the coordinate-equivalent adaptation, not a recovered original container. */
-static char diCoverSublayerBaseKey;
-static void diRhythmRestoreContentLayers(CALayer *root,CALayer *mask,int depth){
-    if(!root||depth>5)return;
-    for(CALayer *child in [root.sublayers copy]){
-        if(child==mask)continue;
-        NSValue *base=objc_getAssociatedObject(child,&diBeatChildBaseKey);
-        if(base){child.transform=base.CATransform3DValue;objc_setAssociatedObject(child,&diBeatChildBaseKey,nil,OBJC_ASSOCIATION_RETAIN_NONATOMIC);}
-        diRhythmRestoreContentLayers(child,mask,depth+1);
-    }
-}
-static void diRhythmScaleContentLayers(CALayer *root,CALayer *mask,CGFloat scale,int depth){
-    if(!root||depth>5)return;
-    CGFloat parentArea=root.bounds.size.width*root.bounds.size.height;
-    for(CALayer *child in [root.sublayers copy]){
-        if(child==mask)continue;
-        CGFloat area=child.bounds.size.width*child.bounds.size.height;
-        if(child.contents && parentArea>1 && area>=parentArea*.12 && area<=parentArea*1.4){
-            NSValue *base=objc_getAssociatedObject(child,&diBeatChildBaseKey);
-            if(!base){base=[NSValue valueWithCATransform3D:child.transform];objc_setAssociatedObject(child,&diBeatChildBaseKey,base,OBJC_ASSOCIATION_RETAIN_NONATOMIC);}
-            child.transform=CATransform3DScale(base.CATransform3DValue,scale,scale,1);
-        }else diRhythmScaleContentLayers(child,mask,scale,depth+1);
-    }
-}
 static void diRhythmRestoreScale(UIView *v,CATransform3D base){
     if(!v)return;CALayer *layer=v.layer;
-    NSValue *group=objc_getAssociatedObject(layer,&diCoverSublayerBaseKey);
-    if(group){layer.sublayerTransform=group.CATransform3DValue;objc_setAssociatedObject(layer,&diCoverSublayerBaseKey,nil,OBJC_ASSOCIATION_RETAIN_NONATOMIC);}
-    diRhythmRestoreContentLayers(layer,layer.mask,0);
-    DIArtMaskState *state=objc_getAssociatedObject(v,kDIArtStateKey);
-    if(state&&state.mask){NSValue *m=objc_getAssociatedObject(state.mask,&diBeatOwnsTransform);if(m){state.mask.transform=m.CATransform3DValue;objc_setAssociatedObject(state.mask,&diBeatOwnsTransform,nil,OBJC_ASSOCIATION_RETAIN_NONATOMIC);}}
-    [layer removeAnimationForKey:@"di.rhythm.scale.hold"];[layer removeAnimationForKey:@"di.rhythm.tf"];
-    if(!group && !(state&&state.mask))layer.transform=base;
+    [layer removeAnimationForKey:@"di.rhythm.scale.hold"];
+    [layer removeAnimationForKey:@"di.rhythm.tf"];
+    objc_setAssociatedObject(layer,&diBeatOwnsTransform,nil,OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    layer.transform=base;
 }
 static void diRhythmApplyScale(UIView *v,CGFloat scale,CATransform3D transform){
-    if(!v)return;scale*=diAlbumGroupSize;CALayer *layer=v.layer;
-    objc_setAssociatedObject(layer,&diBeatOwnsTransform,@YES,OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    if(!v)return;CALayer *layer=v.layer;
+    if(!isfinite(scale)||scale<=0)return;
+    // No inner image heuristics: animate the complete artwork root, including its mask.
+    // A constant scale component overrides presentation resets without replaying a ramp.
     [layer removeAnimationForKey:@"di.rhythm.tf"];
-    if([layer animationForKey:@"di.art.spin"])[layer removeAnimationForKey:@"di.art.spin"];
-    DIArtMaskState *state=objc_getAssociatedObject(v,kDIArtStateKey);
-    if(state&&layer.mask==state.mask){
-        NSValue *base=objc_getAssociatedObject(state.mask,&diBeatChildBaseKey);
-        if(!base){base=[NSValue valueWithCATransform3D:state.mask.transform];objc_setAssociatedObject(state.mask,&diBeatChildBaseKey,base,OBJC_ASSOCIATION_RETAIN_NONATOMIC);}
-        state.mask.transform=CATransform3DScale(base.CATransform3DValue,scale,scale,1);
-        diRhythmScaleContentLayers(layer,state.mask,scale,0);
-    }else if(!layer.contents&&layer.sublayers.count){
-        diRhythmScaleContentLayers(layer,layer.mask,scale,0);
-    }else layer.transform=transform;
+    layer.transform=transform;
+    CGFloat target=sqrt(transform.m11*transform.m11+transform.m12*transform.m12+transform.m13*transform.m13);
+    NSNumber *old=objc_getAssociatedObject(layer,&diBeatOwnsTransform);
+    if(!old || fabs(old.doubleValue-target)>.00001 || ![layer animationForKey:@"di.rhythm.scale.hold"]){
+        CABasicAnimation *hold=[CABasicAnimation animationWithKeyPath:@"transform.scale"];
+        hold.fromValue=@(target);hold.toValue=@(target);hold.duration=1.0;
+        hold.repeatCount=HUGE_VALF;hold.removedOnCompletion=NO;hold.fillMode=kCAFillModeForwards;
+        [layer addAnimation:hold forKey:@"di.rhythm.scale.hold"];
+        objc_setAssociatedObject(layer,&diBeatOwnsTransform,@(target),OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    }
+    // di.art.spin remains on transform.rotation.z and retains its own user switch.
 }
 
 /* 把同一个 tr 写到封面壳 + 所有"有图像内容"的同区域视图上(最多 3 个额外视图) */
@@ -19992,7 +19971,8 @@ static void diRhythmWriteAll(CGFloat s, CGFloat dy, BOOL spin, double ang, BOOL 
         CATransform3D tr = diRhythmBaseOf(v);
         if (spin) tr = CATransform3DConcat(tr, CATransform3DMakeRotation((CGFloat)ang, 0, 0, 1));
         tr = CATransform3DConcat(tr, CATransform3DMakeTranslation(0, dy, 0));
-        diRhythmApplyScale(v, s, CATransform3DConcat(tr, CATransform3DMakeScale(s, s, 1)));
+        CGFloat total=s*diAlbumGroupSize;
+        diRhythmApplyScale(v,total,CATransform3DScale(tr,total,total,1));
     }
     [CATransaction commit];
 }
@@ -20327,9 +20307,9 @@ static void diFxUpdateDots(UIView *host, CGRect cover, float dt,
     if (!host) return;
     (void)energy;
     if (gDICoverScaleNow <= 0.05f) gDICoverScaleNow = 1.0f;
-    diFxUpdateMask(cover, gDICoverScaleNow);
+    diFxUpdateMask(cover,(rhythmOn?gDICoverScaleNow:1.0f)*diAlbumGroupSize);
     if(gDIDotClipLayer){
-        CGFloat sc=rhythmOn?gDICoverScaleNow:1.0f;
+        CGFloat sc=(rhythmOn?gDICoverScaleNow:1.0f)*diAlbumGroupSize;
         CGPoint c=CGPointMake(CGRectGetMidX(cover)-host.bounds.origin.x,CGRectGetMidY(cover)-host.bounds.origin.y);
         CATransform3D tr=CATransform3DIdentity;
         tr=CATransform3DTranslate(tr,c.x,c.y,0);
@@ -20739,6 +20719,7 @@ static UIView *diRhythmDriveView(UIView *t) {
 
 static void diCoverRound(UIView *t) {
     if (!t) return;
+    if(diArtMaskWanted())return;
     if (gDICoverRounded != t) {
         if (gDICoverRounded) {
             gDICoverRounded.layer.cornerRadius = gDICoverOrigRadius;
@@ -20919,7 +20900,7 @@ static void diRhythmLayoutRing(CGRect cover, const float *bands, BOOL active) {
         CGPathMoveToPoint(tp, NULL, c.x + cos(a) * r0, c.y + sin(a) * r0);
         CGPathAddLineToPoint(tp, NULL, c.x + cos(a) * (r0 + len), c.y + sin(a) * (r0 + len));
     }
-    CGFloat beatScale=rhythmOn?MAX(1.0f,gDICoverScaleNow):1.0f;
+    CGFloat beatScale=(rhythmOn?MAX(1.0f,gDICoverScaleNow):1.0f)*diAlbumGroupSize;
     CATransform3D shared=CATransform3DIdentity;
     shared=CATransform3DTranslate(shared,c.x,c.y,0);
     shared=CATransform3DScale(shared,beatScale,beatScale,1);
@@ -22262,6 +22243,8 @@ static void diRhythmTickWithDelta(float dtIn) {
                  gDIFxEnergy, gDIFxBeatE, gDIFxNormN[0], gDIFxNormN[1],
                  gDIFxBeatBaseSee, gDIFxBeatExcSee, gDIFxBeatDrvSee,
                  gDIFxBeatScale, gDIFxBeatPulse);
+            NSNumber *held=objc_getAssociatedObject(dv.layer,&diBeatOwnsTransform);
+            RLog(@"[律动校验318] group=%.3f beat=%.5f target=%.5f model=%.5f present=%.5f hold=%d spin=%d mask=%d ringScale=%.5f particleScale=%.5f",diAlbumGroupSize,gDICoverScaleNow,held.doubleValue,sReal,sPres,[dv.layer animationForKey:@"di.rhythm.scale.hold"]!=nil,[dv.layer animationForKey:@"di.art.spin"]!=nil,dv.layer.mask!=nil,(rhythmOn?gDICoverScaleNow:1)*diAlbumGroupSize,(rhythmOn?gDICoverScaleNow:1)*diAlbumGroupSize);
             /* 3.0.62: 没找到内容层就定期把视图树打出来(20s 一次), 不用等切歌 */
             if (gDIRhythmExtraN == 0 && nowP - gDIDumpAt > 20.0) {
                 gDIDumpAt = nowP;

@@ -5246,6 +5246,15 @@ static void diOpenHomeBarPickWindow(void) {
 @implementation DIPlayerMaskPicker
 - (NSString *)maskKey { return kDIPlayerMaskKey; }
 - (NSString *)pickerTitle { return @"播放器遮罩素材"; }
+- (void)tableView:(UITableView *)tv didSelectRowAtIndexPath:(NSIndexPath *)ip {
+    PSSpecifier *sp=[self specifierAtIndexPath:ip];NSString *asset=[sp propertyForKey:@"diKey"];
+    [super tableView:tv didSelectRowAtIndexPath:ip];
+    if(!asset.length)return;
+    CFPreferencesSetAppValue(CFSTR("PlayerMaskPreset"),(__bridge CFPropertyListRef)@0,(__bridge CFStringRef)kDomain);
+    CFPreferencesSetAppValue((__bridge CFStringRef)kDIPlayerMaskOnKey,[asset isEqualToString:@"__none__"]?kCFBooleanFalse:kCFBooleanTrue,(__bridge CFStringRef)kDomain);
+    CFPreferencesAppSynchronize((__bridge CFStringRef)kDomain);postReload();diPostFxTune();
+    diStep(@"[遮罩318] 自定义素材=%@ 开=%d",asset,![asset isEqualToString:@"__none__"]);
+}
 @end
 
 /* 2.7.0: 壁纸素材选择页 —— 与遮罩页同构, 只是扫描目录和写入的键不同 */
@@ -6669,6 +6678,27 @@ static id gDIFxColorBridge = nil;
     SEL action=sp.buttonAction;
     if(action && [self respondsToSelector:action])((void(*)(id,SEL,id))objc_msgSend)(self,action,sp);
 }
+- (void)diFXChooseBuiltinMask:(PSSpecifier *)sp {
+    UIAlertController *sheet=[UIAlertController alertControllerWithTitle:@"内置遮罩形状" message:@"选择后自动启用头像遮罩；自定义素材在另一个入口设置。" preferredStyle:UIAlertControllerStyleActionSheet];
+    NSArray *names=@[@"圆形",@"圆角方形",@"菱形"];
+    for(NSInteger i=0;i<3;i++){
+        NSInteger preset=i+1;
+        [sheet addAction:[UIAlertAction actionWithTitle:names[i] style:UIAlertActionStyleDefault handler:^(__unused UIAlertAction *action){
+            CFPreferencesSetAppValue(CFSTR("PlayerMaskPreset"),(__bridge CFPropertyListRef)@(preset),(__bridge CFStringRef)kDomain);
+            CFPreferencesSetAppValue((__bridge CFStringRef)kDIPlayerMaskOnKey,kCFBooleanTrue,(__bridge CFStringRef)kDomain);
+            CFPreferencesAppSynchronize((__bridge CFStringRef)kDomain);postReload();diPostFxTune();
+            diStep(@"[遮罩318] 内置预设=%ld 已启用",(long)preset);[self reloadSpecifiers];
+        }]];
+    }
+    [sheet addAction:[UIAlertAction actionWithTitle:@"取消" style:UIAlertActionStyleCancel handler:nil]];
+    if(sheet.popoverPresentationController){sheet.popoverPresentationController.sourceView=self.view;sheet.popoverPresentationController.sourceRect=CGRectMake(CGRectGetMidX(self.view.bounds),CGRectGetMidY(self.view.bounds),1,1);}
+    [self presentViewController:sheet animated:YES completion:nil];
+}
+- (void)diFXOpenCustomMask:(PSSpecifier *)sp {
+    DIPlayerMaskPicker *picker=[DIPlayerMaskPicker new];
+    diStep(@"[遮罩318] 打开自定义素材列表");
+    [self.navigationController pushViewController:picker animated:YES];
+}
 - (double)diFXStepForKey:(NSString *)key {
     if([key containsString:@"Count"])return 1;
     if([key hasPrefix:@"RhythmParticleAlpha"])return .01;
@@ -6677,7 +6707,10 @@ static id gDIFxColorBridge = nil;
 - (void)diFXWrite:(id)value specifier:(PSSpecifier *)sp {
     NSString *key=[sp propertyForKey:@"key"];if(![key isKindOfClass:NSString.class]||!key.length)return;
     CFPreferencesSetAppValue((__bridge CFStringRef)key,(__bridge CFPropertyListRef)value,(__bridge CFStringRef)kDomain);
-    CFPreferencesAppSynchronize((__bridge CFStringRef)kDomain);diPostFxTune();
+    CFPreferencesAppSynchronize((__bridge CFStringRef)kDomain);
+    if([key hasPrefix:@"PlayerMask"])postReload();
+    diPostFxTune();
+    diStep(@"[律动设置318] 写入 %@=%@",key,value);
 }
 - (void)diFXSwitch:(UISwitch *)control {[self diFXWrite:@(control.on) specifier:objc_getAssociatedObject(control,"diFXSp")];}
 - (void)diFXMode:(UISegmentedControl *)control {[self diFXWrite:@(control.selectedSegmentIndex) specifier:objc_getAssociatedObject(control,"diFXSp")];}
@@ -7019,13 +7052,11 @@ static BOOL diBarStyleOK(int s) {
 
     [specs addObject:[self groupSpec:@"专辑头像遮罩" footer:@"可选内置圆形、圆角方形、菱形，或使用自定义遮罩素材。"]];
     [specs addObject:[self switchSpec:@"启用头像遮罩" key:kDIPlayerMaskOnKey def:@NO]];
-    {PSSpecifier *seg=[PSSpecifier preferenceSpecifierNamed:@"遮罩形状" target:self set:@selector(setPreferenceValue:specifier:) get:@selector(readPreferenceValue:) detail:nil cell:PSSegmentCell edit:nil];
-    [seg setProperty:@"PlayerMaskPreset" forKey:@"key"];[seg setProperty:@"0" forKey:@"default"];
-    [seg setProperty:@[@"自定义",@"圆形",@"圆角方形",@"菱形"] forKey:@"titlesValues"];
-    [seg setProperty:@[@0,@1,@2,@3] forKey:@"values"];
-    [specs addObject:seg];}
-    [specs addObject:[self linkSpec:@"自定义遮罩素材" detail:[DIPlayerMaskPicker class]]];
-    [specs addObject:[self npSlider:@"头像/律动环整体大小" key:diFxSizedKey(@"AlbumGroupSize") def:1.0 mn:0.65 mx:1.15]];
+    {PSSpecifier *builtin=[PSSpecifier preferenceSpecifierNamed:@"内置遮罩形状" target:self set:NULL get:NULL detail:nil cell:PSButtonCell edit:nil];
+    builtin.buttonAction=@selector(diFXChooseBuiltinMask:);[specs addObject:builtin];}
+    {PSSpecifier *custom=[PSSpecifier preferenceSpecifierNamed:@"自定义遮罩素材" target:self set:NULL get:NULL detail:nil cell:PSButtonCell edit:nil];
+    custom.buttonAction=@selector(diFXOpenCustomMask:);[specs addObject:custom];}
+    [specs addObject:[self npSlider:@"头像/环/粒子整体大小" key:diFxSizedKey(@"AlbumGroupSize") def:1.0 mn:0.65 mx:1.15]];
     [specs addObject:[self groupSpec:@"专辑进度环" footer:@"根据歌曲实际播放进度绘制，暂停保留位置；没有时长的直播不显示。"]];
     [specs addObject:[self switchSpec:@"启用专辑进度环" key:diFxSizedKey(@"ArtworkProgressRingEnabled") def:@NO]];
     [specs addObject:[self npSlider:@"进度环宽度" key:diFxSizedKey(@"ArtworkRingWidth") def:3.0 mn:0.5 mx:10.0]];
