@@ -7693,12 +7693,6 @@ static void updateSingleVideo(UIWindow *win) {
         }
         return;
     }
-    if(diDirectBackgroundAvailable324()){
-        // The compositor-backed surface owns compact/expanded island video.
-        // Keep only the recorder dot branch above; skip legacy host scans,
-        // MediaRemote selection, moves, frame animation and native-audio scans.
-        return;
-    }
     /* ===== 2.8.21: 选主稳定化 =====
        291 反馈: "充电岛也是有些隐藏了""通知的岛背景也会一闪一闪的"。
        根因: 多岛并存(音乐+通知+音量+充电)时 hostTable 是 NSHashTable,
