@@ -7422,11 +7422,20 @@ static void diContMaybeScan(UIView *self) {
     UIWindow *win = self.window;
     if (win && diWindowExpanded(win)) { diPlatterRestoreInWindow(win); return; }
     static CFAbsoluteTime last;
+    static __weak UIWindow *lastWindow;
+    static BOOL lastExpanded=NO,lastDisplayVisible=NO;
     CFAbsoluteTime now = CFAbsoluteTimeGetCurrent();
+    BOOL expanded=win?diWindowExpanded(win):NO;
+    BOOL visible=win && !win.hidden && win.alpha>.01;
+    BOOL stateChanged=(win!=lastWindow || expanded!=lastExpanded || visible!=lastDisplayVisible);
+    lastWindow=win;lastExpanded=expanded;lastDisplayVisible=visible;
+    /* 3.1.32: the prior unconditional scan on every container layout performed
+       up to 1500-node BFS throughout the expansion animation. Scan only on
+       state transitions; per-target layout/didMove hooks handle additions. */
+    if(!stateChanged && now-last<30.0)return;
     /* 3.0.20: 2s → 4s。扫描本身已经不再动视图树(只是写 hidden), 但 1500 节点的 BFS
        在 iOS17 的控制中心里也要几毫秒, 少扫一半是纯赚 —— 新建的黑层有 layoutSubviews/
        didMoveToWindow 两个钩子兜住, 扫描只是补漏。 */
-    if (now - last < 4.0) return;
     last = now;
     diGainScanAperture();
 }
@@ -7673,8 +7682,14 @@ static void updateSingleVideo(UIWindow *win) {
 
     if (!enabled) {
         for (DIVideoView *v in diLayers(smallV, expandV)) {
-            if (v && !v.hidden) { v.hidden = YES; if (v.player.timeControlStatus != AVPlayerTimeControlStatusPaused) [v.player pause]; }
+            if (v) { v.hidden=YES; v.syncLink.paused=YES; [v.player pause]; }
         }
+        return;
+    }
+    if(diDirectBackgroundAvailable324()){
+        // The compositor-backed surface owns compact/expanded island video.
+        // Keep only the recorder dot branch above; skip legacy host scans,
+        // MediaRemote selection, moves, frame animation and native-audio scans.
         return;
     }
     /* ===== 2.8.21: 选主稳定化 =====

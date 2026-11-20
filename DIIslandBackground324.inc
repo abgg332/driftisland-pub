@@ -230,7 +230,14 @@ static NSHashTable *diBackgrounds324;
             if([self.animationSignatures327[token] isEqualToString:signature] && [layer animationForKey:dest])continue;
             BOOL ignored=NO;CAAnimation *copy=diBGAnimation327(original,i==0?0:1,pixel,&ignored,0);
             if(!copy)continue;
-            if(copy.beginTime!=0)copy.beginTime=[layer convertTime:original.beginTime fromLayer:source];
+            if(copy.beginTime!=0){
+                CFTimeInterval hostNow=[source convertTime:CACurrentMediaTime() fromLayer:nil];
+                CFTimeInterval destNow=[layer convertTime:CACurrentMediaTime() fromLayer:nil];
+                CFTimeInterval localPhase=original.beginTime+original.timeOffset;
+                if(original.speed!=0)localPhase+=((hostNow-original.beginTime)*original.speed);
+                copy.beginTime=destNow-(localPhase-original.timeOffset);
+                copy.timeOffset=original.timeOffset;copy.speed=original.speed;
+            }
             [layer addAnimation:copy forKey:dest];self.animationSignatures327[token]=signature;
         }
         // When the system uses radius=0 and the old capsule fallback, derive
@@ -240,7 +247,7 @@ static NSHashTable *diBackgrounds324;
             NSString *token=[@"radius/" stringByAppendingString:key];[live addObject:token];
             if(![self.animationSignatures327[token] isEqualToString:signature] || ![self.layer animationForKey:dest]){
                 BOOL ignored=NO;CAAnimation *copy=diBGAnimation327(original,2,pixel,&ignored,0);
-                if(copy){if(copy.beginTime!=0)copy.beginTime=[self.layer convertTime:original.beginTime fromLayer:source];[self.layer addAnimation:copy forKey:dest];self.animationSignatures327[token]=signature;}
+                if(copy){if(copy.beginTime!=0){CFTimeInterval hostNow=[source convertTime:CACurrentMediaTime() fromLayer:nil];CFTimeInterval destNow=[self.layer convertTime:CACurrentMediaTime() fromLayer:nil];CFTimeInterval phase=original.beginTime+original.timeOffset;if(original.speed!=0)phase+=(hostNow-original.beginTime)*original.speed;copy.beginTime=destNow-(phase-original.timeOffset);copy.timeOffset=original.timeOffset;copy.speed=original.speed;}[self.layer addAnimation:copy forKey:dest];self.animationSignatures327[token]=signature;}
             }
         }
     }
