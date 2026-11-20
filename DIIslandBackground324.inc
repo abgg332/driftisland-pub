@@ -33,6 +33,10 @@ static NSHashTable *diBackgrounds324;
 @property(nonatomic,assign) BOOL expandedMode;
 @property(nonatomic,assign) BOOL modeKnown;
 @property(nonatomic,assign) BOOL preparing;
+@property(nonatomic,assign) BOOL geometryKnown;
+@property(nonatomic,assign) CGRect lastGeometry;
+@property(nonatomic,assign) CGFloat lastRadius;
+@property(nonatomic,assign) CFAbsoluteTime diagnosticAt;
 - (void)refresh;
 - (void)sync;
 - (void)startBurst;
@@ -58,10 +62,11 @@ static NSHashTable *diBackgrounds324;
     return self;
 }
 - (void)startBurst {
-    self.stableTicks=0;
+    if(!self.link || self.link.paused)self.stableTicks=0;
     if(!self.link){self.link=[CADisplayLink displayLinkWithTarget:self.ticker selector:@selector(tick:)];
-        NSInteger max=UIScreen.mainScreen.maximumFramesPerSecond;
-        self.link.preferredFrameRateRange=CAFrameRateRangeMake(30,MAX(60,max),MAX(60,max));
+        // Geometry runs at 60Hz, video decoding is independent. Avoid two live
+        // decoders plus 120Hz background layout on ProMotion during collapse.
+        self.link.preferredFrameRateRange=CAFrameRateRangeMake(30,60,60);
         [self.link addToRunLoop:NSRunLoop.mainRunLoop forMode:NSRunLoopCommonModes];}
     self.link.paused=NO;
 }
@@ -132,7 +137,9 @@ static NSHashTable *diBackgrounds324;
 }
 - (void)refresh {
     NSString *small=materialPathFor(NO),*large=materialPathFor(YES);
-    NSString *sig=[NSString stringWithFormat:@"%d/%d/%d/%d/%@/%@/%.3f/%.3f/%.3f/%.2f",enabled,gLocked,smallOn,expandOn,small?:@"",large?:@"",animScale,animOffsetX,animOffsetY,animFPS];
+    // Background is edge-to-edge. animScale/offset/FPS configure legacy frame
+    // effects, not the canvas of this independent video background.
+    NSString *sig=[NSString stringWithFormat:@"%d/%d/%d/%d/%@/%@",enabled,gLocked,smallOn,expandOn,small?:@"",large?:@""];
     BOOL changed=![self.prefSignature isEqualToString:sig];self.prefSignature=sig;
     if(![self visibleHost]){[self stop];return;}
     if(changed){[self loadPath:small expanded:NO];[self loadPath:large expanded:YES];[self startBurst];}
@@ -155,24 +162,35 @@ static NSHashTable *diBackgrounds324;
     if(!self.modeKnown){self.expandedMode=height>60;self.modeKnown=YES;}
     else if(height>62)self.expandedMode=YES;else if(height<58)self.expandedMode=NO;
     [CATransaction begin];[CATransaction setDisableActions:YES];
-    self.frame=bounds;self.layer.cornerRadius=radius;
+    // Avoid no-op geometry writes that can invalidate layout every display tick.
+    if(!CGRectEqualToRect(self.frame,bounds))self.frame=bounds;
+    if(fabs(self.layer.cornerRadius-radius)>.01)self.layer.cornerRadius=radius;
     CGRect b=self.bounds;
-    CGFloat scale=isfinite(animScale)?MAX(.1,MIN(4,animScale)):1;
-    CGRect video=CGRectMake(CGRectGetMidX(b)-b.size.width*scale*.5+animOffsetX,CGRectGetMidY(b)-b.size.height*scale*.5+animOffsetY,b.size.width*scale,b.size.height*scale);
-    self.compactLayer.frame=video;self.expandedLayer.frame=video;
-    self.compactImage.frame=video;self.expandedImage.frame=video;
+    // Cover the entire island at every size; never inherit frame-effect insets.
+    // Small overscan avoids subpixel seams without moving the visual center.
+    CGFloat pixel=1.0/MAX(1.0,UIScreen.mainScreen.scale);
+    CGRect video=CGRectInset(b,-pixel,-pixel);
+    if(!CGRectEqualToRect(self.compactLayer.frame,video))self.compactLayer.frame=video;
+    if(!CGRectEqualToRect(self.expandedLayer.frame,video))self.expandedLayer.frame=video;
+    if(!CGRectEqualToRect(self.compactImage.frame,video))self.compactImage.frame=video;
+    if(!CGRectEqualToRect(self.expandedImage.frame,video))self.expandedImage.frame=video;
     self.compactLayer.hidden=self.expandedMode || !smallOn;
     self.expandedLayer.hidden=!self.expandedMode || !expandOn;
     self.compactImage.hidden=self.expandedMode || !smallOn;
     self.expandedImage.hidden=!self.expandedMode || !expandOn;
     self.hidden=NO;
     [CATransaction commit];
-    AVQueuePlayer *current=self.expandedMode?self.expandedPlayer:self.compactPlayer;
-    AVQueuePlayer *other=self.expandedMode?self.compactPlayer:self.expandedPlayer;
-    BOOL allowed=self.expandedMode?expandOn:smallOn;
-    if(allowed){float rate=MAX(.1,MIN(4,animFPS/50.0));if(fabs(current.rate-rate)>.01)[current setRate:rate];}else [current pause];
-    // Pause the other decoder only after transition settles; keep the looper/item.
-    if(!moving)[other pause];
+    // Keep both selected clips warm while the island is visible. Merely hide
+    // the noncurrent layer: collapse must not wait for a paused decoder to start.
+    if(smallOn && self.compactPlayer && self.compactPlayer.rate==0)[self.compactPlayer play];
+    if(expandOn && self.expandedPlayer && self.expandedPlayer.rate==0)[self.expandedPlayer play];
+    if(!smallOn)[self.compactPlayer pause];
+    if(!expandOn)[self.expandedPlayer pause];
+    if(CFAbsoluteTimeGetCurrent()-self.diagnosticAt>3 && (changed || !self.geometryKnown)){
+        self.diagnosticAt=CFAbsoluteTimeGetCurrent();
+        RLog(@"[铺满325] model=%@ presentation=%@ surface=%@ video=%@ legacyScale=%.2f legacyOffset=%.1f,%.1f(不应用背景) mode=%d",NSStringFromCGRect(host.bounds),NSStringFromCGRect(bounds),NSStringFromCGRect(self.frame),NSStringFromCGRect(video),animScale,animOffsetX,animOffsetY,self.expandedMode);
+    }
+    self.geometryKnown=YES;
     if(changed || moving)self.stableTicks=0;else self.stableTicks++;
     if(self.stableTicks>=30)self.link.paused=YES; // video keeps playing in compositor
 }
@@ -186,6 +204,7 @@ static void diDirectBackgroundHost324(UIView *host){
     if(![NSStringFromClass(host.class) isEqualToString:@"SBSystemApertureContainerView"])return;
     DIIslandBackground324 *surface=objc_getAssociatedObject(host,&kDIBackground324);
     if(!host.window || !enabled || gLocked){[surface stop];return;}
+    if(surface){[surface startBurst];[surface sync];}
     if([objc_getAssociatedObject(host,&kDIBackgroundPending324) boolValue])return;
     objc_setAssociatedObject(host,&kDIBackgroundPending324,@YES,OBJC_ASSOCIATION_RETAIN_NONATOMIC);
     __weak UIView *weak=host;
