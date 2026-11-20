@@ -8831,6 +8831,59 @@ static BOOL diNativeActionPrompt(UIView *view){
     return NO;
 }
 
+/* 3.1.23: Fit only a notification's remote content branch. Permission
+   controls remain native siblings. Do not run generic player reflow/height-fit. */
+static BOOL diActionBranch323(UIView *view){
+    NSString *name=NSStringFromClass(view.class);
+    for(NSString *token in @[@"Alert",@"Permission",@"Authorization",@"ActionButtons",@"ActionButton",@"ActionList"])
+        if([name containsString:token])return YES;
+    return NO;
+}
+static BOOL diContentHasActions323(UIView *root,int depth){
+    if(!root || depth>12)return NO;
+    if(diActionBranch323(root))return YES;
+    NSString *text=nil;
+    if([root isKindOfClass:UIButton.class])text=[(UIButton *)root currentTitle];
+    else if([root isKindOfClass:UILabel.class])text=[(UILabel *)root text];
+    if(text && [@[@"不允许",@"始终允许",@"允许",@"不允許",@"始終允許",@"Don't Allow",@"Always Allow",@"Allow"] containsObject:text])return YES;
+    for(UIView *child in root.subviews)if(diContentHasActions323(child,depth+1))return YES;
+    return NO;
+}
+static void diFitNoticeContent323(UIView *root,CGFloat available,int depth){
+    if(!root || depth>10 || !root.window || root.hidden || diActionBranch323(root))return;
+    if(available<40 || !isfinite(available))return;
+    if(root.bounds.size.width>=80 && root.bounds.size.width<available)available=root.bounds.size.width;
+    NSString *name=NSStringFromClass(root.class);
+    BOOL scene=[name containsString:@"ScenePresentationView"] || [name containsString:@"SceneHost"] || [name containsString:@"RemoteView"];
+    if(scene){
+        // Inspect THIS subtree, not the parent permission card: the graph has
+        // no permission controls, even though its ancestor owns those controls.
+        if(diContentHasActions323(root,0))return;
+        CGSize natural=root.bounds.size;
+        if(natural.width<80 || natural.height<2 || !isfinite(natural.width))return;
+        CGFloat scale=MIN(1.0,available/natural.width);
+        if(scale<.30)return;
+        CGAffineTransform wanted=CGAffineTransformMakeScale(scale,scale);
+        if(!CGAffineTransformEqualToTransform(root.transform,wanted)){
+            // UIView transform (not an orphan CALayer transform), preserving the
+            // branch's layout origin. No parent bounds/height/anchor mutations.
+            CGRect before=root.frame;
+            [CATransaction begin];[CATransaction setDisableActions:YES];
+            root.transform=wanted;
+            CGRect after=root.frame;
+            CGPoint center=root.center;
+            center.x+=CGRectGetMinX(before)-CGRectGetMinX(after);
+            center.y+=CGRectGetMinY(before)-CGRectGetMinY(after);
+            root.center=center;
+            [CATransaction commit];
+            static CFAbsoluteTime last=0;
+            if(CFAbsoluteTimeGetCurrent()-last>2){last=CFAbsoluteTimeGetCurrent();RLog(@"[通知内容323] %@ 原生=%.1fx%.1f 可用=%.1f scale=%.4f 视觉宽=%.1f；权限按钮保持原生",name,natural.width,natural.height,available,scale,root.frame.size.width);}
+        }
+        return; // never scale a nested remote host twice
+    }
+    for(UIView *child in root.subviews)diFitNoticeContent323(child,available,depth+1);
+}
+
 /* 让场景宿主按容器宽等比缩放显示
 
    2.2.40 两处关键修改(2.2.39 一行日志都没打出来, 就是这两处导致的):
@@ -9042,7 +9095,11 @@ static CGFloat diReapplySceneFit(UIView *root, CGFloat cardW, int depth) {
 }
 
 static void diRealignPlayerPlatter(UIView *platter) {
-    if (!platter || !platter.window || diNativeActionPrompt(platter)) return;
+    if (!platter || !platter.window) return;
+    if(diNativeActionPrompt(platter)){
+        diFitNoticeContent323(platter,platter.bounds.size.width,0);
+        return;
+    }
 
     /* ===== 2.2.40 关键分叉: 通知卡 vs 播放器卡 =====
 
@@ -9068,8 +9125,8 @@ static void diRealignPlayerPlatter(UIView *platter) {
     }
 
     if (isNotificationCard) {
-        // List horizontalInsetMargin remains available; all internal notification
-        // content and interactive action geometry is now owned by the system.
+        // Fit only the remote visual branch; no notification/action reflow.
+        diFitNoticeContent323(platter,platter.bounds.size.width,0);
         return;
     }
 
@@ -9254,6 +9311,7 @@ static void applyLockWidth(UIView *v) {
     if (!NSThread.isMainThread) return;
     if (diIsSystemStatusUI(v)) return;
     if(diNativeActionPrompt(v)){
+        diFitNoticeContent323(v,v.bounds.size.width,0);
         static CFAbsoluteTime lastPrompt=0;
         if(CFAbsoluteTimeGetCurrent()-lastPrompt>5){lastPrompt=CFAbsoluteTimeGetCurrent();RLog(@"[通知交互322] 权限/动作按钮保留原生布局 %@",NSStringFromClass(v.class));}
         return;
