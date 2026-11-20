@@ -40,6 +40,19 @@ static NSHashTable *diBackgrounds324;
 @property(nonatomic,assign) CFAbsoluteTime diagnosticAt;
 @property(nonatomic,strong) NSMutableDictionary<NSString *,NSString *> *animationSignatures327;
 @property(nonatomic,assign) BOOL mirrored327;
+@property(nonatomic,assign) CGRect observedModel328;
+@property(nonatomic,assign) CGFloat observedRadius328;
+@property(nonatomic,assign) BOOL observed328;
+@property(nonatomic,assign) CFTimeInterval warmUntil328;
+@property(nonatomic,assign) NSInteger oldMode328;
+@property(nonatomic,assign) BOOL displayedMode328;
+@property(nonatomic,assign) BOOL displayKnown328;
+@property(nonatomic,assign) CFTimeInterval requestedAt328;
+@property(nonatomic,assign) CGRect observedModel328;
+@property(nonatomic,assign) CGFloat observedRadius328;
+@property(nonatomic,assign) BOOL observed328;
+@property(nonatomic,assign) CFTimeInterval warmUntil328;
+@property(nonatomic,assign) NSInteger oldMode328;
 @property(nonatomic,assign) CFTimeInterval report327;
 @property(nonatomic,assign) BOOL syncing326;
 @property(nonatomic,assign) CFTimeInterval lastSync326;
@@ -78,18 +91,24 @@ static NSHashTable *diBackgrounds324;
     return self;
 }
 - (void)startBurst {
+    if((gLocked || gScreenOff328) || gScreenOff328)return;
     if(!self.link || self.link.paused)self.stableTicks=0;
     if(!self.link){self.link=[CADisplayLink displayLinkWithTarget:self.ticker selector:@selector(tick:)];
         // Geometry runs at 60Hz, video decoding is independent. Avoid two live
         // decoders plus 120Hz background layout on ProMotion during collapse.
-        NSInteger hz=MAX(60,UIScreen.mainScreen.maximumFramesPerSecond);
+        NSInteger hz=60; // bounded CPU cadence; no persistent 120Hz poll for smoothness
         self.link.preferredFrameRateRange=CAFrameRateRangeMake(60,hz,hz);
         [self.link addToRunLoop:NSRunLoop.mainRunLoop forMode:NSRunLoopCommonModes];}
     self.link.paused=NO;
 }
 - (void)stop {
     [self.compactPlayer pause];[self.expandedPlayer pause];
-    self.hidden=YES;self.link.paused=YES;self.lastDisplay326=0;
+    self.hidden=YES;[self.link invalidate];self.link=nil;self.lastDisplay326=0;
+    self.warmUntil328=0;
+    // Stop our geometric CA copies too. Never alter the system host animations.
+    for(CALayer *layer in @[self.layer,self.compactLayer,self.expandedLayer,self.compactImage.layer,self.expandedImage.layer])
+        for(NSString *key in layer.animationKeys)if([key hasPrefix:@"di.geometry327."])[layer removeAnimationForKey:key];
+    [self.animationSignatures327 removeAllObjects];self.mirrored327=NO;
 }
 - (void)loadPath:(NSString *)path expanded:(BOOL)expanded {
     NSString *old=expanded?self.expandedPath:self.compactPath;
@@ -115,10 +134,14 @@ static NSHashTable *diBackgrounds324;
         if(!still)@try{
             AVURLAsset *asset=[AVURLAsset URLAssetWithURL:[NSURL fileURLWithPath:path] options:nil];
             AVAssetTrack *source=[asset tracksWithMediaType:AVMediaTypeVideo].firstObject;
-            if(source && CMTIME_IS_NUMERIC(asset.duration) && CMTimeCompare(asset.duration,kCMTimeZero)>0){
+            // Container duration may include a longer audio/edit-list tail. Copy
+            // exactly the video track's valid range, rebased to time zero. Do not
+            // trim visible first/last frames or assume that they are black.
+            CMTimeRange range=source?source.timeRange:kCMTimeRangeInvalid;
+            if(source && CMTIMERANGE_IS_VALID(range) && CMTIME_IS_NUMERIC(range.start) && CMTIME_IS_NUMERIC(range.duration) && CMTimeCompare(range.duration,kCMTimeZero)>0){
                 AVMutableComposition *comp=[AVMutableComposition composition];
                 AVMutableCompositionTrack *track=[comp addMutableTrackWithMediaType:AVMediaTypeVideo preferredTrackID:kCMPersistentTrackID_Invalid];
-                if([track insertTimeRange:CMTimeRangeMake(kCMTimeZero,asset.duration) ofTrack:source atTime:kCMTimeZero error:NULL]){track.preferredTransform=source.preferredTransform;video=comp;}
+                if([track insertTimeRange:range ofTrack:source atTime:kCMTimeZero error:NULL]){track.preferredTransform=source.preferredTransform;video=comp;}
             }
         }@catch(NSException *e){NSLog(@"[岛背景324] 素材解析失败 %@",e.name);}
         dispatch_async(dispatch_get_main_queue(),^{
@@ -131,7 +154,11 @@ static NSHashTable *diBackgrounds324;
                 player.muted=YES;player.volume=0;player.preventsDisplaySleepDuringVideoPlayback=NO;
                 player.automaticallyWaitsToMinimizeStalling=NO;player.actionAtItemEnd=AVPlayerActionAtItemEndNone;
                 AVPlayerItem *item=[AVPlayerItem playerItemWithAsset:video];
-                AVPlayerLooper *looper=[AVPlayerLooper playerLooperWithPlayer:player templateItem:item];
+                // Queue looper only; no end observer, no seek-to-zero, no item
+                // replacement at every cycle. Bound the loop to copied video.
+                CMTimeRange loopRange=CMTimeRangeMake(kCMTimeZero,video.duration);
+                AVPlayerLooper *looper=[AVPlayerLooper playerLooperWithPlayer:player templateItem:item timeRange:loopRange];
+                RLog(@"[循环328] %@ videoDuration=%.6f 模式=%d 视频轨范围循环；不重建播放器",path.lastPathComponent,CMTimeGetSeconds(video.duration),expanded);
                 if(expanded){[o.expandedPlayer pause];o.expandedLooper=looper;o.expandedPlayer=player;o.expandedLayer.player=player;}
                 else{[o.compactPlayer pause];o.compactLooper=looper;o.compactPlayer=player;o.compactLayer.player=player;}
                 iv.image=nil;
@@ -147,7 +174,7 @@ static NSHashTable *diBackgrounds324;
 }
 - (BOOL)visibleHost {
     UIView *host=self.host;
-    if(!enabled || gLocked || !host.window || host.window.hidden)return NO;
+    if(!enabled || ((gLocked || gScreenOff328) || gScreenOff328) || !host.window || host.window.hidden)return NO;
     for(UIView *v=host;v;v=v.superview)if(v.hidden || v.alpha<.01)return NO;
     if(notifyBgOff && ([objc_getAssociatedObject(host,&kHostIsNotif) boolValue] || [objc_getAssociatedObject(host,&kCapIsNotif) boolValue]))return NO;
     return host.bounds.size.width>2 && host.bounds.size.height>2;
@@ -156,7 +183,7 @@ static NSHashTable *diBackgrounds324;
     NSString *small=materialPathFor(NO),*large=materialPathFor(YES);
     // Background is edge-to-edge. animScale/offset/FPS configure legacy frame
     // effects, not the canvas of this independent video background.
-    NSString *sig=[NSString stringWithFormat:@"%d/%d/%d/%d/%@/%@",enabled,gLocked,smallOn,expandOn,small?:@"",large?:@""];
+    NSString *sig=[NSString stringWithFormat:@"%d/%d/%d/%d/%@/%@",enabled,((gLocked || gScreenOff328) || gScreenOff328),smallOn,expandOn,small?:@"",large?:@""];
     BOOL changed=![self.prefSignature isEqualToString:sig];self.prefSignature=sig;
     if(![self visibleHost]){[self stop];return;}
     if(changed){[self loadPath:small expanded:NO];[self loadPath:large expanded:YES];[self startBurst];}
@@ -254,6 +281,19 @@ static NSHashTable *diBackgrounds324;
     // Retain DriftIsland's compact/expanded material split, with a small hysteresis.
     if(!self.modeKnown){self.expandedMode=height>60;self.modeKnown=YES;}
     else if(height>62)self.expandedMode=YES;else if(height<58)self.expandedMode=NO;
+    BOOL requestedMode328=self.expandedMode;
+    if(!self.displayKnown328){self.displayedMode328=requestedMode328;self.displayKnown328=YES;}
+    if(self.oldMode328!=(requestedMode328?1:0)){
+        self.oldMode328=requestedMode328?1:0;self.warmUntil328=now326+.18;self.requestedAt328=now326;
+    }
+    AVPlayerLayer *requestedLayer328=requestedMode328?self.expandedLayer:self.compactLayer;
+    AVQueuePlayer *requestedPlayer328=requestedMode328?self.expandedPlayer:self.compactPlayer;
+    UIImageView *requestedImage328=requestedMode328?self.expandedImage:self.compactImage;
+    BOOL wantsRequested328=requestedMode328?expandOn:smallOn;
+    // Keep the previous visible frame until a different clip has a displayable
+    // frame, for at most .25s; no seek, frame extraction, or permanent dual play.
+    BOOL waiting328=wantsRequested328 && requestedPlayer328 && !requestedImage328.image && !requestedLayer328.readyForDisplay && now326-self.requestedAt328<.25;
+    if(!waiting328)self.displayedMode328=requestedMode328;
     self.syncing326=YES;
     [CATransaction begin];[CATransaction setDisableActions:YES];
     // Avoid no-op geometry writes that can invalidate layout every display tick.
@@ -266,37 +306,37 @@ static NSHashTable *diBackgrounds324;
     // Small overscan avoids subpixel seams without moving the visual center.
     CGFloat pixel=1.0/MAX(1.0,UIScreen.mainScreen.scale);
     CGRect video=CGRectInset(b,-pixel,-pixel);
-    AVPlayerLayer *visibleLayer=self.expandedMode?self.expandedLayer:self.compactLayer;
-    UIImageView *visibleImage=self.expandedMode?self.expandedImage:self.compactImage;
+    AVPlayerLayer *visibleLayer=self.displayedMode328?self.expandedLayer:self.compactLayer;
+    UIImageView *visibleImage=self.displayedMode328?self.expandedImage:self.compactImage;
     if(!compositor){
         if(!CGRectEqualToRect(visibleLayer.frame,video))visibleLayer.frame=video;
         if(visibleImage.image && !CGRectEqualToRect(visibleImage.frame,video))visibleImage.frame=video;
     }
-    self.compactLayer.hidden=self.expandedMode || !smallOn;
-    self.expandedLayer.hidden=!self.expandedMode || !expandOn;
-    self.compactImage.hidden=self.expandedMode || !smallOn;
-    self.expandedImage.hidden=!self.expandedMode || !expandOn;
+    self.compactLayer.hidden=self.displayedMode328 || !smallOn;
+    self.expandedLayer.hidden=!self.displayedMode328 || !expandOn;
+    self.compactImage.hidden=self.displayedMode328 || !smallOn;
+    self.expandedImage.hidden=!self.displayedMode328 || !expandOn;
     self.hidden=NO;
     [CATransaction commit];
     // Warm both only while geometry is transitioning. After settling, pause
     // the invisible decoder but retain item/looper and its last rendered frame.
-    BOOL warm=compositor || moving || self.stableTicks<6;
-    BOOL wantCompact=smallOn && (!self.expandedMode || warm);
-    BOOL wantExpanded=expandOn && (self.expandedMode || warm);
+    BOOL warm=now326<self.warmUntil328 || waiting328;
+    BOOL wantCompact=smallOn && (!requestedMode328 || warm || !self.displayedMode328);
+    BOOL wantExpanded=expandOn && (requestedMode328 || warm || self.displayedMode328);
     if(wantCompact){if(self.compactPlayer && self.compactPlayer.rate==0)[self.compactPlayer play];}
     else if(self.compactPlayer.rate!=0)[self.compactPlayer pause];
     if(wantExpanded){if(self.expandedPlayer && self.expandedPlayer.rate==0)[self.expandedPlayer play];}
     else if(self.expandedPlayer.rate!=0)[self.expandedPlayer pause];
-    if(CFAbsoluteTimeGetCurrent()-self.diagnosticAt>3 && (changed || !self.geometryKnown)){
+    if(logEnabled && CFAbsoluteTimeGetCurrent()-self.diagnosticAt>6 && (changed || !self.geometryKnown)){
         self.diagnosticAt=CFAbsoluteTimeGetCurrent();
         RLog(@"[铺满325] model=%@ presentation=%@ surface=%@ video=%@ legacyScale=%.2f legacyOffset=%.1f,%.1f(不应用背景) mode=%d",NSStringFromCGRect(host.bounds),NSStringFromCGRect(bounds),NSStringFromCGRect(self.frame),NSStringFromCGRect(video),animScale,animOffsetX,animOffsetY,self.expandedMode);
     }
     self.geometryKnown=YES;
     self.syncing326=NO;
-    if(changed || moving || compositor)self.stableTicks=0;else self.stableTicks++;
+    if(changed || moving || compositor || waiting328)self.stableTicks=0;else self.stableTicks++;
     if(self.stableTicks>=30){
         self.link.paused=YES;self.lastDisplay326=0;
-        if(self.ticks326){RLog(@"[转场326] ticks=%lu late=%lu worstGap=%.2fms screenHz=%ld（回调间隔非视频解码FPS）",(unsigned long)self.ticks326,(unsigned long)self.late326,self.worstGap326*1000,(long)UIScreen.mainScreen.maximumFramesPerSecond);self.ticks326=0;self.late326=0;self.worstGap326=0;}
+        if(logEnabled && self.ticks326){RLog(@"[转场328] ticks=%lu late=%lu worstGap=%.2fms screenHz=%ld（回调间隔非视频解码FPS）",(unsigned long)self.ticks326,(unsigned long)self.late326,self.worstGap326*1000,(long)UIScreen.mainScreen.maximumFramesPerSecond);self.ticks326=0;self.late326=0;self.worstGap326=0;}
     } // video keeps playing in compositor
 }
 - (void)didMoveToWindow {[super didMoveToWindow];if(!self.window)[self stop];}
@@ -308,8 +348,12 @@ static void diDirectBackgroundHost324(UIView *host){
     // scaling/rotating wrappers implicated by the 3.1.20 crash.
     if(![NSStringFromClass(host.class) isEqualToString:@"SBSystemApertureContainerView"])return;
     DIIslandBackground324 *surface=objc_getAssociatedObject(host,&kDIBackground324);
-    if(!host.window || !enabled || gLocked){[surface stop];return;}
+    if(!host.window || !enabled || ((gLocked || gScreenOff328) || gScreenOff328)){[surface stop];return;}
     if(surface){
+        CGRect model=host.layer.bounds;CGFloat r=host.layer.cornerRadius;
+        BOOL dirty=!surface.observed328 || !CGRectEqualToRect(surface.observedModel328,model) || fabs(surface.observedRadius328-r)>.01;
+        surface.observedModel328=model;surface.observedRadius328=r;surface.observed328=YES;
+        if(!dirty && !surface.hidden)return;
         [surface startBurst];
         // Display link owns transition geometry; no refresh/asset discovery here.
         // Initial alignment is needed only if resuming a hidden surface.
@@ -323,7 +367,7 @@ static void diDirectBackgroundHost324(UIView *host){
         UIView *h=weak;if(!h)return;
         objc_setAssociatedObject(h,&kDIBackgroundPending324,nil,OBJC_ASSOCIATION_RETAIN_NONATOMIC);
         DIIslandBackground324 *v=objc_getAssociatedObject(h,&kDIBackground324);
-        if(!h.window || !enabled || gLocked){[v stop];return;}
+        if(!h.window || !enabled || ((gLocked || gScreenOff328) || gScreenOff328)){[v stop];return;}
         if(!v){v=[[DIIslandBackground324 alloc]initWithFrame:h.bounds];v.host=h;objc_setAssociatedObject(h,&kDIBackground324,v,OBJC_ASSOCIATION_RETAIN_NONATOMIC);
             if(!diBackgrounds324)diBackgrounds324=[NSHashTable weakObjectsHashTable];[diBackgrounds324 addObject:v];
             RLog(@"[岛背景324] 已挂顶层容器 %@；背景不依赖音乐，系统内容包装层不变",NSStringFromClass(h.class));}
@@ -333,7 +377,7 @@ static void diDirectBackgroundHost324(UIView *host){
 }
 static void diDirectBackgroundTick324(void){
     for(DIIslandBackground324 *v in diBackgrounds324.allObjects)[v refresh];
-    if(!enabled || gLocked)return;
+    if(!enabled || ((gLocked || gScreenOff328) || gScreenOff328))return;
     static CFAbsoluteTime last=0;CFAbsoluteTime now=CFAbsoluteTimeGetCurrent();
     if(now-last<3)return;last=now;
     // Catch containers which existed before hook installation, without music.
