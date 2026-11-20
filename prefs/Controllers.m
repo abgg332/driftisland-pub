@@ -5253,7 +5253,7 @@ static void diOpenHomeBarPickWindow(void) {
     CFPreferencesSetAppValue(CFSTR("PlayerMaskPreset"),(__bridge CFPropertyListRef)@0,(__bridge CFStringRef)kDomain);
     CFPreferencesSetAppValue((__bridge CFStringRef)kDIPlayerMaskOnKey,[asset isEqualToString:@"__none__"]?kCFBooleanFalse:kCFBooleanTrue,(__bridge CFStringRef)kDomain);
     CFPreferencesAppSynchronize((__bridge CFStringRef)kDomain);postReload();diPostFxTune();
-    diStep(@"[遮罩318] 自定义素材=%@ 开=%d",asset,![asset isEqualToString:@"__none__"]);
+    diStep(@"[遮罩319] 自定义素材=%@ 开=%d",asset,![asset isEqualToString:@"__none__"]);
 }
 @end
 
@@ -6678,25 +6678,9 @@ static id gDIFxColorBridge = nil;
     SEL action=sp.buttonAction;
     if(action && [self respondsToSelector:action])((void(*)(id,SEL,id))objc_msgSend)(self,action,sp);
 }
-- (void)diFXChooseBuiltinMask:(PSSpecifier *)sp {
-    UIAlertController *sheet=[UIAlertController alertControllerWithTitle:@"内置遮罩形状" message:@"选择后自动启用头像遮罩；自定义素材在另一个入口设置。" preferredStyle:UIAlertControllerStyleActionSheet];
-    NSArray *names=@[@"圆形",@"圆角方形",@"菱形"];
-    for(NSInteger i=0;i<3;i++){
-        NSInteger preset=i+1;
-        [sheet addAction:[UIAlertAction actionWithTitle:names[i] style:UIAlertActionStyleDefault handler:^(__unused UIAlertAction *action){
-            CFPreferencesSetAppValue(CFSTR("PlayerMaskPreset"),(__bridge CFPropertyListRef)@(preset),(__bridge CFStringRef)kDomain);
-            CFPreferencesSetAppValue((__bridge CFStringRef)kDIPlayerMaskOnKey,kCFBooleanTrue,(__bridge CFStringRef)kDomain);
-            CFPreferencesAppSynchronize((__bridge CFStringRef)kDomain);postReload();diPostFxTune();
-            diStep(@"[遮罩318] 内置预设=%ld 已启用",(long)preset);[self reloadSpecifiers];
-        }]];
-    }
-    [sheet addAction:[UIAlertAction actionWithTitle:@"取消" style:UIAlertActionStyleCancel handler:nil]];
-    if(sheet.popoverPresentationController){sheet.popoverPresentationController.sourceView=self.view;sheet.popoverPresentationController.sourceRect=CGRectMake(CGRectGetMidX(self.view.bounds),CGRectGetMidY(self.view.bounds),1,1);}
-    [self presentViewController:sheet animated:YES completion:nil];
-}
 - (void)diFXOpenCustomMask:(PSSpecifier *)sp {
     DIPlayerMaskPicker *picker=[DIPlayerMaskPicker new];
-    diStep(@"[遮罩318] 打开自定义素材列表");
+    diStep(@"[遮罩319] 打开自定义素材列表");
     [self.navigationController pushViewController:picker animated:YES];
 }
 - (double)diFXStepForKey:(NSString *)key {
@@ -6710,7 +6694,7 @@ static id gDIFxColorBridge = nil;
     CFPreferencesAppSynchronize((__bridge CFStringRef)kDomain);
     if([key hasPrefix:@"PlayerMask"])postReload();
     diPostFxTune();
-    diStep(@"[律动设置318] 写入 %@=%@",key,value);
+    diStep(@"[律动设置319] 写入 %@=%@",key,value);
 }
 - (void)diFXSwitch:(UISwitch *)control {[self diFXWrite:@(control.on) specifier:objc_getAssociatedObject(control,"diFXSp")];}
 - (void)diFXMode:(UISegmentedControl *)control {[self diFXWrite:@(control.selectedSegmentIndex) specifier:objc_getAssociatedObject(control,"diFXSp")];}
@@ -7050,10 +7034,8 @@ static BOOL diBarStyleOK(int s) {
     [specs addObject:[self fxColorSpec:@"渐变起始色" key:diFxSizedKey(@"ParticleColorA") def:@"#FFFFBC" modeKey:nil]];
     [specs addObject:[self fxColorSpec:@"渐变结束色" key:diFxSizedKey(@"ParticleColorB") def:@"#BFCDF8" modeKey:nil]];
 
-    [specs addObject:[self groupSpec:@"专辑头像遮罩" footer:@"可选内置圆形、圆角方形、菱形，或使用自定义遮罩素材。"]];
+    [specs addObject:[self groupSpec:@"专辑头像遮罩" footer:@"仅使用自定义 PNG 透明遮罩素材，选中即生效。"]];
     [specs addObject:[self switchSpec:@"启用头像遮罩" key:kDIPlayerMaskOnKey def:@NO]];
-    {PSSpecifier *builtin=[PSSpecifier preferenceSpecifierNamed:@"内置遮罩形状" target:self set:NULL get:NULL detail:nil cell:PSButtonCell edit:nil];
-    builtin.buttonAction=@selector(diFXChooseBuiltinMask:);[specs addObject:builtin];}
     {PSSpecifier *custom=[PSSpecifier preferenceSpecifierNamed:@"自定义遮罩素材" target:self set:NULL get:NULL detail:nil cell:PSButtonCell edit:nil];
     custom.buttonAction=@selector(diFXOpenCustomMask:);[specs addObject:custom];}
     [specs addObject:[self npSlider:@"头像/环/粒子整体大小" key:diFxSizedKey(@"AlbumGroupSize") def:1.0 mn:0.65 mx:1.15]];

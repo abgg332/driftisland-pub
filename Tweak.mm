@@ -17033,7 +17033,7 @@ static const CFTimeInterval kDISpinDur = 10.0;
 /* 3.0.57: 律动接管了哪一层的 transform(旋转+缩放)。这层暂时不挂 di.art.spin ——
    两个写入者抢同一个属性时, 探针里 m11 会间歇变回 1.000, 旋转也会忽快忽慢。 */
 static __weak UIView *gDIArtSpinYield = nil;
-static char diBeatOwnsTransform,diMaskPresetCache;
+static char diBeatOwnsTransform;
 
 /* ===== 3.0.39: 播放器专辑图重新铺「遮罩素材」 =====
    3.0.24 曾把素材直接铺成封面 contents(把专辑图整个换掉), 3.0.28 删掉了。现在改成
@@ -17138,19 +17138,13 @@ static void diArtDress(UIView *v) {
     }
     /* 3.0.39: 有遮罩素材就贴素材(alpha 蒙版), 没有就退回内切圆 */
     BOOL wantedMask=diArtMaskWanted();
-    static CFTimeInterval presetAt=0;static NSInteger presetValue=0;
-    CFTimeInterval presetNow=CACurrentMediaTime();
-    if(presetAt==0 || presetNow-presetAt>.35){presetAt=presetNow;presetValue=pInt(@"PlayerMaskPreset",0);}
-    NSInteger maskPreset=wantedMask?MAX(0,MIN(3,presetValue)):0;
-    UIImage *mk = wantedMask && maskPreset==0 ? diArtMaskImage() : nil;
-    BOOL presetChanged=![(NSNumber *)objc_getAssociatedObject(st.mask,&diMaskPresetCache) isEqual:@(maskPreset)];
+    UIImage *mk = wantedMask ? diArtMaskImage() : nil;
     BOOL wantAsset = (mk.CGImage != NULL);
     if(wantedMask){layer.cornerRadius=0;layer.masksToBounds=NO;}
 
     /* 只有"尺寸真的变了" / "系统把我们那片 mask 换掉了" / "素材换了或开关变了"才重建 */
     if (layer.mask != st.mask || !CGSizeEqualToSize(st.lastSize, b.size)
-        || presetChanged || st.assetOn != wantAsset || (wantAsset && st.assetImg != mk)) {
-        objc_setAssociatedObject(st.mask,&diMaskPresetCache,@(maskPreset),OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        || st.assetOn != wantAsset || (wantAsset && st.assetImg != mk)) {
         st.lastSize = b.size;
         st.mask.frame = b;
         if (wantAsset) {
@@ -17163,15 +17157,7 @@ static void diArtDress(UIView *v) {
             CGFloat side = MIN(b.size.width, b.size.height);
             CGRect circle = CGRectMake((b.size.width - side) / 2.0, (b.size.height - side) / 2.0, side, side);
             st.mask.contents = nil;
-            CGRect shape=CGRectInset(circle,.5,.5);UIBezierPath *shapePath=nil;
-            if(maskPreset==2)shapePath=[UIBezierPath bezierPathWithRoundedRect:shape cornerRadius:side*.22];
-            else if(maskPreset==3){shapePath=[UIBezierPath bezierPath];
-                [shapePath moveToPoint:CGPointMake(CGRectGetMidX(shape),CGRectGetMinY(shape))];
-                [shapePath addLineToPoint:CGPointMake(CGRectGetMaxX(shape),CGRectGetMidY(shape))];
-                [shapePath addLineToPoint:CGPointMake(CGRectGetMidX(shape),CGRectGetMaxY(shape))];
-                [shapePath addLineToPoint:CGPointMake(CGRectGetMinX(shape),CGRectGetMidY(shape))];[shapePath closePath];}
-            else shapePath=[UIBezierPath bezierPathWithOvalInRect:shape];
-            st.mask.path=shapePath.CGPath;
+            st.mask.path=[UIBezierPath bezierPathWithOvalInRect:CGRectInset(circle,.5,.5)].CGPath;
         }
         st.assetOn = wantAsset;
         st.assetImg = wantAsset ? mk : nil;
@@ -20309,14 +20295,8 @@ static void diFxUpdateDots(UIView *host, CGRect cover, float dt,
     if (gDICoverScaleNow <= 0.05f) gDICoverScaleNow = 1.0f;
     diFxUpdateMask(cover,(rhythmOn?gDICoverScaleNow:1.0f)*diAlbumGroupSize);
     if(gDIDotClipLayer){
-        CGFloat sc=(rhythmOn?gDICoverScaleNow:1.0f)*diAlbumGroupSize;
-        CGPoint c=CGPointMake(CGRectGetMidX(cover)-host.bounds.origin.x,CGRectGetMidY(cover)-host.bounds.origin.y);
-        CATransform3D tr=CATransform3DIdentity;
-        tr=CATransform3DTranslate(tr,c.x,c.y,0);
-        tr=CATransform3DScale(tr,sc,sc,1);
-        tr=CATransform3DTranslate(tr,-c.x,-c.y,0);
         [CATransaction begin];[CATransaction setDisableActions:YES];
-        gDIDotClipLayer.sublayerTransform=tr;
+        gDIDotClipLayer.sublayerTransform=CATransform3DIdentity;
         [CATransaction commit];
     }
     if (gDIDotCount == 0) return;
@@ -20376,7 +20356,7 @@ static void diFxUpdateDots(UIView *host, CGRect cover, float dt,
         float radialPulse = cover.size.width * 0.055f * pulse;
         // Reference artRingContainer scales particle offsets AND glyphs together.
         // Keep the verified visible host; apply the same affine transform numerically.
-        float groupScale = 1.0f; // parent sublayerTransform applies the shared scale once
+        float groupScale = (rhythmOn?gDICoverScaleNow:1.0f)*diAlbumGroupSize; // offsets and glyphs, fixed center
         layer.position = CGPointMake(cx + cosf(d->ang) * ((d->rad + radialPulse)*groupScale),
                                      cy + sinf(d->ang) * ((d->rad + radialPulse)*groupScale));
         layer.opacity = alpha;
@@ -20526,9 +20506,14 @@ static float diFxAdvanceBeat(BOOL active, float energy, double strengthSlider, f
         /* 滑杆 0~2 → 参考实现的 strength 域(0.3~2.5)。默认 0.70 → 2.1,
            与旧版"0.20×0.70 幅度"在 pulse≈0.7 时正好对上, 老手感不会突变。 */
         float st = (float)strengthSlider;
-        if (st < 0.3f) st = 0.3f;
+        if (st < 0.0f) st = 0.0f;
         if (st > 2.5f) st = 2.5f;
         float amp = gDIFxBeatPulse * 0.095f * st;
+        // Source-specific bridge: the log shows PCM kick=.91 while spectrum pulse~0.
+        // gDIKick is the existing measured/smoothed kick envelope, not a time oscillator.
+        float kick=(!diW17Using && gDIPcmKickSeen && diAuAlive())?fminf(1.0f,fmaxf(0.0f,gDIKick)):0;
+        float measuredAmp=kick*0.20f*fminf(2.5f,fmaxf(0.0f,(float)strengthSlider));
+        amp=fmaxf(amp,measuredAmp);
         if (amp > 0.22f) amp = 0.22f;
         desired = 1.0f + amp;
     } else {
@@ -20869,7 +20854,11 @@ static void diRhythmLayoutRing(CGRect cover, const float *bands, BOOL active) {
 
     CGPoint c = CGPointMake(gDIRhythmRingBox.bounds.size.width / 2,
                             gDIRhythmRingBox.bounds.size.height / 2);
-    CGFloat r0 = R - 0.25 * (cover.size.width / 57.0);
+    CGFloat visualScale=(rhythmOn?gDICoverScaleNow:1.0f)*diAlbumGroupSize;
+    tickW*=visualScale;
+    gDIRhythmRingMask.lineWidth=tickW;
+    if(gDIRhythmRingBack)gDIRhythmRingBack.lineWidth=tickW*1.25;
+    CGFloat r0 = (R - 0.25 * (cover.size.width / 57.0))*visualScale;
     /* 3.0.55: 取消 30Hz 降频 —— 120Hz 屏上 30Hz 更新就是"每四帧才动一下"的顿感。
        80 段直线路径的构建开销很小, 每帧重建肉眼才连得上。 */
     CGMutablePathRef tp = CGPathCreateMutable();
@@ -20893,19 +20882,14 @@ static void diRhythmLayoutRing(CGRect cover, const float *bands, BOOL active) {
         }
         if (band < 0) band = 0;
         if (band > 1) band = 1;
-        CGFloat len = active ? (gap + 0.25*(cover.size.width/57.0) + maxLen*band) : 0;
+        CGFloat len = active ? (gap + 0.25*(cover.size.width/57.0) + maxLen*band)*visualScale : 0;
         int bucket=i*12/DI_TICK_N;
         CGPathMoveToPoint(colored[bucket],NULL,c.x+cos(a)*r0,c.y+sin(a)*r0);
         CGPathAddLineToPoint(colored[bucket],NULL,c.x+cos(a)*(r0+len),c.y+sin(a)*(r0+len));
         CGPathMoveToPoint(tp, NULL, c.x + cos(a) * r0, c.y + sin(a) * r0);
         CGPathAddLineToPoint(tp, NULL, c.x + cos(a) * (r0 + len), c.y + sin(a) * (r0 + len));
     }
-    CGFloat beatScale=(rhythmOn?MAX(1.0f,gDICoverScaleNow):1.0f)*diAlbumGroupSize;
-    CATransform3D shared=CATransform3DIdentity;
-    shared=CATransform3DTranslate(shared,c.x,c.y,0);
-    shared=CATransform3DScale(shared,beatScale,beatScale,1);
-    shared=CATransform3DTranslate(shared,-c.x,-c.y,0);
-    gDIRhythmRingBox.sublayerTransform=shared;
+    gDIRhythmRingBox.sublayerTransform=CATransform3DIdentity;
     for(int j=0;j<12;j++){
         CAShapeLayer *stroke=gDIRingStrokes[j];
         stroke.frame=gDIRhythmRingGrad.bounds;
@@ -22108,6 +22092,18 @@ static void diRhythmTickWithDelta(float dtIn) {
     diSharedVisualPulse=gDIFxBeatPulse;
     diISPublishBeat(active);
     float fxBeatS=referenceScale;
+    static CFTimeInterval verifyAt=0;
+    static float peakKick=0,peakScale=1;
+    peakKick=fmaxf(peakKick,gDIKick);peakScale=fmaxf(peakScale,referenceScale);
+    if(logEnabled && CACurrentMediaTime()-verifyAt>2 && dv.window){
+        verifyAt=CACurrentMediaTime();
+        CGPoint artCenter=CGPointMake(CGRectGetMidX(dv.bounds),CGRectGetMidY(dv.bounds));
+        CALayer *present=(CALayer *)dv.layer.presentationLayer;
+        CALayer *space=(CALayer *)dv.superview.layer.presentationLayer;
+        CGPoint liveCenter=(present&&space)?[present convertPoint:artCenter toLayer:space]:dv.center;
+        RLog(@"[律动校验319] 源=%@ 幅度=%.2f kick峰=%.4f scale峰=%.5f group=%.3f 中心(model)=%.2f,%.2f 中心(present)=%.2f,%.2f anchor=%.3f,%.3f",diW17Using?@"wave17":@"PCM",rhythmBeatScale,peakKick,peakScale,diAlbumGroupSize,dv.center.x,dv.center.y,liveCenter.x,liveCenter.y,dv.layer.anchorPoint.x,dv.layer.anchorPoint.y);
+        peakKick=0;peakScale=1;
+    }
     static CFTimeInterval outProbe=0;
     if(logEnabled && CACurrentMediaTime()-outProbe>10){
       outProbe=CACurrentMediaTime();
