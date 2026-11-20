@@ -6941,6 +6941,21 @@ static BOOL viewHasToken(UIView *v, NSString *token) {
 
 // 视频要铺满整颗岛: 向上取"最外层的岛尺寸小视图"(岛胶囊本体), 全屏大视图之前的那一层
 static UIView *islandRoot(UIView *v) {
+    if(!v)return nil;
+    if(diIsIOS17Up()){
+        Class element=NSClassFromString(@"SAUIElementView");
+        Class singleton=NSClassFromString(@"_SBSystemApertureContainerViewContentView");
+        // No geometry-only parent walking on 17: Scaling/RotatingContentView
+        // inherit a singleton content contract, including during capture swaps.
+        if(element && [v isKindOfClass:element] && !(singleton && [v isKindOfClass:singleton]))return v;
+        NSMutableArray<UIView *> *queue=[NSMutableArray arrayWithObject:v];int budget=160;
+        while(queue.count && budget-->0){
+            UIView *node=queue.firstObject;[queue removeObjectAtIndex:0];
+            if(element && [node isKindOfClass:element] && !(singleton && [node isKindOfClass:singleton]))return node;
+            for(UIView *child in node.subviews)[queue addObject:child];
+        }
+        return nil; // never fall back to an arbitrary system layout wrapper
+    }
     UIView *best = v;
     CGFloat winW = v.window ? v.window.bounds.size.width : 0;
     CGFloat winH = v.window ? v.window.bounds.size.height : 0;
@@ -7702,6 +7717,10 @@ static void updateSingleVideo(UIWindow *win) {
         if (t > newestT) { newestT = t; newestRoot = root; }
         CGFloat a = root.bounds.size.width * root.bounds.size.height;
         if (a > bestA) { bestA = a; bigRoot = root; }
+    }
+    if(diIsIOS17Up()){
+        static BOOL reportedHost=NO;
+        if(musicRoot && !reportedHost){reportedHost=YES;RLog(@"[岛容器322] 素材限于元素 %@，不向系统单内容包装层添加子视图",NSStringFromClass(musicRoot.class));}
     }
     UIView *matRoot = musicRoot;                                    /* 素材: 只跟音乐岛 */
     /* 2.8.39: 音乐岛瞬断/暂停**粘滞**(308: "展开背景有时候暂停, 播放完就黑屏")。
@@ -8785,6 +8804,33 @@ static BOOL diIsSceneHost(UIView *v) {
     return NO;
 }
 
+/* 3.1.22: Lock-screen permission/action prompts are not player artwork.
+   Preserve their system geometry; CALayer-only remote scene fitting can leave
+   action hit regions out of sync with the visible buttons on both 16 and 17. */
+static BOOL diNativeActionPrompt(UIView *view){
+    if(!view)return NO;
+    for(UIView *node=view;node;node=node.superview){
+        NSString *name=NSStringFromClass(node.class);
+        for(NSString *token in @[@"Alert",@"Permission",@"Authorization",@"ActionButtons",@"ActionButton",@"ActionList"])
+            if([name containsString:token])return YES;
+        if(node==view.window)break;
+    }
+    NSMutableArray<UIView *> *queue=[NSMutableArray arrayWithObject:view];int budget=180;
+    NSSet *titles=[NSSet setWithArray:@[@"不允许",@"始终允许",@"允许",@"不允許",@"始終允許",@"Don't Allow",@"Always Allow",@"Allow"]];
+    while(queue.count && budget-->0){
+        UIView *node=queue.firstObject;[queue removeObjectAtIndex:0];
+        if(node.hidden || node.alpha<.01)continue;
+        NSString *name=NSStringFromClass(node.class);
+        if([name containsString:@"Permission"] || [name containsString:@"Authorization"] || [name containsString:@"ActionButtons"])return YES;
+        NSString *text=nil;
+        if([node isKindOfClass:UIButton.class])text=[(UIButton *)node currentTitle];
+        else if([node isKindOfClass:UILabel.class])text=[(UILabel *)node text];
+        if(text && [titles containsObject:text])return YES;
+        for(UIView *child in node.subviews)[queue addObject:child];
+    }
+    return NO;
+}
+
 /* 让场景宿主按容器宽等比缩放显示
 
    2.2.40 两处关键修改(2.2.39 一行日志都没打出来, 就是这两处导致的):
@@ -8795,7 +8841,7 @@ static BOOL diIsSceneHost(UIView *v) {
      2) 日志去节流: 每变一次打一条, 同类最多重复 3 次。这样下次日志里一定能看到
         它到底有没有被调用、宿主类名是什么、算出来的缩放比是多少。 */
 static void diFitSceneHost(UIView *host, CGFloat cardW, CGFloat *outVisH) {
-    if (!host) return;
+    if (!host || diNativeActionPrompt(host)) return;
     NSString *hcn = NSStringFromClass(host.class);
     CGFloat bw = host.bounds.size.width;
     CGFloat bh = host.bounds.size.height;
@@ -8996,7 +9042,7 @@ static CGFloat diReapplySceneFit(UIView *root, CGFloat cardW, int depth) {
 }
 
 static void diRealignPlayerPlatter(UIView *platter) {
-    if (!platter || !platter.window) return;
+    if (!platter || !platter.window || diNativeActionPrompt(platter)) return;
 
     /* ===== 2.2.40 关键分叉: 通知卡 vs 播放器卡 =====
 
@@ -9015,18 +9061,15 @@ static void diRealignPlayerPlatter(UIView *platter) {
        唯一要做的是让那个 401 的场景宿主缩到 340。 */
     NSString *pcn = NSStringFromClass(platter.class);
     BOOL isNotificationCard = [pcn containsString:@"Notification"];
+    for(UIView *ancestor=platter.superview;ancestor && !isNotificationCard;ancestor=ancestor.superview){
+        NSString *name=NSStringFromClass(ancestor.class);
+        if([name containsString:@"NotificationShortLook"] || [name containsString:@"NotificationLongLook"] || [name containsString:@"NotificationViewControllerView"])isNotificationCard=YES;
+        if(ancestor==platter.window)break;
+    }
 
     if (isNotificationCard) {
-        /* 通知卡: 内层全部交给 horizontalInsetMargin + 系统布局, 这里只做"场景宿主适配"
-           (个别系统会把通知卡的图标/附件也放到 scene 里), 以及诊断。 */
-        NSNumber *prevN = objc_getAssociatedObject(platter, &kDiAppliedW);
-        CGFloat wN = platter.bounds.size.width;
-        if (prevN == nil || fabs(prevN.doubleValue - wN) >= 1.0) {
-            objc_setAssociatedObject(platter, &kDiAppliedW, @(wN), OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-            diReflowChildren(platter, (prevN ? prevN.doubleValue : diScreenWidth() - 30.0), wN, 0);
-        }
-        /* 2.2.41: 通知卡里通常没有场景宿主, 但个别系统会把附件放进去; 无条件补一次 */
-        diReapplySceneFit(platter, wN, 0);
+        // List horizontalInsetMargin remains available; all internal notification
+        // content and interactive action geometry is now owned by the system.
         return;
     }
 
@@ -9209,7 +9252,12 @@ static BOOL diIsSystemStatusUI(UIView *v) {
 static void applyLockWidth(UIView *v) {
     if (!lockWOn || !v.window) return;
     if (!NSThread.isMainThread) return;
-    if (diIsSystemStatusUI(v)) return;   /* 2.6.12: 来电/电池详情等系统界面完全不碰 */
+    if (diIsSystemStatusUI(v)) return;
+    if(diNativeActionPrompt(v)){
+        static CFAbsoluteTime lastPrompt=0;
+        if(CFAbsoluteTimeGetCurrent()-lastPrompt>5){lastPrompt=CFAbsoluteTimeGetCurrent();RLog(@"[通知交互322] 权限/动作按钮保留原生布局 %@",NSStringFromClass(v.class));}
+        return;
+    }   /* 2.6.12: 来电/电池详情等系统界面完全不碰 */
     NSString *cn = NSStringFromClass(v.class);
 
     static BOOL insetActive = NO;
@@ -17483,6 +17531,16 @@ static void diNPDumpCrashEvidence(void) {
                 if([report isKindOfClass:NSDictionary.class]){
                     RLog(@"[崩溃结构] exception=%@ termination=%@ faultingThread=%@",report[@"exception"],report[@"termination"],report[@"faultingThread"]);
                     NSArray *threads=report[@"threads"],*images=report[@"usedImages"];
+                    for(NSString *field in @[@"asi",@"applicationSpecificInformation",@"exceptionReason"]){
+                        id detail=report[field];if(detail){NSString *text=[detail description];if(text.length>2500)text=[text substringToIndex:2500];RLog(@"[首次异常321] %@=%@",field,text);}
+                    }
+                    NSArray *throwFrames=report[@"lastExceptionBacktrace"];
+                    if([throwFrames isKindOfClass:NSArray.class])for(NSUInteger k=0;k<MIN((NSUInteger)40,throwFrames.count);k++){
+                        NSDictionary *frame=throwFrames[k];NSInteger im=[frame[@"imageIndex"] integerValue];
+                        NSDictionary *image=([images isKindOfClass:NSArray.class]&&im>=0&&im<(NSInteger)images.count)?images[im]:@{};
+                        RLog(@"[首次异常栈321] #%lu %@ symbol=%@ offset=%@ uuid=%@",(unsigned long)k,image[@"name"],frame[@"symbol"],frame[@"imageOffset"],image[@"uuid"]);
+                    }
+
                     NSInteger index=[report[@"faultingThread"] integerValue];
                     if([threads isKindOfClass:NSArray.class]&&index>=0&&index<(NSInteger)threads.count){
                         NSArray *frames=threads[index][@"frames"];
