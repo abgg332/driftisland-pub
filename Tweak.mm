@@ -144,7 +144,7 @@ static UIColor *diRhythmHexColor(NSString *hex, UIColor *def);
    岛上那颗专辑是我们自绘的玻璃视图(DIMaskView 小岛态 / MRU 的 glass 展开态)。
    这两个开关只给它们单独开"随节拍缩放"和"外圈粒子", 与播放器那套完全独立:
    开关默认关, 关掉时一个字节的额外行为都没有。 */
-static const BOOL diIslandEffectsAvailable = YES; // 3.1.33: restore native island beat/particle bridge
+static const BOOL diIslandEffectsAvailable = YES; // 3.1.33 restores native island beat/particle bridge
 static BOOL islandFxOn = NO;          // IslandFxOn: 岛专辑特效总开关(3.0.86)
 static BOOL islandBeatOn = NO;        // IslandBeatOn: 岛上专辑随节拍缩放
 static BOOL islandParticlesOn = NO;   // IslandParticlesOn: 岛上专辑外圈粒子
@@ -4050,57 +4050,6 @@ static BOOL diIsIOS17Up(void);   /* 定义在 2.9.37 段(下方), 这里先用 *
    容器(躺在 alpha=0 的 portal 里), 它也会 layout、也会被 diIsNowPlayingHostCached
    命中。后果: MRU 的展开确认期(连续 1.2 秒说展开)被打断 → 展开遮罩有时生效
    有时不生效; 小岛态被写成"展开" → 大玻璃迟迟不拆。 */
-/* ===== 2.9.68: SpringBoard 玻璃交接标志 =====
-   399 日志 + 视频实锤: 展开起手(宿主 209x40 → 240x70 之间)SpringBoard 已经让位
-   (它按小岛尺寸判的), 而 MRU 也读到"小岛/过渡"把 66 的大玻璃拆了 —— 两边同时
-   放手 → 中间 0.1~0.3 秒岛上没有遮罩, 露出来的就是系统那颗很小的原生专辑;
-   长到 240x70 后 MRU 重新铺 66 → 用户看到"小专辑然后变大 / 底闪一下"。
-   谁在画谁负责: SpringBoard 正画着小岛玻璃时, MRU 的大玻璃就该让; SpringBoard
-   不画了(让位/拆掉), MRU 必须立刻接手, 不能等播报变成"展开"。
-   这个标志每帧随岛容器布局一起写, 变化时绕过节流立即落盘。 */
-static volatile int gDISBGlassOn = 0;
-
-/* 2.9.69: 交接信号必须零延迟送达 —— 展开起手时宿主 bounds 可能只跳一两帧,
-   之后就不再 layout, 单靠 layout hook 写盘的话 MRU 会读到"上一帧的 sb=1",
-   于是它一直让位(空窗)。这里把最近一次播报的宿主尺寸记下来, sb 一变就用它
-   立刻重写一份, 不依赖宿主是否还在 layout。 */
-static CGFloat gDISBPubW = 0, gDISBPubH = 0;
-static int gDISBPubM = -1;      /* 1=小岛 2=展开 0=过渡 */
-
-static void diWriteIslandPlist(void) {
-    if (gDISBPubW < 1.0 || gDISBPubH < 1.0) return;
-    NSString *dir = diMruSharedDir();
-    if (!dir.length) return;
-    NSDictionary *d = @{@"w": @(gDISBPubW), @"h": @(gDISBPubH),
-                        @"mini": @(gDISBPubM == 1 ? 1 : 0),
-                        @"expand": @(gDISBPubM == 2 ? 1 : 0),
-                        @"sb": @(gDISBGlassOn ? 1 : 0),
-                        @"t": @(CFAbsoluteTimeGetCurrent()), @"v": DI_BUILD_VER};
-    @try { [d writeToFile:[dir stringByAppendingPathComponent:@"island.plist"] atomically:YES]; }
-    @catch (__unused NSException *e) {}
-}
-
-static void diPublishIslandState(CGSize hostSize, BOOL mini, BOOL expand) {
-    if (hostSize.width < 1.0 || hostSize.height < 1.0) return;
-    static CGFloat lw, lh; static CFAbsoluteTime lt; static int lm = -1; static int lsb = -1;
-    CFAbsoluteTime now = CFAbsoluteTimeGetCurrent();
-    int m = mini ? 1 : (expand ? 2 : 0);
-    int sbNow = gDISBGlassOn ? 1 : 0;
-    /* 2.9.68: 交接标志一变就必须立刻落盘 —— 展开起手只有这一瞬间能救 */
-    if (lsb != sbNow) { lt = 0; lm = -9; }
-    /* 2.9.55: 岛容器布局 hook 每帧都会调进来, 写盘压到 5Hz, 免得展开动画期间狂写
-       2.9.65: 形态"卡在中间"(m=0, 展开/收起动画途中)时放宽到 16Hz ——
-       MRU 靠这份文件判形态, 过渡帧写慢了它就会读到"上一帧的小岛",
-       表现为"展开后专辑先很小再变大"。0.4 秒的动画最多多写 5~6 次, 可忽略。 */
-    if (lt > 0 && now - lt < (m == 0 ? 0.06 : 0.2)) return;
-    if (fabs(hostSize.width - lw) < 0.5 && fabs(hostSize.height - lh) < 0.5
-        && m == lm && now - lt < 2.0) return;
-    lw = hostSize.width; lh = hostSize.height; lm = m; lt = now; lsb = sbNow;
-    gDISBPubW = hostSize.width; gDISBPubH = hostSize.height; gDISBPubM = m;
-    diWriteIslandPlist();
-}
-
-
 static BOOL diContainerVisiblyShown(UIView *v) {
     if (!v || !v.window || v.isHidden) return NO;
     for (UIView *a = v; a && a != v.window; a = a.superview)
@@ -7494,12 +7443,12 @@ static void diContLayoutHook(id self, SEL _cmd) {
     if (diOrigContLayout) diOrigContLayout(self, _cmd);
     diContMaybeScan((UIView *)self);
     diDirectBackgroundHost324((UIView *)self);
-    if(diIsIOS17Up() && diContainerVisiblyShown((UIView *)self)){
-        UIView *host=(UIView *)self;CGSize z=host.bounds.size;
-        BOOL playingPub=mrQueryOK?musicPlaying:AVAudioSession.sharedInstance.isOtherAudioPlaying;
-        BOOL mini=z.height>=24 && z.height<=62 && z.width>=100 && z.width<=(playingPub?208.0:236.0) && z.width>z.height*1.55;
-        BOOL expand=z.height>=120 && z.height<=300 && z.width>=280 && z.width<=440;
-        if(diIsNowPlayingHostCached(host))diPublishIslandState(z,mini,expand);
+    UIView *host=(UIView *)self;
+    if(diIsIOS17Up() && diContainerVisiblyShown(host) && diIsNowPlayingHostCached(host)){
+        CGSize size=host.bounds.size;BOOL playingPub=mrQueryOK?musicPlaying:AVAudioSession.sharedInstance.isOtherAudioPlaying;
+        BOOL mini=size.height>=24 && size.height<=62 && size.width>=100 && size.width<=(playingPub?208.0:236.0) && size.width>size.height*1.55;
+        BOOL expanded=size.height>=120 && size.height<=300 && size.width>=280 && size.width<=440;
+        diPublishIslandState(size,mini,expanded);
     }
 }
 static void diContDMWHook(id self, SEL _cmd) {
@@ -22069,43 +22018,6 @@ static void diISPublishBeat(BOOL playing) {
     sn.extra=diParticleExtraBeat?1:0;
     pwrite(fd, &sn, sizeof sn, 0);
 }
-
-/* ===== 3.0.87: 鼓点快照 —— SB 写 beat.bin, MRU 读它 =====
-   岛专辑特效在 MediaRemoteUI 进程里跑, 它自己连频谱端当然也能算, 但那样就是"另一份
-   包络、另一个鼓点", 和播放器不可能严丝合缝。这里把**已经在算的**这一份(gDIKick/
-   gDIBeatEnv/gDIBassPulse)30Hz 落成 24 字节, MRU 直接读 —— 岛上和播放器永远是同一拍。 */
-typedef struct { double t; float kick, env, bass, playing, energy, extra; } DIBeatSnapOut;
-static void diISPublishBeat(BOOL playing) {
-    if(!diIslandEffectsAvailable)return; // no retired island IPC writes
-
-    static int fd = -2;
-    static CFAbsoluteTime lastTry = 0, lastW = 0;
-    CFAbsoluteTime now = CFAbsoluteTimeGetCurrent();
-    if (fd < 0) {
-        if (fd == -1 && now - lastTry < 2.0) return;
-        lastTry = now;
-        NSString *dir = diMruSharedDir();
-        if (!dir.length) { fd = -1; return; }
-        [[NSFileManager defaultManager] createDirectoryAtPath:dir withIntermediateDirectories:YES
-                                                     attributes:@{NSFilePosixPermissions: @0777} error:NULL];
-        NSString *p = [dir stringByAppendingPathComponent:@"beat.bin"];
-        fd = open([p fileSystemRepresentation], O_RDWR | O_CREAT, 0644);
-        if (fd < 0) { fd = -1; return; }
-    }
-    if (now - lastW < 0.033) return;     /* 30Hz 足够, 别每帧都 write */
-    lastW = now;
-    DIBeatSnapOut sn;
-    memset(&sn, 0, sizeof sn);
-    sn.t = now;
-    sn.kick = playing ? diSharedVisualPulse : 0.0f;
-    sn.env = playing ? gDIBeatEnv : 0.0f;
-    sn.bass = playing ? gDIBassPulse : 0.0f;
-    sn.playing = playing ? 1.0f : 0.0f;
-    sn.energy = playing ? gDIFxEnergy : 0.0f;
-    sn.extra=diParticleExtraBeat?1:0;
-    pwrite(fd, &sn, sizeof sn, 0);
-}
-
 
 static BOOL diPowerPlayerVisible(UIView *v){
     if(!v || !v.window || v.window.hidden)return NO;
