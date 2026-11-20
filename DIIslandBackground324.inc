@@ -81,7 +81,7 @@ static NSHashTable *diBackgrounds324;
         else{[self.compactPlayer pause];self.compactLooper=nil;self.compactPlayer=nil;self.compactLayer.player=nil;}
         image.image=nil;return;
     }
-    __weak typeof(self) weak=self;
+    __weak DIIslandBackground324 *weak=self;
     // Never parse tracks/build AVFoundation assets inside system layout callbacks.
     static dispatch_queue_t queue;static dispatch_once_t once;
     dispatch_once(&once,^{queue=dispatch_queue_create("com.abgg332.driftisland.background324",DISPATCH_QUEUE_SERIAL);});
@@ -203,4 +203,23 @@ static void diDirectBackgroundHost324(UIView *host){
 }
 static void diDirectBackgroundTick324(void){
     for(DIIslandBackground324 *v in diBackgrounds324.allObjects)[v refresh];
+    if(!enabled || gLocked)return;
+    static CFAbsoluteTime last=0;CFAbsoluteTime now=CFAbsoluteTimeGetCurrent();
+    if(now-last<3)return;last=now;
+    // Catch containers which existed before hook installation, without music.
+    for(UIScene *scene in UIApplication.sharedApplication.connectedScenes){
+        if(![scene isKindOfClass:UIWindowScene.class])continue;
+        for(UIWindow *window in ((UIWindowScene *)scene).windows){
+            if(![NSStringFromClass(window.class) containsString:@"SystemAperture"])continue;
+            NSMutableArray<UIView *> *queue=[NSMutableArray arrayWithObject:window];int budget=240;
+            while(queue.count && budget-->0){
+                UIView *node=queue.firstObject;[queue removeObjectAtIndex:0];
+                if([NSStringFromClass(node.class) isEqualToString:@"SBSystemApertureContainerView"]){
+                    if(!objc_getAssociatedObject(node,&kDIBackground324))diDirectBackgroundHost324(node);
+                    continue;
+                }
+                for(UIView *child in node.subviews)[queue addObject:child];
+            }
+        }
+    }
 }
