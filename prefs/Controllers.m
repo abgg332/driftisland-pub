@@ -7034,11 +7034,11 @@ static BOOL diBarStyleOK(int s) {
     [specs addObject:[self fxColorSpec:@"渐变起始色" key:diFxSizedKey(@"ParticleColorA") def:@"#FFFFBC" modeKey:nil]];
     [specs addObject:[self fxColorSpec:@"渐变结束色" key:diFxSizedKey(@"ParticleColorB") def:@"#BFCDF8" modeKey:nil]];
 
-    [specs addObject:[self groupSpec:@"专辑头像遮罩" footer:@"仅使用自定义 PNG 透明遮罩素材，选中即生效。"]];
+    [specs addObject:[self groupSpec:@"专辑头像遮罩" footer:nil]];
     [specs addObject:[self switchSpec:@"启用头像遮罩" key:kDIPlayerMaskOnKey def:@NO]];
     {PSSpecifier *custom=[PSSpecifier preferenceSpecifierNamed:@"自定义遮罩素材" target:self set:NULL get:NULL detail:nil cell:PSButtonCell edit:nil];
     custom.buttonAction=@selector(diFXOpenCustomMask:);[specs addObject:custom];}
-    [specs addObject:[self npSlider:@"头像/环/粒子整体大小" key:diFxSizedKey(@"AlbumGroupSize") def:1.0 mn:0.65 mx:1.15]];
+    [specs addObject:[self npSlider:@"头像大小" key:diFxSizedKey(@"AlbumGroupSize") def:1.0 mn:0.65 mx:1.15]];
     [specs addObject:[self groupSpec:@"专辑进度环" footer:@"根据歌曲实际播放进度绘制，暂停保留位置；没有时长的直播不显示。"]];
     [specs addObject:[self switchSpec:@"启用专辑进度环" key:diFxSizedKey(@"ArtworkProgressRingEnabled") def:@NO]];
     [specs addObject:[self npSlider:@"进度环宽度" key:diFxSizedKey(@"ArtworkRingWidth") def:3.0 mn:0.5 mx:10.0]];
