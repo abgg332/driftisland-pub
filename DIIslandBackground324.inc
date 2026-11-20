@@ -1,3 +1,4 @@
+#include "DIBackgroundAnimation327.inc"
 /* 3.1.24 independent reconstruction of a container-driven island background.
  * Evidence: DynamicFX 1.0.7 arm64e 0x12c0c/0x12ebc/0x11bac/0x119ac.
  * No third-party binary, authorization, network code, or forced island activity.
@@ -37,6 +38,9 @@ static NSHashTable *diBackgrounds324;
 @property(nonatomic,assign) CGRect lastGeometry;
 @property(nonatomic,assign) CGFloat lastRadius;
 @property(nonatomic,assign) CFAbsoluteTime diagnosticAt;
+@property(nonatomic,strong) NSMutableDictionary<NSString *,NSString *> *animationSignatures327;
+@property(nonatomic,assign) BOOL mirrored327;
+@property(nonatomic,assign) CFTimeInterval report327;
 @property(nonatomic,assign) BOOL syncing326;
 @property(nonatomic,assign) CFTimeInterval lastSync326;
 @property(nonatomic,assign) CFTimeInterval lastDisplay326;
@@ -159,6 +163,71 @@ static NSHashTable *diBackgrounds324;
     if(self.hidden)[self startBurst];
     [self sync];
 }
+- (BOOL)mirrorGeometry327:(UIView *)host {
+    CALayer *source=host.layer;
+    // Distinct origins or nonunit local time rates require the sampled fallback.
+    if(fabs(source.bounds.origin.x)>.001 || fabs(source.bounds.origin.y)>.001 || source.speed!=1)return NO;
+    CGFloat pixel=1.0/MAX(1.0,UIScreen.mainScreen.scale);
+    NSMutableDictionary *animations=[NSMutableDictionary dictionary];
+    BOOL hasBounds=NO;
+    for(NSString *key in source.animationKeys){
+        CAAnimation *a=[source animationForKey:key];BOOL bounds=NO;
+        CAAnimation *valid=diBGAnimation327(a,0,pixel,&bounds,0);
+        if(valid){animations[key]=a;hasBounds|=bounds;}
+    }
+    if(!hasBounds){
+        if(self.mirrored327){
+            for(CALayer *layer in @[self.layer,self.compactLayer,self.expandedLayer,self.compactImage.layer,self.expandedImage.layer])
+                for(NSString *key in layer.animationKeys)if([key hasPrefix:@"di.geometry327."])[layer removeAnimationForKey:key];
+            [self.animationSignatures327 removeAllObjects];self.mirrored327=NO;
+        }
+        return NO;
+    }
+    if(!self.animationSignatures327)self.animationSignatures327=[NSMutableDictionary dictionary];
+    NSMutableSet *live=[NSMutableSet set];
+    [CATransaction begin];[CATransaction setDisableActions:YES];
+    CGRect model=host.bounds;
+    self.layer.anchorPoint=CGPointZero;self.layer.position=CGPointZero;self.layer.bounds=model;
+    CGFloat radius=source.cornerRadius;
+    self.layer.cornerRadius=radius>.1?radius:MIN(model.size.width,model.size.height)*.5;
+    NSArray *targets=@[self.layer,self.compactLayer,self.expandedLayer,self.compactImage.layer,self.expandedImage.layer];
+    for(NSUInteger i=1;i<targets.count;i++){
+        CALayer *layer=targets[i];layer.anchorPoint=CGPointZero;layer.position=CGPointMake(-pixel,-pixel);
+        layer.bounds=CGRectMake(0,0,model.size.width+2*pixel,model.size.height+2*pixel);
+    }
+    for(NSString *key in animations){
+        CAAnimation *original=animations[key];NSString *signature=diBGSignature327(original,0);
+        for(NSUInteger i=0;i<targets.count;i++){
+            CALayer *layer=targets[i];NSString *dest=[@"di.geometry327." stringByAppendingString:key];
+            NSString *token=[NSString stringWithFormat:@"%lu/%@",(unsigned long)i,key];[live addObject:token];
+            if([self.animationSignatures327[token] isEqualToString:signature] && [layer animationForKey:dest])continue;
+            BOOL ignored=NO;CAAnimation *copy=diBGAnimation327(original,i==0?0:1,pixel,&ignored,0);
+            if(!copy)continue;
+            if(copy.beginTime!=0)copy.beginTime=[layer convertTime:original.beginTime fromLayer:source];
+            [layer addAnimation:copy forKey:dest];self.animationSignatures327[token]=signature;
+        }
+        // When the system uses radius=0 and the old capsule fallback, derive
+        // its radius from exactly the same bounds curve rather than polling.
+        if(source.cornerRadius<.1){
+            NSString *dest=[@"di.geometry327.radius." stringByAppendingString:key];
+            NSString *token=[@"radius/" stringByAppendingString:key];[live addObject:token];
+            if(![self.animationSignatures327[token] isEqualToString:signature] || ![self.layer animationForKey:dest]){
+                BOOL ignored=NO;CAAnimation *copy=diBGAnimation327(original,2,pixel,&ignored,0);
+                if(copy){if(copy.beginTime!=0)copy.beginTime=[self.layer convertTime:original.beginTime fromLayer:source];[self.layer addAnimation:copy forKey:dest];self.animationSignatures327[token]=signature;}
+            }
+        }
+    }
+    // Replaced/interrupted system animations must not keep an obsolete curve.
+    for(NSString *token in self.animationSignatures327.allKeys)if(![live containsObject:token]){
+        if([token hasPrefix:@"radius/"])[self.layer removeAnimationForKey:[@"di.geometry327.radius." stringByAppendingString:[token substringFromIndex:7]]];
+        else{NSRange slash=[token rangeOfString:@"/"];NSUInteger index=[[token substringToIndex:slash.location] integerValue];if(index<targets.count)[targets[index] removeAnimationForKey:[@"di.geometry327." stringByAppendingString:[token substringFromIndex:slash.location+1]]];}
+        [self.animationSignatures327 removeObjectForKey:token];
+    }
+    [CATransaction commit];
+    self.mirrored327=YES;
+    if(CACurrentMediaTime()-self.report327>2){self.report327=CACurrentMediaTime();RLog(@"[动画同步327] renderer=CA boundsAnimations=%lu model=%@；不逐帧回写呈现尺寸",(unsigned long)animations.count,NSStringFromCGRect(model));}
+    return YES;
+}
 - (void)sync {
     // layoutSubviews, heartbeat and display link can all arrive in one run loop.
     // Coalesce near-identical updates and prevent child layout re-entrancy.
@@ -167,6 +236,7 @@ static NSHashTable *diBackgrounds324;
     self.lastSync326=now326;
     UIView *host=self.host;
     if(![self visibleHost]){[self stop];return;}
+    BOOL compositor=[self mirrorGeometry327:host];
     CALayer *present=(CALayer *)host.layer.presentationLayer;
     CGRect bounds=present?present.bounds:host.bounds;
     if(bounds.size.width<=1 || bounds.size.height<=1)bounds=host.bounds;
@@ -180,15 +250,17 @@ static NSHashTable *diBackgrounds324;
     BOOL moving=present && (fabs(present.bounds.size.width-host.bounds.size.width)>.35 || fabs(present.bounds.size.height-host.bounds.size.height)>.35 || fabs(rawRadius-modelRadius)>.35);
     CGFloat epsilon=.1/MAX(1.0,UIScreen.mainScreen.scale);
     BOOL changed=fabs(self.frame.origin.x-bounds.origin.x)>epsilon || fabs(self.frame.origin.y-bounds.origin.y)>epsilon || fabs(self.frame.size.width-bounds.size.width)>epsilon || fabs(self.frame.size.height-bounds.size.height)>epsilon || fabs(self.layer.cornerRadius-radius)>.1;
-    CGFloat height=bounds.size.height;
+    CGFloat height=(compositor?host.bounds:bounds).size.height;
     // Retain DriftIsland's compact/expanded material split, with a small hysteresis.
     if(!self.modeKnown){self.expandedMode=height>60;self.modeKnown=YES;}
     else if(height>62)self.expandedMode=YES;else if(height<58)self.expandedMode=NO;
     self.syncing326=YES;
     [CATransaction begin];[CATransaction setDisableActions:YES];
     // Avoid no-op geometry writes that can invalidate layout every display tick.
-    if(!CGRectEqualToRect(self.frame,bounds))self.frame=bounds;
-    if(fabs(self.layer.cornerRadius-radius)>.01)self.layer.cornerRadius=radius;
+    if(!compositor){
+        if(!CGRectEqualToRect(self.frame,bounds))self.frame=bounds;
+        if(fabs(self.layer.cornerRadius-radius)>.01)self.layer.cornerRadius=radius;
+    }
     CGRect b=self.bounds;
     // Cover the entire island at every size; never inherit frame-effect insets.
     // Small overscan avoids subpixel seams without moving the visual center.
@@ -196,8 +268,10 @@ static NSHashTable *diBackgrounds324;
     CGRect video=CGRectInset(b,-pixel,-pixel);
     AVPlayerLayer *visibleLayer=self.expandedMode?self.expandedLayer:self.compactLayer;
     UIImageView *visibleImage=self.expandedMode?self.expandedImage:self.compactImage;
-    if(!CGRectEqualToRect(visibleLayer.frame,video))visibleLayer.frame=video;
-    if(visibleImage.image && !CGRectEqualToRect(visibleImage.frame,video))visibleImage.frame=video;
+    if(!compositor){
+        if(!CGRectEqualToRect(visibleLayer.frame,video))visibleLayer.frame=video;
+        if(visibleImage.image && !CGRectEqualToRect(visibleImage.frame,video))visibleImage.frame=video;
+    }
     self.compactLayer.hidden=self.expandedMode || !smallOn;
     self.expandedLayer.hidden=!self.expandedMode || !expandOn;
     self.compactImage.hidden=self.expandedMode || !smallOn;
@@ -206,7 +280,7 @@ static NSHashTable *diBackgrounds324;
     [CATransaction commit];
     // Warm both only while geometry is transitioning. After settling, pause
     // the invisible decoder but retain item/looper and its last rendered frame.
-    BOOL warm=moving || self.stableTicks<6;
+    BOOL warm=compositor || moving || self.stableTicks<6;
     BOOL wantCompact=smallOn && (!self.expandedMode || warm);
     BOOL wantExpanded=expandOn && (self.expandedMode || warm);
     if(wantCompact){if(self.compactPlayer && self.compactPlayer.rate==0)[self.compactPlayer play];}
@@ -219,7 +293,7 @@ static NSHashTable *diBackgrounds324;
     }
     self.geometryKnown=YES;
     self.syncing326=NO;
-    if(changed || moving)self.stableTicks=0;else self.stableTicks++;
+    if(changed || moving || compositor)self.stableTicks=0;else self.stableTicks++;
     if(self.stableTicks>=30){
         self.link.paused=YES;self.lastDisplay326=0;
         if(self.ticks326){RLog(@"[转场326] ticks=%lu late=%lu worstGap=%.2fms screenHz=%ld（回调间隔非视频解码FPS）",(unsigned long)self.ticks326,(unsigned long)self.late326,self.worstGap326*1000,(long)UIScreen.mainScreen.maximumFramesPerSecond);self.ticks326=0;self.late326=0;self.worstGap326=0;}
@@ -239,7 +313,7 @@ static void diDirectBackgroundHost324(UIView *host){
         [surface startBurst];
         // Display link owns transition geometry; no refresh/asset discovery here.
         // Initial alignment is needed only if resuming a hidden surface.
-        if(surface.hidden)[surface sync];
+        [surface sync];
         return;
     }
     if([objc_getAssociatedObject(host,&kDIBackgroundPending324) boolValue])return;
