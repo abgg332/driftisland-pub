@@ -49,6 +49,7 @@ static NSHashTable *diBackgrounds324;
 @property(nonatomic,assign) BOOL displayKnown328;
 @property(nonatomic,assign) CFTimeInterval requestedAt328;
 @property(nonatomic,assign) CFTimeInterval report327;
+@property(nonatomic,weak) CALayer *animationSource327;
 @property(nonatomic,assign) BOOL syncing326;
 @property(nonatomic,assign) CFTimeInterval lastSync326;
 @property(nonatomic,assign) CFTimeInterval lastDisplay326;
@@ -187,16 +188,20 @@ static NSHashTable *diBackgrounds324;
 }
 - (BOOL)mirrorGeometry327:(UIView *)host {
     CALayer *source=host.layer;
-    // Distinct origins or nonunit local time rates require the sampled fallback.
+    // DynamicFX evidence shows geometry is commonly animated on the internal
+    // Scaling/RotatingContentView layer, not the outer container. Search only
+    // the system host subtree and only shallowly; never scan the rendered video.
+    NSMutableArray<CALayer *> *queue=[NSMutableArray arrayWithObject:source];CALayer *best=nil;int budget=48;
+    while(queue.count && budget-->0){CALayer *node=queue.firstObject;[queue removeObjectAtIndex:0];
+        BOOL candidate=node.animationKeys.count>0;
+        if(candidate){for(NSString *key in node.animationKeys){CAAnimation *a=[node animationForKey:key];BOOL dummy=NO;if(diBGAnimation327(a,0,1.0/MAX(1.0,UIScreen.mainScreen.scale),&dummy,0)){best=node;break;}}}
+        if(best)break;for(CALayer *child in node.sublayers)if(child!=self.layer && queue.count<48)[queue addObject:child];
+    }
+    source=best?:host.layer;self.animationSource327=source;
     if(fabs(source.bounds.origin.x)>.001 || fabs(source.bounds.origin.y)>.001 || source.speed!=1)return NO;
     CGFloat pixel=1.0/MAX(1.0,UIScreen.mainScreen.scale);
-    NSMutableDictionary *animations=[NSMutableDictionary dictionary];
-    BOOL hasBounds=NO;
-    for(NSString *key in source.animationKeys){
-        CAAnimation *a=[source animationForKey:key];BOOL bounds=NO;
-        CAAnimation *valid=diBGAnimation327(a,0,pixel,&bounds,0);
-        if(valid){animations[key]=a;hasBounds|=bounds;}
-    }
+    NSMutableDictionary *animations=[NSMutableDictionary dictionary];BOOL hasBounds=NO;
+    for(NSString *key in source.animationKeys){CAAnimation *a=[source animationForKey:key];BOOL bounds=NO;CAAnimation *valid=diBGAnimation327(a,0,pixel,&bounds,0);if(valid){animations[key]=a;hasBounds|=bounds;}}
     if(!hasBounds){
         if(self.mirrored327){
             for(CALayer *layer in @[self.layer,self.compactLayer,self.expandedLayer,self.compactImage.layer,self.expandedImage.layer])
@@ -247,7 +252,7 @@ static NSHashTable *diBackgrounds324;
     }
     [CATransaction commit];
     self.mirrored327=YES;
-    if(CACurrentMediaTime()-self.report327>2){self.report327=CACurrentMediaTime();RLog(@"[动画同步327] renderer=CA boundsAnimations=%lu model=%@；不逐帧回写呈现尺寸",(unsigned long)animations.count,NSStringFromCGRect(model));}
+    if(CACurrentMediaTime()-self.report327>2){self.report327=CACurrentMediaTime();RLog(@"[动画同步327] renderer=CA source=%@ boundsAnimations=%lu model=%@；不逐帧回写呈现尺寸",NSStringFromClass(source.class),(unsigned long)animations.count,NSStringFromCGRect(model));}
     return YES;
 }
 - (void)sync {
