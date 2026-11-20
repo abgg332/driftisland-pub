@@ -17483,6 +17483,15 @@ static void diNPDumpCrashEvidence(void) {
                 if([report isKindOfClass:NSDictionary.class]){
                     RLog(@"[崩溃结构] exception=%@ termination=%@ faultingThread=%@",report[@"exception"],report[@"termination"],report[@"faultingThread"]);
                     NSArray *threads=report[@"threads"],*images=report[@"usedImages"];
+                    for(NSString *field in @[@"asi",@"applicationSpecificInformation",@"exceptionReason"]){
+                        id detail=report[field];if(detail){NSString *text=[detail description];if(text.length>2500)text=[text substringToIndex:2500];RLog(@"[首次异常321] %@=%@",field,text);}
+                    }
+                    NSArray *throwFrames=report[@"lastExceptionBacktrace"];
+                    if([throwFrames isKindOfClass:NSArray.class])for(NSUInteger k=0;k<MIN((NSUInteger)40,throwFrames.count);k++){
+                        NSDictionary *frame=throwFrames[k];NSInteger im=[frame[@"imageIndex"] integerValue];
+                        NSDictionary *image=([images isKindOfClass:NSArray.class]&&im>=0&&im<(NSInteger)images.count)?images[im]:@{};
+                        RLog(@"[首次异常栈321] #%lu %@ symbol=%@ offset=%@ uuid=%@",(unsigned long)k,image[@"name"],frame[@"symbol"],frame[@"imageOffset"],image[@"uuid"]);
+                    }
                     NSInteger index=[report[@"faultingThread"] integerValue];
                     if([threads isKindOfClass:NSArray.class]&&index>=0&&index<(NSInteger)threads.count){
                         NSArray *frames=threads[index][@"frames"];

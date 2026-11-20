@@ -11,6 +11,7 @@
 #import <objc/runtime.h>
 
 #import "TouchViz-Swift.h"
+#import "DITVZSceneSafety.h"
 
 static const void *LNTouchVisualizerWindowKey = &LNTouchVisualizerWindowKey;
 
@@ -71,6 +72,29 @@ __attribute__((visibility("hidden")))
 }
 
 - (void)__ln_vis_sendEvent:(UIEvent *)event {
+    if(DITVZIs17()){
+        if([self isKindOfClass:_LNSceneTouchVisualizerWindow.class])return;
+        // System dispatch happens exactly once; never catch/swallow system errors.
+        [self __ln_vis_sendEvent:event];
+        if(event.type!=UIEventTypeTouches || !NSThread.isMainThread)return;
+        // _UISystemGestureWindow has a separate observer. Avoid a duplicate feed.
+        Class gesture=NSClassFromString(@"_UISystemGestureWindow");
+        if(gesture && [self isKindOfClass:gesture])return;
+        @try{
+            UIWindowScene *scene=self.windowScene;
+            LNTouchVisualizerWindow *overlay=objc_getAssociatedObject(scene,LNTouchVisualizerWindowKey);
+            if(overlay && !overlay.hidden && DITVZEligibleScene(scene)){
+                [overlay sendTouchEvent:event];
+                [overlay sendQuickPathEvent:event];
+            }
+        }@catch(NSException *exception){
+            NSLog(@"[轨迹安全321] 观察触摸失败 %@: %@",exception.name,exception.reason);
+            LNTouchVisualizerWindow *overlay=objc_getAssociatedObject(self.windowScene,LNTouchVisualizerWindowKey);
+            overlay.hidden=YES;
+        }
+        return;
+    }
+
     if ([self isKindOfClass:[_LNSceneTouchVisualizerWindow class]]) {
         return;
     }
@@ -90,6 +114,7 @@ __attribute__((visibility("hidden")))
     LNTouchVisualizerWindow *rv = objc_getAssociatedObject(self, LNTouchVisualizerWindowKey);
 
     NSString *processName = [[NSProcessInfo processInfo] processName];
+    if(DITVZIs17() && !DITVZEligibleScene(self))return rv;
     if (rv == nil && [processName isEqualToString:@"SpringBoard"]) {
         rv = [_LNSceneTouchVisualizerWindow new];
         rv.windowLevel = CGFLOAT_MAX;
@@ -110,6 +135,10 @@ __attribute__((visibility("hidden")))
 }
 
 - (BOOL)touchVisualizerEnabled {
+    if(DITVZIs17()){
+        LNTouchVisualizerWindow *existing=objc_getAssociatedObject(self,LNTouchVisualizerWindowKey);
+        return existing && !existing.hidden;
+    }
     return self.touchVisualizerWindow.hidden == NO;
 }
 

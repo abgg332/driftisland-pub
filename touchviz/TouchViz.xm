@@ -9,6 +9,7 @@
 #import "TVZPrefs/NSBundle+TVZPrefs.h"
 #import "TVZPrefs/TVZUserDefaults.h"
 #import "TouchViz-Swift.h"
+#import "DITVZSceneSafety.h"
 
 @protocol SBReachabilityObserver <NSObject>
 @optional
@@ -410,6 +411,7 @@ static NSString *BlockSig(id blockObj)
 
 %new
 - (void)touchviz_reload {
+    if(DITVZIs17() && !DITVZEligibleScene(self))return;
     _gWindowScene = self;
     _gWindow = self.touchVisualizerWindow;
     _gTouchConfig = _gWindow.touchContactConfig;
@@ -456,6 +458,20 @@ static NSString *BlockSig(id blockObj)
         return;
     }
 
+    if(DITVZIs17()){
+        if(!NSThread.isMainThread || !_gWindow || !DITVZEligibleScene(_gWindowScene))return;
+        @try{
+            if(IsEnabled() || [_gWindow hasAnyTouch]){
+                [_gWindow sendTouchEvent:event];
+                [_gWindow sendQuickPathEvent:event];
+            }
+        }@catch(NSException *exception){
+            NSLog(@"[轨迹安全321] 系统手势观察失败 %@: %@",exception.name,exception.reason);
+            _gWindow.hidden=YES;
+            _gDisableOverride=YES;_gDisableOverrideWhenRecording=YES;
+        }
+        return;
+    }
     if (IsEnabled() || [_gWindow hasAnyTouch]) {
         [_gWindow sendTouchEvent:event];
         [_gWindow sendQuickPathEvent:event];
