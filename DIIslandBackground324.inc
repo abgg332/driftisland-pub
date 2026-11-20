@@ -48,11 +48,6 @@ static NSHashTable *diBackgrounds324;
 @property(nonatomic,assign) BOOL displayedMode328;
 @property(nonatomic,assign) BOOL displayKnown328;
 @property(nonatomic,assign) CFTimeInterval requestedAt328;
-@property(nonatomic,assign) CGRect observedModel328;
-@property(nonatomic,assign) CGFloat observedRadius328;
-@property(nonatomic,assign) BOOL observed328;
-@property(nonatomic,assign) CFTimeInterval warmUntil328;
-@property(nonatomic,assign) NSInteger oldMode328;
 @property(nonatomic,assign) CFTimeInterval report327;
 @property(nonatomic,assign) BOOL syncing326;
 @property(nonatomic,assign) CFTimeInterval lastSync326;
@@ -91,7 +86,7 @@ static NSHashTable *diBackgrounds324;
     return self;
 }
 - (void)startBurst {
-    if((gLocked || gScreenOff328) || gScreenOff328)return;
+    if(gLocked || gScreenOff328)return;
     if(!self.link || self.link.paused)self.stableTicks=0;
     if(!self.link){self.link=[CADisplayLink displayLinkWithTarget:self.ticker selector:@selector(tick:)];
         // Geometry runs at 60Hz, video decoding is independent. Avoid two live
@@ -174,7 +169,7 @@ static NSHashTable *diBackgrounds324;
 }
 - (BOOL)visibleHost {
     UIView *host=self.host;
-    if(!enabled || ((gLocked || gScreenOff328) || gScreenOff328) || !host.window || host.window.hidden)return NO;
+    if(!enabled || (gLocked || gScreenOff328) || !host.window || host.window.hidden)return NO;
     for(UIView *v=host;v;v=v.superview)if(v.hidden || v.alpha<.01)return NO;
     if(notifyBgOff && ([objc_getAssociatedObject(host,&kHostIsNotif) boolValue] || [objc_getAssociatedObject(host,&kCapIsNotif) boolValue]))return NO;
     return host.bounds.size.width>2 && host.bounds.size.height>2;
@@ -183,7 +178,7 @@ static NSHashTable *diBackgrounds324;
     NSString *small=materialPathFor(NO),*large=materialPathFor(YES);
     // Background is edge-to-edge. animScale/offset/FPS configure legacy frame
     // effects, not the canvas of this independent video background.
-    NSString *sig=[NSString stringWithFormat:@"%d/%d/%d/%d/%@/%@",enabled,((gLocked || gScreenOff328) || gScreenOff328),smallOn,expandOn,small?:@"",large?:@""];
+    NSString *sig=[NSString stringWithFormat:@"%d/%d/%d/%d/%@/%@",enabled,(gLocked || gScreenOff328),smallOn,expandOn,small?:@"",large?:@""];
     BOOL changed=![self.prefSignature isEqualToString:sig];self.prefSignature=sig;
     if(![self visibleHost]){[self stop];return;}
     if(changed){[self loadPath:small expanded:NO];[self loadPath:large expanded:YES];[self startBurst];}
@@ -348,7 +343,7 @@ static void diDirectBackgroundHost324(UIView *host){
     // scaling/rotating wrappers implicated by the 3.1.20 crash.
     if(![NSStringFromClass(host.class) isEqualToString:@"SBSystemApertureContainerView"])return;
     DIIslandBackground324 *surface=objc_getAssociatedObject(host,&kDIBackground324);
-    if(!host.window || !enabled || ((gLocked || gScreenOff328) || gScreenOff328)){[surface stop];return;}
+    if(!host.window || !enabled || (gLocked || gScreenOff328)){[surface stop];return;}
     if(surface){
         CGRect model=host.layer.bounds;CGFloat r=host.layer.cornerRadius;
         BOOL dirty=!surface.observed328 || !CGRectEqualToRect(surface.observedModel328,model) || fabs(surface.observedRadius328-r)>.01;
@@ -367,7 +362,7 @@ static void diDirectBackgroundHost324(UIView *host){
         UIView *h=weak;if(!h)return;
         objc_setAssociatedObject(h,&kDIBackgroundPending324,nil,OBJC_ASSOCIATION_RETAIN_NONATOMIC);
         DIIslandBackground324 *v=objc_getAssociatedObject(h,&kDIBackground324);
-        if(!h.window || !enabled || ((gLocked || gScreenOff328) || gScreenOff328)){[v stop];return;}
+        if(!h.window || !enabled || (gLocked || gScreenOff328)){[v stop];return;}
         if(!v){v=[[DIIslandBackground324 alloc]initWithFrame:h.bounds];v.host=h;objc_setAssociatedObject(h,&kDIBackground324,v,OBJC_ASSOCIATION_RETAIN_NONATOMIC);
             if(!diBackgrounds324)diBackgrounds324=[NSHashTable weakObjectsHashTable];[diBackgrounds324 addObject:v];
             RLog(@"[岛背景324] 已挂顶层容器 %@；背景不依赖音乐，系统内容包装层不变",NSStringFromClass(h.class));}
@@ -377,7 +372,7 @@ static void diDirectBackgroundHost324(UIView *host){
 }
 static void diDirectBackgroundTick324(void){
     for(DIIslandBackground324 *v in diBackgrounds324.allObjects)[v refresh];
-    if(!enabled || ((gLocked || gScreenOff328) || gScreenOff328))return;
+    if(!enabled || (gLocked || gScreenOff328))return;
     static CFAbsoluteTime last=0;CFAbsoluteTime now=CFAbsoluteTimeGetCurrent();
     if(now-last<3)return;last=now;
     // Catch containers which existed before hook installation, without music.

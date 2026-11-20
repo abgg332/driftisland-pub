@@ -56,7 +56,6 @@ static NSArray *diSortedStrs(NSArray *arr) {
 
 static BOOL logEnabled; // 日志开关
 static BOOL gScreenOff328=NO; // independent display-power gate, no polling
-static BOOL gScreenOff328=NO; // independent display-power gate, no polling
 static BOOL gLocked = NO; // 锁屏状态: 锁屏期间所有岛视频/帧率动画全停(锁屏界面组件也是岛视图, 不停会一直亮屏)
 /* ===== 2.8.12: 歌词岛已回归(2.8.4/2.8.5 曾下架) —— "音乐岛识别"判据保留,
    遮罩/视频层还要用它排除充电/人脸等系统岛 ===== */
@@ -3143,7 +3142,6 @@ __attribute__((unused)) static BOOL diMiniMusicActive(UIView *host) {
 /* 2.7.26: 小岛专辑/音频位置帧率素材(2.2.45 stepMini 原版, 2.7.0 误删后补回) */
 - (void)stepMini {
     if(gScreenOff328 || gLocked){self.link.paused=YES;return;}
-    if(gScreenOff328 || gLocked){self.link.paused=YES;return;}
     @try {
     if (_link.preferredFramesPerSecond > 30) _link.preferredFramesPerSecond = 30;  /* 3.0.25 功耗: 小岛固定 30fps */
     UIView *host = self.superview;
@@ -3232,7 +3230,6 @@ __attribute__((unused)) static BOOL diMiniMusicActive(UIView *host) {
 }
 
 - (void)step {
-    if(gScreenOff328 || gLocked){self.link.paused=YES;return;}
     if(gScreenOff328 || gLocked){self.link.paused=YES;return;}
     /* 3.0.25 功耗: 小岛素材链路固定 30fps —— 小岛只有 37pt 高, 序列帧推进靠累加器,
        视觉速度不变, CPU/功耗直接减半(用户反馈"听歌明显发热"的主力之一)。 */
@@ -4679,6 +4676,7 @@ static BOOL diApplyMaskToCover(UIView *cover, UIImage *shape) {
 }
 
 - (void)step {
+    if(gScreenOff328 || gLocked){[self diTeardown];_link.paused=YES;return;}
     @try {
         UIView *host = self.superview;
         if (!host || host.window == nil) { [self diTeardown]; if (++_miss > 20) _link.paused = YES; return; }
@@ -13261,8 +13259,6 @@ static BOOL gTickSuspended = NO;
 static void pauseAllUnderWindows(void) { // 立即暂停所有视频层/帧率动画层的 displayLink 与播放器(不等 miss 计数)
     // 324 introduced a distinct UIView/player pair not covered by DIVideoView.
     for(DIIslandBackground324 *surface in diBackgrounds324.allObjects)[surface stop];
-    // 324 introduced a distinct UIView/player pair not covered by DIVideoView.
-    for(DIIslandBackground324 *surface in diBackgrounds324.allObjects)[surface stop];
     for (UIScene *s in UIApplication.sharedApplication.connectedScenes) {
         if (![s isKindOfClass:[UIWindowScene class]]) continue;
         for (UIWindow *w in ((UIWindowScene *)s).windows) {
@@ -13339,38 +13335,6 @@ static void lockStateChanged(CFNotificationCenterRef, void *, CFStringRef, const
             if (inst && [inst respondsToSelector:gs]) locked = (((long(*)(id, SEL))objc_msgSend)(inst, gs) != 0);
         }
         applyLockState(locked);
-    });
-}
-
-/* 3.1.28: physical display power, independent of unlocked/locked state.
-   The display Darwin state carries 0=off, 1=on. Lock remains an additional gate.
-   No audio-session changes and no automatic power assertion. */
-static void diSetDisplayOff328(BOOL off){
-    if(off==gScreenOff328)return;
-    gScreenOff328=off;
-    if(off){
-        pauseAllUnderWindows();
-        if(gTickTimer && !gTickSuspended){dispatch_suspend(gTickTimer);gTickSuspended=YES;}
-        RLog(@"[息屏328] 岛背景/旧视频/序列帧暂停，同步与可见性轮询停止");
-    }else if(!gLocked){
-        if(gTickTimer && gTickSuspended){dispatch_resume(gTickTimer);gTickSuspended=NO;}
-        diDirectBackgroundTick324();
-        RLog(@"[亮屏328] 按宿主可见性恢复；锁定状态仍保持暂停");
-    }
-}
-static void diInstallDisplayPower328(void){
-    static dispatch_once_t once;
-    dispatch_once(&once,^{
-        static int token=-1;
-        uint32_t status=notify_register_dispatch("com.apple.iokit.hid.displayStatus",&token,dispatch_get_main_queue(),^(int t){
-            uint64_t state=2;
-            if(notify_get_state(t,&state)==NOTIFY_STATUS_OK && state<=1)diSetDisplayOff328(state==0);
-        });
-        if(status!=NOTIFY_STATUS_OK)RLog(@"[息屏328] 显示通知注册失败，保留原锁屏暂停逻辑");
-        // If available, establish current state without assuming that an unset
-        // Darwin state means the display is off during initial installation.
-        Class c=NSClassFromString(@"SBBacklightController");SEL shared=NSSelectorFromString(@"sharedInstance"),query=NSSelectorFromString(@"screenIsOn");
-        if(c && [c respondsToSelector:shared]){id ctl=((id(*)(id,SEL))objc_msgSend)(c,shared);if([ctl respondsToSelector:query])diSetDisplayOff328(!((BOOL(*)(id,SEL))objc_msgSend)(ctl,query));}
     });
 }
 
@@ -19580,7 +19544,6 @@ __attribute__((constructor)) static void init(void) {
         if (wpOn) diCCInstallOverlayHook();
         dispatch_async(dispatch_get_main_queue(), ^{
             @try {
-                diInstallDisplayPower328();
                 diInstallDisplayPower328();
                 refreshAll(); installKnownHosts();
                 /* 2.9.55: 17 专用形态播报(16 不装) */
