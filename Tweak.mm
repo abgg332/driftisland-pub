@@ -2053,6 +2053,8 @@ static void diDumpWindowsForVolume(void) {
 
 @end
 
+#include "DIIslandBackground324.inc"
+
 #pragma mark - 2.7.0 换壁纸视图
 
 /* DIWallpaperView —— 铺在 SpringBoard 图标层下方的一整屏背景。
@@ -7426,10 +7428,12 @@ static void diContMaybeScan(UIView *self) {
 static void diContLayoutHook(id self, SEL _cmd) {
     if (diOrigContLayout) diOrigContLayout(self, _cmd);
     diContMaybeScan((UIView *)self);
+    diDirectBackgroundHost324((UIView *)self);
 }
 static void diContDMWHook(id self, SEL _cmd) {
     if (diOrigContDMW) diOrigContDMW(self, _cmd);
     diContMaybeScan((UIView *)self);
+    diDirectBackgroundHost324((UIView *)self);
 }
 static void diGainInstallHook(void) {
     /* 2.8.33: 两类黑层各自一个 done 标志 —— 私有类加载有先后, 任一类晚到时
@@ -7576,6 +7580,7 @@ static void diRefreshContour(void) {
    好(播放器/循环建好、暂停待命), 岛一出现直接挂上即播, 不需要放歌触发。
    锁屏期间不预载(gLocked=YES 直接返回), 功耗策略不变。 */
 static void diPreloadIslandVideos(void) {
+    if(diDirectBackgroundAvailable324())return;
     if (!enabled || gLocked) return;
     for (UIScene *s in UIApplication.sharedApplication.connectedScenes) {
         if (![s isKindOfClass:[UIWindowScene class]]) continue;
@@ -7820,6 +7825,7 @@ static void updateSingleVideo(UIWindow *win) {
            与 2.8.19 闸门一致, 音乐岛判定用结构特征(左专辑门户+右音频门户),
            来电/充电/通知/音量岛结构完全不符, 一律清场, 100% 原生。 */
     BOOL musicHost = (matRoot != nil);   /* 2.8.22: 素材闸门 = 有没有在放歌的音乐岛 */
+    if(!diDirectBackgroundAvailable324()){
     if (!smallV) {
         smallV = [[DIVideoView alloc] initWithFrame:(bestRoot ?: matRoot).bounds];
         smallV.expandedLayer = NO;
@@ -7860,10 +7866,8 @@ static void updateSingleVideo(UIWindow *win) {
         wakeLayer(v, target);
         if (target.subviews.firstObject != v) [target sendSubviewToBack:v];
     }
-    // 展开态: dump 跨进程 CALayer 层树(频谱动画在这里渲染), 2s 后再抓一次布局稳定版; 30s 窗口后重新计数
-    static int dumpCount; static CFAbsoluteTime dumpStart;
-    CFAbsoluteTime nowT = CFAbsoluteTimeGetCurrent();
-    if (dumpStart == 0 || nowT - dumpStart > 30) { dumpCount = 0; dumpStart = nowT; }
+    }
+    static int dumpCount = 0;
     if (0 && dumpCount < 1 && bestRoot.bounds.size.height > 60) {  /* 2.8.20 功耗: 生产版关闭全层树 dump(每 30s 一次巨量 CPU+日志 IO) */
         dumpCount++;
         __weak UIView *wr = bestRoot;
@@ -13106,6 +13110,7 @@ static void diISPublishFxParams(void) {
 
 static void visibilityTick(void) {
     refreshPrefs();
+    diDirectBackgroundTick324();
     @try { diISPublishFxParams(); } @catch (__unused NSException *e) {}
     static CFAbsoluteTime tMR; // CPU 优化: MediaRemote 查询 1秒一次(检测音乐停止够快)
     CFAbsoluteTime now = CFAbsoluteTimeGetCurrent();
