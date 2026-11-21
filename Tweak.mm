@@ -58,6 +58,7 @@ static BOOL logEnabled; // 日志开关
 static BOOL diLockAvatarOn338=NO;
 static void diLockAvatarRefresh338(void);
 static void diLockAvatarStop338(void);
+static void diLockAvatarDiscover339(UIView *root);
 static BOOL gScreenOff328=NO; // independent display-power gate, no polling
 static BOOL gLocked = NO; // 锁屏状态: 锁屏期间所有岛视频/帧率动画全停(锁屏界面组件也是岛视图, 不停会一直亮屏)
 /* ===== 2.8.12: 歌词岛已回归(2.8.4/2.8.5 曾下架) —— "音乐岛识别"判据保留,
@@ -10718,6 +10719,7 @@ static void layoutHook(UIView *self, SEL selector) {
             if (h.cls == c) { ((void(*)(id,SEL))h.original)(self, selector); found = YES; break; }
         if (found) break;
     }
+    if(NSThread.isMainThread && diLockAvatarOn338 && !gScreenOff328 && diInLockScreen(self))diLockAvatarDiscover339(self);
     if (lockWOn) applyLockWidth(self); // 2.2.10: 锁屏通知宽度(先于 updateHost, 避免岛相关开销)
     applyLockStyle(self);              // 2.2.17: 锁屏通知边框/背景/阴影
     if (NSThread.isMainThread) {
