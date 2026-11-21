@@ -2,7 +2,7 @@
    and PlayerMaskOn exported by SpringBoard; no window-tree scans or CC hooks. */
 @interface DILockScreenMaskState343 : NSObject
 @property(nonatomic,weak) UIView *host;
-@property(nonatomic,weak) UIImageView *art;
+@property(nonatomic,weak) UIView *art;
 @property(nonatomic,strong) UIImageView *mask;
 @property(nonatomic,strong) UIView *originalMask;
 @property(nonatomic,assign) BOOL maskInstalled;
@@ -44,11 +44,16 @@ static void diLockScreenFlags343(BOOL *lockOn,BOOL *maskOn){
     }
     if(lockOn)*lockOn=cachedLock;if(maskOn)*maskOn=cachedMask;
 }
-static UIImageView *diLockScreenArtwork343(UIView *host){
+static UIView *diLockScreenArtwork343(UIView *host){
     SEL s=NSSelectorFromString(@"artworkImageView");
-    if([host respondsToSelector:s]){@try{id v=((id(*)(id,SEL))objc_msgSend)(host,s);if([v isKindOfClass:UIImageView.class])return v;}@catch(__unused NSException *e){}}
-    CGSize z=host.bounds.size;
-    for(UIView *v in host.subviews)if([v isKindOfClass:UIImageView.class]&&fabs(v.bounds.size.width-z.width)<2&&fabs(v.bounds.size.height-z.height)<2)return (UIImageView *)v;
+    if([host respondsToSelector:s]){@try{id v=((id(*)(id,SEL))objc_msgSend)(host,s);if([v isKindOfClass:UIImageView.class])return (UIView *)v;}@catch(__unused NSException *e){}}
+    if([NSStringFromClass(host.class) isEqualToString:@"MRUActivityArtworkView"]){
+        SEL layerSel=NSSelectorFromString(@"artworkLayer");
+        if([host respondsToSelector:layerSel]){@try{id l=((id(*)(id,SEL))objc_msgSend)(host,layerSel);if([l isKindOfClass:CALayer.class]){id c=[(CALayer *)l contents];if(c&&CFGetTypeID((__bridge CFTypeRef)c)==CGImageGetTypeID())return host;}}@catch(__unused NSException *e){}}
+        for(NSString *key in @[@"imageView",@"coverArtImageView"]){SEL q=NSSelectorFromString(key);if([host respondsToSelector:q]){@try{id v=((id(*)(id,SEL))objc_msgSend)(host,q);if([v isKindOfClass:UIImageView.class])return (UIView *)v;}@catch(__unused NSException *e){}}}
+    }
+    CGSize z=host.bounds.size;NSMutableArray<UIView *> *todo=[NSMutableArray arrayWithArray:host.subviews];NSUInteger i=0;
+    while(i<todo.count&&i<40){UIView *v=todo[i++];if([v isKindOfClass:UIImageView.class]&&fabs(v.bounds.size.width-z.width)<2&&fabs(v.bounds.size.height-z.height)<2)return v;for(UIView *x in v.subviews)if(todo.count<40)[todo addObject:x];}
     return nil;
 }
 static void diLockScreenTeardown343(UIView *host,DILockScreenMaskState343 *st){
@@ -60,15 +65,17 @@ static UIImage *diLockScreenCircle343(void){
     static UIImage *im;static dispatch_once_t once;dispatch_once(&once,^{CGSize z=CGSizeMake(256,256);UIGraphicsBeginImageContextWithOptions(z,NO,1);CGContextRef c=UIGraphicsGetCurrentContext();CGContextSetShouldAntialias(c,YES);CGContextSetFillColorWithColor(c,UIColor.whiteColor.CGColor);CGContextFillEllipseInRect(c,CGRectInset((CGRect){CGPointZero,z},1,1));im=UIGraphicsGetImageFromCurrentImageContext();UIGraphicsEndImageContext();});return im;
 }
 static void diLockScreenApply343(UIView *host){
-    if(!NSThread.isMainThread||![NSStringFromClass(host.class) isEqualToString:@"MRUArtworkView"])return;
+    NSString *className=NSStringFromClass(host.class);
+    BOOL isLockArtwork=[className isEqualToString:@"MRUArtworkView"]||[className isEqualToString:@"MRUActivityArtworkView"];
+    if(!NSThread.isMainThread||!isLockArtwork)return;
     DILockScreenMaskState343 *st=objc_getAssociatedObject(host,&diLockScreenMaskStateKey343);
     if(!diLockScreenCover343(host)){if(st)diLockScreenTeardown343(host,st);return;}
     BOOL lockOn=NO,maskOn=NO;diLockScreenFlags343(&lockOn,&maskOn);
     if(!lockOn){if(st)diLockScreenTeardown343(host,st);return;}
-    UIImageView *art=diLockScreenArtwork343(host);if(!art||art.bounds.size.width<12||art.bounds.size.height<12)return;
+    UIView *art=diLockScreenArtwork343(host);if(!art||art.bounds.size.width<12||art.bounds.size.height<12)return;
     if(st&&st.art!=art){diLockScreenTeardown343(host,st);st=nil;}
     if(!st){st=[DILockScreenMaskState343 new];st.host=host;st.art=art;st.originalMask=art.maskView;objc_setAssociatedObject(host,&diLockScreenMaskStateKey343,st,OBJC_ASSOCIATION_RETAIN_NONATOMIC);if(!diLockScreenMaskHosts343)diLockScreenMaskHosts343=[NSHashTable weakObjectsHashTable];[diLockScreenMaskHosts343 addObject:host];
-        RLog(@"[锁屏共享遮罩343] 命中 %@ %.0fx%.0f PlayerMaskOn=%d",NSStringFromClass(host.class),art.bounds.size.width,art.bounds.size.height,maskOn);
+        RLog(@"[锁屏共享遮罩344] 命中 %@ %.0fx%.0f PlayerMaskOn=%d",NSStringFromClass(host.class),art.bounds.size.width,art.bounds.size.height,maskOn);
     }
     if(maskOn){
         if(!st.mask){st.mask=[UIImageView new];st.mask.userInteractionEnabled=NO;st.mask.opaque=NO;st.mask.backgroundColor=UIColor.clearColor;st.mask.contentMode=UIViewContentModeScaleToFill;}

@@ -59,6 +59,8 @@ static void diLockAvatarRefresh338(void);
 static void diLockAvatarStop338(void);
 static void diLockScreenInstall343(void);
 static void diLockScreenRefresh343(void);
+static BOOL diLockScreenCover343(UIView *host);
+static void diLockScreenApply343(UIView *host);
 static BOOL gScreenOff328=NO; // independent display-power gate, no polling
 static BOOL gLocked = NO; // 锁屏状态: 锁屏期间所有岛视频/帧率动画全停(锁屏界面组件也是岛视图, 不停会一直亮屏)
 /* ===== 2.8.12: 歌词岛已回归(2.8.4/2.8.5 曾下架) —— "音乐岛识别"判据保留,
@@ -15259,6 +15261,10 @@ static CGFloat diActivityHostHeight(UIView *artwork) {
 }
 static void diActivityApply(UIView *artwork) {
     if (!NSThread.isMainThread || ![artwork isKindOfClass:UIView.class]) return;
+    if ([NSStringFromClass(artwork.class) isEqualToString:@"MRUActivityArtworkView"] && diLockScreenCover343(artwork)) {
+        diLockScreenApply343(artwork);
+        return; /* Lock-screen large artwork uses the shared lock adapter, not island glass. */
+    }
     DIActivityMaskState *state = objc_getAssociatedObject(artwork, &kDIActivityMaskState);
     BOOL sized = artwork.bounds.size.width > 20 && artwork.bounds.size.height > 20;
     BOOL ios17 = diIsIOS17Up();
