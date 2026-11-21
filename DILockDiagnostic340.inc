@@ -3,7 +3,7 @@
 static int diLockDiagnosticToken340=-1;
 static BOOL diLockDiagnosticChannel340(void){
     static dispatch_once_t once;static BOOL ok=NO;
-    dispatch_once(&once,^{ok=notify_register_check("com.abgg332.driftisland.lockavatar.diag340",&diLockDiagnosticToken340)==NOTIFY_STATUS_OK;});
+    dispatch_once(&once,^{ok=notify_register_check("com.abgg332.driftisland.lockavatar.diag341",&diLockDiagnosticToken340)==NOTIFY_STATUS_OK;});
     return ok;
 }
 static void diLockDiagnosticPublish340(void){
@@ -12,6 +12,11 @@ static void diLockDiagnosticPublish340(void){
     uint64_t flags=(enabled && diLockAvatarOn338?1:0) | (!gScreenOff328?2:0) | (gLocked?4:0);
     uint64_t state=((uint64_t)(CFAbsoluteTimeGetCurrent())<<3)|flags;
     notify_set_state(diLockDiagnosticToken340,state);
+    static CFAbsoluteTime report=0;
+    if(CFAbsoluteTimeGetCurrent()-report>20 && diLockAvatarOn338){
+        report=CFAbsoluteTimeGetCurrent();
+        RLog(@"[锁屏通道341] SB 发布 flags=%llu enabled=%d avatar=%d displayOff=%d lockedHint=%d",(unsigned long long)flags,enabled,diLockAvatarOn338,gScreenOff328,gLocked);
+    }
 }
 static NSString *diLockDiagnosticOwner340(UIView *view){
     SEL sel=NSSelectorFromString(@"_viewControllerForAncestor");
@@ -22,7 +27,7 @@ static NSString *diLockDiagnosticOwner340(UIView *view){
 static void diLockDiagnosticDump340(UIView *root,BOOL remote){
     if(!root)return;
     NSMutableArray<UIView *> *queue=[NSMutableArray arrayWithObject:root];NSUInteger index=0,shown=0;
-    NSMutableString *report=[NSMutableString stringWithFormat:@"[锁屏定位340] proc=%@ root=%@ %@ owner=%@",NSProcessInfo.processInfo.processName,NSStringFromClass(root.class),NSStringFromCGRect(root.bounds),diLockDiagnosticOwner340(root)];
+    NSMutableString *report=[NSMutableString stringWithFormat:@"[锁屏定位341] proc=%@ root=%@ %@ owner=%@",NSProcessInfo.processInfo.processName,NSStringFromClass(root.class),NSStringFromCGRect(root.bounds),diLockDiagnosticOwner340(root)];
     while(index<queue.count && index<600 && shown<28 && report.length<10000){
         UIView *v=queue[index++];NSString *name=NSStringFromClass(v.class);
         CGSize size=v.bounds.size;
@@ -38,14 +43,20 @@ static void diLockDiagnosticDump340(UIView *root,BOOL remote){
         }
         for(UIView *child in v.subviews)if(queue.count<600)[queue addObject:child];
     }
-    [report appendFormat:@"\n[锁屏定位340] nodes=%lu described=%lu remote=%d（仅定位，未修改未知视图）",(unsigned long)index,(unsigned long)shown,remote];
+    [report appendFormat:@"\n[锁屏定位341] nodes=%lu described=%lu remote=%d（仅定位，未修改未知视图）",(unsigned long)index,(unsigned long)shown,remote];
     if(remote)diMruFileLog(report);else RLog(@"%@",report);
 }
 static void diLockDiagnosticRemote340(void){
     static CFAbsoluteTime last=0;CFAbsoluteTime now=CFAbsoluteTimeGetCurrent();
     if(now-last<10 || !diLockDiagnosticChannel340())return;
-    uint64_t state=0;if(notify_get_state(diLockDiagnosticToken340,&state)!=NOTIFY_STATUS_OK)return;
-    if((state&7)!=7 || now-(double)(state>>3)>15)return;
+    uint64_t state=0;uint32_t status=notify_get_state(diLockDiagnosticToken340,&state);
+    // Screen lock != visible Cover Sheet. Face ID can unlock while remaining
+    // on the cover sheet, and lockstate events can be absent at startup.
+    // Keep enabled/display/timestamp gates, but never require lockedHint.
+    BOOL fresh=state && now-(double)(state>>3)>=0 && now-(double)(state>>3)<=15;
+    static CFAbsoluteTime channelReport=0;
+    if(now-channelReport>20){channelReport=now;diMruFileLog([NSString stringWithFormat:@"[锁屏通道341] MRU 已执行巡检 status=%u flags=%llu fresh=%d age=%.1f",status,(unsigned long long)(state&7),fresh,state?now-(double)(state>>3):-1]);}
+    if(status!=NOTIFY_STATUS_OK || (state&3)!=3 || !fresh)return;
     last=now;NSUInteger count=0;
     for(UIScene *scene in UIApplication.sharedApplication.connectedScenes){
         if(![scene isKindOfClass:UIWindowScene.class])continue;
@@ -54,5 +65,5 @@ static void diLockDiagnosticRemote340(void){
             diLockDiagnosticDump340(w,YES);if(++count>=3)return;
         }
     }
-    if(!count)diMruFileLog(@"[锁屏定位340] MRU 无可见本地窗口；封面可能由其他进程或独立远程场景承载");
+    if(!count)diMruFileLog(@"[锁屏定位341] MRU 无可见本地窗口；封面可能由其他进程或独立远程场景承载");
 }

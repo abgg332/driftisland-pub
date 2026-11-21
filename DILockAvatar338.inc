@@ -86,6 +86,7 @@ static void diLockAvatarDiscover339(UIView *root){
     __weak UIView *weak=root.window;
     dispatch_async(dispatch_get_main_queue(),^{
         pending=NO;UIView *view=weak;if(!view || !diLockAvatarOn338 || gScreenOff328)return;
+        diLockDiagnosticPublish340();
         // Scan only the relevant lock-screen root, once per layout batch. No timer.
         NSMutableArray<UIView *> *queue=[NSMutableArray arrayWithObject:view];NSUInteger index=0,hits=0;
         while(index<queue.count && index<600){
