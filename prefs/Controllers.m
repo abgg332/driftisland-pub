@@ -6692,7 +6692,7 @@ static id gDIFxColorBridge = nil;
     NSString *key=[sp propertyForKey:@"key"];if(![key isKindOfClass:NSString.class]||!key.length)return;
     CFPreferencesSetAppValue((__bridge CFStringRef)key,(__bridge CFPropertyListRef)value,(__bridge CFStringRef)kDomain);
     CFPreferencesAppSynchronize((__bridge CFStringRef)kDomain);
-    if([key hasPrefix:@"PlayerMask"])postReload();
+    if([key hasPrefix:@"PlayerMask"] || [key isEqualToString:@"LockScreenAvatarOn"])postReload();
     diPostFxTune();
     diStep(@"[律动设置319] 写入 %@=%@",key,value);
 }
@@ -7036,6 +7036,7 @@ static BOOL diBarStyleOK(int s) {
 
     [specs addObject:[self groupSpec:@"专辑头像遮罩" footer:nil]];
     [specs addObject:[self switchSpec:@"启用头像遮罩" key:kDIPlayerMaskOnKey def:@NO]];
+    [specs addObject:[self switchSpec:@"启用锁屏头像" key:@"LockScreenAvatarOn" def:@NO]];
     {PSSpecifier *custom=[PSSpecifier preferenceSpecifierNamed:@"自定义遮罩素材" target:self set:NULL get:NULL detail:nil cell:PSButtonCell edit:nil];
     custom.buttonAction=@selector(diFXOpenCustomMask:);[specs addObject:custom];}
     [specs addObject:[self npSlider:@"头像大小" key:diFxSizedKey(@"AlbumGroupSize") def:1.0 mn:0.65 mx:1.15]];

@@ -55,6 +55,9 @@ static NSArray *diSortedStrs(NSArray *arr) {
 }
 
 static BOOL logEnabled; // 日志开关
+static BOOL diLockAvatarOn338=NO;
+static void diLockAvatarRefresh338(void);
+static void diLockAvatarStop338(void);
 static BOOL gScreenOff328=NO; // independent display-power gate, no polling
 static BOOL gLocked = NO; // 锁屏状态: 锁屏期间所有岛视频/帧率动画全停(锁屏界面组件也是岛视图, 不停会一直亮屏)
 /* ===== 2.8.12: 歌词岛已回归(2.8.4/2.8.5 曾下架) —— "音乐岛识别"判据保留,
@@ -1027,6 +1030,7 @@ static int diColorModeLoadFx(NSString *modeKey, NSString *flowKey) {
 }
 
 static void diFxLoadPrefs(void) {
+    diLockAvatarOn338=pBool(@"LockScreenAvatarOn",NO);
     /* 3.0.55: 特效参数单独读取。
        以前这些键混在 refreshPrefs() 里 —— 那是"全量偏好重读"(上百次跨进程读),
        设置页拖一下滑杆就发一次刷新通知, 一次拖动几十条 → SpringBoard 主线程被按住
@@ -13134,6 +13138,7 @@ static void visibilityTick(void) {
     if(gScreenOff328)return;
     refreshPrefs();
     diDirectBackgroundTick324();
+    diLockAvatarRefresh338();
     @try { diISPublishFxParams(); } @catch (__unused NSException *e) {}
     static CFAbsoluteTime tMR; // CPU 优化: MediaRemote 查询 1秒一次(检测音乐停止够快)
     CFAbsoluteTime now = CFAbsoluteTimeGetCurrent();
@@ -13274,6 +13279,7 @@ static void visibilityTick(void) {
 static dispatch_source_t gTickTimer; // 0.5s 轮询: 锁屏期间挂起 → 锁屏/后台零 CPU 唤醒
 static BOOL gTickSuspended = NO;
 static void pauseAllUnderWindows(void) { // 立即暂停所有视频层/帧率动画层的 displayLink 与播放器(不等 miss 计数)
+    diLockAvatarStop338();
     // 324 introduced a distinct UIView/player pair not covered by DIVideoView.
     for(DIIslandBackground324 *surface in diBackgrounds324.allObjects)[surface stop];
     for (UIScene *s in UIApplication.sharedApplication.connectedScenes) {
@@ -13303,6 +13309,7 @@ extern NSHashTable *gBarPills;
 static void applyLockState(BOOL locked) {
     if (locked == gLocked) return;
     gLocked = locked;
+    dispatch_async(dispatch_get_main_queue(),^{diLockAvatarRefresh338();});
     if (locked) {
         /* 2.3.1/2.3.2: 锁屏不做任何 setActive —— 只暂停我们自己的播放器。
            会话类别保持 Ambient+MixWithOthers 不动, 让系统音频路由完全不受扰动。 */
@@ -13361,6 +13368,7 @@ static void lockStateChanged(CFNotificationCenterRef, void *, CFStringRef, const
 static void diSetDisplayOff328(BOOL off){
     if(off==gScreenOff328)return;
     gScreenOff328=off;
+    dispatch_async(dispatch_get_main_queue(),^{diLockAvatarRefresh338();});
     if(off){
         pauseAllUnderWindows();
         if(gTickTimer && !gTickSuspended){dispatch_suspend(gTickTimer);gTickSuspended=YES;}
@@ -18068,6 +18076,7 @@ static void diArtPlayerPost(UIView *root) {
     /* 灵动岛那套(MRUActivityNowPlayingView)可能继承自 MRUNowPlayingView, 会顺带命中
        这个 hook —— 岛上的头像是用户自己的遮罩素材在管, 这里绝不能碰。 */
     if ([NSStringFromClass(root.class) containsString:@"Activity"]) return;
+    if(diInLockScreen(root))return;
     if (!gDIArtRoots) gDIArtRoots = [NSHashTable weakObjectsHashTable];
     [gDIArtRoots addObject:root];
     diArtInstallAVHook();   /* 3.0.17: 类晚出现时在这里补装, 幂等 */
@@ -18887,7 +18896,7 @@ static void diFxTuneChanged(CFNotificationCenterRef c, void *obs, CFStringRef na
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.12 * NSEC_PER_SEC)),
                    dispatch_get_main_queue(), ^{
         pending = NO;
-        @try { diFxLoadPrefs(); } @catch (__unused NSException *e) {}
+        @try { diFxLoadPrefs();diLockAvatarRefresh338(); } @catch (__unused NSException *e) {}
         @try { diRhythmEnsure(); } @catch (__unused NSException *e) {}
     });
 }
@@ -19197,8 +19206,11 @@ static BOOL diArtInControlCenter(UIView *v) {
     return NO;
 }
 
+#include "DILockAvatar338.inc"
+
 static void diArtAVLayout(id self, SEL cmd) {
     if (gDIOrigAVLayout) gDIOrigAVLayout(self, cmd);
+    diLockAvatarObserve338((UIView *)self);
     @try {
         if (gDIStage < 1) return;
         /* 3.0.19: 去掉 diArtIs3x2() 限制 —— 3×2 只是"要不要动传送栏"的判据, 与封面
