@@ -44,9 +44,7 @@ static NSString *diLockMRUController342(UIView *host){
 static BOOL diLockMRUIsCover342(UIView *host,NSString **ownerOut){
     NSString *owner=diLockMRUController342(host);if(ownerOut)*ownerOut=owner;
     if([owner containsString:@"CoverSheet"] || [owner containsString:@"LockScreen"])return YES;
-    // The iOS 17 activity artwork is owned by this MRU controller. Accept it
-    // only when no active compact/expanded island form owns the same content.
-    if([owner containsString:@"MRUActivityNowPlayingViewController"])return diMruFormFromIsland()<0;
+    if([NSStringFromClass(host.class) isEqualToString:@"MRUActivityArtworkView"] && [owner containsString:@"MRUActivityNowPlayingViewController"])return YES;
     for(UIView *p=host;p;p=p.superview){NSString *n=NSStringFromClass(p.class);if([n containsString:@"CoverSheet"]||[n containsString:@"LockScreen"])return YES;}
     return NO;
 }
@@ -60,9 +58,12 @@ static UIView *diLockMRUArtworkView342(UIView *host){
     if([NSStringFromClass(host.class) isEqualToString:@"MRUFlippingArtworkView"]){
         UIImage *image=nil;SEL imageSel=NSSelectorFromString(@"artworkImage");
         if([host respondsToSelector:imageSel]){@try{id v=((id(*)(id,SEL))objc_msgSend)(host,imageSel);if([v isKindOfClass:UIImage.class])image=v;}@catch(__unused NSException *e){}}
-        SEL layerSel=NSSelectorFromString(@"artworkLayer");if(!image && [host respondsToSelector:layerSel]){@try{id l=((id(*)(id,SEL))objc_msgSend)(host,layerSel);if([l isKindOfClass:CALayer.class]){id c=[(CALayer *)l contents];if(c&&CFGetTypeID((__bridge CFTypeRef)c)==CGImageGetTypeID())image=[UIImage imageWithCGImage:(__bridge CGImageRef)c];}}@catch(__unused NSException *e){}}
+        SEL layerSel=NSSelectorFromString(@"artworkLayer");
+        if(!image && [host respondsToSelector:layerSel]){@try{id l=((id(*)(id,SEL))objc_msgSend)(host,layerSel);if([l isKindOfClass:CALayer.class]){id c=[(CALayer *)l contents];if(c&&CFGetTypeID((__bridge CFTypeRef)c)==CGImageGetTypeID())image=[UIImage imageWithCGImage:(__bridge CGImageRef)c];}}@catch(__unused NSException *e){}}
         if(image)return host;
     }
+    SEL layerSel=NSSelectorFromString(@"artworkLayer");
+    if([host respondsToSelector:layerSel]){@try{id l=((id(*)(id,SEL))objc_msgSend)(host,layerSel);if([l isKindOfClass:CALayer.class]){id c=[(CALayer *)l contents];if(c&&CFGetTypeID((__bridge CFTypeRef)c)==CGImageGetTypeID())return host;}}@catch(__unused NSException *e){}}
     return nil;
 }
 static UIImage *diLockMRUShape342(void){
