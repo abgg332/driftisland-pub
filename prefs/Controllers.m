@@ -1663,9 +1663,9 @@ static void diWriteColors(NSArray<NSString *> *colors) {
 
         /* ---- 2.9.13: 录屏素材(旧版录屏岛: 加载视频 + 调大小)恢复 ----
            2.9 误删了整块, 用户要的只是删掉"录屏岛左右两格帧率"那个二级页。 */
-        DI_ADD([self groupSpec:@"录屏素材" footer:nil]);
+        DI_ADD([self groupSpec:@"录屏岛素材" footer:@"右侧独立小岛也使用此处选择的素材，不需要开启录屏。"]);
         PSSpecifier *recMat = [self buttonSpec:@"素材选择" action:@selector(openRecGrid:)];
-        DI_ADD([self switchSpec:@"录屏显示素材" key:@"recOn" def:@NO]);
+        DI_ADD([self switchSpec:@"启用录屏岛素材" key:@"recOn" def:@NO]);
         DI_ADD(recMat);
         DI_ADD([self stepSlider:@"素材大小" key:@"recScale" def:100 mn:50 mx:200]);
 

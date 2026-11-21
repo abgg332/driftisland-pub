@@ -7666,7 +7666,7 @@ static void updateSingleVideo(UIWindow *win) {
         }
         UIView *recHost = enabled ? diRecIslandHost() : nil;
         recHostNow = recHost;
-        if (recHost && recHost.window == win) {
+        if (recHost && recHost.window == win && !diRightSatelliteAncestor335(recHost)) {
             if (recV.superview != recHost) {
                 [recV removeFromSuperview];
                 /* 2.2.56: 垫到指示岛最底层(原生圆点靠"隐藏它的 layer"让位, 不依赖层级) */
@@ -8832,50 +8832,56 @@ static BOOL diIsSceneHost(UIView *v) {
 /* 3.1.22: Lock-screen permission/action prompts are not player artwork.
    Preserve their system geometry; CALayer-only remote scene fitting can leave
    action hit regions out of sync with the visible buttons on both 16 and 17. */
+// 3.1.35: classify native action STRUCTURE, not a particular app or language.
+static BOOL diActionNode335(UIView *node){
+    NSString *name=NSStringFromClass(node.class);
+    for(NSString *token in @[@"Alert",@"Permission",@"Authorization",@"ActionButton",@"ActionList",@"NotificationManagement",@"NotificationOptions"])
+        if([name containsString:token])return YES;
+    return NO;
+}
+static BOOL diHasActionTree335(UIView *root){
+    if(!root)return NO;
+    NSMutableArray<UIView *> *queue=[NSMutableArray arrayWithObject:root];NSUInteger head=0;
+    while(head<queue.count && head<240){
+        UIView *node=queue[head++];
+        // Include a not-yet-visible action: do not shrink its parent before
+        // UIKit completes the button's presentation animation.
+        if(diActionNode335(node))return YES;
+        if([node isKindOfClass:UIButton.class]){
+            NSString *title=[(UIButton *)node currentTitle];
+            if([@[@"保留",@"关闭",@"關閉",@"不允许",@"始终允许",@"允许",@"不允許",@"始終允許",@"Keep",@"Turn Off",@"Close",@"Don't Allow",@"Always Allow",@"Allow"] containsObject:title?:@""])return YES;
+        }
+        for(UIView *child in node.subviews)if(queue.count<240)[queue addObject:child];
+    }
+    return NO;
+}
 static BOOL diNativeActionPrompt(UIView *view){
     if(!view)return NO;
-    for(UIView *node=view;node;node=node.superview){
+    if(diHasActionTree335(view))return YES;
+    // A generic PLPlatter or remote view can sit below a parent which owns
+    // sibling buttons. Protect that card, never scan the entire lock window.
+    for(UIView *node=view;node && node!=view.window;node=node.superview){
+        if(diActionNode335(node))return YES;
         NSString *name=NSStringFromClass(node.class);
-        for(NSString *token in @[@"Alert",@"Permission",@"Authorization",@"ActionButtons",@"ActionButton",@"ActionList"])
-            if([name containsString:token])return YES;
-        if(node==view.window)break;
-    }
-    NSMutableArray<UIView *> *queue=[NSMutableArray arrayWithObject:view];int budget=180;
-    NSSet *titles=[NSSet setWithArray:@[@"不允许",@"始终允许",@"允许",@"不允許",@"始終允許",@"Don't Allow",@"Always Allow",@"Allow"]];
-    while(queue.count && budget-->0){
-        UIView *node=queue.firstObject;[queue removeObjectAtIndex:0];
-        if(node.hidden || node.alpha<.01)continue;
-        NSString *name=NSStringFromClass(node.class);
-        if([name containsString:@"Permission"] || [name containsString:@"Authorization"] || [name containsString:@"ActionButtons"])return YES;
-        NSString *text=nil;
-        if([node isKindOfClass:UIButton.class])text=[(UIButton *)node currentTitle];
-        else if([node isKindOfClass:UILabel.class])text=[(UILabel *)node text];
-        if(text && [titles containsObject:text])return YES;
-        for(UIView *child in node.subviews)[queue addObject:child];
+        BOOL card=[name containsString:@"Platter"] || [name containsString:@"ShortLook"] || [name containsString:@"LongLook"] || [name containsString:@"NotificationViewControllerView"];
+        if(card && diHasActionTree335(node))return YES;
+        if([node isKindOfClass:UIScrollView.class] || [name containsString:@"NotificationListView"] || [name containsString:@"RootView"])break;
     }
     return NO;
 }
 
 /* 3.1.23: Fit only a notification's remote content branch. Permission
    controls remain native siblings. Do not run generic player reflow/height-fit. */
-static BOOL diActionBranch323(UIView *view){
-    NSString *name=NSStringFromClass(view.class);
-    for(NSString *token in @[@"Alert",@"Permission",@"Authorization",@"ActionButtons",@"ActionButton",@"ActionList"])
-        if([name containsString:token])return YES;
-    return NO;
-}
+static BOOL diActionBranch323(UIView *view){return diActionNode335(view);}
 static BOOL diContentHasActions323(UIView *root,int depth){
-    if(!root || depth>12)return NO;
-    if(diActionBranch323(root))return YES;
-    NSString *text=nil;
-    if([root isKindOfClass:UIButton.class])text=[(UIButton *)root currentTitle];
-    else if([root isKindOfClass:UILabel.class])text=[(UILabel *)root text];
-    if(text && [@[@"不允许",@"始终允许",@"允许",@"不允許",@"始終允許",@"Don't Allow",@"Always Allow",@"Allow"] containsObject:text])return YES;
-    for(UIView *child in root.subviews)if(diContentHasActions323(child,depth+1))return YES;
-    return NO;
+    (void)depth;return diHasActionTree335(root);
 }
 static void diFitNoticeContent323(UIView *root,CGFloat available,int depth){
     if(!root || depth>10 || !root.window || root.hidden || diActionBranch323(root))return;
+    if(depth==0){
+        NSString *entry=NSStringFromClass(root.class);
+        if(![entry containsString:@"Platter"] && ![entry containsString:@"ShortLook"] && ![entry containsString:@"LongLook"] && ![entry containsString:@"NotificationViewControllerView"])return;
+    }
     if(available<40 || !isfinite(available))return;
     if(root.bounds.size.width>=80 && root.bounds.size.width<available)available=root.bounds.size.width;
     NSString *name=NSStringFromClass(root.class);
@@ -9038,7 +9044,7 @@ static void diFitSceneHost(UIView *host, CGFloat cardW, CGFloat *outVisH) {
 
 
 static void diReflowChildren(UIView *v, CGFloat oldW, CGFloat newW, int depth) {
-    if (!v || newW < 40 || fabs(oldW - newW) < 1.0) return;
+    if (!v || newW < 40 || fabs(oldW - newW) < 1.0 || diNativeActionPrompt(v)) return;
     if (oldW < 40) oldW = newW;
     for (UIView *sub in v.subviews) {
         if (sub.isHidden || sub.alpha < 0.01) continue;
@@ -9338,7 +9344,7 @@ static void applyLockWidth(UIView *v) {
     if(diNativeActionPrompt(v)){
         diFitNoticeContent323(v,v.bounds.size.width,0);
         static CFAbsoluteTime lastPrompt=0;
-        if(CFAbsoluteTimeGetCurrent()-lastPrompt>5){lastPrompt=CFAbsoluteTimeGetCurrent();RLog(@"[通知交互322] 权限/动作按钮保留原生布局 %@",NSStringFromClass(v.class));}
+        if(CFAbsoluteTimeGetCurrent()-lastPrompt>5){lastPrompt=CFAbsoluteTimeGetCurrent();RLog(@"[通知交互335] 操作卡与按钮保留原生布局 %@",NSStringFromClass(v.class));}
         return;
     }   /* 2.6.12: 来电/电池详情等系统界面完全不碰 */
     NSString *cn = NSStringFromClass(v.class);

@@ -6,6 +6,21 @@
 static BOOL diDirectBackgroundAvailable324(void){
     return NSClassFromString(@"SBSystemApertureContainerView")!=Nil;
 }
+// Route top-level trailing satellites, not accessory children inside a pill.
+static BOOL diRightSatellite335(UIView *host){
+    UIWindow *win=host.window;
+    if(!win || ![NSStringFromClass(host.class) isEqualToString:@"SBSystemApertureContainerView"] ||
+       ![NSStringFromClass(win.class) containsString:@"SystemAperture"])return NO;
+    CGSize size=host.bounds.size;
+    if(size.width<24 || size.height<24 || size.width>64 || size.height>64 || fabs(size.width-size.height)>8)return NO;
+    CGRect box=[host convertRect:host.bounds toView:win];
+    return CGRectGetMinX(box)>CGRectGetMidX(win.bounds)+8 && CGRectIntersectsRect(box,win.bounds);
+}
+static BOOL diRightSatelliteAncestor335(UIView *view){
+    for(UIView *p=view;p && p!=view.window;p=p.superview)
+        if([NSStringFromClass(p.class) isEqualToString:@"SBSystemApertureContainerView"])return diRightSatellite335(p);
+    return NO;
+}
 static char kDIBackground324,kDIBackgroundPending324;
 static NSHashTable *diBackgrounds324;
 @class DIIslandBackground324;
@@ -28,6 +43,7 @@ static NSHashTable *diBackgrounds324;
 @property(nonatomic,copy) NSString *compactPath;
 @property(nonatomic,copy) NSString *expandedPath;
 @property(nonatomic,copy) NSString *prefSignature;
+@property(nonatomic,assign) BOOL rightSatellite335;
 @property(nonatomic,assign) NSUInteger compactGeneration;
 @property(nonatomic,assign) NSUInteger expandedGeneration;
 @property(nonatomic,assign) NSInteger stableTicks;
@@ -176,10 +192,18 @@ static NSHashTable *diBackgrounds324;
     return host.bounds.size.width>2 && host.bounds.size.height>2;
 }
 - (void)refresh {
-    NSString *small=materialPathFor(NO),*large=materialPathFor(YES);
+    BOOL right=diRightSatellite335(self.host);
+    if(right!=self.rightSatellite335){
+        [self stop];self.rightSatellite335=right;
+        [self loadPath:nil expanded:NO];[self loadPath:nil expanded:YES];
+        self.modeKnown=NO;self.displayKnown328=NO;
+        if(logEnabled)RLog(@"[右侧独立岛335] %@",right?@"使用录屏岛素材":@"返回主岛素材");
+    }
+    NSString *small=right?recVideoPath():materialPathFor(NO);
+    NSString *large=right?nil:materialPathFor(YES);
     // Background is edge-to-edge. animScale/offset/FPS configure legacy frame
     // effects, not the canvas of this independent video background.
-    NSString *sig=[NSString stringWithFormat:@"%d/%d/%d/%d/%@/%@",enabled,(gLocked || gScreenOff328),smallOn,expandOn,small?:@"",large?:@""];
+    NSString *sig=[NSString stringWithFormat:@"%d/%d/%d/%d/%d/%@/%@",enabled,(gLocked || gScreenOff328),right,right?recOn:smallOn,right?NO:expandOn,small?:@"",large?:@""];
     BOOL changed=![self.prefSignature isEqualToString:sig];self.prefSignature=sig;
     if(![self visibleHost]){[self stop];return;}
     if(changed){[self loadPath:small expanded:NO];[self loadPath:large expanded:YES];[self startBurst];}
@@ -269,8 +293,10 @@ static NSHashTable *diBackgrounds324;
     if(self.syncing326 || now326-self.lastSync326<.002)return;
     self.lastSync326=now326;
     UIView *host=self.host;
-    if(![self visibleHost]){[self stop];return;}
-    BOOL compositor=[self mirrorGeometry327:host];
+    if(![self visibleHost] || self.rightSatellite335!=diRightSatellite335(host)){[self stop];return;}
+    BOOL compositor=!self.rightSatellite335 && [self mirrorGeometry327:host];
+    BOOL compactOn=self.rightSatellite335?recOn:smallOn;
+    BOOL expandedOn=!self.rightSatellite335 && expandOn;
     CALayer *present=(CALayer *)host.layer.presentationLayer;
     CGRect bounds=present?present.bounds:host.bounds;
     if(bounds.size.width<=1 || bounds.size.height<=1)bounds=host.bounds;
@@ -288,6 +314,7 @@ static NSHashTable *diBackgrounds324;
     // Retain DriftIsland's compact/expanded material split, with a small hysteresis.
     if(!self.modeKnown){self.expandedMode=height>60;self.modeKnown=YES;}
     else if(height>62)self.expandedMode=YES;else if(height<58)self.expandedMode=NO;
+    if(self.rightSatellite335)self.expandedMode=NO;
     BOOL requestedMode328=self.expandedMode;
     if(!self.displayKnown328){self.displayedMode328=requestedMode328;self.displayKnown328=YES;}
     if(self.oldMode328!=(requestedMode328?1:0)){
@@ -296,7 +323,7 @@ static NSHashTable *diBackgrounds324;
     AVPlayerLayer *requestedLayer328=requestedMode328?self.expandedLayer:self.compactLayer;
     AVQueuePlayer *requestedPlayer328=requestedMode328?self.expandedPlayer:self.compactPlayer;
     UIImageView *requestedImage328=requestedMode328?self.expandedImage:self.compactImage;
-    BOOL wantsRequested328=requestedMode328?expandOn:smallOn;
+    BOOL wantsRequested328=requestedMode328?expandedOn:compactOn;
     // Keep the previous visible frame until a different clip has a displayable
     // frame, for at most .25s; no seek, frame extraction, or permanent dual play.
     BOOL waiting328=wantsRequested328 && requestedPlayer328 && !requestedImage328.image && !requestedLayer328.readyForDisplay && now326-self.requestedAt328<.25;
@@ -313,23 +340,27 @@ static NSHashTable *diBackgrounds324;
     // Small overscan avoids subpixel seams without moving the visual center.
     CGFloat pixel=1.0/MAX(1.0,UIScreen.mainScreen.scale);
     CGRect video=CGRectInset(b,-pixel,-pixel);
+    if(self.rightSatellite335){
+        CGFloat z=isfinite(recScale)?recScale:1;
+        video=CGRectInset(video,(1-z)*video.size.width/2,(1-z)*video.size.height/2);
+    }
     AVPlayerLayer *visibleLayer=self.displayedMode328?self.expandedLayer:self.compactLayer;
     UIImageView *visibleImage=self.displayedMode328?self.expandedImage:self.compactImage;
     if(!compositor){
         if(!CGRectEqualToRect(visibleLayer.frame,video))visibleLayer.frame=video;
         if(visibleImage.image && !CGRectEqualToRect(visibleImage.frame,video))visibleImage.frame=video;
     }
-    self.compactLayer.hidden=self.displayedMode328 || !smallOn;
-    self.expandedLayer.hidden=!self.displayedMode328 || !expandOn;
-    self.compactImage.hidden=self.displayedMode328 || !smallOn;
-    self.expandedImage.hidden=!self.displayedMode328 || !expandOn;
+    self.compactLayer.hidden=self.displayedMode328 || !compactOn;
+    self.expandedLayer.hidden=!self.displayedMode328 || !expandedOn;
+    self.compactImage.hidden=self.displayedMode328 || !compactOn;
+    self.expandedImage.hidden=!self.displayedMode328 || !expandedOn;
     self.hidden=NO;
     [CATransaction commit];
     // Warm both only while geometry is transitioning. After settling, pause
     // the invisible decoder but retain item/looper and its last rendered frame.
     BOOL warm=now326<self.warmUntil328 || waiting328;
-    BOOL wantCompact=smallOn && (!requestedMode328 || warm || !self.displayedMode328);
-    BOOL wantExpanded=expandOn && (requestedMode328 || warm || self.displayedMode328);
+    BOOL wantCompact=compactOn && (!requestedMode328 || warm || !self.displayedMode328);
+    BOOL wantExpanded=expandedOn && (requestedMode328 || warm || self.displayedMode328);
     if(wantCompact){if(self.compactPlayer && self.compactPlayer.rate==0)[self.compactPlayer play];}
     else if(self.compactPlayer.rate!=0)[self.compactPlayer pause];
     if(wantExpanded){if(self.expandedPlayer && self.expandedPlayer.rate==0)[self.expandedPlayer play];}
@@ -357,6 +388,9 @@ static void diDirectBackgroundHost324(UIView *host){
     DIIslandBackground324 *surface=objc_getAssociatedObject(host,&kDIBackground324);
     if(!host.window || !enabled || (gLocked || gScreenOff328)){[surface stop];return;}
     if(surface){
+        // A size/position change can reclassify an existing container. Defer
+        // resource lookup to the existing refresh tick, hiding stale material.
+        if(surface.rightSatellite335!=diRightSatellite335(host)){[surface stop];return;}
         CGRect model=host.layer.bounds;CGFloat r=host.layer.cornerRadius;
         BOOL dirty=!surface.observed328 || !CGRectEqualToRect(surface.observedModel328,model) || fabs(surface.observedRadius328-r)>.01;
         surface.observedModel328=model;surface.observedRadius328=r;surface.observed328=YES;
