@@ -24,7 +24,13 @@ static BOOL diLockScreenCover343(UIView *host){
         if([n containsString:@"ControlCenter"])controlCenter=YES;
         if([p isKindOfClass:UIWindow.class])break;
     }
-    return cover&&!controlCenter;
+    if(cover&&!controlCenter)return YES;
+    if(controlCenter)return NO;
+    if([NSStringFromClass(host.class) isEqualToString:@"MRUActivityArtworkView"]){
+        UIViewController *owner=diActivityAncestorVC(host);
+        return owner&&[NSStringFromClass(owner.class) isEqualToString:@"MRUActivityNowPlayingViewController"];
+    }
+    return NO;
 }
 static void diLockScreenDisplayChanged343(void){
     uint64_t s=2;if(notify_get_state(diLockScreenDisplayToken343,&s)!=NOTIFY_STATUS_OK||s>1)return;
@@ -75,7 +81,7 @@ static void diLockScreenApply343(UIView *host){
     UIView *art=diLockScreenArtwork343(host);if(!art||art.bounds.size.width<12||art.bounds.size.height<12)return;
     if(st&&st.art!=art){diLockScreenTeardown343(host,st);st=nil;}
     if(!st){st=[DILockScreenMaskState343 new];st.host=host;st.art=art;st.originalMask=art.maskView;objc_setAssociatedObject(host,&diLockScreenMaskStateKey343,st,OBJC_ASSOCIATION_RETAIN_NONATOMIC);if(!diLockScreenMaskHosts343)diLockScreenMaskHosts343=[NSHashTable weakObjectsHashTable];[diLockScreenMaskHosts343 addObject:host];
-        RLog(@"[锁屏共享遮罩344] 命中 %@ %.0fx%.0f PlayerMaskOn=%d",NSStringFromClass(host.class),art.bounds.size.width,art.bounds.size.height,maskOn);
+        RLog(@"[锁屏共享遮罩345] 命中 %@ %.0fx%.0f PlayerMaskOn=%d",NSStringFromClass(host.class),art.bounds.size.width,art.bounds.size.height,maskOn);
     }
     if(maskOn){
         if(!st.mask){st.mask=[UIImageView new];st.mask.userInteractionEnabled=NO;st.mask.opaque=NO;st.mask.backgroundColor=UIColor.clearColor;st.mask.contentMode=UIViewContentModeScaleToFill;}

@@ -2,7 +2,7 @@ name: Build DriftIsland
 
 on:
   push:
-    branches: [fix/3.1.44-lockscreen-expanded-sharedmask]
+    branches: [fix/3.1.45-lockscreen-activity-owner]
   workflow_dispatch:
 
 permissions:
@@ -12,7 +12,7 @@ permissions:
 # 注意 cancel-in-progress 必须为 false —— 设 true 时每个新 run 都会掐掉上一个,
 # 结果是"全都 cancelled, 一个产物都没有"(2.6.10 踩过的坑)。
 concurrency:
-  group: driftisland-3144-lockscreen-expanded-sharedmask
+  group: driftisland-3145-lockscreen-activity-owner
   cancel-in-progress: false
 
 jobs:
