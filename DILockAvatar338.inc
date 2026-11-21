@@ -1,3 +1,4 @@
+#include "DILockDiagnostic340.inc"
 /* Lock-screen only. No custom imagery, CC changes, audio session or timer. */
 @interface DILockAvatarState338 : NSObject
 @property(nonatomic,assign) CGFloat radius;
@@ -64,6 +65,7 @@ static void diLockAvatarObserve338(UIView *v){
     dispatch_async(dispatch_get_main_queue(),^{UIView *art=weak;if(!art)return;objc_setAssociatedObject(art,&diLockAvatarPending338,nil,OBJC_ASSOCIATION_RETAIN_NONATOMIC);diLockAvatarApply338(art);});
 }
 static void diLockAvatarRefresh338(void){
+    diLockDiagnosticPublish340();
     if(diLockAvatarOn338 && !gScreenOff328){
         for(UIScene *scene in UIApplication.sharedApplication.connectedScenes){
             if(![scene isKindOfClass:UIWindowScene.class])continue;
@@ -98,6 +100,10 @@ static void diLockAvatarDiscover339(UIView *root){
             for(UIView *child in node.subviews)if(queue.count<600)[queue addObject:child];
         }
         static CFTimeInterval report=0;
-        if(CACurrentMediaTime()-report>10){report=CACurrentMediaTime();RLog(@"[锁屏头像339] 查找 root=%@ nodes=%lu candidates=%lu enabled=%d",NSStringFromClass(view.class),(unsigned long)index,(unsigned long)hits,diLockAvatarOn338);}
+        if(CACurrentMediaTime()-report>10){
+            report=CACurrentMediaTime();
+            RLog(@"[锁屏头像339] 查找 root=%@ nodes=%lu candidates=%lu enabled=%d",NSStringFromClass(view.class),(unsigned long)index,(unsigned long)hits,diLockAvatarOn338);
+            if(!hits)diLockDiagnosticDump340(view,NO);
+        }
     });
 }

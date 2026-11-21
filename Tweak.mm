@@ -58,6 +58,7 @@ static BOOL logEnabled; // 日志开关
 static BOOL diLockAvatarOn338=NO;
 static void diLockAvatarRefresh338(void);
 static void diLockAvatarStop338(void);
+static void diLockDiagnosticRemote340(void);
 static void diLockAvatarDiscover339(UIView *root);
 static BOOL gScreenOff328=NO; // independent display-power gate, no polling
 static BOOL gLocked = NO; // 锁屏状态: 锁屏期间所有岛视频/帧率动画全停(锁屏界面组件也是岛视图, 不停会一直亮屏)
@@ -16528,6 +16529,7 @@ static void diActivityStartScanner(void) {
     started = YES;
     gDIActivityScanTimer = [NSTimer timerWithTimeInterval:1.0 repeats:YES block:^(NSTimer *t) {
         @try { diActivityScan(); } @catch (__unused NSException *e) {}
+        @try { diLockDiagnosticRemote340(); } @catch (__unused NSException *e) {}
         @try { diISMRUEnsure(); } @catch (__unused NSException *e) {}   /* 3.0.85: 岛专辑特效起停巡检 */
     }];
     [NSRunLoop.mainRunLoop addTimer:gDIActivityScanTimer forMode:NSRunLoopCommonModes];
