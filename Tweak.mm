@@ -59,7 +59,9 @@ static BOOL diLockAvatarOn338=NO;
 static void diLockAvatarRefresh338(void);
 static void diLockAvatarStop338(void);
 static void diLockDiagnosticRemote340(void);
-static void diLockAvatarDiscover339(UIView *root);
+static void diLockMRUInstall342(void);
+static void diLockMRURefresh342(void);
+static void diLockMRUApply342(UIView *view);
 static BOOL gScreenOff328=NO; // independent display-power gate, no polling
 static BOOL gLocked = NO; // 锁屏状态: 锁屏期间所有岛视频/帧率动画全停(锁屏界面组件也是岛视图, 不停会一直亮屏)
 /* ===== 2.8.12: 歌词岛已回归(2.8.4/2.8.5 曾下架) —— "音乐岛识别"判据保留,
@@ -6221,6 +6223,7 @@ static void diExportMaskForMRU(void) {
                                      /* 3.0.40: 播放器遮罩 —— 开关与素材名都独立一份 */
                                      @"pmOn": @(diPrefBoolNow(@"PlayerMaskOn", playerMaskOn)),
                                      @"pmMask": pmPath.lastPathComponent ?: @"",
+                                     @"lockAvatar": @(diPrefBoolNow(@"LockScreenAvatarOn", NO)),
                                      /* 2.8.85: 展开定义 —— MRU 内的歌词/歌名位置与大小 */
                                      @"etOn": @(expandTextOn), @"etX": @(expandTextX),
                                      @"etY": @(expandTextY), @"etScale": @(expandTextScale),
@@ -10720,7 +10723,6 @@ static void layoutHook(UIView *self, SEL selector) {
             if (h.cls == c) { ((void(*)(id,SEL))h.original)(self, selector); found = YES; break; }
         if (found) break;
     }
-    if(NSThread.isMainThread && diLockAvatarOn338 && !gScreenOff328 && diInLockScreen(self))diLockAvatarDiscover339(self);
     if (lockWOn) applyLockWidth(self); // 2.2.10: 锁屏通知宽度(先于 updateHost, 避免岛相关开销)
     applyLockStyle(self);              // 2.2.17: 锁屏通知边框/背景/阴影
     if (NSThread.isMainThread) {
@@ -16296,6 +16298,7 @@ static void diActivityReload(void) {
         gDIActivityEnabled, gDIActivityShape ? [NSString stringWithFormat:@"%.0fx%.0f",
         gDIActivityShape.size.width, gDIActivityShape.size.height] : @"(无)"]);
     for (UIView *view in gDIActivityArtworks.allObjects) diActivityApply(view);
+    diLockMRURefresh342();
 }
 static void diActivityNotify(CFNotificationCenterRef c, void *o, CFStringRef n, const void *obj, CFDictionaryRef info) {
     dispatch_async(dispatch_get_main_queue(), ^{
@@ -16312,6 +16315,7 @@ static void diActivityRegister(UIView *view) {
 }
 static void diActivityLayout(id self, SEL cmd) {
     if (gDIActivityOrigLayout) ((void (*)(id, SEL))gDIActivityOrigLayout)(self, cmd);
+    @try { diLockMRUApply342((UIView *)self); } @catch (__unused NSException *e) {}
     @try { diActivityRegister((UIView *)self); } @catch (NSException *e) { DLog(@"[真实专辑遮罩] 布局异常 %@", e.reason); }
     /* 2.8.86: 展开岛自己每次布局都补一次文字位置 —— 系统重排会把我们改过的
        center/transform 覆盖回去, 只在 1 秒心跳里改会出现"动一下就弹回"。 */
@@ -16326,16 +16330,19 @@ static void diActivityLayout(id self, SEL cmd) {
 }
 static void diActivityMove(id self, SEL cmd) {
     if (gDIActivityOrigMove) ((void (*)(id, SEL))gDIActivityOrigMove)(self, cmd);
+    @try { diLockMRUApply342((UIView *)self); } @catch (__unused NSException *e) {}
     @try { diActivityRegister((UIView *)self); } @catch (NSException *e) { DLog(@"[真实专辑遮罩] 挂载异常 %@", e.reason); }
 }
 static void diActivityVisibility(id self, SEL cmd) {
     if (gDIActivityOrigVisibility) ((void (*)(id, SEL))gDIActivityOrigVisibility)(self, cmd);
+    @try { diLockMRUApply342((UIView *)self); } @catch (__unused NSException *e) {}
     @try { diActivityRegister((UIView *)self); } @catch (NSException *e) { DLog(@"[真实专辑遮罩] 显隐异常 %@", e.reason); }
 }
 /* 2.8.78: N95 也 hook 了 init(0x14608), 展开时新建的实例在 didMove 之前就能挂上,
    少一次"方形先露出"的窗口。原 init 必须先调用完再挂 mask。 */
 static id diActivityInit(id self, SEL cmd) {
     id result = gDIActivityOrigInit ? ((id (*)(id, SEL))gDIActivityOrigInit)(self, cmd) : nil;
+    @try { if(result)diLockMRUApply342((UIView *)result); } @catch (__unused NSException *e) {}
     @try { diActivityApply((UIView *)self); } @catch (__unused NSException *e) {}
     return result;
 }
@@ -16378,6 +16385,7 @@ static void diActivitySetImage(id self, SEL cmd, id img) {
 }
 static void diActivityInstall(void) {
     static BOOL installed;
+    diLockMRUInstall342();
     /* 2.8.86: 文字 hook 放在最前面且可重试(不受 installed 影响) */
     diActivityInstallTextHook();
     if (installed) return;
@@ -16452,6 +16460,8 @@ static void diActivityScanTree(UIView *root, NSUInteger *nodes, NSUInteger *matc
     }
 }
 static void diActivityScan(void) {
+    /* Keep MRU artwork lifecycle hooks current as private classes load lazily. */
+    @try { diLockMRUInstall342(); } @catch (__unused NSException *e) {}
     /* 2.8.86: 心跳里补装文字 hook —— 展开过一次之后类才注册, 必须能重试 */
     @try { diActivityInstallTextHook(); } @catch (__unused NSException *e) {}
     /* 2.8.81: 心跳不再被开关/素材挡在前面 —— 之前"没遮上"和"根本没跑"在日志里长得一模一样 */
@@ -19211,9 +19221,11 @@ static BOOL diArtInControlCenter(UIView *v) {
 }
 
 #include "DILockAvatar338.inc"
+#include "DILockAvatarN95.inc"
 
 static void diArtAVLayout(id self, SEL cmd) {
     if (gDIOrigAVLayout) gDIOrigAVLayout(self, cmd);
+    @try { diLockMRUApply342((UIView *)self); } @catch (__unused NSException *e) {}
     diLockAvatarObserve338((UIView *)self);
     @try {
         if (gDIStage < 1) return;
