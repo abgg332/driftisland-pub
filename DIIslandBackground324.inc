@@ -7,14 +7,39 @@ static BOOL diDirectBackgroundAvailable324(void){
     return NSClassFromString(@"SBSystemApertureContainerView")!=Nil;
 }
 // Route top-level trailing satellites, not accessory children inside a pill.
+static char kDIRightRole336,kDIRightRelease336;
 static BOOL diRightSatellite335(UIView *host){
     UIWindow *win=host.window;
     if(!win || ![NSStringFromClass(host.class) isEqualToString:@"SBSystemApertureContainerView"] ||
        ![NSStringFromClass(win.class) containsString:@"SystemAperture"])return NO;
-    CGSize size=host.bounds.size;
-    if(size.width<24 || size.height<24 || size.width>64 || size.height>64 || fabs(size.width-size.height)>8)return NO;
-    CGRect box=[host convertRect:host.bounds toView:win];
-    return CGRectGetMinX(box)>CGRectGetMidX(win.bounds)+8 && CGRectIntersectsRect(box,win.bounds);
+    CGRect model=host.bounds;
+    CALayer *present=(CALayer *)host.layer.presentationLayer;
+    CGRect bounds=present?present.bounds:model;
+    CGRect box=[host convertRect:model toView:win];
+    CALayer *windowPresentation=(CALayer *)win.layer.presentationLayer;
+    if(present && windowPresentation)box=[present convertRect:bounds toLayer:windowPresentation];
+    BOOL right=CGRectGetMidX(box)>CGRectGetMidX(win.bounds)+20;
+    BOOL little=bounds.size.width>=20 && bounds.size.height>=20 && bounds.size.width<=88 && bounds.size.height<=72 && bounds.size.width/bounds.size.height<1.65;
+    BOOL modelLittle=model.size.width<=100 && model.size.height<=80;
+    BOOL latched=[objc_getAssociatedObject(host,&kDIRightRole336) boolValue];
+    // Commit trailing satellite identity, not a one-frame model size. System
+    // spring/portal swaps transiently set model dimensions to the main pill.
+    if(right && little && modelLittle){
+        objc_setAssociatedObject(host,&kDIRightRole336,@YES,OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        objc_setAssociatedObject(host,&kDIRightRelease336,nil,OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        return YES;
+    }
+    if(!latched)return NO;
+    BOOL settled=fabs(bounds.size.width-model.size.width)<1 && fabs(bounds.size.height-model.size.height)<1;
+    BOOL primary=settled && bounds.size.width>=110 && (!right || bounds.size.height>=85);
+    NSNumber *since=objc_getAssociatedObject(host,&kDIRightRelease336);
+    if(!primary){objc_setAssociatedObject(host,&kDIRightRelease336,nil,OBJC_ASSOCIATION_RETAIN_NONATOMIC);return YES;}
+    CFTimeInterval now=CACurrentMediaTime();
+    if(!since){objc_setAssociatedObject(host,&kDIRightRelease336,@(now),OBJC_ASSOCIATION_RETAIN_NONATOMIC);return YES;}
+    if(now-since.doubleValue<.4)return YES;
+    objc_setAssociatedObject(host,&kDIRightRole336,@NO,OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    objc_setAssociatedObject(host,&kDIRightRelease336,nil,OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    return NO;
 }
 static BOOL diRightSatelliteAncestor335(UIView *view){
     for(UIView *p=view;p && p!=view.window;p=p.superview)
@@ -66,6 +91,9 @@ static NSHashTable *diBackgrounds324;
 @property(nonatomic,assign) CFTimeInterval requestedAt328;
 @property(nonatomic,assign) CFTimeInterval report327;
 @property(nonatomic,weak) CALayer *animationSource327;
+@property(nonatomic,assign) BOOL geometryProbe336;
+@property(nonatomic,assign) BOOL compactRequested336;
+@property(nonatomic,assign) BOOL expandedRequested336;
 @property(nonatomic,assign) BOOL syncing326;
 @property(nonatomic,assign) CFTimeInterval lastSync326;
 @property(nonatomic,assign) CFTimeInterval lastDisplay326;
@@ -92,6 +120,9 @@ static NSHashTable *diBackgrounds324;
         self.userInteractionEnabled=NO;self.clipsToBounds=YES;
         self.backgroundColor=UIColor.clearColor;
         _compactLayer=[AVPlayerLayer layer];_expandedLayer=[AVPlayerLayer layer];
+        NSDictionary *noActions=@{@"bounds":NSNull.null,@"position":NSNull.null,@"cornerRadius":NSNull.null,@"hidden":NSNull.null,@"contents":NSNull.null};
+        _compactLayer.actions=noActions;_expandedLayer.actions=noActions;
+        self.layer.actions=noActions;
         _compactLayer.videoGravity=AVLayerVideoGravityResizeAspectFill;
         _expandedLayer.videoGravity=AVLayerVideoGravityResizeAspectFill;
         [self.layer addSublayer:_compactLayer];[self.layer addSublayer:_expandedLayer];
@@ -115,6 +146,7 @@ static NSHashTable *diBackgrounds324;
 }
 - (void)stop {
     [self.compactPlayer pause];[self.expandedPlayer pause];
+    self.compactRequested336=NO;self.expandedRequested336=NO;
     self.hidden=YES;[self.link invalidate];self.link=nil;self.lastDisplay326=0;
     self.warmUntil328=0;
     // Stop our geometric CA copies too. Never alter the system host animations.
@@ -180,6 +212,7 @@ static NSHashTable *diBackgrounds324;
                 else{[o.compactPlayer pause];o.compactLooper=nil;o.compactPlayer=nil;o.compactLayer.player=nil;}
                 iv.image=nil;RLog(@"[岛背景324] 仅视频轨加载失败 %@",path.lastPathComponent);
             }
+            if(expanded)o.expandedRequested336=NO;else o.compactRequested336=NO;
             [o startBurst];[o sync];
         });
     });
@@ -194,10 +227,11 @@ static NSHashTable *diBackgrounds324;
 - (void)refresh {
     BOOL right=diRightSatellite335(self.host);
     if(right!=self.rightSatellite335){
-        [self stop];self.rightSatellite335=right;
-        [self loadPath:nil expanded:NO];[self loadPath:nil expanded:YES];
+        self.rightSatellite335=right;
         self.modeKnown=NO;self.displayKnown328=NO;
-        if(logEnabled)RLog(@"[右侧独立岛335] %@",right?@"使用录屏岛素材":@"返回主岛素材");
+        // Do not destroy both queues first: loadPath updates only the changed
+        // asset, and its generation guard rejects obsolete asynchronous work.
+        if(logEnabled)RLog(@"[独立岛336] host=%p role=%@ model=%@ recIndex=%ld",self.host,right?@"rec":@"primary",NSStringFromCGRect(self.host.bounds),(long)recIdx);
     }
     NSString *small=right?recVideoPath():materialPathFor(NO);
     NSString *large=right?nil:materialPathFor(YES);
@@ -293,8 +327,17 @@ static NSHashTable *diBackgrounds324;
     if(self.syncing326 || now326-self.lastSync326<.002)return;
     self.lastSync326=now326;
     UIView *host=self.host;
-    if(![self visibleHost] || self.rightSatellite335!=diRightSatellite335(host)){[self stop];return;}
-    BOOL compositor=!self.rightSatellite335 && [self mirrorGeometry327:host];
+    if(![self visibleHost]){[self stop];return;}
+    // Classification is committed by low-rate refresh; never stop a renderer
+    // merely because the model/presentation dimensions disagree during a spring.
+    BOOL compositor=NO;
+    if(!self.rightSatellite335){
+        if(self.geometryProbe336){self.geometryProbe336=NO;compositor=[self mirrorGeometry327:host];}
+        else if(self.mirrored327){
+            for(NSString *key in self.layer.animationKeys)if([key hasPrefix:@"di.geometry327."]){compositor=YES;break;}
+            if(!compositor)self.mirrored327=NO;
+        }
+    }
     BOOL compactOn=self.rightSatellite335?recOn:smallOn;
     BOOL expandedOn=!self.rightSatellite335 && expandOn;
     CALayer *present=(CALayer *)host.layer.presentationLayer;
@@ -361,10 +404,8 @@ static NSHashTable *diBackgrounds324;
     BOOL warm=now326<self.warmUntil328 || waiting328;
     BOOL wantCompact=compactOn && (!requestedMode328 || warm || !self.displayedMode328);
     BOOL wantExpanded=expandedOn && (requestedMode328 || warm || self.displayedMode328);
-    if(wantCompact){if(self.compactPlayer && self.compactPlayer.rate==0)[self.compactPlayer play];}
-    else if(self.compactPlayer.rate!=0)[self.compactPlayer pause];
-    if(wantExpanded){if(self.expandedPlayer && self.expandedPlayer.rate==0)[self.expandedPlayer play];}
-    else if(self.expandedPlayer.rate!=0)[self.expandedPlayer pause];
+    if(wantCompact!=self.compactRequested336){self.compactRequested336=wantCompact;if(wantCompact)[self.compactPlayer play];else [self.compactPlayer pause];}
+    if(wantExpanded!=self.expandedRequested336){self.expandedRequested336=wantExpanded;if(wantExpanded)[self.expandedPlayer play];else [self.expandedPlayer pause];}
     if(logEnabled && CFAbsoluteTimeGetCurrent()-self.diagnosticAt>6 && (changed || !self.geometryKnown)){
         self.diagnosticAt=CFAbsoluteTimeGetCurrent();
         RLog(@"[铺满325] model=%@ presentation=%@ surface=%@ video=%@ legacyScale=%.2f legacyOffset=%.1f,%.1f(不应用背景) mode=%d",NSStringFromCGRect(host.bounds),NSStringFromCGRect(bounds),NSStringFromCGRect(self.frame),NSStringFromCGRect(video),animScale,animOffsetX,animOffsetY,self.expandedMode);
@@ -390,11 +431,20 @@ static void diDirectBackgroundHost324(UIView *host){
     if(surface){
         // A size/position change can reclassify an existing container. Defer
         // resource lookup to the existing refresh tick, hiding stale material.
-        if(surface.rightSatellite335!=diRightSatellite335(host)){[surface stop];return;}
+        if(surface.rightSatellite335!=diRightSatellite335(host)){
+            // Switch routing once in the existing resource-refresh path rather
+            // than hiding and rebuilding video from a layout callback.
+            if(![objc_getAssociatedObject(host,&kDIBackgroundPending324) boolValue]){
+                objc_setAssociatedObject(host,&kDIBackgroundPending324,@YES,OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+                __weak DIIslandBackground324 *weakSurface=surface;__weak UIView *weakHost=host;
+                dispatch_async(dispatch_get_main_queue(),^{objc_setAssociatedObject(weakHost,&kDIBackgroundPending324,nil,OBJC_ASSOCIATION_RETAIN_NONATOMIC);[weakSurface refresh];});
+            }
+        }
         CGRect model=host.layer.bounds;CGFloat r=host.layer.cornerRadius;
         BOOL dirty=!surface.observed328 || !CGRectEqualToRect(surface.observedModel328,model) || fabs(surface.observedRadius328-r)>.01;
         surface.observedModel328=model;surface.observedRadius328=r;surface.observed328=YES;
         if(!dirty && !surface.hidden)return;
+        surface.geometryProbe336=YES;
         [surface startBurst];
         // Display link owns transition geometry; no refresh/asset discovery here.
         // Initial alignment is needed only if resuming a hidden surface.
@@ -413,7 +463,7 @@ static void diDirectBackgroundHost324(UIView *host){
             if(!diBackgrounds324)diBackgrounds324=[NSHashTable weakObjectsHashTable];[diBackgrounds324 addObject:v];
             RLog(@"[岛背景324] 已挂顶层容器 %@；背景不依赖音乐，系统内容包装层不变",NSStringFromClass(h.class));}
         if(v.superview!=h){[v removeFromSuperview];[h insertSubview:v atIndex:0];}
-        [v startBurst];[v refresh];
+        v.geometryProbe336=YES;[v startBurst];[v refresh];
     });
 }
 static void diDirectBackgroundTick324(void){

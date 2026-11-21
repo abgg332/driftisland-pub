@@ -7418,26 +7418,21 @@ static void diPlatterDMWHook(id self, SEL _cmd) {
 static void (*diOrigContLayout)(id, SEL);
 static void (*diOrigContDMW)(id, SEL);
 static void diContMaybeScan(UIView *self) {
-    if (![NSThread isMainThread] || !(enabled && hideBlackPillOn)) return;
-    UIWindow *win = self.window;
-    if (win && diWindowExpanded(win)) { diPlatterRestoreInWindow(win); return; }
-    static CFAbsoluteTime last;
-    static __weak UIWindow *lastWindow;
-    static BOOL lastExpanded=NO,lastDisplayVisible=NO;
-    CFAbsoluteTime now = CFAbsoluteTimeGetCurrent();
-    BOOL expanded=win?diWindowExpanded(win):NO;
-    BOOL visible=win && !win.hidden && win.alpha>.01;
-    BOOL stateChanged=(win!=lastWindow || expanded!=lastExpanded || visible!=lastDisplayVisible);
-    lastWindow=win;lastExpanded=expanded;lastDisplayVisible=visible;
-    /* 3.1.32: the prior unconditional scan on every container layout performed
-       up to 1500-node BFS throughout the expansion animation. Scan only on
-       state transitions; per-target layout/didMove hooks handle additions. */
-    if(!stateChanged && now-last<30.0)return;
-    /* 3.0.20: 2s → 4s。扫描本身已经不再动视图树(只是写 hidden), 但 1500 节点的 BFS
-       在 iOS17 的控制中心里也要几毫秒, 少扫一半是纯赚 —— 新建的黑层有 layoutSubviews/
-       didMoveToWindow 两个钩子兜住, 扫描只是补漏。 */
-    last = now;
-    diGainScanAperture();
+    if(!NSThread.isMainThread || !(enabled && hideBlackPillOn) || gScreenOff328 || gLocked)return;
+    static char pendingKey;
+    if([objc_getAssociatedObject(self,&pendingKey) boolValue])return;
+    objc_setAssociatedObject(self,&pendingKey,@YES,OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    __weak UIView *weak=self;
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW,(int64_t)(.8*NSEC_PER_SEC)),dispatch_get_main_queue(),^{
+        UIView *host=weak;if(!host)return;
+        objc_setAssociatedObject(host,&pendingKey,nil,OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        if(!enabled || gScreenOff328 || gLocked || !host.window)return;
+        CALayer *pl=(CALayer *)host.layer.presentationLayer;
+        if(pl && (fabs(pl.bounds.size.width-host.bounds.size.width)>1 || fabs(pl.bounds.size.height-host.bounds.size.height)>1))return;
+        static CFAbsoluteTime last=0;CFAbsoluteTime now=CFAbsoluteTimeGetCurrent();
+        if(now-last<30)return;last=now;
+        if(diWindowExpanded(host.window))diPlatterRestoreInWindow(host.window);else diGainScanAperture();
+    });
 }
 static void diContLayoutHook(id self, SEL _cmd) {
     if (diOrigContLayout) diOrigContLayout(self, _cmd);
