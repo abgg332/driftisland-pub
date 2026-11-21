@@ -46,6 +46,7 @@ static BOOL diRightSatelliteAncestor335(UIView *view){
         if([NSStringFromClass(p.class) isEqualToString:@"SBSystemApertureContainerView"])return diRightSatellite335(p);
     return NO;
 }
+static BOOL diIsNowPlayingHostCached(UIView *host);
 static char kDIBackground324,kDIBackgroundPending324;
 static NSHashTable *diBackgrounds324;
 @class DIIslandBackground324;
@@ -92,6 +93,9 @@ static NSHashTable *diBackgrounds324;
 @property(nonatomic,assign) CFTimeInterval report327;
 @property(nonatomic,weak) CALayer *animationSource327;
 @property(nonatomic,assign) BOOL geometryProbe336;
+@property(nonatomic,assign) CFTimeInterval prewarmUntil337;
+@property(nonatomic,assign) BOOL directExpand337;
+@property(nonatomic,assign) CFTimeInterval routeReport337;
 @property(nonatomic,assign) BOOL compactRequested336;
 @property(nonatomic,assign) BOOL expandedRequested336;
 @property(nonatomic,assign) BOOL syncing326;
@@ -148,7 +152,7 @@ static NSHashTable *diBackgrounds324;
     [self.compactPlayer pause];[self.expandedPlayer pause];
     self.compactRequested336=NO;self.expandedRequested336=NO;
     self.hidden=YES;[self.link invalidate];self.link=nil;self.lastDisplay326=0;
-    self.warmUntil328=0;
+    self.warmUntil328=0;self.prewarmUntil337=0;
     // Stop our geometric CA copies too. Never alter the system host animations.
     for(CALayer *layer in @[self.layer,self.compactLayer,self.expandedLayer,self.compactImage.layer,self.expandedImage.layer])
         for(NSString *key in layer.animationKeys)if([key hasPrefix:@"di.geometry327."])[layer removeAnimationForKey:key];
@@ -221,7 +225,7 @@ static NSHashTable *diBackgrounds324;
     UIView *host=self.host;
     if(!enabled || (gLocked || gScreenOff328) || !host.window || host.window.hidden)return NO;
     for(UIView *v=host;v;v=v.superview)if(v.hidden || v.alpha<.01)return NO;
-    if(notifyBgOff && ([objc_getAssociatedObject(host,&kHostIsNotif) boolValue] || [objc_getAssociatedObject(host,&kCapIsNotif) boolValue]))return NO;
+    if(!self.rightSatellite335 && notifyBgOff && ([objc_getAssociatedObject(host,&kHostIsNotif) boolValue] || [objc_getAssociatedObject(host,&kCapIsNotif) boolValue]))return NO;
     return host.bounds.size.width>2 && host.bounds.size.height>2;
 }
 - (void)refresh {
@@ -241,6 +245,10 @@ static NSHashTable *diBackgrounds324;
     BOOL changed=![self.prefSignature isEqualToString:sig];self.prefSignature=sig;
     if(![self visibleHost]){[self stop];return;}
     if(changed){[self loadPath:small expanded:NO];[self loadPath:large expanded:YES];[self startBurst];}
+    if(logEnabled && CFAbsoluteTimeGetCurrent()-self.routeReport337>8){
+        self.routeReport337=CFAbsoluteTimeGetCurrent();
+        RLog(@"[素材路由337] host=%p role=%@ enabled=%d path=%@ model=%@",self.host,right?@"right-rec":@"primary",right?recOn:smallOn,small.lastPathComponent?:@"none",NSStringFromCGRect(self.host.bounds));
+    }
     if(self.hidden)[self startBurst];
     [self sync];
 }
@@ -252,7 +260,7 @@ static NSHashTable *diBackgrounds324;
     NSMutableArray<CALayer *> *queue=[NSMutableArray arrayWithObject:source];CALayer *best=nil;int budget=48;
     while(queue.count && budget-->0){CALayer *node=queue.firstObject;[queue removeObjectAtIndex:0];
         BOOL candidate=node.animationKeys.count>0;
-        if(candidate){for(NSString *key in node.animationKeys){CAAnimation *a=[node animationForKey:key];BOOL dummy=NO;if(diBGAnimation327(a,0,1.0/MAX(1.0,UIScreen.mainScreen.scale),&dummy,0)){best=node;break;}}}
+        if(candidate){for(NSString *key in node.animationKeys){CAAnimation *a=[node animationForKey:key];BOOL dummy=NO;if(diBGAnimation327(a,0,1.0/MAX(1.0,UIScreen.mainScreen.scale),&dummy,0) && dummy && fabs(node.bounds.size.width-host.bounds.size.width)<1 && fabs(node.bounds.size.height-host.bounds.size.height)<1){best=node;break;}}}
         if(best)break;for(CALayer *child in node.sublayers)if(child!=self.layer && queue.count<48)[queue addObject:child];
     }
     source=best?:host.layer;self.animationSource327=source;
@@ -288,14 +296,7 @@ static NSHashTable *diBackgrounds324;
             if([self.animationSignatures327[token] isEqualToString:signature] && [layer animationForKey:dest])continue;
             BOOL ignored=NO;CAAnimation *copy=diBGAnimation327(original,i==0?0:1,pixel,&ignored,0);
             if(!copy)continue;
-            if(copy.beginTime!=0){
-                CFTimeInterval hostNow=[source convertTime:CACurrentMediaTime() fromLayer:nil];
-                CFTimeInterval destNow=[layer convertTime:CACurrentMediaTime() fromLayer:nil];
-                CFTimeInterval localPhase=original.beginTime+original.timeOffset;
-                if(original.speed!=0)localPhase+=((hostNow-original.beginTime)*original.speed);
-                copy.beginTime=destNow-(localPhase-original.timeOffset);
-                copy.timeOffset=original.timeOffset;copy.speed=original.speed;
-            }
+            if(copy.beginTime!=0)copy.beginTime=[layer convertTime:original.beginTime fromLayer:source];
             [layer addAnimation:copy forKey:dest];self.animationSignatures327[token]=signature;
         }
         // When the system uses radius=0 and the old capsule fallback, derive
@@ -305,7 +306,7 @@ static NSHashTable *diBackgrounds324;
             NSString *token=[@"radius/" stringByAppendingString:key];[live addObject:token];
             if(![self.animationSignatures327[token] isEqualToString:signature] || ![self.layer animationForKey:dest]){
                 BOOL ignored=NO;CAAnimation *copy=diBGAnimation327(original,2,pixel,&ignored,0);
-                if(copy){if(copy.beginTime!=0){CFTimeInterval hostNow=[source convertTime:CACurrentMediaTime() fromLayer:nil];CFTimeInterval destNow=[self.layer convertTime:CACurrentMediaTime() fromLayer:nil];CFTimeInterval phase=original.beginTime+original.timeOffset;if(original.speed!=0)phase+=(hostNow-original.beginTime)*original.speed;copy.beginTime=destNow-(phase-original.timeOffset);copy.timeOffset=original.timeOffset;copy.speed=original.speed;}[self.layer addAnimation:copy forKey:dest];self.animationSignatures327[token]=signature;}
+                if(copy){if(copy.beginTime!=0)copy.beginTime=[self.layer convertTime:original.beginTime fromLayer:source];[self.layer addAnimation:copy forKey:dest];self.animationSignatures327[token]=signature;}
             }
         }
     }
@@ -354,6 +355,8 @@ static NSHashTable *diBackgrounds324;
     CGFloat epsilon=.1/MAX(1.0,UIScreen.mainScreen.scale);
     BOOL changed=fabs(self.frame.origin.x-bounds.origin.x)>epsilon || fabs(self.frame.origin.y-bounds.origin.y)>epsilon || fabs(self.frame.size.width-bounds.size.width)>epsilon || fabs(self.frame.size.height-bounds.size.height)>epsilon || fabs(self.layer.cornerRadius-radius)>.1;
     CGFloat height=(compositor?host.bounds:bounds).size.height;
+    BOOL direct337=self.directExpand337 && !self.rightSatellite335;
+    if(direct337 && host.bounds.size.width>=280 && host.bounds.size.height>=100)height=host.bounds.size.height;
     // Retain DriftIsland's compact/expanded material split, with a small hysteresis.
     if(!self.modeKnown){self.expandedMode=height>60;self.modeKnown=YES;}
     else if(height>62)self.expandedMode=YES;else if(height<58)self.expandedMode=NO;
@@ -383,10 +386,9 @@ static NSHashTable *diBackgrounds324;
     // Small overscan avoids subpixel seams without moving the visual center.
     CGFloat pixel=1.0/MAX(1.0,UIScreen.mainScreen.scale);
     CGRect video=CGRectInset(b,-pixel,-pixel);
-    if(self.rightSatellite335){
-        CGFloat z=isfinite(recScale)?recScale:1;
-        video=CGRectInset(video,(1-z)*video.size.width/2,(1-z)*video.size.height/2);
-    }
+    // Right independent circle uses the SAME edge-to-edge background surface.
+    // recScale remains for the old recording accessory, not its canvas.
+
     AVPlayerLayer *visibleLayer=self.displayedMode328?self.expandedLayer:self.compactLayer;
     UIImageView *visibleImage=self.displayedMode328?self.expandedImage:self.compactImage;
     if(!compositor){
@@ -401,7 +403,7 @@ static NSHashTable *diBackgrounds324;
     [CATransaction commit];
     // Warm both only while geometry is transitioning. After settling, pause
     // the invisible decoder but retain item/looper and its last rendered frame.
-    BOOL warm=now326<self.warmUntil328 || waiting328;
+    BOOL warm=now326<self.warmUntil328 || waiting328 || now326<self.prewarmUntil337;
     BOOL wantCompact=compactOn && (!requestedMode328 || warm || !self.displayedMode328);
     BOOL wantExpanded=expandedOn && (requestedMode328 || warm || self.displayedMode328);
     if(wantCompact!=self.compactRequested336){self.compactRequested336=wantCompact;if(wantCompact)[self.compactPlayer play];else [self.compactPlayer pause];}
@@ -445,6 +447,10 @@ static void diDirectBackgroundHost324(UIView *host){
         surface.observedModel328=model;surface.observedRadius328=r;surface.observed328=YES;
         if(!dirty && !surface.hidden)return;
         surface.geometryProbe336=YES;
+        surface.directExpand337=!diIsNowPlayingHostCached(host);
+        if(dirty && !surface.rightSatellite335 && model.size.width>=280 && model.size.height>=100)surface.prewarmUntil337=CACurrentMediaTime()+.25;
+        // Bypass same-loop sampling debounce on a NEW system destination.
+        if(dirty)surface.lastSync326=0;
         [surface startBurst];
         // Display link owns transition geometry; no refresh/asset discovery here.
         // Initial alignment is needed only if resuming a hidden surface.
@@ -463,6 +469,7 @@ static void diDirectBackgroundHost324(UIView *host){
             if(!diBackgrounds324)diBackgrounds324=[NSHashTable weakObjectsHashTable];[diBackgrounds324 addObject:v];
             RLog(@"[岛背景324] 已挂顶层容器 %@；背景不依赖音乐，系统内容包装层不变",NSStringFromClass(h.class));}
         if(v.superview!=h){[v removeFromSuperview];[h insertSubview:v atIndex:0];}
+        v.directExpand337=!diIsNowPlayingHostCached(h);
         v.geometryProbe336=YES;[v startBurst];[v refresh];
     });
 }
