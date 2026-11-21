@@ -55,11 +55,10 @@ static NSArray *diSortedStrs(NSArray *arr) {
 }
 
 static BOOL logEnabled; // 日志开关
-static BOOL diLockAvatarOn338=NO;
 static void diLockAvatarRefresh338(void);
 static void diLockAvatarStop338(void);
-static void diLockDiagnosticRemote340(void);
-static void diLockAvatarDiscover339(UIView *root);
+static void diLockScreenInstall343(void);
+static void diLockScreenRefresh343(void);
 static BOOL gScreenOff328=NO; // independent display-power gate, no polling
 static BOOL gLocked = NO; // 锁屏状态: 锁屏期间所有岛视频/帧率动画全停(锁屏界面组件也是岛视图, 不停会一直亮屏)
 /* ===== 2.8.12: 歌词岛已回归(2.8.4/2.8.5 曾下架) —— "音乐岛识别"判据保留,
@@ -1032,7 +1031,6 @@ static int diColorModeLoadFx(NSString *modeKey, NSString *flowKey) {
 }
 
 static void diFxLoadPrefs(void) {
-    diLockAvatarOn338=pBool(@"LockScreenAvatarOn",NO);
     /* 3.0.55: 特效参数单独读取。
        以前这些键混在 refreshPrefs() 里 —— 那是"全量偏好重读"(上百次跨进程读),
        设置页拖一下滑杆就发一次刷新通知, 一次拖动几十条 → SpringBoard 主线程被按住
@@ -6221,6 +6219,7 @@ static void diExportMaskForMRU(void) {
                                      /* 3.0.40: 播放器遮罩 —— 开关与素材名都独立一份 */
                                      @"pmOn": @(diPrefBoolNow(@"PlayerMaskOn", playerMaskOn)),
                                      @"pmMask": pmPath.lastPathComponent ?: @"",
+                                     @"lockAvatar": @(diPrefBoolNow(@"LockScreenAvatarOn", NO)),
                                      /* 2.8.85: 展开定义 —— MRU 内的歌词/歌名位置与大小 */
                                      @"etOn": @(expandTextOn), @"etX": @(expandTextX),
                                      @"etY": @(expandTextY), @"etScale": @(expandTextScale),
@@ -10720,7 +10719,6 @@ static void layoutHook(UIView *self, SEL selector) {
             if (h.cls == c) { ((void(*)(id,SEL))h.original)(self, selector); found = YES; break; }
         if (found) break;
     }
-    if(NSThread.isMainThread && diLockAvatarOn338 && !gScreenOff328 && diInLockScreen(self))diLockAvatarDiscover339(self);
     if (lockWOn) applyLockWidth(self); // 2.2.10: 锁屏通知宽度(先于 updateHost, 避免岛相关开销)
     applyLockStyle(self);              // 2.2.17: 锁屏通知边框/背景/阴影
     if (NSThread.isMainThread) {
@@ -16296,6 +16294,7 @@ static void diActivityReload(void) {
         gDIActivityEnabled, gDIActivityShape ? [NSString stringWithFormat:@"%.0fx%.0f",
         gDIActivityShape.size.width, gDIActivityShape.size.height] : @"(无)"]);
     for (UIView *view in gDIActivityArtworks.allObjects) diActivityApply(view);
+    diLockScreenRefresh343();
 }
 static void diActivityNotify(CFNotificationCenterRef c, void *o, CFStringRef n, const void *obj, CFDictionaryRef info) {
     dispatch_async(dispatch_get_main_queue(), ^{
@@ -16378,6 +16377,7 @@ static void diActivitySetImage(id self, SEL cmd, id img) {
 }
 static void diActivityInstall(void) {
     static BOOL installed;
+    diLockScreenInstall343();
     /* 2.8.86: 文字 hook 放在最前面且可重试(不受 installed 影响) */
     diActivityInstallTextHook();
     if (installed) return;
@@ -16452,6 +16452,7 @@ static void diActivityScanTree(UIView *root, NSUInteger *nodes, NSUInteger *matc
     }
 }
 static void diActivityScan(void) {
+    @try { diLockScreenInstall343(); } @catch (__unused NSException *e) {}
     /* 2.8.86: 心跳里补装文字 hook —— 展开过一次之后类才注册, 必须能重试 */
     @try { diActivityInstallTextHook(); } @catch (__unused NSException *e) {}
     /* 2.8.81: 心跳不再被开关/素材挡在前面 —— 之前"没遮上"和"根本没跑"在日志里长得一模一样 */
@@ -16529,7 +16530,6 @@ static void diActivityStartScanner(void) {
     started = YES;
     gDIActivityScanTimer = [NSTimer timerWithTimeInterval:1.0 repeats:YES block:^(NSTimer *t) {
         @try { diActivityScan(); } @catch (__unused NSException *e) {}
-        @try { diLockDiagnosticRemote340(); } @catch (__unused NSException *e) {}
         @try { diISMRUEnsure(); } @catch (__unused NSException *e) {}   /* 3.0.85: 岛专辑特效起停巡检 */
     }];
     [NSRunLoop.mainRunLoop addTimer:gDIActivityScanTimer forMode:NSRunLoopCommonModes];
@@ -19211,10 +19211,10 @@ static BOOL diArtInControlCenter(UIView *v) {
 }
 
 #include "DILockAvatar338.inc"
+#include "DILockScreenMask343.inc"
 
 static void diArtAVLayout(id self, SEL cmd) {
     if (gDIOrigAVLayout) gDIOrigAVLayout(self, cmd);
-    diLockAvatarObserve338((UIView *)self);
     @try {
         if (gDIStage < 1) return;
         /* 3.0.19: 去掉 diArtIs3x2() 限制 —— 3×2 只是"要不要动传送栏"的判据, 与封面
