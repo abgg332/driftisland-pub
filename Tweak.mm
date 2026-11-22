@@ -18115,7 +18115,7 @@ static void diArtPostFlush(UIView *root) {
     diPhase("art");
     static NSString *lastFxLayout347;
     NSString *fxLayout347=diFxSizeId();
-    if(![lastFxLayout347 isEqualToString:fxLayout347]){lastFxLayout347=[fxLayout347 copy];diFxLoadPrefs();}
+    if(![lastFxLayout347 isEqualToString:fxLayout347]){lastFxLayout347=[fxLayout347 copy];if(!diArtIs3x2())diFxLoadPrefs();}
     /* 3.0.61: 遮罩(启用遮罩)和旋转(专辑旋转)分开判断 */
     BOOL on = diArtPrefOn() || diArtMaskWanted();
     /* 3.0.15: 专辑背景跟着"播放器视图"走 —— 播放器视图本身就是各尺寸下的可见卡片
@@ -19230,7 +19230,7 @@ static BOOL diArtInControlCenter(UIView *v) {
 static void diArtAVLayout(id self, SEL cmd) {
     if (gDIOrigAVLayout) gDIOrigAVLayout(self, cmd);
     @try { diLockScreenApply343((UIView *)self); } @catch (__unused NSException *e) {}
-    if(NSThread.isMainThread && diArtInControlCenter((UIView *)self)){
+    if(NSThread.isMainThread && !diArtIs3x2() && diArtInControlCenter((UIView *)self)){
         if(!gDIArtKnown)gDIArtKnown=[NSHashTable weakObjectsHashTable];
         [gDIArtKnown addObject:(UIView *)self];
     }
@@ -20832,6 +20832,10 @@ static UIView *diRhythmPickTarget(void) {
     if (!gDIArtKnown) return nil;
     for (UIView *v in gDIArtKnown.allObjects) {
         if (!v.window || v.hidden || v.alpha < 0.3) continue;
+        BOOL actuallyVisible=!v.window.hidden;CGFloat inheritedAlpha=1;
+        for(UIView *p=v;p&&actuallyVisible;p=p.superview){inheritedAlpha*=p.alpha;if(p.hidden||inheritedAlpha<.05)actuallyVisible=NO;}
+        CGRect onScreen=[v convertRect:v.bounds toView:v.window];
+        if(!actuallyVisible||CGRectIsEmpty(onScreen)||!CGRectIntersectsRect(onScreen,v.window.bounds))continue;
         if (diFxExpandedOrSuggestion(v)) continue;
         if (diViewIsSuggestions(v)) continue;          /* 3.0.48: 不认"媒体建议"页 */
         if (diArtInExpandedPlayer(v)) continue;        /* 3.0.63: 展开的播放页不归律动管 */
@@ -20852,7 +20856,10 @@ static UIView *diRhythmPickTarget(void) {
         CGFloat ratio = s.width / MAX(1.0, s.height);
         if (ratio < 0.8 || ratio > 1.25) continue;
         CGFloat area = s.width * s.height;
-        if (area > bestArea) { bestArea = area; best = v; }
+        BOOL cell=NO;
+        for(UIView *p=v.superview;p&&p!=p.window;p=p.superview)if([NSStringFromClass(p.class) containsString:@"NowPlayingCellContent"]){cell=YES;break;}
+        CGFloat score=area*(cell?.01:1.0);
+        if (score > bestArea) { bestArea = score; best = v; }
     }
     return best;
 }
@@ -22081,7 +22088,7 @@ static void diRhythmTickWithDelta(float dtIn) {
     if (!rhythmFxOn || !anyFx) { diRhythmReset(); return; }
 
     UIView *t = gDIRhythmTarget;
-    BOOL stale = (!t || !t.window || t.hidden || t.alpha < 0.1 || diFxExpandedOrSuggestion(t));
+    BOOL stale = (!t || !t.window || t.hidden || t.alpha < 0.1 || !diPowerPlayerVisible(t) || diFxExpandedOrSuggestion(t));
     if (!stale) {
         UIView *better = nil;
         CFTimeInterval now2 = CACurrentMediaTime();
