@@ -59,6 +59,8 @@ static void diLockAvatarRefresh338(void);
 static void diLockAvatarStop338(void);
 static void diLockScreenInstall343(void);
 static void diLockControllerInstall349(void);
+static void diLockBackgroundClientStart351(void);
+static void diLockBackgroundClientTick351(void);
 static void diLockScreenRefresh343(void);
 static BOOL diLockScreenCover343(UIView *host);
 static void diLockScreenApply343(UIView *host);
@@ -16543,6 +16545,7 @@ static void diActivityStartScanner(void) {
     started = YES;
     gDIActivityScanTimer = [NSTimer timerWithTimeInterval:1.0 repeats:YES block:^(NSTimer *t) {
         @try { diActivityScan(); } @catch (__unused NSException *e) {}
+        @try { diLockBackgroundClientTick351(); } @catch (__unused NSException *e) {}
         @try { diISMRUEnsure(); } @catch (__unused NSException *e) {}   /* 3.0.85: 岛专辑特效起停巡检 */
     }];
     [NSRunLoop.mainRunLoop addTimer:gDIActivityScanTimer forMode:NSRunLoopCommonModes];
@@ -16588,6 +16591,7 @@ static void diActivityStartFormWatch(void) {
 }
 static void diActivityStart(void) {
     dispatch_async(dispatch_get_main_queue(), ^{
+        diLockBackgroundClientStart351();
         diMruPostPayload(@"start", @"enter");
         @try { diActivityReload(); } @catch (__unused NSException *e) {
             diMruPostPayload(@"err.reload", e.reason ?: e.name);
@@ -19228,6 +19232,7 @@ static BOOL diArtInControlCenter(UIView *v) {
 
 #include "DILockAvatar338.inc"
 #include "DILockScreenMask343.inc"
+#include "DILockBackgroundClient351.inc"
 
 static void diArtAVLayout(id self, SEL cmd) {
     if (gDIOrigAVLayout) gDIOrigAVLayout(self, cmd);
