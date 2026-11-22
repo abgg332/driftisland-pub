@@ -8,7 +8,9 @@
 @property(nonatomic,assign) BOOL maskInstalled;
 @end
 @implementation DILockScreenMaskState343 @end
-static char diLockScreenMaskStateKey343;
+static char diLockScreenMaskStateKey343,diLockControllerContext349;
+static void diLockControllerInstall349(void);
+static void diLockSceneIdentity349(id controller);
 static NSHashTable<UIView *> *diLockScreenMaskHosts343;
 static IMP diLockScreenOrigLayout343,diLockScreenOrigMove343,diLockScreenOrigVisibility343,diLockScreenOrigInit343;
 static BOOL diLockScreenHooked343,diLockScreenDisplayOff343,diLockScreenDisplayHooked343;
@@ -23,7 +25,7 @@ static BOOL diLockScreenCover343(UIView *host){
     if([NSStringFromClass(owner.class) isEqualToString:@"MRUActivityNowPlayingViewController"])return NO;
     NSString *wn=NSStringFromClass(host.window.class);
     BOOL wallpaper=[wn isEqualToString:@"_SBWallpaperSecureWindow"];
-    BOOL cover=diInLockScreen(host)||wallpaper,cc=NO;NSUInteger depth=0;
+    BOOL cover=diInLockScreen(host)||wallpaper||[objc_getAssociatedObject(host,&diLockControllerContext349) boolValue],cc=NO;NSUInteger depth=0;
     for(UIView *p=host;p&&depth++<24;p=p.superview){
         NSString *n=NSStringFromClass(p.class);
         if([n containsString:@"ControlCenter"]||[n containsString:@"Aperture"])cc=YES;
@@ -133,13 +135,13 @@ static void diLockScreenInstall343(void){
     s=@selector(init);if(diLockScreenObject343(c,s))MSHookMessageEx(c,s,(IMP)diLockScreenInit343,&diLockScreenOrigInit343);
     RLog(@"[锁屏接入347] proc=%@ class=%@ init=%d move=%d layout=%@",proc,NSStringFromClass(c),diLockScreenOrigInit343!=NULL,diLockScreenOrigMove343!=NULL,spring?@"existingSB":@"dedicatedMRU");
 }
-static void diLockScreenRefresh343(void){diLockScreenInstall343();for(UIView *v in diLockScreenMaskHosts343.allObjects)diLockScreenApply343(v);}
+static void diLockScreenRefresh343(void){diLockControllerInstall349();diLockScreenInstall343();for(UIView *v in diLockScreenMaskHosts343.allObjects)diLockScreenApply343(v);}
 
 static void diLockScreenDiscover347(void){
     if(!NSThread.isMainThread)return;
     static CFTimeInterval last=0;CFTimeInterval now=CACurrentMediaTime();if(now-last<.3)return;last=now;
     if(!diPrefBoolNow(@"LockScreenAvatarOn",NO))return;
-    diLockScreenInstall343();NSUInteger artCount=0,scenes=0;
+    diLockControllerInstall349();diLockScreenInstall343();NSUInteger artCount=0,scenes=0;
     for(UIScene *scene in UIApplication.sharedApplication.connectedScenes){
         if(![scene isKindOfClass:UIWindowScene.class])continue;
         for(UIWindow *w in ((UIWindowScene *)scene).windows){
@@ -155,6 +157,9 @@ static void diLockScreenDiscover347(void){
                     reported++;NSMutableString *chain=[NSMutableString string];NSUInteger d=0;
                     for(UIView *p=v.superview;p&&d++<8;p=p.superview)[chain appendFormat:@"/%@",NSStringFromClass(p.class)];
                     RLog(@"[锁屏显示链347] window=%@ view=%@ bounds=%@ owner=%@ parents=%@",wn,n,NSStringFromCGRect(v.bounds),NSStringFromClass(diActivityAncestorVC(v).class),chain);
+                    UIViewController *owner=diActivityAncestorVC(v);
+                    if([NSStringFromClass(owner.class) isEqualToString:@"CSBackgroundContentViewController"])diLockSceneIdentity349(owner);
+
                 }
                 for(UIView *child in v.subviews)if(q.count<1400)[q addObject:child];
             }
@@ -162,4 +167,39 @@ static void diLockScreenDiscover347(void){
         }
     }
     RLog(@"[锁屏接入347] event windows=%lu knownArt=%lu",(unsigned long)scenes,(unsigned long)artCount);
+}
+
+// Typed, guarded object access only; never mask a full-screen remote scene.
+static id diLockObject349(id object,NSString *name){
+    SEL sel=NSSelectorFromString(name);if(!object||![object respondsToSelector:sel])return nil;
+    Method m=class_getInstanceMethod(object_getClass(object),sel);if(!m||method_getNumberOfArguments(m)!=2)return nil;
+    char *r=method_copyReturnType(m);BOOL valid=r&&r[0]=='@';free(r);if(!valid)return nil;
+    @try{return ((id(*)(id,SEL))objc_msgSend)(object,sel);}@catch(__unused NSException *e){return nil;}
+}
+static void diLockSceneIdentity349(id controller){
+    static CFTimeInterval last=0;CFTimeInterval now=CACurrentMediaTime();if(now-last<1)return;last=now;
+    id scene=diLockObject349(controller,@"scene"),process=diLockObject349(scene,@"clientProcess");
+    int pid=-1;SEL sel=NSSelectorFromString(@"pid");
+    if([process respondsToSelector:sel]){Method m=class_getInstanceMethod(object_getClass(process),sel);char *r=m?method_copyReturnType(m):NULL;if(r&&r[0]=='i')pid=((int(*)(id,SEL))objc_msgSend)(process,sel);free(r);}
+    RLog(@"[锁屏场景349] scene=%@ process=%@ bundle=%@ pid=%d definition=%@",diLockObject349(scene,@"identifier"),diLockObject349(process,@"name"),diLockObject349(process,@"bundleIdentifier"),pid,diLockObject349(scene,@"definition"));
+}
+static void diLockControllerApply349(id controller){
+    id np=diLockObject349(controller,@"nowPlayingViewController");
+    id art=diLockObject349(np,@"artworkView");Class known=NSClassFromString(@"MRUArtworkView");
+    if(known&&[art isKindOfClass:known]){objc_setAssociatedObject(art,&diLockControllerContext349,@YES,OBJC_ASSOCIATION_RETAIN_NONATOMIC);diLockScreenApply343((UIView *)art);}
+    static CFTimeInterval last=0;CFTimeInterval now=CACurrentMediaTime();if(now-last>5){last=now;RLog(@"[锁屏控制器349] proc=%@ controller=%@ nowPlaying=%@ artwork=%@ bounds=%@",NSProcessInfo.processInfo.processName,NSStringFromClass([controller class]),NSStringFromClass([np class]),NSStringFromClass([art class]),[art isKindOfClass:UIView.class]?NSStringFromCGRect(((UIView *)art).bounds):@"none");}
+}
+static void diLockControllerInstall349(void){
+    if(!NSThread.isMainThread)return;
+    static NSMutableSet *installed; if(!installed)installed=[NSMutableSet set];
+    Class cls=NSClassFromString(@"MRUCoverSheetViewController");if(!cls)return;
+    for(NSString *name in @[@"layout",@"viewDidLoad",@"viewWillLayoutSubviews",@"viewDidLayoutSubviews"]){
+        if([installed containsObject:name])continue;SEL sel=NSSelectorFromString(name);Method m=class_getInstanceMethod(cls,sel);if(!m||method_getNumberOfArguments(m)!=2)continue;
+        char *r=method_copyReturnType(m);BOOL valid=r&&!strcmp(r,"v");free(r);if(!valid)continue;
+        // Each trampoline owns its own original IMP, preserving superclass dispatch.
+        __block IMP original=NULL;
+        IMP replacement=imp_implementationWithBlock(^(id self){if(original)((void(*)(id,SEL))original)(self,sel);@try{diLockControllerApply349(self);}@catch(__unused NSException *e){}});
+        MSHookMessageEx(cls,sel,replacement,&original);[installed addObject:name];
+        RLog(@"[锁屏控制器349] installed %@ %@",NSStringFromClass(cls),name);
+    }
 }

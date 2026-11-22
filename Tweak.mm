@@ -58,6 +58,7 @@ static BOOL logEnabled; // 日志开关
 static void diLockAvatarRefresh338(void);
 static void diLockAvatarStop338(void);
 static void diLockScreenInstall343(void);
+static void diLockControllerInstall349(void);
 static void diLockScreenRefresh343(void);
 static BOOL diLockScreenCover343(UIView *host);
 static void diLockScreenApply343(UIView *host);
@@ -16388,6 +16389,7 @@ static void diActivitySetImage(id self, SEL cmd, id img) {
 }
 static void diActivityInstall(void) {
     static BOOL installed;
+    diLockControllerInstall349();
     diLockScreenInstall343();
     /* 2.8.86: 文字 hook 放在最前面且可重试(不受 installed 影响) */
     diActivityInstallTextHook();
