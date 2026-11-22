@@ -15261,10 +15261,6 @@ static CGFloat diActivityHostHeight(UIView *artwork) {
 }
 static void diActivityApply(UIView *artwork) {
     if (!NSThread.isMainThread || ![artwork isKindOfClass:UIView.class]) return;
-    if ([NSStringFromClass(artwork.class) isEqualToString:@"MRUActivityArtworkView"] && diLockScreenCover343(artwork)) {
-        diLockScreenApply343(artwork);
-        return; /* Lock-screen large artwork uses the shared lock adapter, not island glass. */
-    }
     DIActivityMaskState *state = objc_getAssociatedObject(artwork, &kDIActivityMaskState);
     BOOL sized = artwork.bounds.size.width > 20 && artwork.bounds.size.height > 20;
     BOOL ios17 = diIsIOS17Up();
@@ -19221,6 +19217,7 @@ static BOOL diArtInControlCenter(UIView *v) {
 
 static void diArtAVLayout(id self, SEL cmd) {
     if (gDIOrigAVLayout) gDIOrigAVLayout(self, cmd);
+    @try { diLockScreenApply343((UIView *)self); } @catch (__unused NSException *e) {}
     @try {
         if (gDIStage < 1) return;
         /* 3.0.19: 去掉 diArtIs3x2() 限制 —— 3×2 只是"要不要动传送栏"的判据, 与封面
