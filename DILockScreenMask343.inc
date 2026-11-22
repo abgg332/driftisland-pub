@@ -17,10 +17,13 @@ static CFTimeInterval diLockScreenSpinEpoch343;
 static void diLockScreenApply343(UIView *host);
 
 static BOOL diLockScreenCover343(UIView *host){
-    if(![NSStringFromClass(host.class) isEqualToString:@"MRUArtworkView"])return NO;
+    Class artClass=NSClassFromString(@"MRUArtworkView");
+    if(!artClass||![host isKindOfClass:artClass])return NO;
     UIViewController *owner=diActivityAncestorVC(host);
     if([NSStringFromClass(owner.class) isEqualToString:@"MRUActivityNowPlayingViewController"])return NO;
-    BOOL cover=diInLockScreen(host),cc=NO;NSUInteger depth=0;
+    NSString *wn=NSStringFromClass(host.window.class);
+    BOOL wallpaper=[wn isEqualToString:@"_SBWallpaperSecureWindow"];
+    BOOL cover=diInLockScreen(host)||wallpaper,cc=NO;NSUInteger depth=0;
     for(UIView *p=host;p&&depth++<24;p=p.superview){
         NSString *n=NSStringFromClass(p.class);
         if([n containsString:@"ControlCenter"]||[n containsString:@"Aperture"])cc=YES;
@@ -71,21 +74,25 @@ static void diLockScreenTeardown343(UIView *host,DILockScreenMaskState343 *st){
     objc_setAssociatedObject(host,&diLockScreenMaskStateKey343,nil,OBJC_ASSOCIATION_RETAIN_NONATOMIC);
 }
 static void diLockScreenApply343(UIView *host){
-    NSString *className=NSStringFromClass(host.class);
-    BOOL isLockArtwork=[className isEqualToString:@"MRUArtworkView"];
+    Class artworkClass=NSClassFromString(@"MRUArtworkView");
+    BOOL isLockArtwork=artworkClass&&[host isKindOfClass:artworkClass];
     if(!NSThread.isMainThread||!isLockArtwork)return;
     DILockScreenMaskState343 *st=objc_getAssociatedObject(host,&diLockScreenMaskStateKey343);
-    if(!diLockScreenCover343(host)){if(st)diLockScreenTeardown343(host,st);return;}
+    if(!diLockScreenCover343(host)){
+        static CFTimeInterval rejectAt=0;CFTimeInterval now=CACurrentMediaTime();
+        if(host.bounds.size.width>=140 && now-rejectAt>8){rejectAt=now;RLog(@"[锁屏拒绝347] class=%@ bounds=%@ window=%@ owner=%@",NSStringFromClass(host.class),NSStringFromCGRect(host.bounds),NSStringFromClass(host.window.class),NSStringFromClass(diActivityAncestorVC(host).class));}
+        if(st)diLockScreenTeardown343(host,st);return;
+    }
     BOOL lockOn=NO,maskOn=NO;diLockScreenFlags343(&lockOn,&maskOn);
     if(!lockOn){if(st)diLockScreenTeardown343(host,st);return;}
     diLockScreenDisplayInstall343();
     UIView *art=diLockScreenArtwork343(host);if(!art||art.bounds.size.width<12||art.bounds.size.height<12)return;
     if(!st) {
-        RLog(@"[锁屏载体346] proc=%@ host=%@ hostBounds=%@ image=%@ imageBounds=%@ window=%@ owner=%@",NSProcessInfo.processInfo.processName,NSStringFromClass(host.class),NSStringFromCGRect(host.bounds),NSStringFromClass(art.class),NSStringFromCGRect(art.bounds),NSStringFromClass(host.window.class),NSStringFromClass(diActivityAncestorVC(host).class));
+        RLog(@"[锁屏载体347] proc=%@ host=%@ hostBounds=%@ image=%@ imageBounds=%@ window=%@ owner=%@",NSProcessInfo.processInfo.processName,NSStringFromClass(host.class),NSStringFromCGRect(host.bounds),NSStringFromClass(art.class),NSStringFromCGRect(art.bounds),NSStringFromClass(host.window.class),NSStringFromClass(diActivityAncestorVC(host).class));
     }
     if(st&&st.art!=art){diLockScreenTeardown343(host,st);st=nil;}
     if(!st){st=[DILockScreenMaskState343 new];st.host=host;st.art=art;st.originalMask=art.maskView;objc_setAssociatedObject(host,&diLockScreenMaskStateKey343,st,OBJC_ASSOCIATION_RETAIN_NONATOMIC);if(!diLockScreenMaskHosts343)diLockScreenMaskHosts343=[NSHashTable weakObjectsHashTable];[diLockScreenMaskHosts343 addObject:host];
-        RLog(@"[锁屏共享遮罩346] 命中 %@ %.0fx%.0f PlayerMaskOn=%d",NSStringFromClass(host.class),art.bounds.size.width,art.bounds.size.height,maskOn);
+        RLog(@"[锁屏共享遮罩347] 命中 %@ %.0fx%.0f PlayerMaskOn=%d",NSStringFromClass(host.class),art.bounds.size.width,art.bounds.size.height,maskOn);
     }
     UIImage *sharedShape=maskOn?diArtMaskImage():nil;
     if(maskOn && sharedShape){
@@ -116,12 +123,43 @@ static BOOL diLockScreenObject343(Class c,SEL s){Method m=diLockScreenDirect343(
 static void diLockScreenInstall343(void){
     if(!NSThread.isMainThread){dispatch_async(dispatch_get_main_queue(),^{diLockScreenInstall343();});return;}
     NSString *bid=NSBundle.mainBundle.bundleIdentifier.lowercaseString,*proc=NSProcessInfo.processInfo.processName;
-    if(![bid isEqualToString:@"com.apple.mediaremoteui"]&&![proc isEqualToString:@"MediaRemoteUI"])return;
+    BOOL spring=[bid isEqualToString:@"com.apple.springboard"]||[proc isEqualToString:@"SpringBoard"];
+    if(!spring&&![bid isEqualToString:@"com.apple.mediaremoteui"]&&![proc isEqualToString:@"MediaRemoteUI"])return;
     if(diLockScreenHooked343)return;
     Class c=NSClassFromString(@"MRUArtworkView");if(!c||![c isSubclassOfClass:UIView.class])return;diLockScreenHooked343=YES;diLockScreenDisplayInstall343();
-    SEL s=@selector(layoutSubviews);if(diLockScreenVoid343(c,s))MSHookMessageEx(c,s,(IMP)diLockScreenLayout343,&diLockScreenOrigLayout343);
+    SEL s=@selector(layoutSubviews);if(!spring&&diLockScreenVoid343(c,s))MSHookMessageEx(c,s,(IMP)diLockScreenLayout343,&diLockScreenOrigLayout343);
     s=@selector(didMoveToSuperview);if(diLockScreenVoid343(c,s))MSHookMessageEx(c,s,(IMP)diLockScreenMove343,&diLockScreenOrigMove343);
     s=NSSelectorFromString(@"updateVisibility");if(diLockScreenVoid343(c,s))MSHookMessageEx(c,s,(IMP)diLockScreenVisibility343,&diLockScreenOrigVisibility343);
     s=@selector(init);if(diLockScreenObject343(c,s))MSHookMessageEx(c,s,(IMP)diLockScreenInit343,&diLockScreenOrigInit343);
+    RLog(@"[锁屏接入347] proc=%@ class=%@ init=%d move=%d layout=%@",proc,NSStringFromClass(c),diLockScreenOrigInit343!=NULL,diLockScreenOrigMove343!=NULL,spring?@"existingSB":@"dedicatedMRU");
 }
 static void diLockScreenRefresh343(void){diLockScreenInstall343();for(UIView *v in diLockScreenMaskHosts343.allObjects)diLockScreenApply343(v);}
+
+static void diLockScreenDiscover347(void){
+    if(!NSThread.isMainThread)return;
+    static CFTimeInterval last=0;CFTimeInterval now=CACurrentMediaTime();if(now-last<.3)return;last=now;
+    if(!diPrefBoolNow(@"LockScreenAvatarOn",NO))return;
+    diLockScreenInstall343();NSUInteger artCount=0,scenes=0;
+    for(UIScene *scene in UIApplication.sharedApplication.connectedScenes){
+        if(![scene isKindOfClass:UIWindowScene.class])continue;
+        for(UIWindow *w in ((UIWindowScene *)scene).windows){
+            NSString *wn=NSStringFromClass(w.class);
+            if(w.hidden||w.alpha<.01||(!diIsLockScreenWindow(w)&&![wn isEqualToString:@"_SBWallpaperSecureWindow"]))continue;
+            NSMutableArray<UIView *> *q=[NSMutableArray arrayWithObject:w];NSUInteger i=0,reported=0;
+            while(i<q.count&&i<1400){UIView *v=q[i++];NSString *n=NSStringFromClass(v.class);CGSize z=v.bounds.size;
+                Class ac=NSClassFromString(@"MRUArtworkView");
+                if(ac&&[v isKindOfClass:ac]){artCount++;diLockScreenApply343(v);}
+                BOOL named=[n containsString:@"Artwork"]||[n containsString:@"Album"]||[n containsString:@"NowPlaying"]||[n containsString:@"Scene"];
+                BOOL picture=[v isKindOfClass:UIImageView.class]&&((UIImageView *)v).image;
+                if(reported<24&&!v.hidden&&z.width>=140&&z.height>=140&&(named||picture)){
+                    reported++;NSMutableString *chain=[NSMutableString string];NSUInteger d=0;
+                    for(UIView *p=v.superview;p&&d++<8;p=p.superview)[chain appendFormat:@"/%@",NSStringFromClass(p.class)];
+                    RLog(@"[锁屏显示链347] window=%@ view=%@ bounds=%@ owner=%@ parents=%@",wn,n,NSStringFromCGRect(v.bounds),NSStringFromClass(diActivityAncestorVC(v).class),chain);
+                }
+                for(UIView *child in v.subviews)if(q.count<1400)[q addObject:child];
+            }
+            RLog(@"[锁屏接入347] window=%@ visited=%lu knownArt=%lu",wn,(unsigned long)i,(unsigned long)artCount);scenes++;
+        }
+    }
+    RLog(@"[锁屏接入347] event windows=%lu knownArt=%lu",(unsigned long)scenes,(unsigned long)artCount);
+}

@@ -61,6 +61,7 @@ static void diLockScreenInstall343(void);
 static void diLockScreenRefresh343(void);
 static BOOL diLockScreenCover343(UIView *host);
 static void diLockScreenApply343(UIView *host);
+static void diLockScreenDiscover347(void);
 static BOOL gScreenOff328=NO; // independent display-power gate, no polling
 static BOOL gLocked = NO; // 锁屏状态: 锁屏期间所有岛视频/帧率动画全停(锁屏界面组件也是岛视图, 不停会一直亮屏)
 /* ===== 2.8.12: 歌词岛已回归(2.8.4/2.8.5 曾下架) —— "音乐岛识别"判据保留,
@@ -981,6 +982,12 @@ static id diFxReadSized(NSString *key) {
     NSRange at = [key rangeOfString:@"@" options:NSBackwardsSearch];
     if (at.location != NSNotFound && at.location > 0) {
         NSString *base = [key substringToIndex:at.location];
+        BOOL effect=[base hasPrefix:@"Album"]||[base hasPrefix:@"Rhythm"]||[base hasPrefix:@"Particle"]||[base hasPrefix:@"Ring"];
+        if(effect && ![[key substringFromIndex:at.location+1] hasPrefix:@"3x2"]){
+            NSString *reference=[base stringByAppendingString:@"@3x2"];
+            id same=CFBridgingRelease(CFPreferencesCopyAppValue((__bridge CFStringRef)reference,(__bridge CFStringRef)kDomain));
+            if(same)return same;
+        }
         v = CFBridgingRelease(CFPreferencesCopyAppValue((__bridge CFStringRef)base,
                                                        (__bridge CFStringRef)kDomain));
     }
@@ -6864,6 +6871,7 @@ static void h_glfCSViewWillAppear(UIViewController *self, SEL _cmd, BOOL animate
     if (gGLFOrigCSViewWillAppear)
         ((void(*)(id, SEL, BOOL))gGLFOrigCSViewWillAppear)(self, _cmd, animated);
     diGLFRegisterLockScreenController(self);
+    for(double delay : {0.0,0.4,1.0,2.0})dispatch_after(dispatch_time(DISPATCH_TIME_NOW,(int64_t)(delay*NSEC_PER_SEC)),dispatch_get_main_queue(),^{diLockScreenDiscover347();});
 }
 
 static UIView *h_glfMenuViewInit(UIView *self, SEL _cmd, CGRect frame) {
@@ -13372,6 +13380,7 @@ static void diSetDisplayOff328(BOOL off){
     if(off==gScreenOff328)return;
     gScreenOff328=off;
     dispatch_async(dispatch_get_main_queue(),^{diLockAvatarRefresh338();});
+    if(!off)dispatch_after(dispatch_time(DISPATCH_TIME_NOW,(int64_t)(.5*NSEC_PER_SEC)),dispatch_get_main_queue(),^{diLockScreenDiscover347();});
     if(off){
         pauseAllUnderWindows();
         if(gTickTimer && !gTickSuspended){dispatch_suspend(gTickTimer);gTickSuspended=YES;}
@@ -18104,6 +18113,9 @@ static void diArtPostFlush(UIView *root) {
        从休眠里恢复, 不用等 1Hz 巡检(diRhythmEnsure 内部有条件, 没休眠时是空操作)。 */
     @try { diRhythmEnsure(); } @catch (__unused NSException *e) {}
     diPhase("art");
+    static NSString *lastFxLayout347;
+    NSString *fxLayout347=diFxSizeId();
+    if(![lastFxLayout347 isEqualToString:fxLayout347]){lastFxLayout347=[fxLayout347 copy];diFxLoadPrefs();}
     /* 3.0.61: 遮罩(启用遮罩)和旋转(专辑旋转)分开判断 */
     BOOL on = diArtPrefOn() || diArtMaskWanted();
     /* 3.0.15: 专辑背景跟着"播放器视图"走 —— 播放器视图本身就是各尺寸下的可见卡片
@@ -19218,6 +19230,10 @@ static BOOL diArtInControlCenter(UIView *v) {
 static void diArtAVLayout(id self, SEL cmd) {
     if (gDIOrigAVLayout) gDIOrigAVLayout(self, cmd);
     @try { diLockScreenApply343((UIView *)self); } @catch (__unused NSException *e) {}
+    if(NSThread.isMainThread && diArtInControlCenter((UIView *)self)){
+        if(!gDIArtKnown)gDIArtKnown=[NSHashTable weakObjectsHashTable];
+        [gDIArtKnown addObject:(UIView *)self];
+    }
     @try {
         if (gDIStage < 1) return;
         /* 3.0.19: 去掉 diArtIs3x2() 限制 —— 3×2 只是"要不要动传送栏"的判据, 与封面
@@ -20830,7 +20846,9 @@ static UIView *diRhythmPickTarget(void) {
             }
         }
         CGSize s = v.bounds.size;
-        if (s.width < 40 || s.width > 220) continue;
+        Class artworkClass=NSClassFromString(@"MRUArtworkView");
+        BOOL systemArtwork=artworkClass && [v isKindOfClass:artworkClass] && diArtInControlCenter(v);
+        if (s.width < (systemArtwork?20.0:40.0) || s.width > 220) continue;
         CGFloat ratio = s.width / MAX(1.0, s.height);
         if (ratio < 0.8 || ratio > 1.25) continue;
         CGFloat area = s.width * s.height;
