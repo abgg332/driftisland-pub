@@ -10,6 +10,7 @@
 @implementation DILockScreenMaskState343 @end
 static char diLockScreenMaskStateKey343,diLockControllerContext349;
 static void diLockControllerInstall349(void);
+static void diLockBackgroundInstall350(void);
 static void diLockSceneIdentity349(id controller);
 static NSHashTable<UIView *> *diLockScreenMaskHosts343;
 static IMP diLockScreenOrigLayout343,diLockScreenOrigMove343,diLockScreenOrigVisibility343,diLockScreenOrigInit343;
@@ -135,7 +136,7 @@ static void diLockScreenInstall343(void){
     s=@selector(init);if(diLockScreenObject343(c,s))MSHookMessageEx(c,s,(IMP)diLockScreenInit343,&diLockScreenOrigInit343);
     RLog(@"[锁屏接入347] proc=%@ class=%@ init=%d move=%d layout=%@",proc,NSStringFromClass(c),diLockScreenOrigInit343!=NULL,diLockScreenOrigMove343!=NULL,spring?@"existingSB":@"dedicatedMRU");
 }
-static void diLockScreenRefresh343(void){diLockControllerInstall349();diLockScreenInstall343();for(UIView *v in diLockScreenMaskHosts343.allObjects)diLockScreenApply343(v);}
+static void diLockScreenRefresh343(void){diLockBackgroundInstall350();diLockControllerInstall349();diLockScreenInstall343();for(UIView *v in diLockScreenMaskHosts343.allObjects)diLockScreenApply343(v);}
 
 static void diLockScreenDiscover347(void){
     if(!NSThread.isMainThread)return;
@@ -191,6 +192,7 @@ static void diLockControllerApply349(id controller){
 }
 static void diLockControllerInstall349(void){
     if(!NSThread.isMainThread)return;
+    diLockBackgroundInstall350();
     static NSMutableSet *installed; if(!installed)installed=[NSMutableSet set];
     Class cls=NSClassFromString(@"MRUCoverSheetViewController");if(!cls)return;
     for(NSString *name in @[@"layout",@"viewDidLoad",@"viewWillLayoutSubviews",@"viewDidLayoutSubviews"]){
@@ -201,5 +203,54 @@ static void diLockControllerInstall349(void){
         IMP replacement=imp_implementationWithBlock(^(id self){if(original)((void(*)(id,SEL))original)(self,sel);@try{diLockControllerApply349(self);}@catch(__unused NSException *e){}});
         MSHookMessageEx(cls,sel,replacement,&original);[installed addObject:name];
         RLog(@"[锁屏控制器349] installed %@ %@",NSStringFromClass(cls),name);
+    }
+}
+
+/* Read-only scene ownership from native background lifecycle. This observes the
+   actual expansion event, not a delayed window scan. Never clip this controller. */
+static NSHashTable *diLockBackgroundControllers350;
+static void diLockBackgroundReport350(id controller,id suppliedScene,NSString *event){
+    id scene=suppliedScene?:diLockObject349(controller,@"scene");
+    id process=diLockObject349(scene,@"clientProcess");int pid=-1;
+    SEL q=NSSelectorFromString(@"pid");Method method=process?class_getInstanceMethod(object_getClass(process),q):NULL;
+    char *ret=method?method_copyReturnType(method):NULL;
+    if(ret&&ret[0]=='i')pid=((int(*)(id,SEL))objc_msgSend)(process,q);free(ret);
+    id identifier=diLockObject349(scene,@"identifier");
+    NSString *line=[NSString stringWithFormat:@"[锁屏场景350] event=%@ controller=%@ sceneClass=%@ scene=%@ process=%@ bundle=%@ pid=%d presenter=%@",event,NSStringFromClass([controller class]),NSStringFromClass([scene class]),identifier,diLockObject349(process,@"name"),diLockObject349(process,@"bundleIdentifier"),pid,NSStringFromClass([diLockObject349(controller,@"scenePresenter") class])];
+    RLog(@"%@",line);
+    if(!diLockBackgroundControllers350)diLockBackgroundControllers350=[NSHashTable weakObjectsHashTable];
+    if(controller)[diLockBackgroundControllers350 addObject:controller];
+}
+static BOOL diLockReturn350(Class cls,SEL sel,char type,unsigned int nargs){
+    Method m=class_getInstanceMethod(cls,sel);if(!m||method_getNumberOfArguments(m)!=nargs)return NO;
+    char *r=method_copyReturnType(m);BOOL ok=r&&r[0]==type;free(r);return ok;
+}
+static void diLockBackgroundInstall350(void){
+    if(!NSThread.isMainThread)return;
+    static NSMutableSet *installed;if(!installed)installed=[NSMutableSet set];
+    Class cls=NSClassFromString(@"CSBackgroundContentViewController");
+    static BOOL existenceReported=NO;if(!existenceReported){existenceReported=YES;RLog(@"[锁屏接入350] proc=%@ CSBackgroundContentViewController=%@ legacyCoverController=%@",NSProcessInfo.processInfo.processName,cls?@"present":@"absent",NSClassFromString(@"MRUCoverSheetViewController")?@"present":@"absent");}
+    if(!cls)return;
+    NSString *key=@"initWithScene:frame:";SEL sel=NSSelectorFromString(key);
+    if(![installed containsObject:key]&&diLockReturn350(cls,sel,'@',4)){
+        __block IMP original=NULL;
+        IMP replacement=imp_implementationWithBlock(^id(id self,id scene,CGRect frame){
+            id result=original?((id(*)(id,SEL,id,CGRect))original)(self,sel,scene,frame):nil;
+            @try{diLockBackgroundReport350(result,scene,@"initWithScene");}@catch(__unused NSException *e){}
+            return result;
+        });
+        MSHookMessageEx(cls,sel,replacement,&original);[installed addObject:key];
+    }
+    key=@"viewWillAppear:";sel=NSSelectorFromString(key);
+    if(![installed containsObject:key]&&diLockReturn350(cls,sel,'v',3)){
+        SEL appear=sel;__block IMP original=NULL;
+        IMP replacement=imp_implementationWithBlock(^(id self,BOOL animated){if(original)((void(*)(id,SEL,BOOL))original)(self,appear,animated);@try{diLockBackgroundReport350(self,nil,@"viewWillAppear");}@catch(__unused NSException *e){}});
+        MSHookMessageEx(cls,appear,replacement,&original);[installed addObject:key];
+    }
+    key=@"loadView";sel=NSSelectorFromString(key);
+    if(![installed containsObject:key]&&diLockReturn350(cls,sel,'v',2)){
+        SEL load=sel;__block IMP original=NULL;
+        IMP replacement=imp_implementationWithBlock(^(id self){if(original)((void(*)(id,SEL))original)(self,load);@try{diLockBackgroundReport350(self,nil,@"loadView");}@catch(__unused NSException *e){}});
+        MSHookMessageEx(cls,load,replacement,&original);[installed addObject:key];
     }
 }
