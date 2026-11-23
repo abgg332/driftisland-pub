@@ -43,7 +43,8 @@ static void diLockBackgroundApply351(UIImageView *image){
     }else if(st.installed){if(image.maskView==st.mask)image.maskView=st.originalMask;st.installed=NO;}
     if(![image.layer animationForKey:@"di.lock.background.spin351"]){
         CABasicAnimation *a=[CABasicAnimation animationWithKeyPath:@"transform.rotation.z"];a.fromValue=@0;a.toValue=@(2*M_PI);a.duration=10;a.repeatCount=HUGE_VALF;a.timingFunction=[CAMediaTimingFunction functionWithName:kCAMediaTimingFunctionLinear];
-        [image.layer addAnimation:a forKey:@"di.lock.background.spin351"];
+        a.beginTime=[image.layer convertTime:CACurrentMediaTime() fromLayer:nil];
+        [image.layer addAnimation:a forKey:@"di.lock.background.spin351"];diSpinRegister352(image.layer);
     }
 }
 static void diLockBackgroundInspect351(UIScene *scene){

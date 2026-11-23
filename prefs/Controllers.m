@@ -1709,6 +1709,11 @@ static void diWriteColors(NSArray<NSString *> *colors) {
         {
             PSSpecifier *ver = [PSSpecifier preferenceSpecifierNamed:@"" target:nil
                 set:NULL get:NULL detail:nil cell:PSStaticTextCell edit:nil];
+            PSSpecifier *quote=[PSSpecifier preferenceSpecifierNamed:@"" target:nil set:NULL get:NULL detail:nil cell:PSStaticTextCell edit:nil];
+            [quote setProperty:@"diVersion" forKey:@"diKind"];
+            [quote setProperty:@"敬过往，爱当下，向未来。--By独白" forKey:@"diVerText"];
+            [quote setProperty:@YES forKey:@"diAuthorQuote"];
+            DI_ADD(quote);
             [ver setProperty:@"diVersion" forKey:@"diKind"];
             [ver setProperty:[NSString stringWithFormat:@"漂流岛  v%@", DI_VERSION_STR] forKey:@"diVerText"];
             DI_ADD(ver);
@@ -1785,8 +1790,11 @@ static void diWriteColors(NSArray<NSString *> *colors) {
             objc_setAssociatedObject(cell, "diVerLabel", lb, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
         }
         CGFloat cw = cell.contentView.bounds.size.width, ch = cell.contentView.bounds.size.height;
+        BOOL quote=[[sp propertyForKey:@"diAuthorQuote"] boolValue];
+        lb.numberOfLines=quote?2:1;
+        lb.font=[UIFont systemFontOfSize:quote?13:15 weight:UIFontWeightMedium];
         lb.text = txt;
-        lb.frame = CGRectMake(0, (ch - 20) / 2, cw, 20);
+        lb.frame = CGRectMake(12, (ch - (quote?40:20)) / 2, cw-24, quote?40:20);
         return;
     }
 

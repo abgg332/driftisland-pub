@@ -55,6 +55,10 @@ static NSArray *diSortedStrs(NSArray *arr) {
 }
 
 static BOOL logEnabled; // 日志开关
+static NSInteger gDIPlayRateState=-1;
+static void diPlayRatePoll(void);
+static void diSpinSync352(void);
+static void diSpinRegister352(CALayer *layer);
 static void diLockAvatarRefresh338(void);
 static void diLockAvatarStop338(void);
 static void diLockScreenInstall343(void);
@@ -13151,6 +13155,7 @@ static void diISPublishFxParams(void) {
 static void visibilityTick(void) {
     if(gScreenOff328)return;
     refreshPrefs();
+    diPlayRatePoll();diSpinSync352();
     diDirectBackgroundTick324();
     diLockAvatarRefresh338();
     @try { diISPublishFxParams(); } @catch (__unused NSException *e) {}
@@ -16545,6 +16550,7 @@ static void diActivityStartScanner(void) {
     started = YES;
     gDIActivityScanTimer = [NSTimer timerWithTimeInterval:1.0 repeats:YES block:^(NSTimer *t) {
         @try { diActivityScan(); } @catch (__unused NSException *e) {}
+        diPlayRatePoll();diSpinSync352();
         @try { diLockBackgroundClientTick351(); } @catch (__unused NSException *e) {}
         @try { diISMRUEnsure(); } @catch (__unused NSException *e) {}   /* 3.0.85: 岛专辑特效起停巡检 */
     }];
@@ -17387,6 +17393,7 @@ static void diArtDress(UIView *v) {
         sp.timingFunction = [CAMediaTimingFunction functionWithName:kCAMediaTimingFunctionLinear];
         sp.beginTime = tn - fmod(tn - gDISpinEpoch, kDISpinDur);   /* 相位续上 */
         [layer addAnimation:sp forKey:@"di.art.spin"];
+        diSpinRegister352(layer);
     }
 }
 
@@ -19230,6 +19237,7 @@ static BOOL diArtInControlCenter(UIView *v) {
     return NO;
 }
 
+#include "DISpinPlayback352.inc"
 #include "DILockAvatar338.inc"
 #include "DILockScreenMask343.inc"
 #include "DILockBackgroundClient351.inc"
@@ -21942,7 +21950,8 @@ static void diRhythmAdvanceSpectrum(BOOL active, BOOL real, float dt) {
      ② 就算 active 变 NO, 以前也只是把粒子寿命压到 0.35s、让它们慢慢淡,
         引擎还在 120Hz 空转。现在改成硬停: 粒子瞬间清零、所有特效层 opacity=0、
         displayLink 挂起, 直到真的重新播放才唤醒。 */
-static NSInteger gDIPlayRateState = -1;      /* -1 未知 / 0 暂停或停止 / 1 播放中 */
+// gDIPlayRateState declared before both SB and MRU rotation adapters.
+// static NSInteger gDIPlayRateState = -1;      /* -1 未知 / 0 暂停或停止 / 1 播放中 */
 static CFTimeInterval gDIPlayRateAt = 0;
 
 static void diPlayRatePoll(void) {
@@ -21955,13 +21964,13 @@ static void diPlayRatePoll(void) {
     }
     gMRGetNowPlayingInfo(dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^(CFDictionaryRef info) {
         /* 取不到信息时保持上一次判断 —— 一次查询失败不该把特效灭掉 */
-        if (!info) { dispatch_async(dispatch_get_main_queue(), ^{gDIPlayRateState=0;}); return; }
+        if (!info) { dispatch_async(dispatch_get_main_queue(), ^{gDIPlayRateState=0;diSpinSync352();}); return; }
         CFStringRef key = (gMRRateKeyPtr && *gMRRateKeyPtr) ? *gMRRateKeyPtr : NULL;
         if (!key) return;
         id rv = (__bridge id)CFDictionaryGetValue(info, key);
         if (![rv isKindOfClass:NSNumber.class]) return;
         NSInteger st = ([rv doubleValue] > 0.01) ? 1 : 0;
-        dispatch_async(dispatch_get_main_queue(), ^{ gDIPlayRateState = st; });
+        dispatch_async(dispatch_get_main_queue(), ^{ gDIPlayRateState = st;diSpinSync352(); });
     });
 }
 

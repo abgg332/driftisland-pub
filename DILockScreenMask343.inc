@@ -109,7 +109,7 @@ static void diLockScreenApply343(UIView *host){
     if(visible&&![art.layer animationForKey:@"di.lockscreen.spin343"]){
         CFTimeInterval now=CACurrentMediaTime();if(!diLockScreenSpinEpoch343)diLockScreenSpinEpoch343=now;
         CABasicAnimation *a=[CABasicAnimation animationWithKeyPath:@"transform.rotation.z"];a.fromValue=@0;a.toValue=@(2*M_PI);a.duration=10;a.repeatCount=HUGE_VALF;a.timingFunction=[CAMediaTimingFunction functionWithName:kCAMediaTimingFunctionLinear];a.removedOnCompletion=NO;
-        a.beginTime=[art.layer convertTime:now-fmod(now-diLockScreenSpinEpoch343,10) fromLayer:nil];[art.layer addAnimation:a forKey:@"di.lockscreen.spin343"];
+        a.beginTime=[art.layer convertTime:now-fmod(now-diLockScreenSpinEpoch343,10) fromLayer:nil];[art.layer addAnimation:a forKey:@"di.lockscreen.spin343"];diSpinRegister352(art.layer);
     }else if(!visible)[art.layer removeAnimationForKey:@"di.lockscreen.spin343"];
 }
 static void diLockScreenLayout343(id self,SEL cmd){if(diLockScreenOrigLayout343)((void(*)(id,SEL))diLockScreenOrigLayout343)(self,cmd);diLockScreenApply343((UIView *)self);}
