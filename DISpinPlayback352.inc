@@ -5,6 +5,8 @@ static NSArray<NSString *> *diSpinKeys352(void){return @[@"di.art.spin",@"di.loc
 static void diSpinSync352(void){
     if(!NSThread.isMainThread||gDIPlayRateState<0)return;
     for(CALayer *layer in diSpinLayers352.allObjects){
+        id dg=layer.delegate;
+        if([dg isKindOfClass:UIView.class]&&diArtSkipDetail353((UIView *)dg))continue;
         for(NSString *key in diSpinKeys352()){
             CAAnimation *animation=[layer animationForKey:key];if(!animation)continue;
             BOOL pause=gDIPlayRateState==0;BOOL stopped=animation.speed==0;
@@ -22,8 +24,11 @@ static void diSpinSync352(void){
         }
     }
 }
+static BOOL diArtSkipDetail353(UIView *v);
 static void diSpinRegister352(CALayer *layer){
     if(!layer||!NSThread.isMainThread)return;
+    id dg=layer.delegate;
+    if([dg isKindOfClass:UIView.class]&&diArtSkipDetail353((UIView *)dg))return;
     if(!diSpinLayers352)diSpinLayers352=[NSHashTable weakObjectsHashTable];
     [diSpinLayers352 addObject:layer];diSpinSync352();
 }

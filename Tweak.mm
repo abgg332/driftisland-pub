@@ -17306,11 +17306,50 @@ static BOOL diArtMaskWanted(void) {
    3.0.16 及以前每轮布局都重设 mask.frame/path, 3×2 网格里那张图每秒被重建两三次,
    肉眼就是"小专辑头像闪一下"。 */
 
+/* ===== 3.1.53: 详情页 / 通知区域完全不参与 =====
+   用户 38616284/7CD9CF59 日志实锤: 展开详情页那四格推荐封面
+   (MRUMediaSuggestionCollectionViewCell 里的 MRUArtworkView, 24/48/53/65/149 各档)
+   也被挂了遮罩 + 旋转, 暂停时又被一起冻结。用户原话:
+   "不需要头像圆, 保持原样" + "截图那个地方不要影响"。
+   这三条路径(遮罩/旋转/暂停冻结)在这里统一排除: 既不上, 也把已经上错的还原。 */
+static BOOL diArtSkipDetail353(UIView *v) {
+    UIView *p = v;
+    for (int i = 0; i < 9 && p; i++, p = p.superview) {
+        NSString *n = NSStringFromClass(p.class);
+        if ([n containsString:@"Suggestion"]) return YES;      /* 推荐/详情网格 */
+        if ([n containsString:@"Bulletin"]) return YES;        /* 通知横幅 */
+        if ([n containsString:@"Notification"]) return YES;    /* 通知中心/锁屏通知 */
+        if ([n containsString:@"NBX"]) return YES;
+        if ([n containsString:@"Expanded"] && p.bounds.size.height >= 320) return YES;
+    }
+    return NO;
+}
+static void diArtUndressDetail353(UIView *v) {
+    if (!v || !v.layer) return;
+    DIArtMaskState *st = objc_getAssociatedObject(v, kDIArtStateKey);
+    if (!st) return;
+    CALayer *layer = v.layer;
+    @try {
+        [layer removeAnimationForKey:@"di.art.spin"];
+        if (layer.mask == st.mask) layer.mask = st.origMask;
+        layer.cornerRadius = st.origRadius;
+        layer.masksToBounds = st.origClip;
+        if (fabs(st.origAnchor.x - 0.5) > 0.001 || fabs(st.origAnchor.y - 0.5) > 0.001) {
+            CGRect f = layer.frame;
+            layer.anchorPoint = st.origAnchor;
+            layer.position = CGPointMake(f.origin.x + f.size.width * st.origAnchor.x,
+                                         f.origin.y + f.size.height * st.origAnchor.y);
+        }
+    } @catch (__unused NSException *e) {}
+    objc_setAssociatedObject(v, kDIArtStateKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+}
+
 static void diArtDress(UIView *v) {
     if (!v || !v.layer) return;
     CALayer *layer = v.layer;
     CGRect b = v.bounds;
     if (b.size.width < 8 || b.size.height < 8) return;
+    if (diArtSkipDetail353(v)) { diArtUndressDetail353(v); return; }
     DIArtMaskState *st = objc_getAssociatedObject(v, kDIArtStateKey);
     if (!st) {
         st = [DIArtMaskState new];
