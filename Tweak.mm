@@ -22004,8 +22004,9 @@ static void diPlayRatePoll(void) {
         if (!gMRGetNowPlayingInfo) return;
     }
     gMRGetNowPlayingInfo(dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^(CFDictionaryRef info) {
-        /* 取不到信息时保持上一次判断 —— 一次查询失败不该把特效灭掉 */
-        if (!info) { dispatch_async(dispatch_get_main_queue(), ^{gDIPlayRateState=0;diSpinSync352();}); return; }
+        /* 取不到信息时保持上一次判断 —— 一次查询失败不该把特效灭掉,
+           更不能把旋转永久冻住(3.1.53: 之前这里误写成 0, 控制中心专辑因此停转)。 */
+        if (!info) return;
         CFStringRef key = (gMRRateKeyPtr && *gMRRateKeyPtr) ? *gMRRateKeyPtr : NULL;
         if (!key) return;
         id rv = (__bridge id)CFDictionaryGetValue(info, key);
