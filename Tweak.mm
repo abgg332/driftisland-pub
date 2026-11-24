@@ -17320,7 +17320,9 @@ static BOOL diArtSkipDetail353(UIView *v) {
         if ([n containsString:@"Bulletin"]) return YES;        /* 通知横幅 */
         if ([n containsString:@"Notification"]) return YES;    /* 通知中心/锁屏通知 */
         if ([n containsString:@"NBX"]) return YES;
-        if ([n containsString:@"Expanded"] && p.bounds.size.height >= 320) return YES;
+        /* 注意: 绝不能加 "Expanded" 判据 —— 3×2 / 展开播放器的主封面父链里就是
+           MRUNowPlayingView(*Expanded*), 排掉它主专辑就不遮不转了。用户明确要求
+           主专辑保持 3.1.51 的正常行为, 这里只排除"推荐格/通知"这两类。 */
     }
     return NO;
 }
