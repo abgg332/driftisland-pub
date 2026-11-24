@@ -17306,27 +17306,30 @@ static BOOL diArtMaskWanted(void) {
    3.0.16 及以前每轮布局都重设 mask.frame/path, 3×2 网格里那张图每秒被重建两三次,
    肉眼就是"小专辑头像闪一下"。 */
 
-/* ===== 3.1.53: 详情页 / 通知区域完全不参与 =====
-   用户 38616284/7CD9CF59 日志实锤: 展开详情页那四格推荐封面
-   (MRUMediaSuggestionCollectionViewCell 里的 MRUArtworkView, 24/48/53/65/149 各档)
-   也被挂了遮罩 + 旋转, 暂停时又被一起冻结。用户原话:
-   "不需要头像圆, 保持原样" + "截图那个地方不要影响"。
-   这三条路径(遮罩/旋转/暂停冻结)在这里统一排除: 既不上, 也把已经上错的还原。 */
-static BOOL diArtSkipDetail353(UIView *v) {
+/* ===== 3.1.54: 只排除"通知"，推荐格恢复 3.1.51 行为 =====
+   3.1.53 做过头了: 用户 666132A4 反馈展开详情页那四格推荐封面在 3.1.51 本来
+   就带默认遮罩+旋转, 3.1.53 把它们一起摘掉了。
+   现在只排除真正的通知(横幅/通知中心/锁屏通知), 它们的头像是本地 UIImageView,
+   不该被套专辑遮罩。推荐格(MRUMediaSuggestionCollectionViewCell)不排除。 */
+static BOOL diArtSkipNotify354(UIView *v) {
     UIView *p = v;
     for (int i = 0; i < 9 && p; i++, p = p.superview) {
         NSString *n = NSStringFromClass(p.class);
-        if ([n containsString:@"Suggestion"]) return YES;      /* 推荐/详情网格 */
-        if ([n containsString:@"Bulletin"]) return YES;        /* 通知横幅 */
-        if ([n containsString:@"Notification"]) return YES;    /* 通知中心/锁屏通知 */
+        if ([n containsString:@"Bulletin"]) return YES;
+        if ([n containsString:@"Notification"]) return YES;
         if ([n containsString:@"NBX"]) return YES;
-        /* 注意: 绝不能加 "Expanded" 判据 —— 3×2 / 展开播放器的主封面父链里就是
-           MRUNowPlayingView(*Expanded*), 排掉它主专辑就不遮不转了。用户明确要求
-           主专辑保持 3.1.51 的正常行为, 这里只排除"推荐格/通知"这两类。 */
     }
     return NO;
 }
-static void diArtUndressDetail353(UIView *v) {
+/* 推荐格: 3.1.51 的默认遮罩/旋转照旧, 只是不进入暂停冻结。 */
+static BOOL diArtSuggestion354(UIView *v) {
+    UIView *p = v;
+    for (int i = 0; i < 9 && p; i++, p = p.superview) {
+        if ([NSStringFromClass(p.class) containsString:@"Suggestion"]) return YES;
+    }
+    return NO;
+}
+static void diArtUndressNotify354(UIView *v) {
     if (!v || !v.layer) return;
     DIArtMaskState *st = objc_getAssociatedObject(v, kDIArtStateKey);
     if (!st) return;
@@ -17351,7 +17354,7 @@ static void diArtDress(UIView *v) {
     CALayer *layer = v.layer;
     CGRect b = v.bounds;
     if (b.size.width < 8 || b.size.height < 8) return;
-    if (diArtSkipDetail353(v)) { diArtUndressDetail353(v); return; }
+    if (diArtSkipNotify354(v)) { diArtUndressNotify354(v); return; }
     DIArtMaskState *st = objc_getAssociatedObject(v, kDIArtStateKey);
     if (!st) {
         st = [DIArtMaskState new];
