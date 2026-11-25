@@ -1,7 +1,7 @@
 /* Freeze only our rotation animations; never pause a whole layer (particles,
    masks and native layout must continue independently). Main-thread only. */
 static NSHashTable<CALayer *> *diSpinLayers352;
-static NSArray<NSString *> *diSpinKeys352(void){return @[@"di.art.spin",@"di.lockscreen.spin343",@"di.lock.background.spin351"];}
+static NSArray<NSString *> *diSpinKeys352(void){return @[@"di.art.spin",@"di.lockscreen.spin343",@"di.lock.background.spin351",@"diSpin"];}
 static void diSpinSync352(void){
     if(!NSThread.isMainThread||gDIPlayRateState<0)return;
     for(CALayer *layer in diSpinLayers352.allObjects){

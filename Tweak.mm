@@ -4687,7 +4687,7 @@ static BOOL diApplyMaskToCover(UIView *cover, UIImage *shape) {
             spin.timingFunction = [CAMediaTimingFunction functionWithName:kCAMediaTimingFunctionLinear];
             spin.removedOnCompletion = NO;
             [_artView.layer addAnimation:spin forKey:@"diSpin"];
-            diMruSpinRegister355(_artView.layer);
+            diSpinRegister352(_artView.layer);   /* SB 侧: 复用 352 的播放状态冻结 */
             self.rotInstalled = YES;
             self.rotInstalledSpeed = maskRotateSpeed;
             self.rotInstalledRev = maskRotateReverse;
