@@ -15,6 +15,7 @@ static CFTimeInterval gDIMruPlayAt355 = 0;
 static BOOL gDIMruPlayAsked355 = NO;
 
 static void diMruSpinSync355(void);
+static NSHashTable<CALayer *> *gDIMruSpinLayers355;
 static void diMruPlayPoll355(void) {
     if (!NSThread.isMainThread) return;
     CFTimeInterval now = CACurrentMediaTime();
@@ -36,6 +37,9 @@ static void diMruPlayPoll355(void) {
                 gDIMruPlayAsked355 = NO;
                 if (gDIMruPlayState355 == st) return;
                 gDIMruPlayState355 = st;
+                diMruFileLog([NSString stringWithFormat:@"[岛旋转355] 播放状态=%@ 跟随=%@ 层数=%lu",
+                              st ? @"播放" : @"暂停", st ? @"续转" : @"停转",
+                              (unsigned long)gDIMruSpinLayers355.allObjects.count]);
                 diMruSpinSync355();
             });
         } @catch (__unused NSException *e) { gDIMruPlayAsked355 = NO; } }
@@ -71,7 +75,6 @@ static void diMruSpinSyncLayer355(CALayer *layer) {
 }
 
 /* 汇总: 玻璃层与自绘 _artView 都在本进程登记; 只有登记过才起一个 0.9s 心跳。 */
-static NSHashTable<CALayer *> *gDIMruSpinLayers355;
 static dispatch_source_t gDIMruSpinTimer355;
 static void diMruSpinRegister355(CALayer *layer) {
     if (!layer || !NSThread.isMainThread) return;
