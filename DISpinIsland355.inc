@@ -70,13 +70,30 @@ static void diMruSpinSyncLayer355(CALayer *layer) {
     }
 }
 
-/* 汇总: 自绘玻璃那颗由调用方登记, 展开岛那颗按视图找到。 */
+/* 汇总: 玻璃层与自绘 _artView 都在本进程登记; 只有登记过才起一个 0.9s 心跳。 */
 static NSHashTable<CALayer *> *gDIMruSpinLayers355;
+static dispatch_source_t gDIMruSpinTimer355;
 static void diMruSpinRegister355(CALayer *layer) {
     if (!layer || !NSThread.isMainThread) return;
     if (!gDIMruSpinLayers355) gDIMruSpinLayers355 = [NSHashTable weakObjectsHashTable];
     [gDIMruSpinLayers355 addObject:layer];
     diMruSpinSyncLayer355(layer);
+    /* 只在本进程确实挂过岛旋转时才起心跳, 避免无谓常驻。周期 0.9s, 与既有 1s 轮询同量级。 */
+    if (!gDIMruSpinTimer355) {
+        gDIMruSpinTimer355 = dispatch_source_create(DISPATCH_SOURCE_TYPE_TIMER, 0, 0,
+                                                    dispatch_get_main_queue());
+        if (gDIMruSpinTimer355) {
+            dispatch_source_set_timer(gDIMruSpinTimer355,
+                dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.9 * NSEC_PER_SEC)),
+                (uint64_t)(0.9 * NSEC_PER_SEC), (uint64_t)(0.1 * NSEC_PER_SEC));
+            dispatch_source_set_event_handler(gDIMruSpinTimer355, ^{
+                diMruPlayPoll355();
+                diMruSpinSync355();
+            });
+            dispatch_resume(gDIMruSpinTimer355);
+        }
+    }
+    diMruPlayPoll355();
 }
 static void diMruSpinSync355(void) {
     if (!NSThread.isMainThread || gDIMruPlayState355 < 0) return;
