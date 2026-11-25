@@ -59,6 +59,9 @@ static NSInteger gDIPlayRateState=-1;
 static void diPlayRatePoll(void);
 static void diSpinSync352(void);
 static void diSpinRegister352(CALayer *layer);
+static void diMruSpinRegister355(CALayer *layer);
+static void diMruPlayPoll355(void);
+static void diMruSpinSync355(void);
 static void diLockAvatarRefresh338(void);
 static void diLockAvatarStop338(void);
 static void diLockScreenInstall343(void);
@@ -4684,6 +4687,7 @@ static BOOL diApplyMaskToCover(UIView *cover, UIImage *shape) {
             spin.timingFunction = [CAMediaTimingFunction functionWithName:kCAMediaTimingFunctionLinear];
             spin.removedOnCompletion = NO;
             [_artView.layer addAnimation:spin forKey:@"diSpin"];
+            diMruSpinRegister355(_artView.layer);
             self.rotInstalled = YES;
             self.rotInstalledSpeed = maskRotateSpeed;
             self.rotInstalledRev = maskRotateReverse;
@@ -15769,6 +15773,7 @@ static void diActivityApply(UIView *artwork) {
         a.fillMode = kCAFillModeBoth;
         a.timingFunction = [CAMediaTimingFunction functionWithName:kCAMediaTimingFunctionLinear];
         [state.glass.layer addAnimation:a forKey:@"di.spin"];
+        diMruSpinRegister355(state.glass.layer);
         state.spinSpeed = speed; state.spinRev = rev;
         diMruFileLog([NSString stringWithFormat:@"spin 开=%@ 速度=%.0f°/s 反转=%d", rotOn ? @"是" : @"否", speed, rev]);
     }
@@ -18412,6 +18417,8 @@ static void diNPLoadMediaRemote(void) {
     if (!gMRGetNowPlayingInfo)
         RLog(@"[背景] MediaRemote 取不到 MRMediaRemoteGetNowPlayingInfo, 背景暂不可用");
 }
+
+#include "DISpinIsland355.inc"
 
 static void diNPRefreshBackgrounds(void);
 static void diNPStartBgTimer(void);   /* 3.0.15: 定义在模块容器钩子之后 */
